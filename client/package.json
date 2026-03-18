@@ -79,6 +79,7 @@
   "dependencies": {
     "bootstrap": "^5.3.8",
     "electron-store": "^11.0.2",
+    "material-icons": "^1.13.14",
     "electron-updater": "^6.3.9"
   }
 }

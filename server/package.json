@@ -29,6 +29,7 @@
   "dependencies": {
     "better-sqlite3": "^12.6.2",
     "bootstrap": "^5.3.8",
+    "material-icons": "^1.13.14",
     "content-disposition": "^1.0.0",
     "cors": "^2.8.5",
     "ejs": "^5.0.1",

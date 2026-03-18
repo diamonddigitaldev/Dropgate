@@ -28,7 +28,7 @@ try {
 log('process.argv on startup:', JSON.stringify(process.argv));
 
 if (process.platform === 'win32') {
-    app.setdropgateModelId('com.diamonddigitaldev.dropgateclient');
+    app.setAppUserModelId('com.diamonddigitaldev.dropgateclient');
 }
 
 const store = new Store();

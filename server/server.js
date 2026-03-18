@@ -348,6 +348,9 @@ app.get('/vendor/streamsaver/mitm.html', (req, res) => res.render('pages/mitm'))
 app.get('/vendor/streamsaver/sw.js', serveVendorFile('streamsaver/sw.js', 'application/javascript; charset=utf-8'));
 app.get('/vendor/peerjs/peerjs.min.js', serveVendorFile('peerjs/dist/peerjs.min.js', 'application/javascript; charset=utf-8'));
 app.get('/vendor/qr-code-styling/qr-code-styling.js', serveVendorFile('qr-code-styling/lib/qr-code-styling.js', 'application/javascript; charset=utf-8'));
+app.get('/vendor/material-icons/round.css', serveVendorFile('material-icons/iconfont/round.css', 'text/css; charset=utf-8'));
+app.get('/vendor/material-icons/material-icons-round.woff2', serveVendorFile('material-icons/iconfont/material-icons-round.woff2', 'font/woff2'));
+app.get('/vendor/material-icons/material-icons-round.woff', serveVendorFile('material-icons/iconfont/material-icons-round.woff', 'font/woff'));
 
 const rateLimitWindowMs = process.env.RATE_LIMIT_WINDOW_MS ? process.env.RATE_LIMIT_WINDOW_MS : 60000;
 const rateLimitMaxRequests = process.env.RATE_LIMIT_MAX_REQUESTS ? process.env.RATE_LIMIT_MAX_REQUESTS : 25;
