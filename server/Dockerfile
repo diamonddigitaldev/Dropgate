@@ -27,7 +27,7 @@ EXPOSE 52443
 
 # Health check to ensure the application is running
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -f https://localhost:52443/api/info || exit 1
+  CMD curl -f http://localhost:52443/api/info || exit 1
 
 # Define the default command to run the application
 CMD [ "node", "server.js" ]
