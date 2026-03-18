@@ -25,5 +25,9 @@ USER dropgate
 # Expose the port the app runs on
 EXPOSE 52443
 
+# Health check to ensure the application is running
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -f https://localhost:52443/api/info || exit 1
+
 # Define the default command to run the application
 CMD [ "node", "server.js" ]
