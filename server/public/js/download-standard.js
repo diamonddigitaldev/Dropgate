@@ -1,4 +1,4 @@
-import { DropgateClient, importKeyFromBase64, decryptFilenameFromBase64 } from './dropgate-core.js';
+import { DropgateClient, importKeyFromBase64, decryptFilenameFromBase64, DEFAULT_CHUNK_SIZE, ENCRYPTION_OVERHEAD_PER_CHUNK } from './dropgate-core.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
 const statusTitle = document.getElementById('status-title');
@@ -17,7 +17,7 @@ const card = document.getElementById('status-card');
 const trustStatement = document.getElementById('trust-statement');
 const encryptionStatement = document.getElementById('encryption-statement');
 
-const client = new DropgateClient({ clientVersion: '3.0.5', server: location.origin });
+const client = new DropgateClient({ clientVersion: '3.0.6', server: location.origin });
 
 const downloadState = {
   fileId: null,
@@ -177,9 +177,19 @@ async function loadMetadata() {
     const metadata = await client.getFileMetadata(fileId);
 
     downloadState.isEncrypted = Boolean(metadata.isEncrypted);
-    downloadState.sizeBytes = metadata.sizeBytes;
+
+    // For encrypted files, metadata.sizeBytes is the ciphertext size on disk.
+    // Convert to plaintext size by subtracting per-chunk encryption overhead.
+    let displaySize = metadata.sizeBytes;
+    if (metadata.isEncrypted && displaySize > 0) {
+      const encryptedChunkSize = DEFAULT_CHUNK_SIZE + ENCRYPTION_OVERHEAD_PER_CHUNK;
+      const numChunks = Math.ceil(displaySize / encryptedChunkSize);
+      displaySize = displaySize - numChunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
+    }
+
+    downloadState.sizeBytes = displaySize;
     fileEncryptionEl.textContent = metadata.isEncrypted ? 'End-to-End Encrypted' : 'None';
-    fileSizeEl.textContent = formatBytes(metadata.sizeBytes);
+    fileSizeEl.textContent = formatBytes(displaySize);
 
     trustStatement.style.display = 'block';
 

@@ -3,7 +3,7 @@
 
    # Dropgate
 
-   <p style="margin-bottom:1rem;">A self-hostable, privacy-first file sharing system with both hosted upload and direct P2P transfer capabilities.</p>
+   <p style="margin-bottom:1rem;">A self-hosted, privacy-first file sharing system with both hosted upload and direct P2P transfer capabilities.</p>
 </div>
 
 <div align="center">
