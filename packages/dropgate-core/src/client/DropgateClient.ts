@@ -474,6 +474,18 @@ export class DropgateClient {
     } else if (serverMeta.files) {
       // Unsealed bundle: use files from server response
       files = serverMeta.files;
+
+      // For unsealed encrypted bundles, the server stores ciphertext sizes.
+      // Convert per-file sizeBytes to plaintext sizes by subtracting encryption overhead.
+      if (serverMeta.isEncrypted) {
+        const encryptedChunkSize = this.chunkSize + ENCRYPTION_OVERHEAD_PER_CHUNK;
+        for (const f of files) {
+          if (f.sizeBytes > 0) {
+            const numChunks = Math.ceil(f.sizeBytes / encryptedChunkSize);
+            f.sizeBytes = f.sizeBytes - numChunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
+          }
+        }
+      }
     } else {
       throw new DropgateProtocolError('Invalid bundle metadata: missing files or manifest.');
     }
@@ -1066,6 +1078,8 @@ export class DropgateClient {
     }
 
     const isEncrypted = Boolean(bundleMeta.isEncrypted);
+    // getBundleMetadata() already converts ciphertext sizes to plaintext sizes
+    // for unsealed encrypted bundles, so totalBytes matches decrypted byte counts.
     const totalBytes = bundleMeta.totalSizeBytes || 0;
 
     // Decrypt filenames (and manifest for sealed bundles)
@@ -1244,7 +1258,20 @@ export class DropgateClient {
     }
 
     const isEncrypted = Boolean(metadata.isEncrypted);
-    const totalBytes = metadata.sizeBytes || 0;
+    const encryptedTotalBytes = metadata.sizeBytes || 0;
+
+    // For encrypted files, metadata.sizeBytes is the ciphertext size on disk.
+    // Progress tracks decrypted bytes, so compute the plaintext total by subtracting
+    // the per-chunk encryption overhead (12-byte IV + 16-byte GCM tag = 28 bytes).
+    let totalBytes = encryptedTotalBytes;
+    if (isEncrypted && encryptedTotalBytes > 0) {
+      const downloadChunkSize = (Number.isFinite(compat.serverInfo?.capabilities?.upload?.chunkSize) && compat.serverInfo.capabilities!.upload!.chunkSize! > 0)
+        ? compat.serverInfo.capabilities!.upload!.chunkSize!
+        : this.chunkSize;
+      const encryptedChunkSize = downloadChunkSize + ENCRYPTION_OVERHEAD_PER_CHUNK;
+      const numChunks = Math.ceil(encryptedTotalBytes / encryptedChunkSize);
+      totalBytes = encryptedTotalBytes - numChunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
+    }
 
     if (!onData && totalBytes > MAX_IN_MEMORY_DOWNLOAD_BYTES) {
       const sizeMB = Math.round(totalBytes / (1024 * 1024));

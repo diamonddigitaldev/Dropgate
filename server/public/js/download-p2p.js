@@ -131,7 +131,7 @@ const showError = (title, message) => {
   elBar.parentElement.hidden = true;
 };
 
-const client = new DropgateClient({ clientVersion: '3.0.5', server: location.origin });
+const client = new DropgateClient({ clientVersion: '3.0.6', server: location.origin });
 
 async function loadPeerJS() {
   if (globalThis.Peer) return globalThis.Peer;

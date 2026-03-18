@@ -1,11 +1,11 @@
 # Use an official Node.js runtime as a parent image
-FROM node:22-alpine
+FROM node:24-alpine
 
 # Set the working directory in the container
 WORKDIR /usr/src/app
 
 # Add a non-root user for security
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN addgroup -S dropgate && adduser -S dropgate -G dropgate
 
 # Copy package.json and package-lock.json
 COPY package*.json ./
@@ -17,10 +17,10 @@ RUN npm install
 COPY . .
 
 # Create 'uploads' and 'db' directories and set permissions
-RUN mkdir -p uploads/db && chown -R appuser:appgroup .
+RUN mkdir -p uploads/db && chown -R dropgate:dropgate .
 
 # Switch to the non-root user
-USER appuser
+USER dropgate
 
 # Expose the port the app runs on
 EXPOSE 52443

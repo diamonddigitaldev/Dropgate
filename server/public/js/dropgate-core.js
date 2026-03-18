@@ -2342,6 +2342,15 @@ var DropgateClient = class {
       }));
     } else if (serverMeta.files) {
       files = serverMeta.files;
+      if (serverMeta.isEncrypted) {
+        const encryptedChunkSize = this.chunkSize + ENCRYPTION_OVERHEAD_PER_CHUNK;
+        for (const f of files) {
+          if (f.sizeBytes > 0) {
+            const numChunks = Math.ceil(f.sizeBytes / encryptedChunkSize);
+            f.sizeBytes = f.sizeBytes - numChunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
+          }
+        }
+      }
     } else {
       throw new DropgateProtocolError("Invalid bundle metadata: missing files or manifest.");
     }
@@ -3023,7 +3032,14 @@ var DropgateClient = class {
       throw new DropgateNetworkError("Could not fetch file metadata.", { cause: err2 });
     }
     const isEncrypted = Boolean(metadata.isEncrypted);
-    const totalBytes = metadata.sizeBytes || 0;
+    const encryptedTotalBytes = metadata.sizeBytes || 0;
+    let totalBytes = encryptedTotalBytes;
+    if (isEncrypted && encryptedTotalBytes > 0) {
+      const downloadChunkSize = Number.isFinite(compat.serverInfo?.capabilities?.upload?.chunkSize) && compat.serverInfo.capabilities.upload.chunkSize > 0 ? compat.serverInfo.capabilities.upload.chunkSize : this.chunkSize;
+      const encryptedChunkSize = downloadChunkSize + ENCRYPTION_OVERHEAD_PER_CHUNK;
+      const numChunks = Math.ceil(encryptedTotalBytes / encryptedChunkSize);
+      totalBytes = encryptedTotalBytes - numChunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
+    }
     if (!onData && totalBytes > MAX_IN_MEMORY_DOWNLOAD_BYTES) {
       const sizeMB = Math.round(totalBytes / (1024 * 1024));
       const limitMB = Math.round(MAX_IN_MEMORY_DOWNLOAD_BYTES / (1024 * 1024));
