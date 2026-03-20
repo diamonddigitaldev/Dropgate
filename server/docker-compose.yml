@@ -8,7 +8,7 @@ services:
     environment:
       - ENABLE_UPLOAD=true
       - UPLOAD_ENABLE_E2EE=true
-      - UPLOAD_MAX_FILE_SIZE_MB=1000
+      - UPLOAD_MAX_FILE_SIZE_MB=100
       # Persist uploads across restarts — requires the volume below to be mapped
       # - UPLOAD_PRESERVE_UPLOADS=true
     # Uncomment to persist uploads across container restarts

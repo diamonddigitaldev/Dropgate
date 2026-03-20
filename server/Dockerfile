@@ -20,8 +20,9 @@ EXPOSE 52443
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -qO- http://localhost:52443/api/info || exit 1
 
-# Add a non-root user for security and set app ownership
-RUN addgroup -S dropgate && adduser -S dropgate -G dropgate && \
+# Install su-exec for dropping privileges and add a non-root user
+RUN apk add --no-cache su-exec && \
+    addgroup -S dropgate && adduser -S dropgate -G dropgate && \
     chown -R dropgate:dropgate /usr/src/app
 
 # Entrypoint creates uploads dir at runtime (after volume mount) then drops to dropgate
