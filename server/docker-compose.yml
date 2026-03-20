@@ -1,0 +1,16 @@
+services:
+  dropgate-server:
+    build: .
+    container_name: dropgate-server
+    restart: unless-stopped
+    ports:
+      - "52443:52443"
+    environment:
+      - ENABLE_UPLOAD=true
+      - UPLOAD_ENABLE_E2EE=true
+      - UPLOAD_MAX_FILE_SIZE_MB=1000
+      # Persist uploads across restarts — requires the volume below to be mapped
+      # - UPLOAD_PRESERVE_UPLOADS=true
+    # Uncomment to persist uploads across container restarts
+    # volumes:
+    #   - /path/to/uploads:/usr/src/app/uploads
