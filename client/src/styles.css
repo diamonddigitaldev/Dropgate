@@ -112,14 +112,14 @@ body.popup-window {
     border-top: 1px solid #535353;
 }
 
-.popup-window a {
+.popup-window span {
     color: var(--bs-primary);
     text-decoration: none;
     cursor: pointer;
-    transition: opacity 0.3s;
+    transition: all 0.3s;
 }
 
-.popup-window a:hover {
+.popup-window span:hover {
     color: var(--bs-primary);
     text-decoration: underline;
     opacity: 0.8;

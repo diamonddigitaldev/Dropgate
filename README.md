@@ -9,7 +9,7 @@
 <div align="center">
 
 ![license](https://img.shields.io/badge/license-Mixed-lightgrey?style=flat-square)
-![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Docker-lightgrey?style=flat-square)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-lightgrey?style=flat-square)
 
 [![discord](https://img.shields.io/discord/667479986214666272?logo=discord&logoColor=white&style=flat-square)](https://diamonddigital.dev/discord)
 [![buy me a coffee](https://img.shields.io/badge/-Buy%20Me%20a%20Coffee-ffdd00?logo=Buy%20Me%20A%20Coffee&logoColor=000000&style=flat-square)](https://www.buymeacoffee.com/willtda)
