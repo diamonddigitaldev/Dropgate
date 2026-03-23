@@ -1,5 +1,5 @@
 <div align="center">
-   <img alt="Dropgate Logo" src="./src/img/dropgate.png" style="width:100px;height:auto;margin-bottom:1rem;" />
+   <img alt="Dropgate Logo" src="../docs/img/dropgate.png" style="width:100px;height:auto;margin-bottom:1rem;" />
 
    # Dropgate Client
 
