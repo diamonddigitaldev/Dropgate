@@ -9,7 +9,7 @@
 <div align="center">
 
 ![license](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)
-![version](https://img.shields.io/badge/version-3.0.8-brightgreen?style=flat-square)
+![version](https://img.shields.io/badge/version-3.0.9-brightgreen?style=flat-square)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)
 
 [![discord](https://img.shields.io/discord/667479986214666272?logo=discord\&logoColor=white\&style=flat-square)](https://diamonddigital.dev/discord)
@@ -119,7 +119,7 @@ See the [LICENSE](./LICENSE) file for details.
 
 ## 📖 Acknowledgements
 
-* Logo designed by [TheFuturisticIdiot](https://youtube.com/TheFuturisticIdiot)
+* Logo designed by [TheFuturisticIdiot](https://github.com/TheFuturisticIdiot)
 * Built with [Electron](https://www.electronjs.org/)
 * Inspired by the growing need for privacy-respecting, open file transfer tools
 

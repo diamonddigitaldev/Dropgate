@@ -111,7 +111,7 @@ If you self-host, you decide how strict you want to be — from private-only to 
 
 ## 📖 Acknowledgements
 
-* Logo designed by [TheFuturisticIdiot](https://youtube.com/TheFuturisticIdiot)
+* Logo designed by [TheFuturisticIdiot](https://github.com/TheFuturisticIdiot)
 * Built with [Electron](https://www.electronjs.org/) and [Node.js](https://www.nodejs.org/)
 * Inspired by the growing need for privacy-respecting, open file transfer tools
 

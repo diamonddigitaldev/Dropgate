@@ -545,7 +545,6 @@ ipcMain.handle('get-client-version', () => {
 ipcMain.on('open-external', (event, url) => {
     const allowed = [
         'https://github.com/',
-        'https://youtube.com/',
         'https://buymeacoff.ee/',
         'https://diamonddigital.dev'
     ];

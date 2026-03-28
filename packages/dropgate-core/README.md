@@ -9,7 +9,7 @@
 <div align="center">
 
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)
-![version](https://img.shields.io/badge/version-3.0.8-brightgreen?style=flat-square)
+![version](https://img.shields.io/badge/version-3.0.9-brightgreen?style=flat-square)
 ![typescript](https://img.shields.io/badge/TypeScript-5.0+-blue?style=flat-square)
 
 [![discord](https://img.shields.io/discord/667479986214666272?logo=discord&logoColor=white&style=flat-square)](https://diamonddigital.dev/discord)
@@ -55,7 +55,7 @@ All operations go through a single `DropgateClient` instance. Server connection 
 import { DropgateClient } from '@dropgate/core';
 
 const client = new DropgateClient({
-  clientVersion: '3.0.8',
+  clientVersion: '3.0.9',
   server: 'https://dropgate.link', // URL string or { host, port?, secure? }
   fallbackToHttp: true,             // auto-retry HTTP if HTTPS fails (optional)
 });
@@ -422,7 +422,7 @@ For browser environments, you can use the IIFE bundle:
 <script src="/path/to/dropgate-core.browser.js"></script>
 <script>
   const { DropgateClient } = DropgateCore;
-  const client = new DropgateClient({ clientVersion: '3.0.8', server: location.origin });
+  const client = new DropgateClient({ clientVersion: '3.0.9', server: location.origin });
   // ...
 </script>
 ```
@@ -432,7 +432,7 @@ Or as an ES module:
 ```html
 <script type="module">
   import { DropgateClient } from '/path/to/dropgate-core.js';
-  const client = new DropgateClient({ clientVersion: '3.0.8', server: location.origin });
+  const client = new DropgateClient({ clientVersion: '3.0.9', server: location.origin });
   // ...
 </script>
 ```
@@ -464,7 +464,7 @@ See the [LICENSE](./LICENSE) file for details.
 
 ## Acknowledgements
 
-* Logo designed by [TheFuturisticIdiot](https://youtube.com/TheFuturisticIdiot)
+* Logo designed by [TheFuturisticIdiot](https://github.com/TheFuturisticIdiot)
 * Built with [TypeScript](https://www.typescriptlang.org/)
 * Inspired by the growing need for privacy-respecting, open file transfer tools
 

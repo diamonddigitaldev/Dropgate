@@ -9,7 +9,7 @@
 <div align="center">
 
 ![license](https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square)
-![version](https://img.shields.io/badge/version-3.0.8-brightgreen?style=flat-square)
+![version](https://img.shields.io/badge/version-3.0.9-brightgreen?style=flat-square)
 ![docker](https://img.shields.io/badge/docker-supported-blue?style=flat-square)
 
 [![discord](https://img.shields.io/discord/667479986214666272?logo=discord&logoColor=white&style=flat-square)](https://diamonddigital.dev/discord)
@@ -138,7 +138,7 @@ Example response:
 ```json
 {
   "name": "Dropgate Server",
-  "version": "3.0.8",
+  "version": "3.0.9",
   "logLevel": "INFO",
   "capabilities": {
     "upload": {
@@ -206,7 +206,7 @@ See the [LICENSE](./LICENSE) file for details.
 
 ## 📖 Acknowledgements
 
-* Logo designed by [TheFuturisticIdiot](https://youtube.com/TheFuturisticIdiot)
+* Logo designed by [TheFuturisticIdiot](https://github.com/TheFuturisticIdiot)
 * Built with [Node.js](https://www.nodejs.org/)
 * Inspired by the growing need for privacy-respecting, open file transfer tools
 

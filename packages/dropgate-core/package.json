@@ -1,6 +1,6 @@
 {
   "name": "@dropgate/core",
-  "version": "3.0.8",
+  "version": "3.0.9",
   "description": "Headless Dropgate client library for file uploads and P2P transfers.",
   "type": "module",
   "main": "./dist/index.cjs",
