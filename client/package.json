@@ -1,6 +1,6 @@
 {
   "name": "dropgate-client",
-  "version": "3.0.9",
+  "version": "3.0.10",
   "description": "A self-hosted, privacy-first file sharing system with both hosted upload and direct P2P transfer capabilities.",
   "main": "src/main.js",
   "funding": {

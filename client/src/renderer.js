@@ -55,9 +55,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         const dropZone = document.getElementById('drop-zone');
         const fileInput = document.getElementById('file-input');
         const selectFileBtn = document.getElementById('select-file-btn');
-        const fileChosen = document.getElementById('file-chosen');
-        const fileChosenSummary = document.getElementById('file-chosen-summary');
-        const fileChosenList = document.getElementById('file-chosen-list');
+        const browseMoreBtn = document.getElementById('browse-more-btn');
+        const btnClearAll = document.getElementById('btn-clear-all');
+        const dzEmpty = document.getElementById('dz-empty');
+        const dzHasFiles = document.getElementById('dz-has-files');
+        const dzFileCount = document.getElementById('dz-file-count');
+        const fileListSection = document.getElementById('file-list-section');
+        const fileListContainer = document.getElementById('file-list');
         const fileChosenTotal = document.getElementById('file-chosen-total');
         const maxUploadHint = document.getElementById('max-upload-hint');
         const serverUrlInput = document.getElementById('server-url');
@@ -194,7 +198,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         maxDownloadsValue.addEventListener('input', () => updateMaxDownloadsSettings());
         maxDownloadsValue.addEventListener('blur', () => updateMaxDownloadsSettings());
 
-        selectFileBtn.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('click', (e) => {
+            if (e.target.closest('button')) return;
+            fileInput.click();
+        });
+        selectFileBtn.addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
+        browseMoreBtn.addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
+        btnClearAll.addEventListener('click', (e) => {
+            e.stopPropagation();
+            selectedFiles = [];
+            updateFileListUI();
+            updateUploadButtonState();
+        });
         fileInput.addEventListener('change', (e) => {
             if (e.target.files && e.target.files.length) {
                 handleFiles(Array.from(e.target.files));
@@ -412,49 +427,58 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         function updateFileListUI() {
-            if (!selectedFiles.length) {
-                fileChosen.hidden = true;
-                return;
-            }
-
             const count = selectedFiles.length;
-            fileChosenSummary.textContent = count === 1 ? '1 file selected' : `${count} files selected`;
+            const isEmpty = count === 0;
 
-            fileChosenList.innerHTML = '';
+            // Toggle drop zone states
+            dzEmpty.classList.toggle('d-none', !isEmpty);
+            dzHasFiles.classList.toggle('d-none', isEmpty);
+            fileListSection.classList.toggle('d-none', isEmpty);
+
+            if (isEmpty) return;
+
+            dzFileCount.textContent = count === 1 ? '1 File Selected' : `${count} Files Selected`;
+
+            fileListContainer.innerHTML = '';
             for (let i = 0; i < selectedFiles.length; i++) {
                 const f = selectedFiles[i];
-                const li = document.createElement('li');
-                li.className = 'd-flex align-items-center small file-list-item';
-                const nameSpan = document.createElement('span');
-                nameSpan.className = 'text-truncate me-2';
-                nameSpan.textContent = f.name;
-                nameSpan.title = f.name;
-                const rightSide = document.createElement('span');
-                rightSide.className = 'd-flex align-items-center gap-2 flex-shrink-0 ms-auto';
-                const sizeSpan = document.createElement('span');
-                sizeSpan.className = 'text-body-secondary';
-                sizeSpan.textContent = formatBytes(f.size);
-                rightSide.appendChild(sizeSpan);
+
+                const row = document.createElement('div');
+                row.className = 'file-row';
+
+                const icon = document.createElement('span');
+                icon.className = 'material-icons-round text-secondary';
+                icon.textContent = 'insert_drive_file';
+
+                const name = document.createElement('span');
+                name.className = 'file-row-name';
+                name.textContent = f.name;
+                name.title = f.name;
+
+                const size = document.createElement('span');
+                size.className = 'file-row-size';
+                size.textContent = formatBytes(f.size);
+
                 const removeBtn = document.createElement('button');
-                removeBtn.type = 'button';
                 removeBtn.className = 'file-remove-btn';
                 removeBtn.title = 'Remove file';
-                removeBtn.innerHTML = '<span class="material-icons-round" style="font-size: 14px;">close</span>';
+                removeBtn.innerHTML = '<span class="material-icons-round">close</span>';
                 removeBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     selectedFiles.splice(i, 1);
                     updateFileListUI();
                     updateUploadButtonState();
                 });
-                rightSide.appendChild(removeBtn);
-                li.appendChild(nameSpan);
-                li.appendChild(rightSide);
-                fileChosenList.appendChild(li);
+
+                row.appendChild(icon);
+                row.appendChild(name);
+                row.appendChild(size);
+                row.appendChild(removeBtn);
+                fileListContainer.appendChild(row);
             }
 
             const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
             fileChosenTotal.textContent = `Total: ${formatBytes(totalSize)}`;
-            fileChosen.hidden = false;
         }
 
         // Trigger for uploads started from the UI

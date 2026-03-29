@@ -26,17 +26,29 @@
     <div class="container">
         <h3 class="text-center mb-4">Dropgate Client</h3>
 
-        <div id="drop-zone" class="text-center p-5 mb-3">
-            <p>Drag & Drop Files Here</p>
-            <p class="text-muted small">or</p>
-            <button id="select-file-btn" class="btn btn-secondary btn-sm">Select Files</button>
+        <div id="drop-zone" class="text-center mb-3">
             <input type="file" id="file-input" hidden multiple>
-            <div id="file-chosen" class="mt-3 small text-body-secondary" style="width: 95%;" hidden>
-                <div id="file-chosen-summary" class="fw-semibold mb-1"></div>
-                <ul id="file-chosen-list" class="list-unstyled mb-0 text-start mx-auto"></ul>
-                <div class="mt-1 text-body-secondary" id="file-chosen-total"></div>
+            <div id="dz-empty">
+                <span class="material-icons-round drop-icon">upload_file</span>
+                <p class="drop-label mb-1">Drag & Drop Files Here</p>
+                <p class="text-body-secondary small mb-2">or</p>
+                <button id="select-file-btn" class="btn btn-secondary btn-sm">Select Files</button>
+            </div>
+            <div id="dz-has-files" class="d-none">
+                <span class="material-icons-round accent" style="font-size:28px">add_circle_outline</span>
+                <p class="drop-label mb-1"><span id="dz-file-count"></span></p>
+                <p class="text-body-secondary small mb-2">drag and drop more files or</p>
+                <div class="d-flex gap-2 justify-content-center">
+                    <button id="browse-more-btn" class="btn btn-sm btn-secondary">Select More Files</button>
+                    <button id="btn-clear-all" class="btn btn-sm btn-outline-secondary">Clear All</button>
+                </div>
             </div>
             <div class="mt-4 small text-body-secondary" id="max-upload-hint">Loading server limits...</div>
+        </div>
+
+        <div id="file-list-section" class="d-none mb-3">
+            <div id="file-list"></div>
+            <div class="mt-1 text-body-secondary small" id="file-chosen-total"></div>
         </div>
 
         <div class="mb-3">
