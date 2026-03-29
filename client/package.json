@@ -1,6 +1,6 @@
 {
   "name": "dropgate-client",
-  "version": "3.0.9",
+  "version": "3.0.10",
   "description": "A self-hosted, privacy-first file sharing system with both hosted upload and direct P2P transfer capabilities.",
   "main": "src/main.js",
   "funding": {
@@ -74,13 +74,13 @@
   "author": "Diamond Digital Development <https://diamonddigital.dev>",
   "license": "GPL-3.0-only",
   "devDependencies": {
-    "electron": "^41.0.3",
+    "electron": "^41.1.0",
     "electron-builder": "^26.7.0"
   },
   "dependencies": {
     "bootstrap": "^5.3.8",
     "electron-store": "^11.0.2",
-    "material-icons": "^1.13.14",
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "material-icons": "^1.13.14"
   }
 }

@@ -13,9 +13,13 @@ const els = {
   dropzone: $('dropzone'),
   selectFileBtn: $('selectFileBtn'),
   fileInput: $('fileInput'),
-  fileChosen: $('fileChosen'),
-  fileChosenSummary: $('fileChosenSummary'),
-  fileChosenList: $('fileChosenList'),
+  dzEmpty: $('dzEmpty'),
+  dzHasFiles: $('dzHasFiles'),
+  dzFileCount: $('dzFileCount'),
+  browseMoreBtn: $('browseMoreBtn'),
+  btnClearAll: $('btnClearAll'),
+  fileListSection: $('fileListSection'),
+  fileListContainer: $('fileListContainer'),
   fileChosenTotal: $('fileChosenTotal'),
   maxUploadHint: $('maxUploadHint'),
 
@@ -129,7 +133,7 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-const coreClient = new DropgateClient({ clientVersion: '3.0.9', server: location.origin });
+const coreClient = new DropgateClient({ clientVersion: '3.0.10', server: location.origin });
 
 function isFile(file) {
   return new Promise((resolve) => {
@@ -217,35 +221,45 @@ function showPanels(which) {
 }
 
 function updateFileUI() {
-  if (!state.files.length) {
-    setHidden(els.fileChosen, true);
-    els.dropzone?.classList.remove('dragover');
-    return;
-  }
-
   const count = state.files.length;
-  els.fileChosenSummary.textContent = count === 1 ? '1 file selected' : `${count} files selected`;
+  const isEmpty = count === 0;
 
-  els.fileChosenList.innerHTML = '';
+  els.dropzone?.classList.remove('dragover');
+
+  // Toggle drop zone states
+  if (els.dzEmpty) els.dzEmpty.classList.toggle('d-none', !isEmpty);
+  if (els.dzHasFiles) els.dzHasFiles.classList.toggle('d-none', isEmpty);
+  if (els.fileListSection) els.fileListSection.classList.toggle('d-none', isEmpty);
+
+  if (isEmpty) return;
+
+  if (els.dzFileCount) els.dzFileCount.textContent = count === 1 ? '1 File Selected' : `${count} Files Selected`;
+
+  els.fileListContainer.innerHTML = '';
   for (let i = 0; i < state.files.length; i++) {
     const f = state.files[i];
-    const li = document.createElement('li');
-    li.className = 'd-flex align-items-center small file-list-item';
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'text-truncate me-2';
-    nameSpan.textContent = f.name;
-    nameSpan.title = f.name;
-    const rightSide = document.createElement('span');
-    rightSide.className = 'd-flex align-items-center gap-2 flex-shrink-0 ms-auto';
-    const sizeSpan = document.createElement('span');
-    sizeSpan.className = 'text-body-secondary';
-    sizeSpan.textContent = formatBytes(f.size);
-    rightSide.appendChild(sizeSpan);
+
+    const row = document.createElement('div');
+    row.className = 'file-row';
+
+    const icon = document.createElement('span');
+    icon.className = 'material-icons-round text-secondary';
+    icon.textContent = 'insert_drive_file';
+
+    const name = document.createElement('span');
+    name.className = 'file-row-name';
+    name.textContent = f.name;
+    name.title = f.name;
+
+    const size = document.createElement('span');
+    size.className = 'file-row-size';
+    size.textContent = formatBytes(f.size);
+
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'file-remove-btn';
     removeBtn.title = 'Remove file';
-    removeBtn.innerHTML = '<span class="material-icons-round" style="font-size: 14px;">close</span>';
+    removeBtn.innerHTML = '<span class="material-icons-round">close</span>';
     removeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       state.files.splice(i, 1);
@@ -253,15 +267,16 @@ function updateFileUI() {
       state.fileTooLargeForStandard = Boolean(state.files.length && areFilesTooLargeForStandard(state.files));
       updateStartEnabled();
     });
-    rightSide.appendChild(removeBtn);
-    li.appendChild(nameSpan);
-    li.appendChild(rightSide);
-    els.fileChosenList.appendChild(li);
+
+    row.appendChild(icon);
+    row.appendChild(name);
+    row.appendChild(size);
+    row.appendChild(removeBtn);
+    els.fileListContainer.appendChild(row);
   }
 
   const totalSize = state.files.reduce((sum, f) => sum + f.size, 0);
   els.fileChosenTotal.textContent = `Total: ${formatBytes(totalSize)}`;
-  setHidden(els.fileChosen, false);
 }
 
 function areFilesTooLargeForStandard(files) {
@@ -1039,7 +1054,15 @@ async function startP2PSendFlow() {
 
 function wireUI() {
   // File selection
-  els.selectFileBtn?.addEventListener('click', () => els.fileInput?.click());
+  els.selectFileBtn?.addEventListener('click', (e) => { e.stopPropagation(); els.fileInput?.click(); });
+  els.browseMoreBtn?.addEventListener('click', (e) => { e.stopPropagation(); els.fileInput?.click(); });
+  els.btnClearAll?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    state.files = [];
+    state.fileTooLargeForStandard = false;
+    updateFileUI();
+    updateStartEnabled();
+  });
   els.dropzone?.addEventListener('click', (e) => {
     // Don't steal button clicks
     if (e.target?.closest('button')) return;

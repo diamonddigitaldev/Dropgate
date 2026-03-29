@@ -11,12 +11,18 @@ body {
     border: 2px dashed var(--bs-border-color);
     border-radius: 0.375rem;
     cursor: pointer;
+    padding: 2.25rem 1.5rem;
     transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out;
 }
 
+#drop-zone:hover:not(:has(button:hover)) {
+    border-color: rgba(var(--bs-primary-rgb), 0.5);
+    background-color: rgba(var(--bs-primary-rgb), .04);
+}
+
 #drop-zone.drag-over {
-    background-color: var(--bs-secondary-bg);
-    border-color: var(--bs-gray-400);
+    border-color: rgba(var(--bs-primary-rgb), 1);
+    background-color: rgba(var(--bs-primary-rgb), .06);
 }
 
 #upload-btn {
@@ -185,14 +191,67 @@ body.popup-window {
     border: 1px solid rgba(220, 53, 69, 0.3);
 }
 
-/* File list styles */
-.file-list-item {
+/* Drop zone icon */
+.drop-icon {
+    font-size: 48px;
+    color: var(--bs-secondary-color);
+    margin-bottom: 0.25rem;
+}
+
+.drop-label {
+    font-size: 1rem;
+    font-weight: 500;
+}
+
+.accent {
+    color: var(--bs-primary);
+}
+
+/* ── File list ───────────────────────────────────────────────────────────── */
+
+#file-list {
+    max-height: 280px;
+    overflow-y: auto;
+    border: 1px solid var(--bs-border-color);
+    border-radius: 8px;
+    padding: 0.25rem 0.6rem;
+}
+
+#file-list::-webkit-scrollbar { width: 6px; }
+#file-list::-webkit-scrollbar-track { background: transparent; }
+#file-list::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.3); border-radius: 3px; }
+#file-list::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,0.5); }
+
+.file-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     padding: 0.35rem 0;
     border-bottom: 1px solid var(--bs-border-color);
 }
 
-.file-list-item:last-child {
+.file-row:last-child {
     border-bottom: none;
+}
+
+.file-row .material-icons-round {
+    font-size: 18px;
+    flex-shrink: 0;
+}
+
+.file-row-name {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.875rem;
+}
+
+.file-row-size {
+    flex-shrink: 0;
+    color: var(--bs-secondary-color);
+    font-size: 0.875rem;
 }
 
 .file-remove-btn {
@@ -207,14 +266,20 @@ body.popup-window {
     justify-content: center;
     padding: 0;
     cursor: pointer;
-    transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
     flex-shrink: 0;
+    transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
 .file-remove-btn:hover {
     background-color: var(--bs-danger);
     border-color: var(--bs-danger);
     color: #fff;
+}
+
+.file-remove-btn .material-icons-round {
+    font-size: 14px;
+    line-height: 1;
+    display: block;
 }
 
 /* Responsive Design */

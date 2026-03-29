@@ -26,20 +26,30 @@
           <!-- File selection -->
           <div class="col-lg-6">
             <div class="card shadow-sm h-100">
-              <div class="card-body p-4">
+              <div class="card-body p-4 dropzone-card-body">
                 <div id="dropzone" class="dropzone text-center" tabindex="0" role="button" aria-label="Select files">
-                  <h5 class="mb-2">Drag &amp; Drop Files Here</h5>
-                  <div class="text-body-secondary mb-3">or</div>
-                  <button class="btn btn-secondary" id="selectFileBtn" type="button">Select Files</button>
                   <input id="fileInput" class="visually-hidden" type="file" multiple />
-
-                  <div id="fileChosen" class="mt-3 small text-body-secondary" style="width: 95%;" hidden>
-                    <div id="fileChosenSummary" class="fw-semibold mb-1"></div>
-                    <ul id="fileChosenList" class="list-unstyled mb-0 text-start mx-auto"></ul>
-                    <div class="mt-1 text-body-secondary" id="fileChosenTotal"></div>
+                  <div id="dzEmpty">
+                    <span class="material-icons-round drop-icon">upload_file</span>
+                    <p class="drop-label mb-1">Drag &amp; Drop Files Here</p>
+                    <div class="text-body-secondary small mb-2">or</div>
+                    <button class="btn btn-secondary" id="selectFileBtn" type="button">Select Files</button>
                   </div>
-
+                  <div id="dzHasFiles" class="d-none">
+                    <span class="material-icons-round accent" style="font-size:28px">add_circle_outline</span>
+                    <p class="drop-label mb-1"><span id="dzFileCount"></span></p>
+                    <div class="text-body-secondary small mb-2">drag and drop more files or</div>
+                    <div class="d-flex gap-2 justify-content-center">
+                      <button class="btn btn-sm btn-secondary" id="browseMoreBtn" type="button">Select More Files</button>
+                      <button class="btn btn-sm btn-outline-secondary" id="btnClearAll" type="button">Clear All</button>
+                    </div>
+                  </div>
                   <div class="mt-4 small text-body-secondary" id="maxUploadHint">Loading server limits...</div>
+                </div>
+
+                <div id="fileListSection" class="d-none mt-3">
+                  <div id="fileListContainer"></div>
+                  <div class="mt-1 text-body-secondary small" id="fileChosenTotal"></div>
                 </div>
               </div>
             </div>
