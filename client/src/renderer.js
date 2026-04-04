@@ -571,6 +571,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         uploadBtn.style.display = 'block';
                         cancelUploadBtn.style.display = 'none';
                         activeUploadSession = null;
+                        setUploadingState(false);
                         resetUI(false);
                     }
                 });
@@ -579,6 +580,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 activeUploadSession = session;
                 uploadBtn.style.display = 'none';
                 cancelUploadBtn.style.display = 'block';
+                setUploadingState(true);
 
                 // Wire up cancel button
                 cancelUploadBtn.onclick = () => {
@@ -596,6 +598,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 uploadBtn.style.display = 'block';
                 cancelUploadBtn.style.display = 'none';
                 activeUploadSession = null;
+                setUploadingState(false);
 
                 revokeAllLazyFiles();
                 window.electronAPI.uploadFinished({ status: 'success', link: result.downloadUrl });
@@ -604,6 +607,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 uploadBtn.style.display = 'block';
                 cancelUploadBtn.style.display = 'none';
                 activeUploadSession = null;
+                setUploadingState(false);
 
                 revokeAllLazyFiles();
                 window.electronAPI.uploadFinished({
@@ -999,6 +1003,37 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         // Helper to reset the UI state after an upload completes or fails
+        /**
+         * Lock or unlock the UI while an upload is in progress.
+         * Only the cancel-upload button remains interactive during upload.
+         */
+        function setUploadingState(uploading) {
+            // Drop zone
+            dropZone.style.opacity = uploading ? '0.5' : '1';
+            dropZone.style.pointerEvents = uploading ? 'none' : 'auto';
+            selectFileBtn.disabled = uploading;
+            browseMoreBtn.disabled = uploading;
+            btnClearAll.disabled = uploading;
+            fileInput.disabled = uploading;
+
+            // File list remove buttons
+            fileListContainer.querySelectorAll('.file-remove-btn').forEach(btn => {
+                btn.disabled = uploading;
+                btn.style.pointerEvents = uploading ? 'none' : 'auto';
+            });
+
+            // Server URL & test button
+            serverUrlInput.disabled = uploading;
+            testConnectionBtn.disabled = uploading;
+
+            // File lifetime
+            fileLifetimeValueInput.disabled = uploading;
+            fileLifetimeUnitSelect.disabled = uploading;
+
+            // Max downloads
+            maxDownloadsValue.disabled = uploading;
+        }
+
         function resetUI(clearFile = true) {
             uploadBtn.textContent = 'Upload';
             if (clearFile) {
