@@ -56,7 +56,7 @@ body:
     attributes:
       label: Server Version
       description: The Dropgate server version (shown in /api/info or the footer).
-      placeholder: e.g. 3.0.10
+      placeholder: e.g. 3.0.11
 
   - type: input
     id: browser
