@@ -16,6 +16,10 @@
 
 </div>
 
+<div align="center">
+  <img alt="Dropgate Banner" src="./docs/img/banner.png" style="width:75%;height:auto;" />
+</div>
+
 ## 🌐 Public Demo
 
 See **Dropgate** in action here: **[dropgate.link](https://dropgate.link)**
@@ -49,6 +53,15 @@ Dropgate was built to make **secure file sharing accessible**, **transparent**, 
 - ⚙️ **Configurable Server Controls** – Tune size limits, rate limits, retention, and storage caps.
 - 🧰 **Self-Host Ready** – Works behind common reverse proxies and tunnels.
 
+<div align="center">
+
+| | |
+|---------|-----------|
+| ![Upload](./docs/img/screenshots/upload.png) | ![Download](./docs/img/screenshots/download.png) |
+| ![P2P](./docs/img/screenshots/p2p.png) | ![P2P (Awaiting)](./docs/img/screenshots/p2p_awaiting.png) |
+| ![P2P (QR Code)](./docs/img/screenshots/p2p_qr.png) | ![P2P (Receiving)](./docs/img/screenshots/p2p_receiving.png) |
+
+</div>
 
 ## 🧰 Project Structure
 
