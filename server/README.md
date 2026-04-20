@@ -25,7 +25,8 @@ To prevent and monitor for abuse, `DEBUG`-level logging and strict rate limits a
 
 ## 🌍 Overview
 
-The **Dropgate Server** powers the backend of the system.
+**Dropgate Server** is the official backend and reference implementation for secure, privacy-focused file sharing using Dropgate (DGUP and DGDTP) protocols.
+
 It can be self-hosted easily on:
 - Home servers / NAS boxes
 - VPS instances
