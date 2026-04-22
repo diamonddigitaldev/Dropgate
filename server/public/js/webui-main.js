@@ -133,7 +133,7 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-const coreClient = new DropgateClient({ clientVersion: '3.0.11', server: location.origin });
+const coreClient = new DropgateClient({ clientVersion: '3.0.12', server: location.origin });
 
 function isFile(file) {
   return new Promise((resolve) => {
@@ -603,7 +603,7 @@ function validateLifetimeInput() {
   if (maxH === 0) {
     els.lifetimeHelp.textContent = 'No lifetime limit enforced by the server.';
   } else if (maxH > 0) {
-    els.lifetimeHelp.textContent = `Max lifetime: ${maxH} hours.`;
+    els.lifetimeHelp.textContent = `Max: ${maxH} hours`;
   }
   els.lifetimeHelp.className = 'form-text text-body-secondary';
   return true;

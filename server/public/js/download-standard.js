@@ -17,7 +17,7 @@ const card = document.getElementById('status-card');
 const trustStatement = document.getElementById('trust-statement');
 const encryptionStatement = document.getElementById('encryption-statement');
 
-const client = new DropgateClient({ clientVersion: '3.0.11', server: location.origin });
+const client = new DropgateClient({ clientVersion: '3.0.12', server: location.origin });
 
 const downloadState = {
   fileId: null,
@@ -221,7 +221,7 @@ async function loadMetadata() {
     downloadButton.style.display = 'inline-block';
     downloadButton.addEventListener('click', startDownload);
     statusTitle.textContent = 'Ready to Download';
-    statusMessage.textContent = 'Review the file details above, then click Start Download.';
+    statusMessage.textContent = 'Review the file details below, then click Start Download.';
   } catch (error) {
     console.error(error);
     resetTitleProgress();
