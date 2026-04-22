@@ -21,7 +21,7 @@ const iconContainer = document.getElementById('icon-container');
 const card = document.getElementById('status-card');
 const encryptionStatement = document.getElementById('encryption-statement');
 
-const client = new DropgateClient({ clientVersion: '3.0.11', server: location.origin });
+const client = new DropgateClient({ clientVersion: '3.0.12', server: location.origin });
 
 const bundleState = {
   bundleId: null,

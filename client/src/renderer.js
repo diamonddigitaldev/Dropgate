@@ -820,7 +820,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (limitHours === 0) {
                     fileLifetimeHelp.textContent = 'No lifetime limit enforced by the server.';
                 } else {
-                    fileLifetimeHelp.textContent = `Max lifetime: ${limitHours} hours.`;
+                    fileLifetimeHelp.textContent = `Max: ${limitHours} hours`;
                 }
                 fileLifetimeHelp.className = 'form-text mt-1 text-muted';
 
