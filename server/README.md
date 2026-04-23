@@ -17,6 +17,14 @@
 
 </div>
 
+## 🩵 Now available on TrueNAS!
+
+**Dropgate Server** is installable from the TrueNAS Apps Market!
+
+See it here: https://apps.truenas.com/catalog/dropgate-server
+
+Learn more: https://diamonddigital.dev/blog/announcing-dropgate-for-truenas
+
 ## 🌐 Public Demo
 
 See **Dropgate** in action here: **[dropgate.link](https://dropgate.link)**
