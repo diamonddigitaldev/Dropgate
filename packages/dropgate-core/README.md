@@ -468,6 +468,28 @@ See the [LICENSE](./LICENSE) file for details.
 * Built with [TypeScript](https://www.typescriptlang.org/)
 * Inspired by the growing need for privacy-respecting, open file transfer tools
 
+### AI Disclosure
+
+This project uses AI tools to aid development.
+
+AI is used to:
+- Plan sigificant changes
+- Implement initial passes of new features
+- Perform security audits (alongside human review)
+- Fix bugs and patch security vulnerabilities
+- Review pull requests (alongside human review)
+
+AI is NOT used to:
+- Design UI/UX
+- Design visual assets (such as bitmap and vector graphics)
+- Triage issues
+- Decide project direction
+- Create release information
+
+AI has a tendency to hallucinate/produce plausible but suboptimal, inaccurate or misleading solutions to delegated tasks.
+
+Every commit is manually reviewed and approved by a member of Diamond Digital Development, and testing is carried out to ensure changes work as intended, do not introduce regressions, and meet reliability and security expectations before being merged into the `master` branch.
+
 ## Contact Us
 
 * **Need help or want to chat?** [Join our Discord Server](https://diamonddigital.dev/discord)
