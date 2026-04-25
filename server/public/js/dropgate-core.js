@@ -1276,7 +1276,15 @@ async function startP2PSend(opts) {
         const now = Date.now();
         for (const [_seq, chunk] of unackedChunks) {
           if (now - chunk.sentAt > P2P_UNACKED_CHUNK_TIMEOUT_MS) {
-            throw new DropgateNetworkError("Receiver stopped acknowledging chunks");
+            const bufferedBytes = conn._dc?.bufferedAmount ?? 0;
+            if (bufferedBytes >= 1024 * 1024) {
+              throw new DropgateNetworkError(
+                "Connection is too unstable. Data is queued locally but not being delivered to the receiver."
+              );
+            }
+            throw new DropgateNetworkError(
+              "Receiver stopped responding. No acknowledgments received for over " + P2P_UNACKED_CHUNK_TIMEOUT_MS + " ms."
+            );
           }
         }
         await Promise.race([
@@ -1686,6 +1694,7 @@ async function startP2PReceive(opts) {
   let writeQueueDepth = 0;
   const MAX_WRITE_QUEUE_DEPTH = 100;
   const MAX_FILE_COUNT = 1e4;
+  let lastSenderActivityMs = 0;
   const transitionTo = (newState) => {
     if (!ALLOWED_TRANSITIONS2[state].includes(newState)) {
       console.warn(`[P2P Receive] Invalid state transition: ${state} -> ${newState}`);
@@ -1702,7 +1711,16 @@ async function startP2PReceive(opts) {
     }
     watchdogTimer = setTimeout(() => {
       if (state === "transferring") {
-        safeError(new DropgateNetworkError("Connection timed out (no data received)."));
+        const sinceActivity = Date.now() - lastSenderActivityMs;
+        if (sinceActivity < 1e4) {
+          safeError(new DropgateNetworkError(
+            "Connection is too unstable. Sender is reachable but file data has stopped arriving."
+          ));
+        } else {
+          safeError(new DropgateNetworkError(
+            "Sender stopped responding. No file data or heartbeats received for over " + watchdogTimeoutMs + " ms."
+          ));
+        }
       }
     }, watchdogTimeoutMs);
   };
@@ -1785,6 +1803,7 @@ async function startP2PReceive(opts) {
       });
     });
     conn.on("data", async (data) => {
+      lastSenderActivityMs = Date.now();
       try {
         if (data instanceof ArrayBuffer || ArrayBuffer.isView(data) || typeof Blob !== "undefined" && data instanceof Blob) {
           if (state !== "transferring") {

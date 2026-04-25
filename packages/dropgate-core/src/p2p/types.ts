@@ -246,7 +246,7 @@ export interface P2PSendOptions extends P2PServerConfig {
   onCancel?: (evt: P2PCancellationEvent) => void;
   /** Enable chunk-level acknowledgments for flow control (default: true). */
   chunkAcknowledgments?: boolean;
-  /** Maximum unacknowledged chunks before pausing (default: 32). */
+  /** Maximum unacknowledged chunks before pausing (default: 64). */
   maxUnackedChunks?: number;
   /** ICE restart timeout in ms (default: 10000). */
   iceRestartTimeoutMs?: number;
@@ -298,8 +298,8 @@ export interface P2PReceiveOptions extends P2PServerConfig {
    */
   autoReady?: boolean;
   /**
-   * Timeout in ms for detecting dead connections (no data received).
-   * Default: 15000 (15 seconds). Set to 0 to disable.
+   * Timeout in ms for detecting dead connections (no binary data received).
+   * Default: 30000 (30 seconds). Set to 0 to disable.
    */
   watchdogTimeoutMs?: number;
   /** Callback for status updates. */
@@ -377,7 +377,7 @@ export interface P2PSendFileOptions {
   heartbeatIntervalMs?: number;
   /** Enable chunk-level acknowledgments for flow control (default: true). */
   chunkAcknowledgments?: boolean;
-  /** Maximum unacknowledged chunks before pausing (default: 32). */
+  /** Maximum unacknowledged chunks before pausing (default: 64). */
   maxUnackedChunks?: number;
   /** ICE restart timeout in ms (default: 10000). */
   iceRestartTimeoutMs?: number;
@@ -419,8 +419,8 @@ export interface P2PReceiveFileOptions {
    */
   autoReady?: boolean;
   /**
-   * Timeout in ms for detecting dead connections (no data received).
-   * Default: 15000 (15 seconds). Set to 0 to disable.
+   * Timeout in ms for detecting dead connections (no binary data received).
+   * Default: 30000 (30 seconds). Set to 0 to disable.
    */
   watchdogTimeoutMs?: number;
   /** Callback for status updates. */
