@@ -23,8 +23,10 @@ import {
   type P2PFileEndAckMessage,
 } from './protocol.js';
 
-// Timeout for detecting stalled receivers that stop sending acks
-const P2P_UNACKED_CHUNK_TIMEOUT_MS = 30000;
+// Timeout for detecting stalled receivers that stop sending acks.
+// Tolerates SCTP retransmit storms over lossy/jittery links (e.g. Powerline
+// Ethernet, CGNAT) without sacrificing detection of genuinely dead peers.
+const P2P_UNACKED_CHUNK_TIMEOUT_MS = 60000;
 
 /**
  * Generate a unique session ID for transfer tracking.

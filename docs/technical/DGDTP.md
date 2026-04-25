@@ -2,7 +2,7 @@
 
 **Protocol Version:** 3
 **Status:** Stable
-**Last Updated:** February 2026
+**Last Updated:** April 2026
 
 ---
 
@@ -301,10 +301,10 @@ DGDTP implements multi-layered flow control to prevent fast senders from overwhe
 
 | Parameter | Default |
 |-----------|---------|
-| Maximum unacknowledged chunks | 32 |
-| Unacknowledged chunk timeout | 30,000 ms |
+| Maximum unacknowledged chunks | 64 |
+| Unacknowledged chunk timeout | 60,000 ms |
 
-The sender maintains a map of unacknowledged chunks. When the number of unacknowledged chunks reaches the maximum, the sender pauses until acknowledgements are received. If no acknowledgement arrives within 30 seconds, the transfer is aborted.
+The sender maintains a map of unacknowledged chunks. When the number of unacknowledged chunks reaches the maximum, the sender pauses until acknowledgements are received. If no acknowledgement arrives within 60 seconds, the transfer is aborted.
 
 ### 9.2 Data Channel Buffer Monitoring
 
@@ -471,7 +471,7 @@ The receiver runs a watchdog timer that detects stalled senders:
 
 | Parameter | Default |
 |-----------|---------|
-| Timeout | 15,000 ms |
+| Timeout | 30,000 ms |
 
 **Critically**, the watchdog resets **only on receipt of binary data** (actual file chunks), not on control messages such as `ping`. This prevents a malicious sender from keeping the connection alive with heartbeats alone whilst never delivering file data.
 
@@ -683,8 +683,8 @@ With ~3.3 billion possible codes and active codes existing only for the duration
 | `bufferLowWaterMark` | 2,097,152 (2 MiB) | Resume sending below this buffer level. |
 | `heartbeatIntervalMs` | 5,000 | Ping interval (0 = disabled). |
 | `chunkAcknowledgments` | `true` | Enable chunk-level acks. |
-| `maxUnackedChunks` | 32 | Back-pressure threshold. |
-| `watchdogTimeoutMs` | 15,000 | Receiver stall detection timeout. |
+| `maxUnackedChunks` | 64 | Back-pressure threshold. |
+| `watchdogTimeoutMs` | 30,000 | Receiver stall detection timeout. |
 | `autoReady` | `true` | Auto-accept transfers on metadata receipt. |
 
 ---
@@ -695,12 +695,12 @@ With ~3.3 billion possible codes and active codes existing only for the duration
 |----------|-------|---------|
 | `P2P_PROTOCOL_VERSION` | 3 | Current protocol version. |
 | `P2P_CHUNK_SIZE` | 65,536 | Default chunk size (bytes). |
-| `P2P_MAX_UNACKED_CHUNKS` | 32 | Flow control threshold. |
+| `P2P_MAX_UNACKED_CHUNKS` | 64 | Flow control threshold. |
 | `P2P_END_ACK_TIMEOUT_MS` | 15,000 | End-ack base timeout. |
 | `P2P_END_ACK_RETRIES` | 3 | End message retry count. |
 | `P2P_END_ACK_RETRY_DELAY_MS` | 100 | Delay between redundant end-acks. |
 | `P2P_CLOSE_GRACE_PERIOD_MS` | 2,000 | Delay before closing after completion. |
-| `P2P_UNACKED_CHUNK_TIMEOUT_MS` | 30,000 | Stale ack detection. |
+| `P2P_UNACKED_CHUNK_TIMEOUT_MS` | 60,000 | Stale ack detection. |
 | `MAX_FILE_COUNT` | 10,000 | Maximum files in a multi-file transfer. |
 | `MAX_CONNECTION_ATTEMPTS` | 10 | Connection rate limit. |
 | `CONNECTION_RATE_WINDOW_MS` | 10,000 | Rate limit sliding window. |
