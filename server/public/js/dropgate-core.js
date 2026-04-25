@@ -1156,6 +1156,7 @@ async function startP2PSend(opts) {
   const unackedChunks = /* @__PURE__ */ new Map();
   let nextSeq = 0;
   let ackResolvers = [];
+  let lastReportedBytes = 0;
   let transferEverStarted = false;
   const connectionAttempts = [];
   const MAX_CONNECTION_ATTEMPTS = 10;
@@ -1172,6 +1173,8 @@ async function startP2PSend(opts) {
     if (isStopped()) return;
     const safeTotal = Number.isFinite(data.total) && data.total > 0 ? data.total : totalSize;
     const safeReceived = Math.min(Number(data.received) || 0, safeTotal || 0);
+    if (safeReceived < lastReportedBytes) return;
+    lastReportedBytes = safeReceived;
     const percent = safeTotal ? safeReceived / safeTotal * 100 : 0;
     onProgress?.({ processedBytes: safeReceived, totalBytes: safeTotal, percent });
   };
