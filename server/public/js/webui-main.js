@@ -133,7 +133,7 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-const coreClient = new DropgateClient({ clientVersion: '3.0.12', server: location.origin });
+const coreClient = new DropgateClient({ clientVersion: '3.0.13', server: location.origin });
 
 function isFile(file) {
   return new Promise((resolve) => {
