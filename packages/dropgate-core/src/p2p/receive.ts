@@ -31,11 +31,12 @@ const ALLOWED_TRANSITIONS: Record<P2PReceiveState, P2PReceiveState[]> = {
  * IMPORTANT: Consumer must provide the PeerJS Peer constructor and handle file writing.
  * This removes DOM coupling (no streamSaver).
  *
- * Protocol v2 features:
- * - Explicit version handshake
- * - Chunk-level acknowledgments for flow control
- * - Multiple end-ack sends for reliability
- * - Stream-through design for unlimited file sizes
+ * Features:
+ * - Explicit version handshake (v2)
+ * - Chunk-level acknowledgments for flow control (v2)
+ * - Multiple end-ack sends for reliability (v2)
+ * - Stream-through design for unlimited file sizes (v2)
+ * - Multi-file transfers via file_list / file_end (v3)
  *
  * Example:
  * ```js
@@ -74,7 +75,7 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
     secure = false,
     iceServers,
     autoReady = true,
-    watchdogTimeoutMs = 15000,
+    watchdogTimeoutMs = 30000,
     onStatus,
     onMeta,
     onData,
@@ -154,6 +155,11 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
   // Security: Maximum file count for multi-file transfers
   const MAX_FILE_COUNT = 10000;
 
+  // Diagnostics: tracks any inbound message (incl. pings) so the watchdog
+  // error can distinguish a reachable-but-stalled sender from a silent one.
+  // The watchdog itself still resets only on binary data — see data handler.
+  let lastSenderActivityMs = 0;
+
   /**
    * Attempt a state transition. Returns true if transition was valid.
    */
@@ -179,7 +185,16 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
 
     watchdogTimer = setTimeout(() => {
       if (state === 'transferring') {
-        safeError(new DropgateNetworkError('Connection timed out (no data received).'));
+        const sinceActivity = Date.now() - lastSenderActivityMs;
+        if (sinceActivity < 10000) {
+          safeError(new DropgateNetworkError(
+            'Connection is too unstable. Sender is reachable but file data has stopped arriving.'
+          ));
+        } else {
+          safeError(new DropgateNetworkError(
+            'Sender stopped responding. No file data or heartbeats received for over ' + watchdogTimeoutMs + ' ms.'
+          ));
+        }
       }
     }, watchdogTimeoutMs);
   };
@@ -300,6 +315,7 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
     });
 
     conn.on('data', async (data: unknown) => {
+      lastSenderActivityMs = Date.now();
       try {
         // Note: Watchdog is reset only on actual binary data, not control messages
         // This prevents attackers from keeping connections alive with just pings

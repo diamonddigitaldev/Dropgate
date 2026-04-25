@@ -23,8 +23,10 @@ import {
   type P2PFileEndAckMessage,
 } from './protocol.js';
 
-// Timeout for detecting stalled receivers that stop sending acks
-const P2P_UNACKED_CHUNK_TIMEOUT_MS = 30000;
+// Timeout for detecting stalled receivers that stop sending acks.
+// Tolerates SCTP retransmit storms over lossy/jittery links (e.g. Powerline
+// Ethernet, CGNAT) without sacrificing detection of genuinely dead peers.
+const P2P_UNACKED_CHUNK_TIMEOUT_MS = 60000;
 
 /**
  * Generate a unique session ID for transfer tracking.
@@ -57,11 +59,12 @@ const ALLOWED_TRANSITIONS: Record<P2PSendState, P2PSendState[]> = {
  * IMPORTANT: Consumer must provide the PeerJS Peer constructor.
  * This removes DOM coupling (no script injection).
  *
- * Protocol v2 features:
- * - Explicit version handshake
- * - Chunk-level acknowledgments for flow control
- * - Multiple end-ack retries for reliability
- * - Stream-through design for unlimited file sizes
+ * Features:
+ * - Explicit version handshake (v2)
+ * - Chunk-level acknowledgments for flow control (v2)
+ * - Multiple end-ack retries for reliability (v2)
+ * - Stream-through design for unlimited file sizes (v2)
+ * - Multi-file transfers via file_list / file_end (v3)
  *
  * Example:
  * ```js
@@ -175,6 +178,10 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
   let nextSeq = 0;
   let ackResolvers: Array<() => void> = [];
 
+  // Monotonic progress: enqueued bytes (sender-side) and acked bytes (receiver-side)
+  // arrive interleaved; clamp reports so the UI never moves backwards.
+  let lastReportedBytes = 0;
+
   // Track if transfer ever started to prevent connection replacement attacks
   let transferEverStarted = false;
 
@@ -201,6 +208,8 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
     const safeTotal =
       Number.isFinite(data.total) && data.total > 0 ? data.total : totalSize;
     const safeReceived = Math.min(Number(data.received) || 0, safeTotal || 0);
+    if (safeReceived < lastReportedBytes) return;
+    lastReportedBytes = safeReceived;
     const percent = safeTotal ? (safeReceived / safeTotal) * 100 : 0;
     onProgress?.({ processedBytes: safeReceived, totalBytes: safeTotal, percent });
   };
@@ -353,7 +362,18 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
         const now = Date.now();
         for (const [_seq, chunk] of unackedChunks) {
           if (now - chunk.sentAt > P2P_UNACKED_CHUNK_TIMEOUT_MS) {
-            throw new DropgateNetworkError('Receiver stopped acknowledging chunks');
+            // bufferedAmount distinguishes a network stall (bytes still queued
+            // locally because the wire isn't draining) from a slow/silent
+            // receiver (bytes left cleanly but no acks come back).
+            const bufferedBytes = conn._dc?.bufferedAmount ?? 0;
+            if (bufferedBytes >= 1024 * 1024) {
+              throw new DropgateNetworkError(
+                'Connection is too unstable. Data is queued locally but not being delivered to the receiver.'
+              );
+            }
+            throw new DropgateNetworkError(
+              'Receiver stopped responding. No acknowledgments received for over ' + P2P_UNACKED_CHUNK_TIMEOUT_MS + ' ms.'
+            );
           }
         }
 
@@ -601,7 +621,7 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
         // Start health monitoring
         startHealthMonitoring(conn);
 
-        // Protocol v2: Send hello first
+        // Send hello first to negotiate protocol version
         conn.send({
           t: 'hello',
           protocolVersion: P2P_PROTOCOL_VERSION,
