@@ -41,6 +41,6 @@
     "qr-code-styling": "^1.9.2",
     "quick.db": "^9.1.7",
     "streamsaver": "^2.0.6",
-    "uuid": "^13.0.0"
+    "uuid": "^14.0.0"
   }
 }
