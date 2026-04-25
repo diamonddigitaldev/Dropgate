@@ -74,7 +74,7 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
     secure = false,
     iceServers,
     autoReady = true,
-    watchdogTimeoutMs = 15000,
+    watchdogTimeoutMs = 30000,
     onStatus,
     onMeta,
     onData,

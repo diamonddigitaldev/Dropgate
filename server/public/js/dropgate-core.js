@@ -1059,14 +1059,14 @@ function isP2PMessage(value) {
   ].includes(msg.t);
 }
 var P2P_CHUNK_SIZE = 64 * 1024;
-var P2P_MAX_UNACKED_CHUNKS = 32;
+var P2P_MAX_UNACKED_CHUNKS = 64;
 var P2P_END_ACK_TIMEOUT_MS = 15e3;
 var P2P_END_ACK_RETRIES = 3;
 var P2P_END_ACK_RETRY_DELAY_MS = 100;
 var P2P_CLOSE_GRACE_PERIOD_MS = 2e3;
 
 // src/p2p/send.ts
-var P2P_UNACKED_CHUNK_TIMEOUT_MS = 3e4;
+var P2P_UNACKED_CHUNK_TIMEOUT_MS = 6e4;
 function generateSessionId() {
   return crypto.randomUUID();
 }
@@ -1631,7 +1631,7 @@ async function startP2PReceive(opts) {
     secure = false,
     iceServers,
     autoReady = true,
-    watchdogTimeoutMs = 15e3,
+    watchdogTimeoutMs = 3e4,
     onStatus,
     onMeta,
     onData,

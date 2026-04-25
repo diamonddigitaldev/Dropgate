@@ -245,8 +245,12 @@ export const P2P_CHUNK_SIZE = 64 * 1024;
 /**
  * Default maximum unacknowledged chunks before sender pauses.
  * This creates backpressure when receiver is slow.
+ *
+ * Sized to leave comfortable head-room below the receiver's
+ * MAX_WRITE_QUEUE_DEPTH (100) while filling typical residential
+ * bandwidth-delay products (Powerline / CGNAT links can stall briefly).
  */
-export const P2P_MAX_UNACKED_CHUNKS = 32;
+export const P2P_MAX_UNACKED_CHUNKS = 64;
 
 /**
  * Default timeout for waiting on end acknowledgment (ms).
