@@ -175,6 +175,10 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
   let nextSeq = 0;
   let ackResolvers: Array<() => void> = [];
 
+  // Monotonic progress: enqueued bytes (sender-side) and acked bytes (receiver-side)
+  // arrive interleaved; clamp reports so the UI never moves backwards.
+  let lastReportedBytes = 0;
+
   // Track if transfer ever started to prevent connection replacement attacks
   let transferEverStarted = false;
 
@@ -201,6 +205,8 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
     const safeTotal =
       Number.isFinite(data.total) && data.total > 0 ? data.total : totalSize;
     const safeReceived = Math.min(Number(data.received) || 0, safeTotal || 0);
+    if (safeReceived < lastReportedBytes) return;
+    lastReportedBytes = safeReceived;
     const percent = safeTotal ? (safeReceived / safeTotal) * 100 : 0;
     onProgress?.({ processedBytes: safeReceived, totalBytes: safeTotal, percent });
   };
