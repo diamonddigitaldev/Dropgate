@@ -75,11 +75,11 @@ Dropgate was built to make **secure file sharing accessible**, **transparent**, 
 
 ```
 /Dropgate
-├── client/    # Electron-based uploader app (GPL-3.0)
-├── server/    # Node.js server + Web UI (AGPL-3.0)
+├── client/                  # Electron-based uploader app (GPL-3.0)
+├── server/                  # Node.js server + Web UI (AGPL-3.0)
 ├── packages/
-│   ├── dropgate-core/      # Shared TypeScript library (Apache-2.0)
-├── docs/      # Privacy, troubleshooting, and technical notes
+│   └── dropgate-core/       # Shared TypeScript library (Apache-2.0)
+└── docs/                    # Privacy, troubleshooting, and technical notes
 ```
 
 
@@ -142,7 +142,7 @@ If you self-host, you decide how strict you want to be — from private-only to 
 This project uses AI tools to aid development.
 
 AI is used to:
-- Plan sigificant changes
+- Plan significant changes
 - Implement initial passes of new features
 - Perform security audits (alongside human review)
 - Fix bugs and patch security vulnerabilities
