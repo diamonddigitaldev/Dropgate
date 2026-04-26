@@ -33,7 +33,7 @@ To prevent and monitor for abuse, `DEBUG`-level logging and strict rate limits a
 
 ## 🌍 Overview
 
-**Dropgate Server** is the official backend and reference implementation for secure, privacy-focused file sharing using Dropgate (DGUP and DGDTP) protocols.
+**Dropgate Server** is the official backend and reference implementation for secure, privacy-focused file sharing using the Dropgate protocols: [DGUP (Dropgate Upload Protocol)](../docs/technical/DGUP.md) and [DGDTP (Dropgate Direct Transfer Protocol)](../docs/technical/DGDTP.md).
 
 It can be self-hosted easily on:
 - Home servers / NAS boxes
@@ -192,7 +192,7 @@ Run the server behind a reverse proxy that terminates TLS:
 
 ## 🗄️ Storage and Lifecycle
 
-- Uploaded files live in `server/uploads`.
+- Uploaded files live in `uploads/`.
 - Files can be set to expire after a certain period or after a certain number of downloads.
 - Incomplete uploads are cleaned up on an interval.
 
@@ -225,7 +225,7 @@ See the [LICENSE](./LICENSE) file for details.
 This project uses AI tools to aid development.
 
 AI is used to:
-- Plan sigificant changes
+- Plan significant changes
 - Implement initial passes of new features
 - Perform security audits (alongside human review)
 - Fix bugs and patch security vulnerabilities

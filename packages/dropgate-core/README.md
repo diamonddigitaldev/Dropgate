@@ -17,9 +17,9 @@
 
 </div>
 
-## Overview
+## 🌍 Overview
 
-**@dropgate/core** is the universal client library for Dropgate. It provides all the core functionality for:
+**@dropgate/core** is the universal client library for Dropgate. It implements the client side of the Dropgate protocols — [DGUP (Dropgate Upload Protocol)](../../docs/technical/DGUP.md) for hosted uploads and [DGDTP (Dropgate Direct Transfer Protocol)](../../docs/technical/DGDTP.md) for peer-to-peer transfers — and provides all the core functionality for:
 
 - Uploading files to Dropgate servers (with optional E2EE)
 - Downloading files from Dropgate servers
@@ -29,13 +29,13 @@
 
 This package is **headless** and **environment-agnostic** — it contains no DOM manipulation, no browser-specific APIs, and no Node.js-specific code. All environment-specific concerns (loading PeerJS, handling file streams, etc.) are handled by the consumer.
 
-## Installation
+## 📦 Installation
 
 ```bash
 npm install @dropgate/core
 ```
 
-## Builds
+## 🏗️ Builds
 
 The package ships with multiple build targets:
 
@@ -45,7 +45,7 @@ The package ships with multiple build targets:
 | CJS | `dist/index.cjs` | Legacy Node.js, CommonJS |
 | Browser IIFE | `dist/index.browser.js` | `<script>` tag, exposes `DropgateCore` global |
 
-## Quick Start
+## 🚀 Quick Start
 
 ### Configure Once, Use Everywhere
 
@@ -243,7 +243,7 @@ const { serverInfo } = await getServerInfo({
 console.log('Server version:', serverInfo.version);
 ```
 
-## Metadata Fetching
+## 🧾 Metadata Fetching
 
 The core library provides intelligent metadata fetching methods that handle all the complexity of deriving computed fields from server responses.
 
@@ -278,7 +278,7 @@ const meta = await client.getBundleMetadata('bundle-id', 'optional-key');
 // meta.totalSizeBytes and meta.fileCount are computed client-side
 ```
 
-## API Reference
+## 📚 API Reference
 
 ### DropgateClient
 
@@ -414,7 +414,7 @@ zipWriter.finalize(); // Flush remaining data and write ZIP footer
 | `DropgateAbortError` | Operation aborted |
 | `DropgateTimeoutError` | Operation timed out |
 
-## Browser Usage
+## 🌐 Browser Usage
 
 For browser environments, you can use the IIFE bundle:
 
@@ -437,7 +437,7 @@ Or as an ES module:
 </script>
 ```
 
-## P2P Consumer Responsibilities
+## 🧩 P2P Consumer Responsibilities
 
 The P2P methods are **headless**. The consumer is responsible for:
 
@@ -457,12 +457,12 @@ The P2P implementation is designed for **unlimited file sizes** with constant me
 
 > **Note**: For large files, always use the `onData` callback approach rather than buffering in memory.
 
-## License
+## 📜 License
 
 Licensed under the **Apache-2.0 License**.
 See the [LICENSE](./LICENSE) file for details.
 
-## Acknowledgements
+## 📖 Acknowledgements
 
 * Logo designed by [TheFuturisticIdiot](https://github.com/TheFuturisticIdiot)
 * Built with [TypeScript](https://www.typescriptlang.org/)
@@ -473,7 +473,7 @@ See the [LICENSE](./LICENSE) file for details.
 This project uses AI tools to aid development.
 
 AI is used to:
-- Plan sigificant changes
+- Plan significant changes
 - Implement initial passes of new features
 - Perform security audits (alongside human review)
 - Fix bugs and patch security vulnerabilities
@@ -490,11 +490,11 @@ AI has a tendency to hallucinate/produce plausible but suboptimal, inaccurate or
 
 Every commit is manually reviewed and approved by a member of Diamond Digital Development, and testing is carried out to ensure changes work as intended, do not introduce regressions, and meet reliability and security expectations before being merged into the `master` branch.
 
-## Contact Us
+## 🙂 Contact Us
 
-* **Need help or want to chat?** [Join our Discord Server](https://diamonddigital.dev/discord)
-* **Found a bug?** [Open an issue](https://github.com/diamonddigitaldev/Dropgate/issues)
-* **Have a suggestion?** [Submit a feature request](https://github.com/diamonddigitaldev/Dropgate/issues/new?labels=enhancement)
+* 💬 **Need help or want to chat?** [Join our Discord Server](https://diamonddigital.dev/discord)
+* 🐛 **Found a bug?** [Open an issue](https://github.com/diamonddigitaldev/Dropgate/issues)
+* 💡 **Have a suggestion?** [Submit a feature request](https://github.com/diamonddigitaldev/Dropgate/issues/new?labels=enhancement)
 
 <div align="center">
   <a href="https://diamonddigital.dev/">
