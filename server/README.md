@@ -17,13 +17,14 @@
 
 </div>
 
-## 🩵 Now available on TrueNAS!
+## 🩵 Available on TrueNAS and umbrelOS
 
-**Dropgate Server** is installable from the TrueNAS Apps Market!
+Install **Dropgate Server** on your favourite home server platform:
 
-See it here: https://apps.truenas.com/catalog/dropgate-server
-
-Learn more: https://diamonddigital.dev/blog/announcing-dropgate-for-truenas
+| Platform | Install | Learn more |
+|----------|---------|------------|
+| **TrueNAS** | [Apps Market →](https://apps.truenas.com/catalog/dropgate-server) | [Announcement](https://diamonddigital.dev/blog/announcing-dropgate-for-truenas) |
+| **umbrelOS** | [App Store →](https://apps.umbrel.com/app/dropgate-server) | [Announcement](https://diamonddigital.dev/blog/announcing-dropgate-for-umbrelos) |
 
 ## 🌐 Public Demo
 
