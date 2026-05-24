@@ -20,7 +20,8 @@
   <img alt="Dropgate Banner" src="./docs/img/banner.png" style="width:75%;height:auto;" />
 </div>
 
-## 🩵 Available on TrueNAS and umbrelOS
+
+## Available on TrueNAS and umbrelOS
 
 Install **Dropgate Server** on your favourite home server platform:
 
@@ -29,13 +30,13 @@ Install **Dropgate Server** on your favourite home server platform:
 | **TrueNAS** | [Apps Market →](https://apps.truenas.com/catalog/dropgate-server) | [Announcement](https://diamonddigital.dev/blog/announcing-dropgate-for-truenas) |
 | **umbrelOS** | [App Store →](https://apps.umbrel.com/app/dropgate-server) | [Announcement](https://diamonddigital.dev/blog/announcing-dropgate-for-umbrelos) |
 
-## 🌐 Public Demo
+## Public Demo
 
 See **Dropgate** in action here: **[dropgate.link](https://dropgate.link)**
 
 To prevent and monitor for abuse, `DEBUG`-level logging and strict rate limits are enforced.
 
-## 🌍 Overview
+## Overview
 
 **Dropgate** is a modern, privacy-respecting file sharing system designed to be easy to self-host and easy to use.
 
@@ -52,15 +53,15 @@ In today’s world, privacy and anonymity are more important than ever.
 Dropgate was built to make **secure file sharing accessible**, **transparent**, and **fully self-hostable** — whether on a home NAS, a VPS, or in Docker.
 
 
-## ✨ Features
+## Features
 
-- 🔐 **End-to-End Encryption (E2EE)** – Encrypt on the sender device, decrypt on the recipient device. Encryption keys never need to reach the server.
-- 🕵️ **Privacy First** – No analytics, no tracking, and no logging of file contents.
-- 🔗 **Share Links That “Just Work”** – Simple links for recipients that expire based on download count or lifetime.
-- 🚀 **Direct Transfer (P2P)** – Great for big files or “zero-storage” sharing (when enabled).
-- 🧩 **Built-in Web UI** – Send and receive from a browser, no install required.
-- ⚙️ **Configurable Server Controls** – Tune size limits, rate limits, retention, and storage caps.
-- 🧰 **Self-Host Ready** – Works behind common reverse proxies and tunnels.
+- **End-to-End Encryption (E2EE)** – Encrypt on the sender device, decrypt on the recipient device. Encryption keys never need to reach the server.
+- **Privacy First** – No analytics, no tracking, and no logging of file contents.
+- **Share Links That “Just Work”** – Simple links for recipients that expire based on download count or lifetime.
+- **Direct Transfer (P2P)** – Great for big files or “zero-storage” sharing (when enabled).
+- **Built-in Web UI** – Send and receive from a browser, no install required.
+- **Configurable Server Controls** – Tune size limits, rate limits, retention, and storage caps.
+- **Self-Host Ready** – Works behind common reverse proxies and tunnels.
 
 <div align="center">
 
@@ -72,7 +73,7 @@ Dropgate was built to make **secure file sharing accessible**, **transparent**, 
 
 </div>
 
-## 🧰 Project Structure
+## Project Structure
 
 ```
 /Dropgate
@@ -84,7 +85,7 @@ Dropgate was built to make **secure file sharing accessible**, **transparent**, 
 ```
 
 
-## 🧩 Getting Started
+## Getting Started
 
 ### Clone the Repository
 
@@ -106,7 +107,7 @@ See the [server README](./server/README.md) for configuration, Docker setup, and
 See the [core README](./packages/dropgate-core/README.md) for API documentation and usage examples.
 
 
-## 🔒 Privacy and Security Philosophy
+## Privacy and Security Philosophy
 
 Dropgate’s design is built around **you staying in control of your data**:
 
@@ -117,21 +118,21 @@ Dropgate’s design is built around **you staying in control of your data**:
 If you self-host, you decide how strict you want to be — from private-only to public-facing with limits.
 
 
-## 📚 Docs
+## Docs
 
 - [`docs/PRIVACY.md`](./docs/PRIVACY.md)
 - [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md)
 - [`Technical Documentation`](./docs/technical/)
 
 
-## 📜 Licenses
+## Licenses
 
 * **Client:** GPL-3.0 License – See [`client/LICENSE`](./client/LICENSE)
 * **Server:** AGPL-3.0 License – See [`server/LICENSE`](./server/LICENSE)
 * **Core Library:** Apache-2.0 License – See [`packages/dropgate-core/LICENSE`](./packages/dropgate-core/LICENSE)
 
 
-## 📖 Acknowledgements
+## Acknowledgements
 
 * Logo designed by [TheFuturisticIdiot](https://github.com/TheFuturisticIdiot)
 * Built with [Electron](https://www.electronjs.org/) and [Node.js](https://www.nodejs.org/)
@@ -161,11 +162,11 @@ AI has a tendency to hallucinate/produce plausible but suboptimal, inaccurate or
 Every commit is manually reviewed and approved by a member of Diamond Digital Development, and testing is carried out to ensure changes work as intended, do not introduce regressions, and meet reliability and security expectations before being merged into the `master` branch.
 
 
-## 🙂 Contact Us
+## Contact Us
 
-* 💬 **Need help or want to chat?** [Join our Discord Server](https://diamonddigital.dev/discord)
-* 🐛 **Found a bug?** [Open an issue](https://github.com/diamonddigitaldev/Dropgate/issues)
-* 💡 **Have a suggestion?** [Submit a feature request](https://github.com/diamonddigitaldev/Dropgate/issues/new?labels=enhancement)
+* **Need help or want to chat?** [Join our Discord Server](https://diamonddigital.dev/discord)
+* **Found a bug?** [Open an issue](https://github.com/diamonddigitaldev/Dropgate/issues)
+* **Have a suggestion?** [Submit a feature request](https://github.com/diamonddigitaldev/Dropgate/issues/new?labels=enhancement)
 
 
 <div align="center">

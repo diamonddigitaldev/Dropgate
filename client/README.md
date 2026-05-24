@@ -18,32 +18,32 @@
 </div>
 
 
-## 🌍 Overview
+## Overview
 
 **Dropgate Client** is the desktop way to upload and share files through a Dropgate Server.
 It’s built to feel simple: pick a file, choose your options, hit upload, and share the link.
 
 
-## ✨ Features
+## Features
 
-* 🔒 **End-to-End Encryption (E2EE)** | Encrypt on your device before upload, decrypt on the recipient’s device. The server doesn’t need your key.
+* **End-to-End Encryption (E2EE)** | Encrypt on your device before upload, decrypt on the recipient’s device. The server doesn’t need your key.
 
-* 🌐 **Server Agnostic** | Connect to any compatible Dropgate Server — whether it’s self-hosted at home, deployed via Docker, or behind a reverse proxy.
+* **Server Agnostic** | Connect to any compatible Dropgate Server — whether it’s self-hosted at home, deployed via Docker, or behind a reverse proxy.
 
-* 🧱 **Privacy by Design** | No telemetry, no analytics, and no personal identifiers. Your data stays between you and your chosen server.
+* **Privacy by Design** | No telemetry, no analytics, and no personal identifiers. Your data stays between you and your chosen server.
 
-* 🖥️ **Cross-Platform Support** | Available for Windows, macOS, and Linux.
+* **Cross-Platform Support** | Available for Windows, macOS, and Linux.
 
-* 📦 **Multi-File Uploads** | Select or drag-and-drop multiple files at once — they're bundled together and uploaded in one go.
+* **Multi-File Uploads** | Select or drag-and-drop multiple files at once — they're bundled together and uploaded in one go.
 
-* ⚡ **Fast, Lightweight Interface** | Simple drag-and-drop UI focused on minimalism and clarity.
+* **Fast, Lightweight Interface** | Simple drag-and-drop UI focused on minimalism and clarity.
 
-* 🧩 **Smart Compatibility Checks** | The client reads server capabilities (limits, encryption support, etc.) so you don’t run into surprises mid-upload.
+* **Smart Compatibility Checks** | The client reads server capabilities (limits, encryption support, etc.) so you don’t run into surprises mid-upload.
 
-* 🪟 **Windows Context Menu Integration** | Right-click a file and upload in the background.
+* **Windows Context Menu Integration** | Right-click a file and upload in the background.
 
 
-## 📦 Installation
+## Installation
 
 To install Dropgate Client:
 
@@ -52,7 +52,7 @@ To install Dropgate Client:
 3. Launch the client and connect to your preferred server.
 
 
-## 🚀 Usage
+## Usage
 
 ### Sending a file
 
@@ -71,13 +71,13 @@ To install Dropgate Client:
 3. Download as usual. If the file is end-to-end encrypted, decryption happens locally on your device.
 
 
-## 🌐 Direct Transfer (P2P)
+## Direct Transfer (P2P)
 
 The desktop client focuses on the classic hosted-upload flow.
 If your server has **Direct Transfer (P2P)** enabled, you can use it from the server’s **Web UI** in your browser.
 
 
-## 🛠️ Development
+## Development
 
 To set up a development environment:
 
@@ -89,7 +89,7 @@ npm start
 ```
 
 
-## 🏗️ Building
+## Building
 
 To build the client for your platform:
 
@@ -100,24 +100,24 @@ npm run build
 Distributable binaries will appear in the `dist` folder.
 
 
-## 🔌 Self-Hosting & Networking
+## Self-Hosting & Networking
 
 Dropgate Client works seamlessly with **self-hosted Dropgate Servers**, which you can run from your own **home server**, **NAS**, or **cloud VPS**.
 
 It plays nicely with common setups like:
 
-* 🌐 **NGINX** or **Caddy** reverse proxies
-* ☁️ **Cloudflare Tunnel**
-* 🔒 **Tailscale** private networks
+* **NGINX** or **Caddy** reverse proxies
+* **Cloudflare Tunnel**
+* **Tailscale** private networks
 
 
-## 📜 License
+## License
 
 Dropgate Client is licensed under the **GPL-3.0 License**.
 See the [LICENSE](./LICENSE) file for details.
 
 
-## 📖 Acknowledgements
+## Acknowledgements
 
 * Logo designed by [TheFuturisticIdiot](https://github.com/TheFuturisticIdiot)
 * Built with [Electron](https://www.electronjs.org/)
@@ -147,11 +147,11 @@ AI has a tendency to hallucinate/produce plausible but suboptimal, inaccurate or
 Every commit is manually reviewed and approved by a member of Diamond Digital Development, and testing is carried out to ensure changes work as intended, do not introduce regressions, and meet reliability and security expectations before being merged into the `master` branch.
 
 
-## 🙂 Contact Us
+## Contact Us
 
-* 💬 **Need help or want to chat?** [Join our Discord Server](https://diamonddigital.dev/discord)
-* 🐛 **Found a bug?** [Open an issue](https://github.com/diamonddigitaldev/Dropgate/issues)
-* 💡 **Have a suggestion?** [Submit a feature request](https://github.com/diamonddigitaldev/Dropgate/issues/new?labels=enhancement)
+* **Need help or want to chat?** [Join our Discord Server](https://diamonddigital.dev/discord)
+* **Found a bug?** [Open an issue](https://github.com/diamonddigitaldev/Dropgate/issues)
+* **Have a suggestion?** [Submit a feature request](https://github.com/diamonddigitaldev/Dropgate/issues/new?labels=enhancement)
 
 
 <div align="center">

@@ -17,7 +17,8 @@
 
 </div>
 
-## 🩵 Available on TrueNAS and umbrelOS
+
+## Available on TrueNAS and umbrelOS
 
 Install **Dropgate Server** on your favourite home server platform:
 
@@ -26,13 +27,13 @@ Install **Dropgate Server** on your favourite home server platform:
 | **TrueNAS** | [Apps Market →](https://apps.truenas.com/catalog/dropgate-server) | [Announcement](https://diamonddigital.dev/blog/announcing-dropgate-for-truenas) |
 | **umbrelOS** | [App Store →](https://apps.umbrel.com/app/dropgate-server) | [Announcement](https://diamonddigital.dev/blog/announcing-dropgate-for-umbrelos) |
 
-## 🌐 Public Demo
+## Public Demo
 
 See **Dropgate** in action here: **[dropgate.link](https://dropgate.link)**
 
 To prevent and monitor for abuse, `DEBUG`-level logging and strict rate limits are enforced.
 
-## 🌍 Overview
+## Overview
 
 **Dropgate Server** is the official backend and reference implementation for secure, privacy-focused file sharing using the Dropgate protocols: [DGUP (Dropgate Upload Protocol)](../docs/technical/DGUP.md) and [DGDTP (Dropgate Direct Transfer Protocol)](../docs/technical/DGDTP.md).
 
@@ -50,7 +51,7 @@ Dropgate supports **two ways to share files**:
 When running with **E2EE**, the server acts as a **blind data relay** — the contents are unreadable without the client-side decryption key.
 
 
-## 🧩 Defaults (important!)
+## Defaults (important!)
 
 Out of the box, the server is conservative:
 - ✅ Web UI is enabled
@@ -60,7 +61,7 @@ Out of the box, the server is conservative:
 This means you can spin it up, try the Web UI, and choose what features you want to allow.
 
 
-## 🚀 Quick Start (Manual)
+## Quick Start (Manual)
 
 ```bash
 git clone https://github.com/diamonddigitaldev/Dropgate.git
@@ -83,7 +84,7 @@ npm start
 ```
 
 
-## 🐳 Running with Docker
+## Running with Docker
 
 ```bash
 docker run -d \
@@ -100,7 +101,7 @@ docker run -d \
 If you want uploads to persist across restarts, map `/usr/src/app/uploads` to a path on the host machine and set `UPLOAD_PRESERVE_UPLOADS=true`.
 
 
-## ⚙️ Environment Variables
+## Environment Variables
 
 ### General
 
@@ -137,7 +138,7 @@ If you want uploads to persist across restarts, map `/usr/src/app/uploads` to a 
 | `PEERJS_DEBUG` | `false` | Enables verbose PeerJS logs. |
 
 
-## 🧾 Server Info Endpoint
+## Server Info Endpoint
 
 You can sanity-check your server and see what it supports via:
 
@@ -180,7 +181,7 @@ Example response:
 ```
 
 
-## 🔒 HTTPS / Reverse Proxy Setup
+## HTTPS / Reverse Proxy Setup
 
 For **E2EE** and **Direct Transfer (P2P)** in browsers, you generally want HTTPS (localhost is the common exception).
 Run the server behind a reverse proxy that terminates TLS:
@@ -191,14 +192,14 @@ Run the server behind a reverse proxy that terminates TLS:
 * [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/)
 
 
-## 🗄️ Storage and Lifecycle
+## Storage and Lifecycle
 
 - Uploaded files live in `uploads/`.
 - Files can be set to expire after a certain period or after a certain number of downloads.
 - Incomplete uploads are cleaned up on an interval.
 
 
-## 🔎 Logging and Privacy
+## Logging and Privacy
 
 Dropgate tries to keep logs **minimal and transparent**.
 For the full breakdown of what gets logged (and what doesn’t), see:
@@ -208,13 +209,13 @@ For the full breakdown of what gets logged (and what doesn’t), see:
 If you’re debugging a problem, temporarily enable `LOG_LEVEL=DEBUG`, reproduce the issue, then turn it back down.
 
 
-## 📜 License
+## License
 
 Licensed under the **AGPL-3.0 License**.
 See the [LICENSE](./LICENSE) file for details.
 
 
-## 📖 Acknowledgements
+## Acknowledgements
 
 * Logo designed by [TheFuturisticIdiot](https://github.com/TheFuturisticIdiot)
 * Built with [Node.js](https://www.nodejs.org/)
@@ -244,11 +245,11 @@ AI has a tendency to hallucinate/produce plausible but suboptimal, inaccurate or
 Every commit is manually reviewed and approved by a member of Diamond Digital Development, and testing is carried out to ensure changes work as intended, do not introduce regressions, and meet reliability and security expectations before being merged into the `master` branch.
 
 
-## 🙂 Contact Us
+## Contact Us
 
-* 💬 **Need help or want to chat?** [Join our Discord Server](https://diamonddigital.dev/discord)
-* 🐛 **Found a bug?** [Open an issue](https://github.com/diamonddigitaldev/Dropgate/issues)
-* 💡 **Have a suggestion?** [Submit a feature request](https://github.com/diamonddigitaldev/Dropgate/issues/new?labels=enhancement)
+* **Need help or want to chat?** [Join our Discord Server](https://diamonddigital.dev/discord)
+* **Found a bug?** [Open an issue](https://github.com/diamonddigitaldev/Dropgate/issues)
+* **Have a suggestion?** [Submit a feature request](https://github.com/diamonddigitaldev/Dropgate/issues/new?labels=enhancement)
 
 <div align="center">
   <a href="https://diamonddigital.dev/">
