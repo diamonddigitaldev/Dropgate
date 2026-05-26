@@ -88,13 +88,14 @@ npm start
 
 ```bash
 docker run -d \
+  --name dropgate-server \
+  --restart unless-stopped \
   -p 52443:52443 \
   -e ENABLE_UPLOAD=true \
   -e UPLOAD_ENABLE_E2EE=true \
   -e UPLOAD_PRESERVE_UPLOADS=true \
   -e UPLOAD_MAX_FILE_SIZE_MB=1000 \
   -v /path/to/uploads:/usr/src/app/uploads \
-  --name dropgate \
   willtda/dropgate-server:latest
 ```
 
