@@ -32,7 +32,7 @@
     "material-icons": "^1.13.14",
     "content-disposition": "^1.0.0",
     "cors": "^2.8.5",
-    "ejs": "^5.0.1",
+    "ejs": "^6.0.1",
     "express": "^5.1.0",
     "express-rate-limit": "^8.2.1",
     "helmet": "^8.1.0",
