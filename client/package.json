@@ -74,7 +74,7 @@
   "author": "Diamond Digital Development <https://diamonddigital.dev>",
   "license": "GPL-3.0-only",
   "devDependencies": {
-    "electron": "^41.1.0",
+    "electron": "^42.3.2",
     "electron-builder": "^26.7.0"
   },
   "dependencies": {
