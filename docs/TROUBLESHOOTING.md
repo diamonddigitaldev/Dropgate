@@ -58,7 +58,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 
 ## 4) Encryption / HTTPS issues
 
-- Some browser features (especially WebRTC used for P2P) require a **secure context**.
+- Browsers only provide some features Dropgate relies on in a **secure context** (HTTPS or localhost), notably the Web Crypto API used for end-to-end encryption. The Web UI also only enables direct transfer (P2P) in a secure context.
 - If you see missing buttons or “blocked” errors in the Web UI, run the server behind HTTPS.
 
 ## 5) P2P issues (Direct transfer)

@@ -109,7 +109,7 @@ An honest server has **no visibility** into data channel content once the WebRTC
 
 ### 4.4 Secure Context Requirement
 
-WebRTC requires a secure context (HTTPS or `localhost`) in all modern browsers. The signalling server MUST be accessed over HTTPS in production. The `proxied: true` flag is set on the PeerJS server to indicate it operates behind a TLS-terminating reverse proxy.
+The Dropgate Web UI only allows direct transfers in a secure context (HTTPS or `localhost`). This is Dropgate's own check, using the core library's `isSecureContextForP2P()` helper, not a browser restriction on WebRTC; the core library does not enforce it itself. The signalling server MUST be accessed over HTTPS in production. The `proxied: true` flag is set on the PeerJS server to indicate it operates behind a TLS-terminating reverse proxy.
 
 ---
 
@@ -758,7 +758,7 @@ The code is the only credential needed to connect, so treat a live code like a p
 
 ### 22.1 Server Deployment
 
-- **Deploy the Dropgate Server/signalling server behind HTTPS.** WebRTC requires a secure context in all modern browsers. The PeerJS server MUST be accessed via HTTPS (or `localhost` for development).
+- **Deploy the Dropgate Server/signalling server behind HTTPS.** The Web UI only enables direct transfers in a secure context (§4.4). The PeerJS server MUST be accessed via HTTPS (or `localhost` for development).
 - **Treat the signalling server as trusted infrastructure.** Because it relays the DTLS fingerprints that secure each transfer (§18.1), whoever controls it could intercept transfers. For sensitive use, run your own.
 - **Configure appropriate STUN servers.** The default Cloudflare STUN server is suitable for most deployments. For privacy-sensitive applications, consider self-hosting a STUN server or using a VPN to mask IP addresses.
 - **Do not enable `PEERJS_DEBUG` in production.** Debug logging may expose ICE candidates (IP addresses) and connection metadata in server logs.
