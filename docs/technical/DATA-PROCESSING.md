@@ -1,6 +1,6 @@
 # Dropgate Data Processing
 
-**Last Updated:** February 2026
+**Last Updated:** September 2026
 
 This document describes what data Dropgate collects, where and why it is stored, how it is processed, and when it is deleted. It covers all three components of the monorepo: the Dropgate Server, the Dropgate Client (Electron), and the `dropgate-core` library (which is also used in the Web UI).
 
@@ -53,11 +53,13 @@ The following tables enumerate every category of data processed by Dropgate, gro
 
 | Data | Stored? | Where | Why | When Created | When Deleted |
 |------|---------|-------|-----|--------------|--------------|
-| **Peer IDs** (P2P codes) | Transiently | PeerJS in-memory (not Dropgate-managed) | Peer discovery and routing. | On peer registration. | On peer disconnection. |
+| **Peer IDs** (P2P codes) | Transiently | PeerJS in-memory (not Dropgate-managed) | Peer discovery and routing. The code is also in the receiver link's URL path (`/p2p/<code>`), so reverse proxies may log it (see §9.2). | On peer registration. | On peer disconnection. |
 | **ICE candidates** | Transiently | PeerJS in-memory (not Dropgate-managed) | NAT traversal — relayed between peers during WebRTC connection setup. Contains IP addresses and ports. | During ICE gathering. | On connection establishment or failure. |
 | **SDP offers/answers** | Transiently | PeerJS in-memory (not Dropgate-managed) | WebRTC session negotiation. | During connection setup. | On connection establishment or failure. |
 | **File content** | **Never** | — | File data flows directly between peers via the WebRTC data channel. The server is not involved. | — | — |
 | **File metadata** (name, size, MIME) | **Never** | — | Exchanged between peers over the encrypted data channel. The server cannot observe it. | — | — |
+
+These guarantees assume the server relays signalling honestly. The SDP it relays includes the DTLS certificate fingerprints that secure the peer connection, so a malicious or compromised server could put itself between the peers and read the transfer, including file names and contents. See [DGDTP §18.1](./DGDTP.md#181-transport-encryption).
 
 ### 2.4 Dropgate Server — HTTP Request Metadata
 
@@ -75,7 +77,7 @@ The following tables enumerate every category of data processed by Dropgate, gro
 | **Lifetime preference** (value + unit) | Yes | `electron-store` | Remembers the user's preferred file lifetime. | On user input. | On user change or application uninstall. |
 | **Max downloads preference** | Yes | `electron-store` | Remembers the user's preferred download limit. | On user input. | On user change or application uninstall. |
 | **Window bounds** (x, y, width, height) | Yes | `electron-store` | Restores window position and size between sessions. | On window move/resize. | On application uninstall. |
-| **Debug log** | Yes | `{userData}/debug.log` | Troubleshooting application issues. Contains timestamps, process arguments, app lifecycle events, and upload progress. Does not contain file content or encryption keys. | On application start. | Manual deletion by user. |
+| **Debug log** | Yes | `{userData}/debug.log` | Troubleshooting application issues. Contains timestamps, process arguments, app lifecycle events, and upload progress. Process arguments include the full paths of files sent with **Share with Dropgate**, so the log can contain file names and folder paths. Does not contain file content or encryption keys. Always written; there is no setting to turn it off. | On application start. | Manual deletion by user. |
 
 ### 2.6 Web UI (Browser)
 
@@ -106,13 +108,16 @@ Even with E2EE active, the following metadata is visible to the server:
 - Whether the file is encrypted (`isEncrypted` flag).
 - Expiry timestamp and download limits.
 - Upload timing patterns (when chunks arrive).
+- For sealed bundles: the number of files and each file's size. The client sends these when the bundle upload starts; only the names are hidden.
+
+Encryption also protects each chunk only on its own. A chunk's position and whether it is the last one are not authenticated, so someone able to modify stored files could remove, reorder or duplicate chunks without the download failing to decrypt. See [DGUP §4.7](./DGUP.md#47-integrity-limitations).
 
 ### 3.3 Key Lifecycle
 
 1. **Generated** by the client using `crypto.subtle.generateKey`.
 2. **Used** to encrypt all chunks and the filename.
 3. **Exported** to URL-safe Base64 and appended to the download URL as a fragment (`#<keyBase64>`).
-4. **Never transmitted to the server.** URL fragments are not included in HTTP requests.
+4. **Not transmitted to the server.** URL fragments are not included in HTTP requests. The one exception: pasting a full encrypted link into the Web UI's "enter a sharing code" box sends the whole link, key included, to `POST /api/resolve`. The server only uses the path and doesn't store or log it. See [DGUP §4.5](./DGUP.md#45-key-transmission).
 5. **Not persisted** by the client. The key exists only in the download link. If the link is lost, the file cannot be decrypted.
 
 ### 3.4 Server's Cryptographic Capabilities
@@ -318,7 +323,7 @@ During DGDTP connection establishment, STUN binding requests are sent to the con
 A TLS-terminating reverse proxy (Nginx, Caddy, etc.) sits between clients and the Dropgate Server. It sees:
 
 - Client IP addresses.
-- Request URLs (including file IDs, but not URL fragments containing encryption keys).
+- Request URLs (including file IDs and P2P codes, but not URL fragments containing encryption keys). A P2P code is all that's needed to connect to a waiting sender.
 - Request and response sizes.
 - TLS handshake metadata (SNI, client hello).
 

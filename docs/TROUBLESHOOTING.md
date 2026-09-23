@@ -46,6 +46,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - If you're behind a reverse proxy with a body size limit, make sure the proxy allows at least `UPLOAD_CHUNK_SIZE_BYTES + 1024` bytes per request (the extra 1024 accounts for encryption overhead and request framing).
 - Lowering the chunk size can help on unstable connections (smaller chunks = less data to re-upload on failure), but increases the number of HTTP requests per file and adds per-chunk overhead (hashing, encryption IV/tag).
 - The 64KB minimum prevents extreme fragmentation — values below this would generate millions of chunks for moderate files and cause significant per-chunk overhead.
+- **If you use `UPLOAD_PRESERVE_UPLOADS=true`, don't change the chunk size while encrypted files are still stored.** Encrypted files are decrypted using the server's current chunk size, so files uploaded before the change will fail to download. Let them expire first (or clear them), then change it. See [DGUP §4.8](./technical/DGUP.md#48-chunk-framing-on-download).
 
 **"Too many chunks" error**
 - The server limits files to 100,000 chunks maximum (about 500GB at 5MB chunk size).
@@ -68,6 +69,10 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
   - Confirm `ENABLE_P2P=true`.
   - Try changing `P2P_STUN_SERVERS` to a different STUN provider.
   - Some networks/NATs need a **TURN** server to relay traffic (currently not supported).
+
+**"The sender cancelled the transfer" (or "The receiver cancelled…") when nobody did**
+- Currently, if the connection drops mid-transfer for any reason (network change, Wi-Fi drop, a closed or sleeping device), it's reported as the other side cancelling. See [DGDTP §14.4](./technical/DGDTP.md#144-connection-loss).
+- Interrupted transfers can't be resumed. Start the transfer again, ideally on a more stable connection.
 
 ## 6) Rate limiting
 

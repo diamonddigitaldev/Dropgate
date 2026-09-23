@@ -2,7 +2,7 @@
 
 **Protocol Version:** 3
 **Status:** Stable
-**Last Updated:** February 2026
+**Last Updated:** September 2026
 
 ---
 
@@ -29,7 +29,7 @@ DGUP is transport-agnostic in principle but is presently implemented over HTTPS.
 | **Chunk** | A contiguous byte range of the source file, optionally encrypted. |
 | **Upload Session** | A stateful server-side context that tracks chunk reception for a single file. |
 | **Bundle** | A logical grouping of two or more files uploaded as a single unit. |
-| **Sealed Bundle** | An encrypted bundle whose manifest is an opaque, client-encrypted blob. The server cannot enumerate member files. |
+| **Sealed Bundle** | An encrypted bundle whose manifest is an opaque, client-encrypted blob. The server cannot read the member file names, but it does learn how many files the bundle has and each file's size when the upload starts ([§5.2](#52-bundle-upload)). |
 | **Unsealed Bundle** | An unencrypted bundle whose file list is stored in plaintext on the server. |
 | **File ID** | A UUID v4 assigned on upload completion. Used in download URLs. |
 | **Upload ID** | A UUID v4 assigned on upload initialisation. Used only during the upload session and discarded afterwards. |
@@ -57,15 +57,15 @@ A JSON object containing (at minimum):
 | `version` | `string` | Server version (semver). |
 | `capabilities.upload.enabled` | `boolean` | Whether DGUP is available. |
 | `capabilities.upload.e2ee` | `boolean` | Whether E2EE is supported. |
-| `capabilities.upload.maxFileSizeBytes` | `number` | Maximum file size in bytes (0 = unlimited). |
-| `capabilities.upload.maxLifetimeMs` | `number` | Maximum permitted file lifetime in milliseconds. |
-| `capabilities.upload.maxDownloads` | `number` | Server-enforced maximum download limit. |
-| `capabilities.upload.chunkSizeBytes` | `number` | Server's expected chunk size. |
+| `capabilities.upload.maxSizeMB` | `number` | Maximum file size in megabytes (0 = unlimited). |
+| `capabilities.upload.maxLifetimeHours` | `number` | Maximum permitted file lifetime in hours (0 = unlimited). |
+| `capabilities.upload.maxFileDownloads` | `number` | Server-enforced maximum download limit (0 = unlimited). |
+| `capabilities.upload.chunkSize` | `number` | Server's expected chunk size in bytes. |
 | `capabilities.upload.bundleSizeMode` | `string` | `"total"` or `"per-file"` — how bundle size limits are applied. |
 
 ### 3.3 Compatibility
 
-The client SHOULD compare its own version against the server version. Major version mismatches SHOULD be treated as incompatible. The client SHOULD respect `chunkSizeBytes` and all declared limits.
+The client SHOULD compare its own version against the server version. Major version mismatches SHOULD be treated as incompatible. The client SHOULD respect `chunkSize` and all declared limits.
 
 ---
 
@@ -99,11 +99,31 @@ For each chunk:
 
 ### 4.5 Key Transmission
 
-The encryption key is **never** sent to the server. It is appended to the download URL as a fragment identifier (`#<keyBase64>`). URL fragments are not included in HTTP requests and are therefore invisible to the server and any intermediate proxies.
+The encryption key is appended to the download URL as a fragment identifier (`#<keyBase64>`). URL fragments are not included in HTTP requests and are therefore invisible to the server and any intermediate proxies.
+
+**One exception:** pasting a full encrypted link into the Web UI's "enter a sharing code" box, or passing one to the core library's `resolveShareTarget()`, sends the whole link, including the key, to the server in the body of `POST /api/resolve`. The server only uses the path and does not store or log the value, but it does receive it. To open an encrypted link, paste it into the browser's address bar instead.
 
 ### 4.6 Secure Context Requirement
 
 E2EE requires the Web Crypto API, which is only available in secure contexts (HTTPS or `localhost`). If the client cannot obtain a secure context, E2EE MUST be disabled or the upload MUST be rejected.
+
+### 4.7 Integrity Limitations
+
+Each chunk is encrypted and authenticated on its own, and one key is used for the filename, every chunk and, in bundles, every member file and the manifest. A chunk's position in the file, the file it belongs to and whether it is the last chunk are not part of what is authenticated.
+
+So a server, or anyone able to modify stored files, cannot read or change the contents of an individual chunk, but could:
+
+- remove chunks from the end of a file;
+- reorder or duplicate chunks;
+- swap member files of the same size within a bundle.
+
+The result would still decrypt without an error. Size checks during download catch some of these changes, but not all of them.
+
+### 4.8 Chunk Framing on Download
+
+Encrypted files do not record the chunk size they were uploaded with. Clients split the downloaded stream using the chunk size the server currently advertises (`capabilities.upload.chunkSize` in `/api/info`).
+
+If `UPLOAD_CHUNK_SIZE_BYTES` changes on a server that keeps uploads across restarts (`UPLOAD_PRESERVE_UPLOADS=true`), encrypted files uploaded before the change can no longer be decrypted. Unencrypted files are not affected.
 
 ---
 
@@ -209,8 +229,8 @@ For encrypted uploads, each chunk's on-wire size includes the 28-byte encryption
 
 1. The upload ID is validated against active sessions.
 2. The chunk index is validated (0 ≤ index < totalChunks).
-3. The chunk is checked for duplication — if already received, the request is rejected.
-4. The SHA-256 digest of the received bytes is computed and compared to `X-Chunk-Hash`.
+3. The SHA-256 digest of the received bytes is computed and compared to `X-Chunk-Hash`.
+4. The chunk is checked for duplication. If that chunk index has already been received, the server responds `200` (`Chunk already received.`) and does not write it again. This makes retries safe.
 5. The chunk is written to the temporary file at the calculated byte offset.
 6. The session's inactivity timer is reset.
 
@@ -222,8 +242,8 @@ The SHA-256 hash in `X-Chunk-Hash` MUST be a 64-character lowercase hexadecimal 
 
 | Status | Meaning |
 |--------|---------|
-| `200` | Chunk accepted. |
-| `400` | Invalid chunk index, hash format, or duplicate chunk. |
+| `200` | Chunk accepted, or already received (not written again). |
+| `400` | Invalid chunk index, hash format, or hash mismatch. |
 | `410` | Upload session expired or not found. |
 | `413` | Chunk exceeds expected size. |
 | `500` | File I/O error. |
@@ -341,7 +361,7 @@ The server deletes the temporary file, releases the storage reservation, and rem
 | Bundle (unencrypted) | `https://<host>/b/<bundleId>` |
 | Bundle (encrypted) | `https://<host>/b/<bundleId>#<keyBase64>` |
 
-The fragment identifier (`#<keyBase64>`) is processed exclusively by the client. It is never transmitted to the server.
+The fragment identifier (`#<keyBase64>`) is processed exclusively by the client. Browsers never include it in requests. The one case where it does reach the server is described in [§4.5](#45-key-transmission).
 
 ---
 

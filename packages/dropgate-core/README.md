@@ -58,7 +58,7 @@ import { DropgateClient } from '@dropgate/core';
 const client = new DropgateClient({
   clientVersion: '3.0.13',
   server: 'https://dropgate.link', // URL string or { host, port?, secure? }
-  fallbackToHttp: true,             // auto-retry HTTP if HTTPS fails (optional)
+  fallbackToHttp: true,             // retry over plain HTTP if HTTPS fails (optional; see Constructor Options)
 });
 ```
 
@@ -297,6 +297,8 @@ The main client class for interacting with Dropgate servers.
 | `cryptoObj` | `CryptoAdapter` | No | Custom crypto implementation |
 | `base64` | `Base64Adapter` | No | Custom base64 encoder/decoder |
 
+> **`fallbackToHttp` and security:** when enabled, *any* failure to reach the `https://` URL makes the client retry over plain `http://` and keep using it, including a failure caused by someone on the network blocking HTTPS. Only enable it for servers you knowingly run without TLS (for example on a private LAN), and check `client.baseUrl` after `connect()` so you can tell the user the connection is not secure.
+
 #### Properties
 
 | Property | Type | Description |
@@ -316,7 +318,7 @@ The main client class for interacting with Dropgate servers.
 | `p2pSend(opts)` | Start a P2P send session |
 | `p2pReceive(opts)` | Start a P2P receive session |
 | `validateUploadInputs(opts)` | Validate file and settings before upload |
-| `resolveShareTarget(value, opts?)` | Resolve a sharing code via the server |
+| `resolveShareTarget(value, opts?)` | Resolve a sharing code via the server. `value` is sent to the server as-is, so strip any `#fragment` (the encryption key) from a full link first. |
 
 ### P2P Utility Functions
 
@@ -447,6 +449,14 @@ The P2P methods are **headless**. The consumer is responsible for:
 3. **UI Updates**: React to callbacks (`onProgress`, `onStatus`, etc.)
 
 This design allows the library to work in any environment (browser, Electron, Node.js with WebRTC).
+
+Behaviour to account for in the current version:
+
+- **`onCancel` also fires when the connection drops.** If the data channel closes mid-transfer, the receiver gets `cancelledBy: 'sender'` and the sender gets `cancelledBy: 'receiver'`, even if nobody cancelled. Word your UI accordingly.
+- **The sender is told the transfer succeeded before `onComplete` runs.** The receiver acknowledges completion first, then calls `onComplete` without waiting for it. If closing or finalising your output fails there, the sender still reports success, so handle that error yourself.
+- **Flow control only works if `onData` waits for the write.** The receiver acknowledges a chunk when `onData` resolves. `StreamingZipWriter.writeChunk()` returns immediately and queues its output internally, so with a slow destination that queue can grow without limit.
+- **Resume is not implemented.** `onResumeRequest` is never called; an interrupted transfer has to be restarted.
+- **Security:** see [DGDTP §18](../../docs/technical/DGDTP.md#18-security-considerations) for what the P2P code and DTLS do and don't protect against.
 
 ### Large File Support
 

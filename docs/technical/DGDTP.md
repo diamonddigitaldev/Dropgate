@@ -2,20 +2,20 @@
 
 **Protocol Version:** 3
 **Status:** Stable
-**Last Updated:** April 2026
+**Last Updated:** September 2026
 
 ---
 
 ## 1. Overview
 
-The Dropgate Direct Transfer Protocol (DGDTP) defines the peer-to-peer (P2P) file transfer mechanism used by Dropgate. Unlike DGUP (which uploads files to a server for later retrieval), DGDTP streams file data directly from one peer to another over a WebRTC data channel. The Dropgate Server acts only as a signalling relay; it never sees, stores, or processes the transferred file content.
+The Dropgate Direct Transfer Protocol (DGDTP) defines the peer-to-peer (P2P) file transfer mechanism used by Dropgate. Unlike DGUP (which uploads files to a server for later retrieval), DGDTP streams file data directly from one peer to another over a WebRTC data channel. The Dropgate Server acts only as a signalling relay; it doesn't store or process the transferred file content, and it can't see it as long as it relays signalling honestly (see [§18.1](#181-transport-encryption)).
 
-DGDTP supports single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, connection health monitoring, and resumable sessions.
+DGDTP supports single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§15](#15-resume-support)).
 
 ### 1.1 Design Goals
 
 - **Zero server storage** — file data never touches the server's filesystem or memory.
-- **Transport encryption** — WebRTC data channels are encrypted via DTLS by default. No plaintext data traverses the network.
+- **Transport encryption** — WebRTC data channels are encrypted via DTLS by default. No plaintext data traverses the network. The DTLS connection is authenticated through the signalling server, so this protects against network observers, not against a malicious signalling server (see [§18.1](#181-transport-encryption)).
 - **Flow control** — chunk acknowledgements and buffer monitoring prevent fast senders from overwhelming slow receivers.
 - **Minimal signalling** — the server's role is limited to PeerJS signalling (peer discovery, ICE candidate relay, SDP exchange). Once the data channel is established, the server is no longer involved.
 - **Human-readable codes** — peers are identified by short, pronounceable codes rather than opaque UUIDs or IP addresses.
@@ -31,7 +31,7 @@ DGDTP supports single-file transfers, multi-file transfers (streamed into a ZIP 
 | **Signalling Server** | The Dropgate Server component that relays WebRTC signalling messages (PeerJS). |
 | **Data Channel** | The WebRTC RTCDataChannel over which DGDTP messages and binary data are sent. |
 | **P2P Code** | A human-readable identifier in the format `XXXX-0000` (4 letters + 4 digits). |
-| **Session ID** | A UUID identifying a specific transfer session, used for resume detection. |
+| **Session ID** | A UUID identifying a specific transfer session, used to check that all file metadata in a transfer belongs to the same session. |
 | **Watchdog** | A receiver-side timer that detects stalled senders. |
 | **Heartbeat** | A sender-side periodic ping that prevents idle-timeout disconnections. |
 
@@ -105,7 +105,7 @@ The signalling server observes but does **not persist**:
 | SDP offers/answers | WebRTC capability negotiation — includes media/transport parameters. |
 | Connection lifecycle events | Connect, disconnect, error. |
 
-The server has **no visibility** into data channel content once the WebRTC connection is established.
+An honest server has **no visibility** into data channel content once the WebRTC connection is established. The SDP it relays includes each peer's DTLS certificate fingerprint, which is what authenticates the encrypted connection, so a malicious or compromised server could substitute its own and intercept the transfer. See [§18.1](#181-transport-encryption).
 
 ### 4.4 Secure Context Requirement
 
@@ -166,6 +166,8 @@ Protocol versions MUST match exactly. There is no backwards-compatibility negoti
 Protocol version mismatch: sender v3, receiver v2
 ```
 
+In the current implementation only the sender performs this check. The receiver sends its version but does not compare it with the sender's.
+
 ### 6.3 Timeout
 
 The handshake MUST complete within **10 seconds**. If the `hello` is not received within this window, the connection is closed.
@@ -212,7 +214,7 @@ Before each file's chunks, the sender transmits a `meta` message:
 ```
 
 - `fileIndex` is present only in multi-file transfers (v3).
-- The `sessionId` is used for resume detection and session hijacking prevention.
+- The `sessionId` is used for session hijacking prevention (see [§18.2](#182-session-id-tracking)).
 
 ### 7.3 Ready Signal
 
@@ -237,7 +239,8 @@ The default DGDTP chunk size is **65,536 bytes** (64 KiB). This is deliberately 
 
 - Smaller chunks reduce end-to-end latency.
 - They enable finer-grained flow control over a real-time data channel.
-- They minimise retransmission overhead if a chunk is lost.
+
+The data channel is reliable, so lost packets are retransmitted by the transport (SCTP) regardless of chunk size. DGDTP itself never re-sends a chunk.
 
 ### 8.2 Chunk Message
 
@@ -537,11 +540,19 @@ Both peers receive an `onCancel` callback with:
 
 The Web UI registers a `beforeunload` handler to warn users before navigating away during an active transfer. Navigation triggers implicit cancellation.
 
+### 14.4 Connection Loss
+
+If the data channel closes during an active transfer without a `cancelled` message, the current implementation still reports it as a cancellation by the other peer: the receiver's `onCancel` fires with `cancelledBy: "sender"`, and the sender's with `cancelledBy: "receiver"`. This happens whatever the cause, including a network drop, a closed or crashed tab, or a device going to sleep.
+
+So a "cancelled by the other peer" result means the transfer stopped. It does not prove the other person chose to cancel.
+
 ---
 
 ## 15. Resume Support
 
-DGDTP defines resume messages for interrupted transfers, though full implementation is session-scoped (reconnection within the same P2P code session).
+DGDTP reserves `resume` and `resume_ack` messages for continuing interrupted transfers, but **the current implementation does not support resuming**. Neither peer sends or handles these messages, and the `onResumeRequest` callback is never called. Once a transfer has started, the sender rejects new connections (see [§5.4](#54-connection-replacement)), so an interrupted transfer has to be started again.
+
+The message formats below are kept for reference.
 
 ### 15.1 Resume Request (Receiver)
 
@@ -555,7 +566,7 @@ DGDTP defines resume messages for interrupted transfers, though full implementat
 { "t": "resume_ack", "resumeFromOffset": 524288, "accepted": true }
 ```
 
-The sender validates the resume request via an `onResumeRequest` callback, which returns a boolean. If accepted, the sender skips to the indicated byte offset and resumes chunk transmission.
+As designed, the sender would validate the resume request via an `onResumeRequest` callback returning a boolean and, if accepted, continue from the indicated byte offset. This is not implemented.
 
 ---
 
@@ -625,7 +636,13 @@ When one peer encounters an error, it transmits an `error` message to the other 
 
 WebRTC data channels are encrypted via **DTLS** (Datagram Transport Layer Security). This is handled transparently by the browser's WebRTC implementation. All data in transit between peers — including DGDTP messages and file content — is encrypted.
 
-DGDTP does **not** implement an additional application-layer encryption scheme. The rationale is that DTLS already provides confidentiality and integrity for the data channel. Adding a second encryption layer would impose a performance cost without meaningful security benefit, given that both peers must already trust the WebRTC implementation.
+DGDTP does **not** implement an additional application-layer encryption scheme, and that has a consequence for what DTLS protects against. Each peer proves its identity during the DTLS handshake with a certificate whose fingerprint is sent to the other peer in the SDP. In DGDTP the SDP travels through the signalling server, and nothing else authenticates it: the P2P code is only used to find the sender.
+
+- **Network observers** (including anyone relaying WebRTC packets) see only encrypted data.
+- **An honest signalling server** relays the fingerprints unchanged and cannot read the transfer.
+- **A malicious or compromised signalling server** can replace both fingerprints with its own, place itself between the peers and read or alter everything, including file names and contents. Neither peer can detect this.
+
+In practice, DGDTP transfers are only as confidential as the signalling server is trustworthy. For sensitive transfers, use a server you run or trust.
 
 ### 18.2 Session ID Tracking
 
@@ -659,6 +676,12 @@ During WebRTC connection establishment, ICE candidates are exchanged via the sig
 ### 18.8 Code Brute-Force Resistance
 
 With ~3.3 billion possible codes and active codes existing only for the duration of a transfer, brute-force guessing is impractical under the connection rate limit (10 attempts per 10 seconds per sender). However, server operators SHOULD monitor for distributed scanning patterns.
+
+The code is the only credential needed to connect, so treat a live code like a password:
+
+- Anyone who connects with a valid code receives the file names and sizes as part of the preview (§7), before the receiver accepts anything.
+- The receiver link carries the code in the URL path (`/p2p/<code>`), not in a fragment. It can therefore appear in reverse-proxy access logs and browser history.
+- The Web UI's receive page connects to the sender as soon as the link is opened.
 
 ---
 
@@ -726,8 +749,8 @@ With ~3.3 billion possible codes and active codes existing only for the duration
 | `pong` | Receiver → Sender | transferring+ | Keepalive response. |
 | `error` | Both | Any | Error notification. |
 | `cancelled` | Both | Any | Cancellation notification. |
-| `resume` | Receiver → Sender | handshaking | Resume request. |
-| `resume_ack` | Sender → Receiver | handshaking | Resume response. |
+| `resume` | Receiver → Sender | handshaking | Resume request (reserved, not implemented). |
+| `resume_ack` | Sender → Receiver | handshaking | Resume response (reserved, not implemented). |
 
 ---
 
@@ -736,6 +759,7 @@ With ~3.3 billion possible codes and active codes existing only for the duration
 ### 22.1 Server Deployment
 
 - **Deploy the Dropgate Server/signalling server behind HTTPS.** WebRTC requires a secure context in all modern browsers. The PeerJS server MUST be accessed via HTTPS (or `localhost` for development).
+- **Treat the signalling server as trusted infrastructure.** Because it relays the DTLS fingerprints that secure each transfer (§18.1), whoever controls it could intercept transfers. For sensitive use, run your own.
 - **Configure appropriate STUN servers.** The default Cloudflare STUN server is suitable for most deployments. For privacy-sensitive applications, consider self-hosting a STUN server or using a VPN to mask IP addresses.
 - **Do not enable `PEERJS_DEBUG` in production.** Debug logging may expose ICE candidates (IP addresses) and connection metadata in server logs.
 - **Monitor connection patterns.** Unusual rates of peer registrations or connection attempts may indicate scanning or abuse.
