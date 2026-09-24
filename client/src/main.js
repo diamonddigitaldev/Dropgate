@@ -38,6 +38,10 @@ let uploadQueue = [];
 let isUploading = false;
 let activeUploadNotification = null;
 
+// Electron 43+ opens file dialogs in Downloads unless told otherwise. Remember the
+// last folder for this session only, so it's never written to disk.
+let lastOpenDialogDir;
+
 // Tracks file paths the renderer is allowed to read ranges from (defense-in-depth for context isolation)
 const authorizedFilePaths = new Set();
 
@@ -454,7 +458,7 @@ ipcMain.on('upload-finished', (event, result) => {
     const isFocused = mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused();
 
     if (result.status === 'success') {
-        clipboard.writeText(result.link);
+        clipboard.writeText(result.link).catch(err => log('Failed to copy link to clipboard:', err));
 
         // Send to main window if it exists
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -654,7 +658,8 @@ async function handleOpenDialog() {
     const { canceled, filePaths } = await dialog.showOpenDialog(focusedWindow, {
         properties: ['openFile'],
         title: 'Select a file',
-        buttonLabel: 'Select'
+        buttonLabel: 'Select',
+        defaultPath: lastOpenDialogDir
     });
 
     if (canceled || filePaths.length === 0) {
@@ -662,6 +667,7 @@ async function handleOpenDialog() {
     }
 
     const filePath = filePaths[0];
+    lastOpenDialogDir = path.dirname(filePath);
     try {
         const stats = fs.statSync(filePath);
         authorizedFilePaths.add(filePath);
