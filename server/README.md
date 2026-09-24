@@ -136,7 +136,7 @@ If you want uploads to persist across restarts, map `/usr/src/app/uploads` to a 
 | --- | --- | --- |
 | `ENABLE_P2P` | `true` | Enables direct transfer (P2P). |
 | `P2P_STUN_SERVERS` | `stun:stun.cloudflare.com:3478` | Comma/space separated STUN servers for WebRTC. |
-| `PEERJS_DEBUG` | `false` | Enables verbose PeerJS logs. |
+| `PEERJS_DEBUG` | `false` | Currently has no effect (the bundled PeerJS server has no logging). Still reported in `/api/info`. |
 
 
 ## Server Info Endpoint

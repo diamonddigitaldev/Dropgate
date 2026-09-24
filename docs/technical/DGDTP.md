@@ -693,7 +693,7 @@ The code is the only credential needed to connect, so treat a live code like a p
 |----------|---------|-------------|
 | `ENABLE_P2P` | `true` | Enable or disable DGDTP. |
 | `P2P_STUN_SERVERS` | `stun:stun.cloudflare.com:3478` | Comma-separated list of STUN server URLs. |
-| `PEERJS_DEBUG` | `false` | Enable PeerJS debug logging. |
+| `PEERJS_DEBUG` | `false` | Currently has no effect: the bundled PeerJS server has no logging, and clients always run PeerJS with debug output off. Still reported in `GET /api/info`. |
 
 ### 19.2 Client Configuration Options
 
@@ -761,7 +761,7 @@ The code is the only credential needed to connect, so treat a live code like a p
 - **Deploy the Dropgate Server/signalling server behind HTTPS.** The Web UI only enables direct transfers in a secure context (§4.4). The PeerJS server MUST be accessed via HTTPS (or `localhost` for development).
 - **Treat the signalling server as trusted infrastructure.** Because it relays the DTLS fingerprints that secure each transfer (§18.1), whoever controls it could intercept transfers. For sensitive use, run your own.
 - **Configure appropriate STUN servers.** The default Cloudflare STUN server is suitable for most deployments. For privacy-sensitive applications, consider self-hosting a STUN server or using a VPN to mask IP addresses.
-- **Do not enable `PEERJS_DEBUG` in production.** Debug logging may expose ICE candidates (IP addresses) and connection metadata in server logs.
+- **Mind the reverse proxy's access log.** Every sender's code appears in the URL of the PeerJS WebSocket connection (`/peerjs/peerjs?key=peerjs&id=<code>&token=…`), even when the receiver types the code in. See [DATA-PROCESSING §9.2](./DATA-PROCESSING.md#92-reverse-proxies).
 - **Monitor connection patterns.** Unusual rates of peer registrations or connection attempts may indicate scanning or abuse.
 
 ### 22.2 Client Behaviour

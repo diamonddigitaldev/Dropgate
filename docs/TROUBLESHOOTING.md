@@ -22,7 +22,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 
 - `LOG_LEVEL=DEBUG` → detailed transfer flow
 - `LOG_LEVEL=INFO` → normal operation
-- `LOG_LEVEL=NONE` → no logs at all
+- `LOG_LEVEL=NONE` → none of Dropgate's own logs (unexpected errors can still print a stack trace; see [PRIVACY.md](PRIVACY.md))
 
 ## 3) Hosted upload issues
 
