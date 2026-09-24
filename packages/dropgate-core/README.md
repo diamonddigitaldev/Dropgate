@@ -42,8 +42,8 @@ The package ships with multiple build targets:
 
 | Format | File | Use Case |
 | --- | --- | --- |
-| ESM | `dist/index.js` | Modern bundlers, Node.js 18+ |
-| CJS | `dist/index.cjs` | Legacy Node.js, CommonJS |
+| ESM | `dist/index.js` | Modern bundlers, Node.js 24+ |
+| CJS | `dist/index.cjs` | CommonJS consumers, Node.js 24+ |
 | Browser IIFE | `dist/index.browser.js` | `<script>` tag, exposes `DropgateCore` global |
 
 ## Quick Start
