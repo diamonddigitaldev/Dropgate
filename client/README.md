@@ -84,7 +84,7 @@ To set up a development environment:
 ```bash
 git clone https://github.com/diamonddigitaldev/Dropgate.git
 cd Dropgate/client
-npm install
+npm ci
 npm start
 ```
 

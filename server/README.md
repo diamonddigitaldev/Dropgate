@@ -63,10 +63,12 @@ This means you can spin it up, try the Web UI, and choose what features you want
 
 ## Quick Start (Manual)
 
+Requires Node.js 22 or later.
+
 ```bash
 git clone https://github.com/diamonddigitaldev/Dropgate.git
 cd Dropgate/server
-npm install
+npm ci
 npm start
 ```
 
