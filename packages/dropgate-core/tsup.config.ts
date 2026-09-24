@@ -5,7 +5,7 @@ export default defineConfig([
   {
     entry: ['src/index.ts'],
     format: ['esm', 'cjs'],
-    dts: true,
+    dts: { compilerOptions: { ignoreDeprecations: '6.0' } },
     sourcemap: true,
     clean: true,
     target: 'es2020',
@@ -18,7 +18,7 @@ export default defineConfig([
   {
     entry: { 'p2p/index': 'src/p2p/index.ts' },
     format: ['esm', 'cjs'],
-    dts: true,
+    dts: { compilerOptions: { ignoreDeprecations: '6.0' } },
     sourcemap: true,
     target: 'es2020',
     splitting: false,
