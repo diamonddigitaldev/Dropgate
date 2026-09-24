@@ -24,7 +24,7 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "WillTDA",
+      "owner": "diamonddigitaldev",
       "repo": "Dropgate"
     },
     "win": {
