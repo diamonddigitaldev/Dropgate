@@ -40,7 +40,7 @@ const rateLimit = require('express-rate-limit').default;
 const helmet = require('helmet').default;
 const cors = require('cors');
 const { ExpressPeerServer } = require('peer');
-const contentDisposition = require('content-disposition');
+const { create: contentDisposition } = require('content-disposition');
 const { QuickDB, MemoryDriver } = require('quick.db');
 const { v4: uuidv4 } = require('uuid');
 

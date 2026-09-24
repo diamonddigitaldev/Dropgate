@@ -27,15 +27,15 @@
   "author": "Diamond Digital Development <https://diamonddigital.dev>",
   "license": "AGPL-3.0-only",
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "bootstrap": "^5.3.8",
-    "material-icons": "^1.13.14",
-    "content-disposition": "^1.1.0",
+    "content-disposition": "^3.0.0",
     "cors": "^2.8.6",
-    "ejs": "^5.0.2",
+    "ejs": "^6.0.1",
     "express": "^5.2.1",
     "express-rate-limit": "^8.7.0",
     "helmet": "^8.3.0",
+    "material-icons": "^1.13.14",
     "peer": "^1.0.2",
     "peerjs": "^1.5.5",
     "qr-code-styling": "^1.9.2",
@@ -44,6 +44,6 @@
     "uuid": "^14.0.2"
   },
   "allowScripts": {
-    "better-sqlite3@12.11.1": true
+    "better-sqlite3": false
   }
 }
