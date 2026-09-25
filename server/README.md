@@ -97,7 +97,13 @@ npm test
 
 Each test starts its own copy of the server in a temporary folder on a free port, so it never touches your `uploads/` folder or a running server. Server settings in your shell (`LOG_LEVEL`, `ENABLE_UPLOAD` and so on) are ignored during tests.
 
-Tests for known issues are marked as expected failures. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten.
+Tests for known issues are marked as expected failures. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. To see what each one is waiting on, run the tests with the TAP reporter, which prints each label:
+
+```bash
+node --test --test-reporter=tap "test/*.test.mjs"
+```
+
+GitHub Actions runs the tests this way on Ubuntu and Windows ([`ci.yml`](../.github/workflows/ci.yml)).
 
 
 ## Running with Docker

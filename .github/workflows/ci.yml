@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: ['4.0.0']
+  pull_request:
+    branches: ['4.0.0']
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: Server tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          # The expected-failure tests use node:test's expectFailure, added in 24.14.
+          node-version: '^24.14'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The same run as `npm test`, with the TAP reporter so each expected failure's
+      # label shows in the log. The reporter has to come before the pattern, which
+      # `npm test -- --test-reporter=tap` can't do.
+      - name: Run tests
+        run: node --test --test-reporter=tap "test/*.test.mjs"
+
+  core:
+    name: Core typecheck, build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/dropgate-core
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/dropgate-core/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Run tests
+        run: npx vitest run

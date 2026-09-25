@@ -468,6 +468,19 @@ The P2P implementation is designed for **unlimited file sizes** with constant me
 
 > **Note**: For large files, always use the `onData` callback approach rather than buffering in memory.
 
+## Building and Testing
+
+Requires Node.js 24 or later. From `packages/dropgate-core`:
+
+```bash
+npm ci
+npm run typecheck
+npm run build
+npx vitest run
+```
+
+GitHub Actions runs these steps on Ubuntu ([`ci.yml`](../../.github/workflows/ci.yml)).
+
 ## License
 
 Licensed under the **Apache-2.0 License**.
