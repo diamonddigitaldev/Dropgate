@@ -100,6 +100,30 @@ npm run build
 Distributable binaries will appear in the `dist` folder.
 
 
+## Running the Tests
+
+Requires Node.js 24.14 or later.
+
+```bash
+npm ci
+npm test
+```
+
+The tests read the app's source rather than launching it, so they don't need a display and don't download Electron. They guard the things that break quietly:
+
+* **The preload contract.** The preload only loads modules a sandboxed preload can load, and every IPC channel is used on both sides. A mistake in either leaves the app doing nothing, with no error in the main process.
+* **Window security.** Every window keeps `contextIsolation` on, `nodeIntegration` off and the sandbox on.
+* **Menu shortcuts.** Every shortcut has a modifier, so none of them fires while you're typing.
+
+Tests for known issues are marked as expected failures. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. To see what each one is waiting on, run the tests with the TAP reporter, which prints each label:
+
+```bash
+node --test --test-reporter=tap "test/*.test.mjs"
+```
+
+GitHub Actions runs the tests this way on Ubuntu and Windows ([`ci.yml`](../.github/workflows/ci.yml)).
+
+
 ## Self-Hosting & Networking
 
 Dropgate Client works seamlessly with **self-hosted Dropgate Servers**, which you can run from your own **home server**, **NAS**, or **cloud VPS**.

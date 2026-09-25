@@ -55,6 +55,52 @@ jobs:
       - name: Run tests
         run: node --test --test-reporter=tap "test/*.test.mjs"
 
+  client:
+    name: Client tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          # The expected-failure tests use node:test's expectFailure, added in 24.14.
+          node-version: '^24.14'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      # Windows runners install global packages outside Node's own folder, and
+      # setup-node puts Node's folder, with its bundled npm, first on PATH.
+      - name: Put npm 12 first on PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npm prefix -g >> $env:GITHUB_PATH
+
+      # Electron downloads its binary the first time it runs, not on install, and
+      # these tests only read the source, so nothing large is downloaded here.
+      - name: Install dependencies
+        run: |
+          npm --version
+          npm ci
+
+      # The same run as `npm test`, with the TAP reporter so each expected failure's
+      # label shows in the log.
+      - name: Run tests
+        run: node --test --test-reporter=tap "test/*.test.mjs"
+
   core:
     name: Core typecheck, build and tests
     runs-on: ubuntu-latest

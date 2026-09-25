@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder"
+    "build": "electron-builder",
+    "test": "node --test \"test/*.test.mjs\""
   },
   "repository": {
     "type": "git",
