@@ -37,8 +37,17 @@ jobs:
       - name: Install npm 12
         run: npm install -g npm@12
 
+      # Windows runners install global packages outside Node's own folder, and
+      # setup-node puts Node's folder, with its bundled npm, first on PATH.
+      - name: Put npm 12 first on PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npm prefix -g >> $env:GITHUB_PATH
+
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm --version
+          npm ci
 
       # The same run as `npm test`, with the TAP reporter so each expected failure's
       # label shows in the log. The reporter has to come before the pattern, which
@@ -69,7 +78,9 @@ jobs:
         run: npm install -g npm@12
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm --version
+          npm ci
 
       - name: Typecheck
         run: npm run typecheck
