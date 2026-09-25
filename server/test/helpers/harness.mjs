@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -97,6 +98,22 @@ export async function startServer({ env = {}, clock = false } = {}) {
         /** Files in uploads/ other than the tmp/ and db/ folders. */
         storedFiles: () => fs.readdirSync(path.join(dir, 'uploads')).filter((f) => f !== 'tmp' && f !== 'db'),
         tempFiles: () => fs.readdirSync(path.join(dir, 'uploads', 'tmp')),
+        /**
+         * Every record in one of the server's databases, as { id, value }.
+         * Needs UPLOAD_PRESERVE_UPLOADS=true; the in-memory mode stores the same records.
+         * @param {'file-database.sqlite' | 'bundle-database.sqlite'} name
+         */
+        records: (name) => {
+            const Database = createRequire(path.join(dir, 'server.js'))('better-sqlite3');
+            const db = new Database(path.join(dir, 'uploads', 'db', name), { readonly: true });
+            try {
+                const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all();
+                return tables.flatMap(({ name: table }) => db.prepare(`SELECT * FROM "${table}"`).all())
+                    .map((row) => ({ id: row.ID, value: JSON.parse(row.json) }));
+            } finally {
+                db.close();
+            }
+        },
         /** The web UI's own copy of dropgate-core, the same client the server ships. */
         loadCore: async () => {
             const copy = path.join(dir, 'dropgate-core.mjs');

@@ -1,39 +1,12 @@
 // Cancelled and abandoned uploads must leave nothing behind: no temp file, no
 // stored file, no database record and no storage reservation.
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { startServer, waitFor } from './helpers/harness.mjs';
+import { HOUR_MS, PAST_SESSION_EXPIRY_MS, initUpload, postJson, sendChunk } from './helpers/uploads.mjs';
 
 // Sweep every 100 ms, and turn off rate limiting so polling can't trip it.
 const ENV = { ENABLE_UPLOAD: 'true', UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS: '100', RATE_LIMIT_MAX_REQUESTS: '0' };
-// Upload sessions expire 2 minutes after their last activity.
-const PAST_SESSION_EXPIRY_MS = 3 * 60 * 1000;
-const HOUR_MS = 60 * 60 * 1000;
-
-const postJson = (server, route, body) => fetch(server.baseUrl + route, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-});
-
-const sendChunk = (server, uploadId, index, bytes) => fetch(`${server.baseUrl}/upload/chunk`, {
-    method: 'POST',
-    headers: {
-        'Content-Type': 'application/octet-stream',
-        'X-Upload-ID': uploadId,
-        'X-Chunk-Index': String(index),
-        'X-Chunk-Hash': createHash('sha256').update(bytes).digest('hex'),
-    },
-    body: bytes,
-});
-
-const initUpload = async (server, totalSize, totalChunks) => {
-    const res = await postJson(server, '/upload/init', {
-        filename: 'cleanup-test.bin', lifetime: HOUR_MS, isEncrypted: false, totalSize, totalChunks,
-    });
-    return { status: res.status, uploadId: res.ok ? (await res.json()).uploadId : null };
-};
 
 test('cancelling a single upload part-way leaves nothing behind', async () => {
     const server = await startServer({ env: ENV });
