@@ -479,6 +479,14 @@ npm run build
 npx vitest run
 ```
 
+Tests for known issues are marked `it.fails`, and vitest counts them as "expected fail". Each one only counts as expected while it fails in the specific way its issue causes, so it fails once the issue is fixed, or if something else breaks it, and the marker can't be forgotten. Each test's name says what fixes it. To list them all:
+
+```bash
+npx vitest run --reporter=verbose
+```
+
+The P2P tests use stand-ins for the PeerJS objects (`tests/helpers/fake-peer.ts`), and the client tests use a fake server passed in as `fetchFn`, so no test needs a network or a PeerJS server.
+
 GitHub Actions runs these steps on Ubuntu ([`ci.yml`](../../.github/workflows/ci.yml)).
 
 ## License
