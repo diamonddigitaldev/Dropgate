@@ -86,6 +86,20 @@ npm start
 ```
 
 
+## Running the Tests
+
+Requires Node.js 24.14 or later.
+
+```bash
+npm ci
+npm test
+```
+
+Each test starts its own copy of the server in a temporary folder on a free port, so it never touches your `uploads/` folder or a running server. Server settings in your shell (`LOG_LEVEL`, `ENABLE_UPLOAD` and so on) are ignored during tests.
+
+Tests for known issues are marked as expected failures. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten.
+
+
 ## Running with Docker
 
 ```bash
