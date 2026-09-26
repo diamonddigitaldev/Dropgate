@@ -5,10 +5,13 @@ End-to-end tests that drive Dropgate's web UI in real browsers (Chromium, Firefo
 
 ## What They Cover
 
-Each test uploads files through the web UI the way a person would, then downloads them from the page a recipient would use, and compares every byte and file name with what was sent:
+Each test sends files through the web UI the way a person would, then receives them on the page a recipient would use, and compares every byte and file name with what was sent:
 
 * **A single file**, unencrypted and end-to-end encrypted, from the home page to the standard download page.
 * **A bundle of three files**, unencrypted and end-to-end encrypted, from the home page to the bundle page: each file on its own, then all of them with "Download All as ZIP".
+* **File lifetime.** A single file and a bundle, uploaded with a five-minute lifetime set on the home page, are still there after three minutes. After six, the link shows "not found" and the server holds none of their files. Bundles are checked unencrypted and end-to-end encrypted.
+* **Max downloads.** With a limit of 2 set on the home page, a single file downloads twice, and then its link shows "not found". A bundle's files can each be downloaded on their own without using up the limit, because only "Download All as ZIP" counts, so it gives two ZIPs and then its link is gone. Each is checked unencrypted and end-to-end encrypted.
+* **Direct transfer.** A file sent from the home page reaches a receiver in a second, separate browser context, whether they type the code into the home page's "Enter Sharing Code" box or open the link. Several files sent together arrive as one ZIP.
 
 For encrypted uploads, they also check that the files the server stores hold none of the plaintext and none of the file names.
 
@@ -44,10 +47,13 @@ npx playwright test --project=firefox --headed
 
 * **Each test starts its own server.** It's the real `server.js`, started by the server tests' own harness ([`server/test/helpers/harness.mjs`](../../server/test/helpers/harness.mjs)): a copy in a temporary folder, on a free port on `127.0.0.1`. It never touches your `uploads/` folder or a running server, and server settings in your shell are ignored.
 * **Nothing leaves your machine.** Every file is made up on the spot from a fixed seed, and the pages only talk to that local server. A test fails if the browser makes a request to any other host.
+* **Direct transfers stay on your machine too.** The server is started with `P2P_STUN_SERVERS=,`, a list with nothing in it, so it offers browsers no ICE servers at all (an empty value would fall back to a public STUN server). The two browsers connect over this machine's own addresses. STUN runs over UDP, which the request check can't see, so each direct transfer test also checks that the server offered no ICE servers, and that every peer connection that gathered candidates had none and found only host candidates.
+* **The server's clock can be moved forward.** Tests about time start the server with the test clock, which moves the server's `Date.now()` and runs any repeating timer that would have come due, such as the one-minute sweep for expired uploads. Checking a five-minute lifetime takes milliseconds.
 * **The browser plays the part of a TLS reverse proxy.** The server only serves encrypted download pages to requests that came in over HTTPS, because it expects a reverse proxy in front of it to terminate TLS. So the browser sends `X-Forwarded-Proto: https` with every request, as that proxy would. Only the localhost known-issue test leaves it out. The pages load from `http://127.0.0.1`, which browsers treat as a secure context, so encryption works as it would over HTTPS.
+* **The browsers ask for reduced motion.** Bootstrap otherwise scrolls smoothly, and a page that's still scrolling can move a button out from under a click.
 * **Flaky tests get fixed, not retried.** Retries are off.
 
-GitHub Actions runs the tests in all three browsers on Ubuntu ([`ci.yml`](../../.github/workflows/ci.yml)).
+GitHub Actions runs the tests in all three browsers on Ubuntu ([`ci.yml`](../../.github/workflows/ci.yml)). Playwright's WebKit on Windows has no WebRTC, so the direct transfer tests are skipped in WebKit on Windows, and run in WebKit on Linux.
 
 
 ## License

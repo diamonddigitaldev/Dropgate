@@ -9,13 +9,36 @@ import { startServer } from '../../../server/test/helpers/harness.mjs';
 
 export { expect };
 
+// The server hands browsers a public STUN server by default, and an empty value
+// falls back to that default. A lone comma is a list with nothing in it, so the
+// server offers no ICE servers at all and direct transfers stay on this machine.
+export const NO_ICE_SERVERS = ',';
+
+/** Record every http(s) and ws(s) request a browser context makes to a host other than the server. */
+function watchForOtherHosts(context, server) {
+    const serverHost = new URL(server.baseUrl).host;
+    const elsewhere = [];
+    context.on('request', (request) => {
+        const url = new URL(request.url());
+        if (/^(https?|wss?):$/.test(url.protocol) && url.host !== serverHost) elsewhere.push(request.url());
+    });
+    return () => expect(elsewhere, 'requests to anywhere but the local server').toEqual([]);
+}
+
 export const test = base.extend({
-    // Server settings for this test, on top of ENABLE_UPLOAD=true.
+    // Server settings for this test, on top of ENABLE_UPLOAD=true and no ICE servers.
     // Set them with test.use({ serverEnv: { ... } }).
     serverEnv: [{}, { option: true }],
 
-    server: async ({ serverEnv }, use) => {
-        const server = await startServer({ env: { ENABLE_UPLOAD: 'true', ...serverEnv } });
+    // Start the server with the test clock, so the test can call server.advanceClock().
+    // Set it with test.use({ serverClock: true }).
+    serverClock: [false, { option: true }],
+
+    server: async ({ serverEnv, serverClock }, use) => {
+        const server = await startServer({
+            env: { ENABLE_UPLOAD: 'true', P2P_STUN_SERVERS: NO_ICE_SERVERS, ...serverEnv },
+            clock: serverClock,
+        });
         try {
             await use(server);
         } finally {
@@ -28,14 +51,22 @@ export const test = base.extend({
     },
 
     context: async ({ context, server }, use) => {
-        const serverHost = new URL(server.baseUrl).host;
-        const elsewhere = [];
-        context.on('request', (request) => {
-            const url = new URL(request.url());
-            if (/^(https?|wss?):$/.test(url.protocol) && url.host !== serverHost) elsewhere.push(request.url());
-        });
+        const check = watchForOtherHosts(context, server);
         await use(context);
-        expect(elsewhere, 'requests to anywhere but the local server').toEqual([]);
+        check();
+    },
+
+    // A second, separate browser context, like another person on another device.
+    // It has the same base URL and headers as the first, and the same host check.
+    otherContext: async ({ browser, baseURL, extraHTTPHeaders, server }, use) => {
+        const context = await browser.newContext({ baseURL, extraHTTPHeaders });
+        const check = watchForOtherHosts(context, server);
+        try {
+            await use(context);
+        } finally {
+            await context.close();
+        }
+        check();
     },
 });
 

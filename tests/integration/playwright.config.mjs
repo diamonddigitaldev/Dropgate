@@ -19,6 +19,10 @@ export default defineConfig({
         // The pages themselves load from http://127.0.0.1, which browsers treat as
         // a secure context, so the Web Crypto API and service workers still work.
         extraHTTPHeaders: { 'X-Forwarded-Proto': 'https' },
+        // Bootstrap scrolls smoothly unless the user prefers reduced motion. A page
+        // that's still scrolling can move a button out from under a click, so the
+        // browsers ask for reduced motion, as some people do.
+        reducedMotion: 'reduce',
     },
     projects: [
         { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
