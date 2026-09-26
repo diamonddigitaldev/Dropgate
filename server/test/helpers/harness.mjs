@@ -120,6 +120,7 @@ export async function startServer({ env = {}, clock = false } = {}) {
             fs.copyFileSync(path.join(dir, 'public', 'js', 'dropgate-core.js'), copy);
             return import(pathToFileURL(copy).href);
         },
+        /** Move the server's clock forward. Repeating timers due in that time run once before it resolves. */
         advanceClock: async (ms) => {
             if (!clock) throw new Error('Start the server with { clock: true } to use advanceClock().');
             child.send({ type: 'advance-clock', ms });
