@@ -101,6 +101,98 @@ jobs:
       - name: Run tests
         run: node --test --test-reporter=tap "test/*.test.mjs"
 
+  client-build:
+    name: Client build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: --win
+            packages: exe
+          - os: ubuntu-latest
+            platform: --linux
+            packages: AppImage deb rpm
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      # Windows runners install global packages outside Node's own folder, and
+      # setup-node puts Node's folder, with its bundled npm, first on PATH.
+      - name: Put npm 12 first on PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npm prefix -g >> $env:GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          npm --version
+          npm ci
+
+      # The .rpm target needs rpmbuild, from the rpm package. The Ubuntu image
+      # ships it today, so this only installs it if a later image drops it.
+      - name: Check for rpmbuild
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v rpmbuild > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends rpm
+          fi
+          rpmbuild --version
+
+      # Builds this platform's targets from the "build" config in package.json.
+      # Nothing is published, and no token is passed to it.
+      - name: Build the packages
+        run: npx --no-install electron-builder ${{ matrix.platform }} --publish never
+
+      - name: List the built files
+        shell: bash
+        run: |
+          for f in dist/*; do
+            [ -f "$f" ] || continue
+            size=$(wc -c < "$f")
+            printf '%-45s %11d bytes  %s\n' "${f#dist/}" "$size" \
+              "$(numfmt --to=iec-i --suffix=B --format=%.1f "$size")"
+          done
+          for ext in ${{ matrix.packages }}; do
+            ls dist/*."$ext" > /dev/null || { echo "No .$ext package was built"; exit 1; }
+          done
+
+      - name: Show the .deb and .rpm metadata
+        if: runner.os == 'Linux'
+        run: |
+          dpkg-deb --info dist/*.deb
+          rpm -qip dist/*.rpm
+
+      # package.json leaves client/test/ out of the app. This lists what the
+      # packaged app holds outside node_modules, and fails if test/ is back in.
+      - name: Check the packaged app
+        shell: bash
+        run: |
+          list=$(npx --no-install asar list dist/*-unpacked/resources/app.asar | tr '\\' '/')
+          echo "app.asar holds $(printf '%s\n' "$list" | wc -l) entries. Outside node_modules:"
+          printf '%s\n' "$list" | grep -v '^/node_modules/'
+          if printf '%s\n' "$list" | grep -q '^/test\(/\|$\)'; then
+            echo "client/test/ is in the package"
+            exit 1
+          fi
+
   core:
     name: Core typecheck, build and tests
     runs-on: ubuntu-latest

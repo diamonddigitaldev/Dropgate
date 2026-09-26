@@ -21,7 +21,8 @@
     "productName": "Dropgate Client",
     "artifactName": "Dropgate-Client-Setup-${version}.${ext}",
     "files": [
-      "**/*"
+      "**/*",
+      "!test/**"
     ],
     "publish": {
       "provider": "github",

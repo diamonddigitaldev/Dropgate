@@ -97,7 +97,9 @@ To build the client for your platform:
 npm run build
 ```
 
-Distributable binaries will appear in the `dist` folder.
+Distributable binaries will appear in the `dist` folder: the NSIS installer on Windows, or an AppImage, a `.deb` and a `.rpm` on Linux. The `.rpm` needs `rpmbuild`, from the `rpm` package on Debian and Ubuntu, or `rpm-build` on Fedora.
+
+GitHub Actions builds all four packages ([`ci.yml`](../.github/workflows/ci.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the tests aren't packaged into the app, and doesn't publish or upload anything.
 
 
 ## Running the Tests
