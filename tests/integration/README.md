@@ -11,7 +11,7 @@ Each test sends files through the web UI the way a person would, then receives t
 * **A bundle of three files**, unencrypted and end-to-end encrypted, from the home page to the bundle page: each file on its own, then all of them with "Download All as ZIP".
 * **File lifetime.** A single file and a bundle, uploaded with a five-minute lifetime set on the home page, are still there after three minutes. After six, the link shows "not found" and the server holds none of their files. Bundles are checked unencrypted and end-to-end encrypted.
 * **Max downloads.** With a limit of 2 set on the home page, a single file downloads twice, and then its link shows "not found". A bundle's files can each be downloaded on their own without using up the limit, because only "Download All as ZIP" counts, so it gives two ZIPs and then its link is gone. Each is checked unencrypted and end-to-end encrypted.
-* **Direct transfer.** A file sent from the home page reaches a receiver in a second, separate browser context, whether they type the code into the home page's "Enter Sharing Code" box or open the link. Several files sent together arrive as one ZIP.
+* **Direct transfer**, in Chromium and Firefox. A file sent from the home page reaches a receiver in a second, separate browser context, whether they type the code into the home page's "Enter Sharing Code" box or open the link. Several files sent together arrive as one ZIP.
 
 For encrypted uploads, they also check that the files the server stores hold none of the plaintext and none of the file names.
 
@@ -53,7 +53,7 @@ npx playwright test --project=firefox --headed
 * **The browsers ask for reduced motion.** Bootstrap otherwise scrolls smoothly, and a page that's still scrolling can move a button out from under a click.
 * **Flaky tests get fixed, not retried.** Retries are off.
 
-GitHub Actions runs the tests in all three browsers on Ubuntu ([`ci.yml`](../../.github/workflows/ci.yml)). Playwright's WebKit on Windows has no WebRTC, so the direct transfer tests are skipped in WebKit on Windows, and run in WebKit on Linux.
+GitHub Actions runs the tests in all three browsers on Ubuntu ([`ci.yml`](../../.github/workflows/ci.yml)). The direct transfer tests run in Chromium and Firefox only. Playwright's WebKit on Windows has no WebRTC, and on Linux its two peers don't connect when the server offers no ICE servers.
 
 
 ## License

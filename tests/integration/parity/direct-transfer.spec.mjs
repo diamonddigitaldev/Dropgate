@@ -11,8 +11,11 @@ import { madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, test } from '../helpers/test.mjs';
 import { download, peerConnections, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
 
-test.skip(({ browserName }) => browserName === 'webkit' && process.platform === 'win32',
-    "Playwright's WebKit on Windows has no RTCPeerConnection");
+// WebKit is left out for now. Playwright's WebKit on Windows has no
+// RTCPeerConnection, and on Linux its two peers don't connect when there are
+// no ICE servers.
+test.skip(({ browserName }) => browserName === 'webkit',
+    "WebKit peers don't connect without ICE servers, and Windows WebKit has no RTCPeerConnection");
 
 // Several data channel messages' worth.
 const SIZE = 3_000_000;
