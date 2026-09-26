@@ -192,6 +192,8 @@ Run the server behind a reverse proxy that terminates TLS:
 * [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)
 * [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/)
 
+**Known issue in 3.x:** localhost is only an exception for uploading. On plain HTTP, even on `localhost` or `127.0.0.1`, the Web UI encrypts uploads, but the server refuses the download page for every encrypted file or bundle and shows "Secure Connection Required". Unencrypted files download normally. To download encrypted files while testing locally, put the server behind a TLS-terminating proxy on the same machine.
+
 
 ## Storage and Lifecycle
 
