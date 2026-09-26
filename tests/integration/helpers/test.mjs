@@ -38,3 +38,23 @@ export const test = base.extend({
         expect(elsewhere, 'requests to anywhere but the local server').toEqual([]);
     },
 });
+
+/**
+ * Runs the body of a test.fail() test, and only counts the failure it names.
+ *
+ * test.fail() passes on any error, so a broken step would look just like the
+ * known issue. This rethrows only an error whose message matches `match`. Any
+ * other error is logged and swallowed, so test.fail() reports the test as
+ * failed. It fails the same way once the issue is fixed: then make it a plain
+ * test() and drop this wrapper.
+ * @param {RegExp} match
+ * @param {() => Promise<void>} body
+ */
+export async function onlyFailsWith(match, body) {
+    try {
+        await body();
+    } catch (err) {
+        if (err instanceof Error && match.test(err.message)) throw err;
+        console.error(`Failed, but not with ${match}:`, err);
+    }
+}
