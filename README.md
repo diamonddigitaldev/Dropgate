@@ -81,8 +81,12 @@ Dropgate was built to make **secure file sharing accessible**, **transparent**, 
 ├── server/                  # Node.js server + Web UI (AGPL-3.0)
 ├── packages/
 │   └── dropgate-core/       # Shared TypeScript library (Apache-2.0)
+├── tests/
+│   └── integration/         # Browser tests of the Web UI, with Playwright (AGPL-3.0)
 └── docs/                    # Privacy, troubleshooting, and technical notes
 ```
+
+Each part has its own tests. See the READMEs linked below, and the [integration tests README](./tests/integration/README.md) for the browser tests.
 
 
 ## Getting Started

@@ -105,6 +105,8 @@ node --test --test-reporter=tap "test/*.test.mjs"
 
 GitHub Actions runs the tests this way on Ubuntu and Windows ([`ci.yml`](../.github/workflows/ci.yml)).
 
+The Web UI is tested in real browsers by the [integration tests](../tests/integration/README.md), which start the server with the same harness.
+
 
 ## Running with Docker
 
