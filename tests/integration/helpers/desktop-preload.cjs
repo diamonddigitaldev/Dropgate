@@ -7,6 +7,7 @@
 // one JSON object per line, the moment it happens:
 //   { at, pid, event: 'notification', title, body }
 //   { at, pid, event: 'clipboard', text }             the app copied text
+//   { at, pid, event: 'clipboard-written' }           the copy finished (or error)
 //   { at, pid, event: 'clipboard-read-back', text }   what the clipboard held after
 //                                                      (or error, if it couldn't be read)
 //   { at, pid, event: 'window', id }                   a window was created
@@ -17,8 +18,9 @@
 // Unless DROPGATE_TEST_REAL_CLIPBOARD is 1, the clipboard and notifications are
 // only written down: nothing is copied and nothing is shown, so running the tests
 // leaves your clipboard alone. With it (as in CI), the app's own calls go through,
-// and the clipboard is read back once each copy has finished. The app waits for
-// that before it quits.
+// and the clipboard is read back once each copy has finished, if the app is still
+// running by then. (Holding the app open until then made it hang in CI on Linux:
+// after a copy made just before the app quit, the read-back never finished.)
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -35,29 +37,23 @@ const real = process.env.DROPGATE_TEST_REAL_CLIPBOARD === '1';
 
 const record = (event) => fs.appendFileSync(EVENTS, `${JSON.stringify({ at: Date.now(), pid: process.pid, ...event })}\n`);
 
-const readBacks = new Set();
 const writeText = clipboard.writeText;
 clipboard.writeText = function (text, ...rest) {
     record({ event: 'clipboard', text });
     if (!real) return Promise.resolve();
     const written = Promise.resolve(writeText.call(this, text, ...rest));
-    const readBack = written
+    written
+        .then(
+            () => record({ event: 'clipboard-written' }),
+            (err) => { record({ event: 'clipboard-written', error: String(err) }); throw err; },
+        )
         .then(() => clipboard.readText())
         .then(
             (held) => record({ event: 'clipboard-read-back', text: held }),
             (err) => record({ event: 'clipboard-read-back', error: String(err) }),
-        )
-        .finally(() => readBacks.delete(readBack));
-    readBacks.add(readBack);
+        );
     return written;
 };
-
-// Quitting straight after copying mustn't cut a read-back short.
-app.on('will-quit', (event) => {
-    if (readBacks.size === 0) return;
-    event.preventDefault();
-    Promise.allSettled([...readBacks]).then(() => app.quit());
-});
 
 const show = Notification.prototype.show;
 Notification.prototype.show = function (...args) {

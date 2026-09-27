@@ -25,9 +25,8 @@ async function setUpAndQuit(desktop) {
  * same way whichever way it was shared, and the link it copied.
  * @param {import('../helpers/desktop.mjs').DesktopApp} app
  * @param {string} file - The shared file's full path.
- * @param {{ real: boolean }} desktop
  */
-async function expectLinkCopied(app, file, { real }) {
+function expectLinkCopied(app, file) {
     const copied = app.eventsOf('clipboard');
     expect(copied.map((e) => e.text), 'what the app copied to the clipboard').toHaveLength(1);
     const [{ text: link, at }] = copied;
@@ -36,11 +35,6 @@ async function expectLinkCopied(app, file, { real }) {
     const finished = app.eventsOf('upload-finished');
     expect(finished.map(({ status, error }) => ({ status, error })), 'how the upload finished').toEqual([{ status: 'success' }]);
     expect(at, 'when the link was copied, next to when the upload finished').toBeGreaterThanOrEqual(finished[0].at);
-    if (real) {
-        // The clipboard is read back once the copy has finished, which can be just after the app says it's done.
-        await expect.poll(() => app.eventsOf('clipboard-read-back').map((e) => e.text), { message: 'what the clipboard held afterwards' })
-            .toEqual([link]);
-    }
 
     // Notifications may name the file, but never where it is.
     const notifications = app.eventsOf('notification');
@@ -75,7 +69,7 @@ test.describe('on a server with HTTPS', () => {
         const app = await desktop.share(shared);
         expect(await app.exited(), "the app's exit code").toBe(0);
 
-        const { link, notifications } = await expectLinkCopied(app, shared, desktop);
+        const { link, notifications } = expectLinkCopied(app, shared);
         expect(link, 'the link').toMatch(new RegExp(`^${desktop.serverUrl}/[^/#?]+#.+`));
         secrets.addLink(link);
         expect(notifications.at(-1), 'the last notification').toMatchObject({ title: expect.stringMatching(/success/i), body: expect.stringMatching(/copied/i) });
@@ -104,8 +98,15 @@ test.describe('on a server with HTTPS', () => {
         expect(await desktop.launchAgain(shared, '--upload'), "the second launch's exit code").toBe(0);
 
         await expect(window.locator('#upload-status')).toHaveText(/upload successful/i, { timeout: 30_000 });
-        const { link } = await expectLinkCopied(app, shared, desktop);
+        const { link } = expectLinkCopied(app, shared);
         await expect(window.locator('#download-link'), 'the link the open app shows').toHaveValue(link);
+        if (desktop.real) {
+            // In CI the clipboard is real, and read back once the copy has finished, which can be just
+            // after the window says it's done. It's checked here, where the app stays open: an app that
+            // quits straight after copying can quit before the read-back finishes.
+            await expect.poll(() => app.eventsOf('clipboard-read-back').map((e) => e.text ?? e.error),
+                { message: 'what the clipboard held afterwards' }).toEqual([link]);
+        }
         secrets.addLink(link);
         expect(app.running, 'whether the app is still open').toBe(true);
         expect(uploadsStarted(server).map(({ isEncrypted, lifetime }) => ({ isEncrypted, lifetime })),
@@ -129,7 +130,7 @@ test.describe('on a server without HTTPS', () => {
         await window.locator('#confirm-insecure-upload').click();
         expect(await app.exited(), "the app's exit code").toBe(0);
 
-        const { link, notifications } = await expectLinkCopied(app, shared, desktop);
+        const { link, notifications } = expectLinkCopied(app, shared);
         expect(link, 'the link').toMatch(new RegExp(`^${desktop.serverUrl}/[^/#?]+$`));
         expect(notifications.at(-1), 'the last notification').toMatchObject({ title: expect.stringMatching(/success/i), body: expect.stringMatching(/copied/i) });
         expect(uploadsStarted(server).map(({ isEncrypted, lifetime }) => ({ isEncrypted, lifetime })),
