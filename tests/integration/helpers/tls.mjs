@@ -41,8 +41,10 @@ export function selfSignedCertificate() {
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
     const ecdsaWithSha256 = sequence(oid('1.2.840.10045.4.3.2'));
     const name = sequence(der(0x31, sequence(oid('2.5.4.3'), der(0x0c, Buffer.from('127.0.0.1')))));
+    // A DER INTEGER, so positive (first byte below 0x80) and with no leading zero
+    // byte, which OpenSSL refuses as padding: the first byte is 0x01 to 0x7f.
     const serial = crypto.randomBytes(8);
-    serial[0] &= 0x7f;
+    serial[0] = (serial[0] & 0x7f) || 0x01;
     const now = Date.now();
 
     const tbs = sequence(
