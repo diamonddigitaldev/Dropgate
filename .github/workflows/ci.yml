@@ -273,6 +273,78 @@ jobs:
         run: npx playwright install --with-deps --only-shell chromium firefox webkit
 
       # The list reporter prints every test's name, browser and result. Every test
-      # talks only to its own server on 127.0.0.1.
+      # talks only to its own server on 127.0.0.1. The desktop app's tests run in
+      # their own job, below.
       - name: Run tests
-        run: npx playwright test
+        run: npx playwright test --project=chromium --project=firefox --project=webkit
+
+  desktop:
+    name: Desktop app tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: tests/integration
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            client/package-lock.json
+            tests/integration/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      # Windows runners install global packages outside Node's own folder, and
+      # setup-node puts Node's folder, with its bundled npm, first on PATH.
+      - name: Put npm 12 first on PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npm prefix -g >> $env:GITHUB_PATH
+
+      # Each test starts the real server from server/, so it needs its dependencies.
+      - name: Install the server's dependencies
+        working-directory: server
+        run: |
+          npm --version
+          npm ci
+
+      # The tests launch the app from client/. Electron downloads its build the
+      # first time it's asked where it is, not on install, so that's done here.
+      - name: Install the desktop app's dependencies and Electron
+        working-directory: client
+        run: |
+          npm ci
+          node -e "console.log(require('electron'))"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npx playwright --version
+
+      # The app's links are opened in Chromium, headless. On Linux this also
+      # installs Xvfb, the virtual display the app's windows open on.
+      - name: Install Chromium
+        run: npx playwright install --with-deps --only-shell chromium
+
+      # One test at a time: in CI the app copies its links to the real clipboard,
+      # which every test shares.
+      - name: Run tests
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" npx playwright test --project=desktop --workers=1
+
+      - name: Run tests
+        if: runner.os == 'Windows'
+        run: npx playwright test --project=desktop --workers=1
