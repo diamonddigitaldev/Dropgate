@@ -2,10 +2,16 @@
 //
 // The server is the real server.js, started by the server suite's own harness:
 // a throwaway copy on a free port on 127.0.0.1. Pages are opened relative to it,
-// so a test never reaches any other host, and the browser's requests are checked
-// after each test to prove it.
+// so a test never reaches any other origin, and the browser's requests are
+// checked after each test to prove it.
+//
+// Once a test has passed, the fixtures also check what its flows left in the
+// browser and what they sent the server (see privacy.mjs). They're skipped for
+// a test.fail() test, which runs any it needs inside onlyFailsWith(), so that a
+// failure here can't stand in for the one it expects.
 import { test as base, expect } from '@playwright/test';
 import { startServer } from '../../../server/test/helpers/harness.mjs';
+import { expectNoSecretsSent, expectNothingStored, keepSecretsFor, Secrets } from './privacy.mjs';
 
 export { expect };
 
@@ -14,15 +20,27 @@ export { expect };
 // server offers no ICE servers at all and direct transfers stay on this machine.
 export const NO_ICE_SERVERS = ',';
 
-/** Record every http(s) and ws(s) request a browser context makes to a host other than the server. */
-function watchForOtherHosts(context, server) {
-    const serverHost = new URL(server.baseUrl).host;
+/** Whether the test body passed, as it was meant to. */
+const passed = (testInfo) => testInfo.status === 'passed' && testInfo.expectedStatus === 'passed';
+
+/**
+ * Record every http(s) and ws(s) request a browser context makes to anywhere but
+ * the server's own origin, and every WebSocket message its pages send.
+ */
+function watchContext(context, server, secrets) {
+    const origin = new URL(server.baseUrl).origin;
+    const sameOrigin = new Set([origin, origin.replace(/^http/, 'ws')]);
     const elsewhere = [];
-    context.on('request', (request) => {
-        const url = new URL(request.url());
-        if (/^(https?|wss?):$/.test(url.protocol) && url.host !== serverHost) elsewhere.push(request.url());
-    });
-    return () => expect(elsewhere, 'requests to anywhere but the local server').toEqual([]);
+    const check = (url) => {
+        const { protocol, origin: to } = new URL(url);
+        if (/^(https?|wss?):$/.test(protocol) && !sameOrigin.has(to)) elsewhere.push(url);
+    };
+    context.on('request', (request) => check(request.url()));
+    context.on('page', (page) => page.on('websocket', (ws) => {
+        check(ws.url());
+        ws.on('framesent', ({ payload }) => secrets.messagesSent.push({ url: ws.url(), payload }));
+    }));
+    return () => expect(elsewhere, "requests that weren't to the local server's origin").toEqual([]);
 }
 
 export const test = base.extend({
@@ -34,13 +52,21 @@ export const test = base.extend({
     // Set it with test.use({ serverClock: true }).
     serverClock: [false, { option: true }],
 
-    server: async ({ serverEnv, serverClock }, use) => {
+    // The file names and keys this test's flows handle. The web UI helpers add to it.
+    secrets: async ({}, use) => {
+        await use(new Secrets());
+    },
+
+    server: async ({ serverEnv, serverClock, secrets }, use, testInfo) => {
         const server = await startServer({
             env: { ENABLE_UPLOAD: 'true', P2P_STUN_SERVERS: NO_ICE_SERVERS, ...serverEnv },
             clock: serverClock,
+            requests: true,
         });
         try {
             await use(server);
+            // Both browser contexts have closed by now, so every request is in.
+            if (passed(testInfo)) expectNoSecretsSent(server, secrets);
         } finally {
             await server.stop();
         }
@@ -50,19 +76,23 @@ export const test = base.extend({
         await use(server.baseUrl);
     },
 
-    context: async ({ context, server }, use) => {
-        const check = watchForOtherHosts(context, server);
+    context: async ({ context, server, secrets }, use, testInfo) => {
+        keepSecretsFor(context, secrets);
+        const check = watchContext(context, server, secrets);
         await use(context);
+        if (passed(testInfo)) await expectNothingStored(context, server.baseUrl, 'the browser');
         check();
     },
 
     // A second, separate browser context, like another person on another device.
-    // It has the same base URL and headers as the first, and the same host check.
-    otherContext: async ({ browser, baseURL, extraHTTPHeaders, server }, use) => {
+    // It has the same base URL and headers as the first, and the same checks.
+    otherContext: async ({ browser, baseURL, extraHTTPHeaders, server, secrets }, use, testInfo) => {
         const context = await browser.newContext({ baseURL, extraHTTPHeaders });
-        const check = watchForOtherHosts(context, server);
+        keepSecretsFor(context, secrets);
+        const check = watchContext(context, server, secrets);
         try {
             await use(context);
+            if (passed(testInfo)) await expectNothingStored(context, server.baseUrl, 'the other browser');
         } finally {
             await context.close();
         }

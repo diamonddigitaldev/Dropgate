@@ -3,6 +3,7 @@
 // Checks on page text match loosely (case-insensitive, on the key words), so a
 // copy edit doesn't break a test about behaviour.
 import fs from 'node:fs';
+import { secretsOf } from './privacy.mjs';
 import { expect } from './test.mjs';
 
 /**
@@ -18,6 +19,8 @@ import { expect } from './test.mjs';
  *   is left out.
  */
 export async function uploadFromHomePage(page, files, { encrypted, lifetime, maxDownloads }) {
+    // Without encryption, the server stores the names; with it, it must never see them.
+    secretsOf(page).addFiles(files, { storedByServer: !encrypted });
     await page.goto('/');
     await expect(page.locator('#securityText')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
 
@@ -38,7 +41,9 @@ export async function uploadFromHomePage(page, files, { encrypted, lifetime, max
     await expect(page.locator('#shareCard')).toBeVisible({ timeout: 30_000 });
     await expect(page.locator('#shareTitle')).toHaveText(/upload complete/i);
     await expect(page.locator('#shareLink')).toHaveValue(/^http/);
-    return page.locator('#shareLink').inputValue();
+    const link = await page.locator('#shareLink').inputValue();
+    secretsOf(page).addLink(link);
+    return link;
 }
 
 /**
@@ -89,6 +94,8 @@ export async function expectGone(page, link) {
  * @param {{ name: string, mimeType: string, buffer: Buffer }[]} files
  */
 export async function sendDirectFromHomePage(page, files) {
+    // The names only ever go to the other browser.
+    secretsOf(page).addFiles(files);
     await page.goto('/');
     // The security note changes once the page has the server's settings.
     await expect(page.locator('#securityText')).not.toHaveText(/checking/i);

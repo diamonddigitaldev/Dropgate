@@ -4,7 +4,7 @@
 //
 // The server offers no ICE servers (see NO_ICE_SERVERS), so the two peers only
 // use this machine's own addresses, and nothing goes to an outside STUN server.
-// The host check can't see STUN, which runs over UDP. So each test also checks
+// The request check can't see STUN, which runs over UDP. So each test also checks
 // that the server offered none, and that every peer connection that gathered
 // candidates had none and found only host candidates.
 import { madeUpFile, readZip, summary } from '../helpers/files.mjs';
