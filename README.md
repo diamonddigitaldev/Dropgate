@@ -82,11 +82,12 @@ Dropgate was built to make **secure file sharing accessible**, **transparent**, 
 ├── packages/
 │   └── dropgate-core/       # Shared TypeScript library (Apache-2.0)
 ├── tests/
+│   ├── docs/                # Checks that the docs' links and names match the repository (AGPL-3.0)
 │   └── integration/         # End-to-end tests of the Web UI and the client, with Playwright (AGPL-3.0)
 └── docs/                    # Privacy, troubleshooting, and technical notes
 ```
 
-Each part has its own tests. See the READMEs linked below, and the [integration tests README](./tests/integration/README.md) for the end-to-end tests of the Web UI and the client.
+Each part has its own tests. See the READMEs linked below, and the [integration tests README](./tests/integration/README.md) for the end-to-end tests of the Web UI and the client. The [docs checks](./tests/docs/README.md) check that every link in the READMEs and the docs leads somewhere, and that the environment variables, endpoints and error codes they name match the code.
 
 
 ## Getting Started
@@ -127,6 +128,8 @@ If you self-host, you decide how strict you want to be — from private-only to 
 - [`docs/PRIVACY.md`](./docs/PRIVACY.md)
 - [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md)
 - [`Technical Documentation`](./docs/technical/)
+
+GitHub Actions checks their links, and the names they give, against the code on every push and pull request ([docs checks](./tests/docs/README.md)).
 
 
 ## Licenses
