@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const SERVER_DIR = fileURLToPath(new URL('../../', import.meta.url));
 const CLOCK_PRELOAD = fileURLToPath(new URL('./clock.cjs', import.meta.url));
+const REQUESTS_PRELOAD = fileURLToPath(new URL('./requests.cjs', import.meta.url));
 
 export const serverVersion = JSON.parse(
     fs.readFileSync(path.join(SERVER_DIR, 'package.json'), 'utf8')
@@ -43,8 +44,9 @@ const canConnect = (port) => new Promise((resolve) => {
  * @param {object} [opts]
  * @param {Record<string, string>} [opts.env] - Server settings for this run.
  * @param {boolean} [opts.clock] - Load the test clock so advanceClock() works.
+ * @param {boolean} [opts.requests] - Write down every request the server receives, for requests().
  */
-export async function startServer({ env = {}, clock = false } = {}) {
+export async function startServer({ env = {}, clock = false, requests = false } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-server-test-'));
     fs.copyFileSync(path.join(SERVER_DIR, 'server.js'), path.join(dir, 'server.js'));
     fs.copyFileSync(path.join(SERVER_DIR, 'package.json'), path.join(dir, 'package.json'));
@@ -57,7 +59,10 @@ export async function startServer({ env = {}, clock = false } = {}) {
     const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SERVER_ENV.test(k)));
     Object.assign(childEnv, { SERVER_PORT: String(port) }, env);
 
-    const child = spawn(process.execPath, clock ? ['--require', CLOCK_PRELOAD, 'server.js'] : ['server.js'], {
+    const preloads = [];
+    if (clock) preloads.push('--require', CLOCK_PRELOAD);
+    if (requests) preloads.push('--require', REQUESTS_PRELOAD);
+    const child = spawn(process.execPath, [...preloads, 'server.js'], {
         cwd: dir,
         env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe', clock ? 'ipc' : 'ignore'],
@@ -119,6 +124,23 @@ export async function startServer({ env = {}, clock = false } = {}) {
             const copy = path.join(dir, 'dropgate-core.mjs');
             fs.copyFileSync(path.join(dir, 'public', 'js', 'dropgate-core.js'), copy);
             return import(pathToFileURL(copy).href);
+        },
+        /**
+         * Every request the server has received so far, in order, as { method, url, headers, body }.
+         * WebSocket upgrades are included, with an empty body. Needs { requests: true }.
+         */
+        requests: () => {
+            if (!requests) throw new Error('Start the server with { requests: true } to use requests().');
+            const lines = fs.readFileSync(path.join(dir, 'requests.jsonl'), 'utf8').split('\n');
+            // Anything after the last newline is a line still being written.
+            lines.pop();
+            const received = [];
+            for (const line of lines) {
+                const entry = JSON.parse(line);
+                if (entry.body === undefined) received[entry.n - 1] = { ...entry, body: [] };
+                else received[entry.n - 1].body.push(Buffer.from(entry.body, 'base64'));
+            }
+            return received.map(({ n, body, ...request }) => ({ ...request, body: Buffer.concat(body) }));
         },
         /** Move the server's clock forward. Repeating timers due in that time run once before it resolves. */
         advanceClock: async (ms) => {
