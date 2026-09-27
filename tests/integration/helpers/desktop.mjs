@@ -102,12 +102,19 @@ export class DesktopApp {
      * upload runs in), once it has finished setting itself up. Until then it may
      * still be filling in its saved settings over what a test types, and its
      * buttons may do nothing.
+     *
+     * It also waits for the app's cookie store to load. Every request reads it
+     * first, and it only starts loading from disk at the first one. With a new
+     * profile on Windows runners that has taken over 5 s, as long as the app waits
+     * for the server when Test is clicked, so Test failed with the request never
+     * sent. Asking the main process for the cookies starts the load, and waits.
      */
     async window() {
         const window = await this.app.firstWindow();
         const id = await (await this.app.browserWindow(window)).evaluate((win) => win.id);
         await expect.poll(() => this.eventsOf('window-ready').some((e) => e.id === id),
             { message: 'whether the window has finished setting itself up', timeout: 15_000 }).toBe(true);
+        await this.app.evaluate(({ session }) => session.defaultSession.cookies.get({}).then(() => {}));
         return window;
     }
 
@@ -439,6 +446,8 @@ export const test = base.extend({
         const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-desktop-test-'));
         const proxy = tlsProxy ? await startTlsProxy(server.baseUrl) : null;
         const desktop = new Desktop({ started, root, server, proxy, secrets, real });
+        // A hung app gets 10 s to quit, so the teardown can't hang with it and lose the report.
+        const close = () => Promise.race([desktop.close(), sleep(10_000)]);
         try {
             await use(desktop);
             expect.soft(desktop.elsewhere, "requests the desktop app made that weren't to the test's server").toEqual([]);
@@ -447,8 +456,8 @@ export const test = base.extend({
             const print = process.env.DROPGATE_TEST_NETLOG_PRINT === '1';
             if (unexpected || print) {
                 const appRequests = desktop.appRequests();
-                // Quitting finishes each run's net log. A hung app gets 10 s, then the report goes on without it.
-                await Promise.race([desktop.close(), sleep(10_000)]);
+                // Quitting finishes each run's net log.
+                await close();
                 if (print) {
                     const logs = desktop.runs.map((run, i) => `run ${i + 1}:\n${desktop.netLogOf(run)}`).join('\n');
                     console.log(`Net logs of "${testInfo.title}" (${testInfo.status}):\n${logs}`);
@@ -458,9 +467,14 @@ export const test = base.extend({
                 else if (unexpected) throw new Error(desktop.report(appRequests));
             }
         } finally {
-            await desktop.close();
+            await close();
             await proxy?.stop();
-            fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+            try {
+                fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 });
+            } catch (err) {
+                // An app that didn't quit can still hold its files. Throwing here would replace the test's own error.
+                console.error(`Couldn't remove the test's folder ${root}: ${err.message}`);
+            }
         }
     },
 });
