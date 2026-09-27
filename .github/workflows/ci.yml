@@ -193,6 +193,22 @@ jobs:
             exit 1
           fi
 
+      # The app loads core's build from src/dropgate-core.js, which the core job
+      # checks against core's source. This checks the package carries it as is.
+      - name: Check the packaged app carries core's build
+        shell: bash
+        run: |
+          node -e '
+            const { extractFile } = require("@electron/asar");
+            const fs = require("fs");
+            const packaged = extractFile(process.argv[1], "src/dropgate-core.js");
+            if (!packaged.equals(fs.readFileSync("src/dropgate-core.js"))) {
+              console.error("The packaged src/dropgate-core.js is not the one in client/src.");
+              process.exit(1);
+            }
+            console.log("The packaged app carries client/src/dropgate-core.js as it is.");
+          ' dist/*-unpacked/resources/app.asar
+
   core:
     name: Core typecheck, build and tests
     runs-on: ubuntu-latest
@@ -225,6 +241,19 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # The build also writes core's copies in the server and the client
+      # (scripts/copy-build.mjs). If that changed anything, a copy was edited by
+      # hand, or not built again after a change to core.
+      - name: Check the server's and client's copies of the build
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            git diff --stat
+            echo "The build changed the files above. Run npm run build in packages/dropgate-core and commit them."
+            exit 1
+          fi
+          echo "The server's and client's copies are this build."
 
       # The verbose reporter lists every test, so each expected failure's name,
       # which says what fixes it, shows in the log.
