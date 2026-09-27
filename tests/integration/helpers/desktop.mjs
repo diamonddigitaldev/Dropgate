@@ -433,6 +433,11 @@ export const test = base.extend({
         try {
             await use(desktop);
             expect.soft(desktop.elsewhere, "requests the desktop app made that weren't to the test's server").toEqual([]);
+            // With DROPGATE_TEST_NETLOG_PRINT=1, every test prints its runs' net logs, passed or not.
+            if (process.env.DROPGATE_TEST_NETLOG_PRINT === '1') {
+                const logs = desktop.runs.map((run, i) => `run ${i + 1}:\n${desktop.netLogOf(run)}`).join('\n');
+                console.log(`Net logs of "${testInfo.title}" (${testInfo.status}):\n${logs}`);
+            }
             if (testInfo.status !== testInfo.expectedStatus) {
                 // A test.fail() test that passed: failing it now would count as the failure it expects, and hide the pass.
                 if (testInfo.expectedStatus === 'failed') console.error(`"${testInfo.title}" passed, though it's expected to fail.\n\n${desktop.report()}`);
