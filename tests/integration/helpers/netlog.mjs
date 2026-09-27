@@ -88,6 +88,17 @@ export function describeNetLog(file, since, origins) {
         lines.push({ at: b, text: `looking for a proxy script ${whole}: ${steps.map((s) => s.text).join('; ') || 'no steps'}` });
     }
 
+    // The cookie store on disk: a request reads cookies before anything else, so it waits for this.
+    for (const { kind, events: list } of sources.values()) {
+        if (kind !== 'COOKIE_STORE' || !list[0].params?.persistent_store) continue;
+        const { b, e } = span(list, 'COOKIE_PERSISTENT_STORE_LOAD');
+        if (!b) continue;
+        const keys = list.filter((x) => type(x) === 'COOKIE_PERSISTENT_STORE_KEY_LOAD_COMPLETED')
+            .map((x) => `${x.params?.domain ?? 'some'} at ${ms(x)}`);
+        const load = e ? `took ${took(b, e)}` : `still going (${lastStep(list.at(-1))})`;
+        lines.push({ at: b, text: `loading the cookie store from disk ${load}${keys.length ? `; cookies for ${keys.join(', ')}` : ''}` });
+    }
+
     // Each request to the test's addresses, whatever its scheme (v3 retries https:// as http://),
     // with the stream job it was bound to, which is where the proxy is decided.
     const hosts = new Set(origins.map((origin) => new URL(origin).host));
@@ -115,6 +126,11 @@ export function describeNetLog(file, since, origins) {
         else if (alive.e && error) parts.push(`ended at ${ms(alive.e)} with ${errorName(error)}`);
         else if (alive.e) parts.push(`done at ${ms(alive.e)}`);
         else parts.push(`not ended, ${lastStep(list.at(-1))}`);
+        // Where it was held: every gap of 100 ms or more between one step and the next.
+        for (let i = 1; i < list.length; i++) {
+            const gap = Number(list[i].time) - Number(list[i - 1].time);
+            if (gap >= 100) parts.push(`held ${gap} ms after ${type(list[i - 1])} ${phaseOf(list[i - 1])}, until ${type(list[i])} ${phaseOf(list[i])} at ${ms(list[i])}`);
+        }
         const method = list.find((e) => e.params?.method)?.params.method ?? '';
         lines.push({ at: alive.b, text: `${method} ${url}: ${parts.join(', ')}`.trim() });
     }
