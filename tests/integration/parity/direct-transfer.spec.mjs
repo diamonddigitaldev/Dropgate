@@ -7,9 +7,11 @@
 // The request check can't see STUN, which runs over UDP. So each test also checks
 // that the server offered none, and that every peer connection that gathered
 // candidates had none and found only host candidates.
+//
+// If the peers never connect, the failure says why, as each page saw it.
 import { madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, test } from '../helpers/test.mjs';
-import { download, peerConnections, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
+import { download, peerConnections, recordPeerConnections, sendDirectFromHomePage, whyNotConnected } from '../helpers/webui.mjs';
 
 // WebKit is left out for now. Playwright's WebKit on Windows has no
 // RTCPeerConnection, and on Linux its two peers don't connect when there are
@@ -35,15 +37,25 @@ async function expectNoIceServersUsed(...pages) {
         expect(started?.length, `peer connections started on ${where}`).toBeGreaterThan(0);
         for (const pc of started) {
             expect(pc.iceServers, `ICE servers a peer connection on ${where} had`).toEqual([]);
-            expect(pc.candidateTypes.length, `candidates a peer connection on ${where} found`).toBeGreaterThan(0);
-            expect(new Set(pc.candidateTypes), `kinds of candidate a peer connection on ${where} found`).toEqual(new Set(['host']));
+            expect(pc.candidates.length, `candidates a peer connection on ${where} found`).toBeGreaterThan(0);
+            expect(new Set(pc.candidates.map((c) => c.type)), `kinds of candidate a peer connection on ${where} found`).toEqual(new Set(['host']));
         }
+    }
+}
+
+/** Wait for the receive page to offer what was sent, and if it never does, say why. */
+async function expectConnected(receiver, sender) {
+    try {
+        await expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 });
+    } catch (err) {
+        const why = await whyNotConnected({ 'The receiver': receiver, 'The sender': sender });
+        throw new Error(`${err.message}\n\n${why}`, { cause: err });
     }
 }
 
 /** On the receive page: check what's offered, take it, and compare it with what was sent. */
 async function receiveAndCompare(receiver, sender, file) {
-    await expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 });
+    await expectConnected(receiver, sender);
     await expect(receiver.locator('#file-name')).toHaveText(file.name);
 
     const got = await download(receiver, receiver.locator('#download-button'));
@@ -101,7 +113,7 @@ test('several files sent together by direct transfer arrive intact as one ZIP', 
 
     const receiver = await otherContext.newPage();
     await receiver.goto(sent.link);
-    await expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 });
+    await expectConnected(receiver, page);
     await expect(receiver.locator('#file-name')).toHaveText(String(files.length));
 
     const zip = await download(receiver, receiver.locator('#download-button'));
