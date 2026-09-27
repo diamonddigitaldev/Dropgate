@@ -10,11 +10,12 @@
 // that one, and found only host candidates and server-reflexive ones at this
 // machine's own addresses.
 //
-// If the peers never connect, the failure says why, as each page saw it.
+// If the peers never connect, or the transfer fails after they do, the failure
+// says what each page saw.
 import os from 'node:os';
 import { madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, test } from '../helpers/test.mjs';
-import { download, peerConnections, recordPeerConnections, sendDirectFromHomePage, whyNotConnected } from '../helpers/webui.mjs';
+import { describePeers, download, peerConnections, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
 
 test.use({ localStun: true });
 
@@ -59,25 +60,37 @@ async function expectOnlyLocalCandidates(stun, ...pages) {
     }
 }
 
-/** Wait for the receive page to offer what was sent, and if it never does, say why. */
-async function expectConnected(receiver, sender) {
+/**
+ * Run one part of a direct transfer. If it fails, the failure also says what both
+ * pages saw, under `heading`.
+ */
+async function explained(heading, receiver, sender, part) {
     try {
-        await expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 });
+        return await part();
     } catch (err) {
-        const why = await whyNotConnected({ 'The receiver': receiver, 'The sender': sender });
-        throw new Error(`${err.message}\n\n${why}`, { cause: err });
+        const seen = await describePeers({ 'The receiver': receiver, 'The sender': sender });
+        throw new Error(`${err.message}\n\n${heading}:\n${seen}`, { cause: err });
     }
 }
+
+/** Wait for the receive page to offer what was sent, and if it never does, say why. */
+const expectConnected = (receiver, sender) => explained("Why the peers didn't connect", receiver, sender,
+    () => expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 }));
+
+/** Take what the receive page offers, and wait for both pages to say the transfer is complete. */
+const takeDownload = (receiver, sender) => explained('What the peers did', receiver, sender, async () => {
+    const got = await download(receiver, receiver.locator('#download-button'));
+    await expect(receiver.locator('#title')).toHaveText(/transfer complete/i);
+    await expect(sender.locator('#shareTitle')).toHaveText(/transfer complete/i);
+    return got;
+});
 
 /** On the receive page: check what's offered, take it, and compare it with what was sent. */
 async function receiveAndCompare(receiver, sender, file) {
     await expectConnected(receiver, sender);
     await expect(receiver.locator('#file-name')).toHaveText(file.name);
 
-    const got = await download(receiver, receiver.locator('#download-button'));
-    await expect(receiver.locator('#title')).toHaveText(/transfer complete/i);
-    await expect(sender.locator('#shareTitle')).toHaveText(/transfer complete/i);
-
+    const got = await takeDownload(receiver, sender);
     expect(got.name).toBe(file.name);
     expect(summary(got.bytes)).toEqual(summary(file.buffer));
 }
@@ -132,10 +145,7 @@ test('several files sent together by direct transfer arrive intact as one ZIP', 
     await expectConnected(receiver, page);
     await expect(receiver.locator('#file-name')).toHaveText(String(files.length));
 
-    const zip = await download(receiver, receiver.locator('#download-button'));
-    await expect(receiver.locator('#title')).toHaveText(/transfer complete/i);
-    await expect(page.locator('#shareTitle')).toHaveText(/transfer complete/i);
-
+    const zip = await takeDownload(receiver, page);
     expect(zip.name).toBe(`dropgate-bundle-${sent.code}.zip`);
     const entries = readZip(zip.bytes);
     expect(entries.map((e) => e.name)).toEqual(files.map((f) => f.name));

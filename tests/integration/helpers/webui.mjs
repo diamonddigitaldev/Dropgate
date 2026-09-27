@@ -117,25 +117,33 @@ export async function sendDirectFromHomePage(page, files) {
     };
 }
 
-/** Errors and warnings each page has logged, for whyNotConnected(). */
+/**
+ * Errors and warnings logged, and errors thrown and not caught, for describePeers():
+ * by page, or by context for its service workers.
+ */
 const consoleLogs = new WeakMap();
+const keepLog = (key, line) => {
+    if (!consoleLogs.has(key)) consoleLogs.set(key, []);
+    consoleLogs.get(key).push(line);
+};
 
 /**
  * Keep a record of every RTCPeerConnection in a context: the ICE servers it had,
  * as the browser reports them, the candidates it found and was given, any ICE
  * errors, how its states and data channels changed, and which kinds of message
  * each data channel sent and received (the kind only, never what's in them).
- * Also keep each page's console errors and warnings. Read the record with
- * peerConnections(), or ask whyNotConnected().
+ * Also keep the console errors and warnings of its pages and service workers,
+ * and any error they threw and didn't catch. Read the record with
+ * peerConnections(), or ask describePeers().
  * @param {import('@playwright/test').BrowserContext} context
  */
 export async function recordPeerConnections(context) {
     context.on('console', (msg) => {
         if (msg.type() !== 'error' && msg.type() !== 'warning') return;
-        const page = msg.page();
-        if (!page) return;
-        if (!consoleLogs.has(page)) consoleLogs.set(page, []);
-        consoleLogs.get(page).push(`${msg.type()}: ${msg.text()}`);
+        keepLog(msg.page() ?? context, `${msg.type()}: ${msg.text()}`);
+    });
+    context.on('weberror', (webError) => {
+        keepLog(webError.page() ?? context, `uncaught: ${webError.error().message}`);
     });
     await context.addInitScript(() => {
         const Native = window.RTCPeerConnection;
@@ -252,13 +260,13 @@ export const peerConnections = async (page) => (await allPeerConnections(page))?
 const allPeerConnections = (page) => page.evaluate(() => /** @type {any} */ (window).__peerConnections ?? null);
 
 /**
- * Why two pages' peers didn't connect, as far as each page can tell: what the
- * page says, what each peer connection found and was given, how its states
- * changed, what its data channels carried, and the page's console errors. For a
- * failed test's message.
+ * What two pages' peers did, as far as each page can tell, for a failed direct
+ * transfer test's message: what the page says, what each peer connection found
+ * and was given, how its states changed, what its data channels carried, and the
+ * console errors of the page and its service workers.
  * @param {Record<string, import('@playwright/test').Page>} pages - Each page, by what to call it.
  */
-export async function whyNotConnected(pages) {
+export async function describePeers(pages) {
     const lines = [];
     const where = (c) => (c.address?.endsWith('.local') ? 'an mDNS name' : c.address);
     const list = (candidates) => {
@@ -269,15 +277,18 @@ export async function whyNotConnected(pages) {
         }
         return [...counts].map(([key, n]) => (n > 1 ? `${key} (×${n})` : key)).join(', ') || 'none';
     };
-    // Runs of the same kind of message, in order: "hello, meta, chunk ×3".
+    // Runs of the same kind of message, in order, with the file data counted
+    // apart: "hello, meta, chunk ×46, end (and 229 binary)".
     const runs = (kinds) => {
         const out = [];
-        for (const kind of kinds) {
+        for (const kind of kinds.filter((k) => k !== 'binary')) {
             const last = out.at(-1);
             if (last?.kind === kind) last.n++;
             else out.push({ kind, n: 1 });
         }
-        return out.map(({ kind, n }) => (n > 1 ? `${kind} ×${n}` : kind)).join(', ') || 'nothing';
+        const text = out.map(({ kind, n }) => (n > 1 ? `${kind} ×${n}` : kind)).join(', ') || 'nothing';
+        const binary = kinds.length - kinds.filter((k) => k !== 'binary').length;
+        return binary ? `${text} (and ${binary} binary)` : text;
     };
     for (const [name, page] of Object.entries(pages)) {
         try {
@@ -309,9 +320,11 @@ export async function whyNotConnected(pages) {
             }
             const logged = consoleLogs.get(page) ?? [];
             if (logged.length) lines.push(`  console: ${logged.slice(-10).join(' | ')}`);
+            const workers = consoleLogs.get(page.context()) ?? [];
+            if (workers.length) lines.push(`  its service workers' console: ${workers.slice(-10).join(' | ')}`);
         } catch (err) {
             lines.push(`  (couldn't look: ${err.message.split('\n')[0]})`);
         }
     }
-    return `Why the peers didn't connect:\n${lines.join('\n')}`;
+    return lines.join('\n');
 }
