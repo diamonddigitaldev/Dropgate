@@ -75,15 +75,18 @@ export async function openLink(page, link) {
 /**
  * Open a share link and expect the server's "not found" page, as someone would
  * see it once the upload has gone. The server may take a moment to finish
- * removing it, so this keeps trying for a few seconds.
+ * removing it, so the page's status is asked for over HTTP for a few seconds
+ * first. Only then is the page loaded, so a slow page load can't use up that time.
  * @param {import('@playwright/test').Page} page
  * @param {string} link
  */
 export async function expectGone(page, link) {
-    await expect(async () => {
-        const response = await openLink(page, link);
-        expect(response?.status(), `the page at ${new URL(link).pathname}`).toBe(404);
-    }).toPass({ timeout: 5_000 });
+    const { pathname } = new URL(link);
+    const where = `the page at ${pathname}`;
+    // Without the #, so the key stays in the browser.
+    await expect.poll(async () => (await page.request.get(pathname)).status(), { message: where, timeout: 5_000 }).toBe(404);
+    const response = await openLink(page, link);
+    expect(response?.status(), where).toBe(404);
     await expect(page.locator('#status-title')).toHaveText(/not found/i);
 }
 
