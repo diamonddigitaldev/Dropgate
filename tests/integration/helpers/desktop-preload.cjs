@@ -12,6 +12,7 @@
 //                                                      (or error, if it couldn't be read)
 //   { at, pid, event: 'window', id }                   a window was created
 //   { at, pid, event: 'window-shown', id }             it was shown
+//   { at, pid, event: 'window-ready', id }             it finished setting itself up
 //   { at, pid, event: 'upload-finished', status, error }
 //   { at, pid, event: 'exit', code }
 //
@@ -24,7 +25,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, clipboard, ipcMain, Notification } = require('electron');
+const { app, BrowserWindow, clipboard, ipcMain, Notification } = require('electron');
 
 // Take this preload's own "-r <path>" back out of the command line, so the app
 // sees only the arguments it would be given when launched normally.
@@ -67,7 +68,11 @@ app.on('browser-window-created', (_event, win) => {
     win.on('show', () => record({ event: 'window-shown', id }));
 });
 
-// Registered before the app's own handler, so it's written down before the app acts on it.
+// Registered before the app's own handlers, so each is written down before the app acts on it.
+// A window says it's ready once it has loaded its settings and set up its buttons.
+ipcMain.on('renderer-ready', (event) => {
+    record({ event: 'window-ready', id: BrowserWindow.fromWebContents(event.sender)?.id });
+});
 ipcMain.on('upload-finished', (_event, result) => {
     record({ event: 'upload-finished', status: result?.status, error: result?.error });
 });

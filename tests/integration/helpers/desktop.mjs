@@ -67,9 +67,18 @@ export class DesktopApp {
         this.desktop = desktop;
     }
 
-    /** The first window the app opens: its main window, or the one a background upload runs in. */
-    window() {
-        return this.app.firstWindow();
+    /**
+     * The first window the app opens (its main window, or the one a background
+     * upload runs in), once it has finished setting itself up. Until then it may
+     * still be filling in its saved settings over what a test types, and its
+     * buttons may do nothing.
+     */
+    async window() {
+        const window = await this.app.firstWindow();
+        const id = await (await this.app.browserWindow(window)).evaluate((win) => win.id);
+        await expect.poll(() => this.eventsOf('window-ready').some((e) => e.id === id),
+            { message: 'whether the window has finished setting itself up', timeout: 15_000 }).toBe(true);
+        return window;
     }
 
     /**
