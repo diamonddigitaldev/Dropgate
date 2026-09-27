@@ -25,8 +25,10 @@ export default defineConfig({
         reducedMotion: 'reduce',
     },
     projects: [
-        { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
-        { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
-        { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+        { name: 'chromium', testIgnore: 'desktop/**', use: { ...devices['Desktop Chrome'] } },
+        { name: 'firefox', testIgnore: 'desktop/**', use: { ...devices['Desktop Firefox'] } },
+        { name: 'webkit', testIgnore: 'desktop/**', use: { ...devices['Desktop Safari'] } },
+        // The desktop app, from client/. Its links are opened in Chromium.
+        { name: 'desktop', testMatch: 'desktop/**/*.spec.mjs', use: { ...devices['Desktop Chrome'] } },
     ],
 });
