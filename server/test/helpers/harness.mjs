@@ -13,6 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const SERVER_DIR = fileURLToPath(new URL('../../', import.meta.url));
 const CLOCK_PRELOAD = fileURLToPath(new URL('./clock.cjs', import.meta.url));
 const REQUESTS_PRELOAD = fileURLToPath(new URL('./requests.cjs', import.meta.url));
+const LISTENING_PRELOAD = fileURLToPath(new URL('./listening.cjs', import.meta.url));
 
 export const serverVersion = JSON.parse(
     fs.readFileSync(path.join(SERVER_DIR, 'package.json'), 'utf8')
@@ -33,20 +34,15 @@ const freePort = () => new Promise((resolve, reject) => {
     });
 });
 
-const canConnect = (port) => new Promise((resolve) => {
-    const socket = net.connect(port, '127.0.0.1');
-    socket.once('connect', () => { socket.destroy(); resolve(true); });
-    socket.once('error', () => resolve(false));
-});
-
 /**
  * Start a copy of the server.
  * @param {object} [opts]
  * @param {Record<string, string>} [opts.env] - Server settings for this run.
  * @param {boolean} [opts.clock] - Load the test clock so advanceClock() works.
  * @param {boolean} [opts.requests] - Write down every request the server receives, for requests().
+ * @param {number} [opts.port] - Try this port first. Another is used if it's taken.
  */
-export async function startServer({ env = {}, clock = false, requests = false } = {}) {
+export async function startServer({ env = {}, clock = false, requests = false, port: firstPort } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-server-test-'));
     fs.copyFileSync(path.join(SERVER_DIR, 'server.js'), path.join(dir, 'server.js'));
     fs.copyFileSync(path.join(SERVER_DIR, 'package.json'), path.join(dir, 'package.json'));
@@ -55,40 +51,57 @@ export async function startServer({ env = {}, clock = false, requests = false } 
     // A junction on Windows, a plain symlink elsewhere. fs.rmSync removes the link, never the target.
     fs.symlinkSync(path.join(SERVER_DIR, 'node_modules'), path.join(dir, 'node_modules'), 'junction');
 
-    const port = await freePort();
-    const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SERVER_ENV.test(k)));
-    Object.assign(childEnv, { SERVER_PORT: String(port) }, env);
-
-    const preloads = [];
+    const preloads = ['--require', LISTENING_PRELOAD];
     if (clock) preloads.push('--require', CLOCK_PRELOAD);
     if (requests) preloads.push('--require', REQUESTS_PRELOAD);
-    const child = spawn(process.execPath, [...preloads, 'server.js'], {
-        cwd: dir,
-        env: childEnv,
-        stdio: ['ignore', 'pipe', 'pipe', clock ? 'ipc' : 'ignore'],
-    });
 
-    const output = { stdout: '', stderr: '' };
-    child.stdout.on('data', (d) => { output.stdout += d; });
-    child.stderr.on('data', (d) => { output.stderr += d; });
-    let exited = false;
-    child.once('exit', () => { exited = true; });
+    const launch = (port) => {
+        const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SERVER_ENV.test(k)));
+        Object.assign(childEnv, { SERVER_PORT: String(port) }, env);
+        const child = spawn(process.execPath, [...preloads, 'server.js'], {
+            cwd: dir,
+            env: childEnv,
+            stdio: ['ignore', 'pipe', 'pipe', clock ? 'ipc' : 'ignore'],
+        });
+        const run = { port, child, output: { stdout: '', stderr: '' }, exited: false, closed: once(child, 'close') };
+        child.stdout.on('data', (d) => { run.output.stdout += d; });
+        child.stderr.on('data', (d) => { run.output.stderr += d; });
+        child.once('exit', () => { run.exited = true; });
+        return run;
+    };
 
+    // The port the server says it's listening on (listening.cjs), or null.
+    const listeningOn = () => {
+        try {
+            return JSON.parse(fs.readFileSync(path.join(dir, 'listening.json'), 'utf8')).port;
+        } catch {
+            return null;
+        }
+    };
+
+    let run;
     const stop = async () => {
-        if (!exited) {
-            child.kill();
-            await once(child, 'exit');
+        if (!run.exited) {
+            run.child.kill();
+            await once(run.child, 'exit');
         }
         fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
     };
 
-    for (let i = 0; !(await canConnect(port)); i++) {
-        if (exited || i > 100) {
-            await stop();
-            throw new Error(`Server did not start.\n${output.stdout}${output.stderr}`);
-        }
-        await sleep(100);
+    // Another test can start a server on the port freePort() found before this
+    // one listens on it. Then this server exits with EADDRINUSE while the other
+    // answers on the port, so the server has only started once it says it's
+    // listening, and a taken port means trying another.
+    for (let attempt = 1; ; attempt++) {
+        run = launch(attempt === 1 && firstPort ? firstPort : await freePort());
+        for (let i = 0; listeningOn() !== run.port && !run.exited && i <= 100; i++) await sleep(100);
+        if (listeningOn() === run.port) break;
+        if (run.exited) await run.closed;
+        if (attempt < 3 && run.exited && run.output.stderr.includes('EADDRINUSE')) continue;
+        await stop();
+        throw new Error(`Server did not start.\n${run.output.stdout}${run.output.stderr}`);
     }
+    const { port, child, output } = run;
 
     return {
         baseUrl: `http://127.0.0.1:${port}`,
