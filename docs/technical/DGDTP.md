@@ -148,7 +148,7 @@ If a new connection arrives while an existing one is present:
 
 Once the data channel is open, both peers exchange `hello` messages. The receiver sends its `hello` as soon as its channel opens. The sender waits for it before sending anything, then replies with its own.
 
-The sender waits because its channel can open before the receiver's, and a message sent in that gap is sometimes never delivered (seen in Chromium). The receiver would then never get the sender's `hello`, and would ignore the file details that follow it.
+The sender waits because its channel can open before the receiver's, and a message sent in that gap is sometimes never delivered (seen in Chromium). The receiver would then never get the sender's `hello`, and would ignore the file details that follow it. Chromium also sometimes reports the sender's data channel open twice, so the sender starts only once per connection.
 
 ### 6.1 Hello Message
 

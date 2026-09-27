@@ -1414,6 +1414,7 @@ async function startP2PSend(opts) {
     let readyResolve = null;
     let endAckResolve = null;
     let fileEndAckResolve = null;
+    let started = false;
     const helloPromise = new Promise((resolve) => {
       helloResolve = resolve;
     });
@@ -1462,7 +1463,8 @@ async function startP2PSend(opts) {
     });
     conn.on("open", async () => {
       try {
-        if (isStopped()) return;
+        if (started || isStopped()) return;
+        started = true;
         startHealthMonitoring(conn);
         const receiverVersion = await Promise.race([
           helloPromise,

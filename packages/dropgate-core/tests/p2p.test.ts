@@ -10,8 +10,9 @@ import { onlyFailsWith, settle } from './helpers/known-issue.js';
 // `it.fails` until then. The receiver runs against the fake PeerJS objects in
 // helpers/fake-peer.ts, with the test playing the sender.
 //
-// The sender's test is a plain one: its handshake was fixed in v3's engine,
-// because Chromium sometimes lost the first message it sent.
+// The sender's tests are plain ones: its handshake was fixed in v3's engine,
+// because Chromium sometimes lost the first message it sent, and sometimes
+// reported its data channel open twice.
 
 const SESSION_ID = 'session-1';
 const sessions: P2PReceiveSession[] = [];
@@ -237,5 +238,22 @@ describe('P2P sender', () => {
     await conn.deliver({ t: 'hello', protocolVersion: P2P_PROTOCOL_VERSION, sessionId: '' });
     await settle();
     expect(conn.sent.map((msg) => (msg as { t?: unknown }).t), 'what the sender sent after it').toEqual(['hello', 'meta']);
+  });
+
+  it('starts the transfer once when its connection reports open twice', async () => {
+    const starting = startP2PSend({
+      file: memoryFile('notes.txt', new Uint8Array([1, 2, 3, 4])),
+      Peer: FakePeer as unknown as PeerConstructor,
+      codeGenerator: () => 'ABCD-1234',
+    });
+    FakePeer.latest().simulateOpen('ABCD-1234');
+    sendSessions.push(await starting);
+
+    const conn = FakePeer.latest().simulateConnection();
+    conn.simulateOpen();
+    conn.simulateOpen();
+    await conn.deliver({ t: 'hello', protocolVersion: P2P_PROTOCOL_VERSION, sessionId: '' });
+    await settle();
+    expect(conn.sent.map((msg) => (msg as { t?: unknown }).t), 'what the sender sent').toEqual(['hello', 'meta']);
   });
 });

@@ -550,6 +550,7 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
     let readyResolve: (() => void) | null = null;
     let endAckResolve: ((msg: P2PEndAckMessage) => void) | null = null;
     let fileEndAckResolve: ((msg: P2PFileEndAckMessage) => void) | null = null;
+    let started = false;
 
     const helloPromise = new Promise<number>((resolve) => {
       helloResolve = resolve;
@@ -616,7 +617,10 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
 
     conn.on('open', async () => {
       try {
-        if (isStopped()) return;
+        // Chromium sometimes reports the data channel open twice. A second run
+        // would send everything again, so start the transfer only once.
+        if (started || isStopped()) return;
+        started = true;
 
         // Start health monitoring
         startHealthMonitoring(conn);
