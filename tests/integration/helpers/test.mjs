@@ -12,12 +12,14 @@
 import { test as base, expect } from '@playwright/test';
 import { startServer } from '../../../server/test/helpers/harness.mjs';
 import { expectNoSecretsSent, expectNothingStored, keepSecretsFor, Secrets } from './privacy.mjs';
+import { startStunServer } from './stun.mjs';
 
 export { expect };
 
 // The server hands browsers a public STUN server by default, and an empty value
 // falls back to that default. A lone comma is a list with nothing in it, so the
-// server offers no ICE servers at all and direct transfers stay on this machine.
+// server offers no ICE servers at all. Direct transfer tests offer the tests' own
+// STUN server instead (localStun), so either way nothing leaves this machine.
 export const NO_ICE_SERVERS = ',';
 
 /** Whether the test body passed, as it was meant to. */
@@ -44,7 +46,7 @@ function watchContext(context, server, secrets) {
 }
 
 export const test = base.extend({
-    // Server settings for this test, on top of ENABLE_UPLOAD=true and no ICE servers.
+    // Server settings for this test, on top of ENABLE_UPLOAD=true and its ICE servers.
     // Set them with test.use({ serverEnv: { ... } }).
     serverEnv: [{}, { option: true }],
 
@@ -52,14 +54,32 @@ export const test = base.extend({
     // Set it with test.use({ serverClock: true }).
     serverClock: [false, { option: true }],
 
+    // Have the server offer the tests' own STUN server, on this machine, as its only
+    // ICE server. Set it with test.use({ localStun: true }).
+    localStun: [false, { option: true }],
+
+    // That STUN server, or null when the server offers no ICE servers.
+    stun: async ({ localStun }, use) => {
+        if (!localStun) {
+            await use(null);
+            return;
+        }
+        const stun = await startStunServer();
+        try {
+            await use(stun);
+        } finally {
+            await stun.stop();
+        }
+    },
+
     // The file names and keys this test's flows handle. The web UI helpers add to it.
     secrets: async ({}, use) => {
         await use(new Secrets());
     },
 
-    server: async ({ serverEnv, serverClock, secrets }, use, testInfo) => {
+    server: async ({ serverEnv, serverClock, stun, secrets }, use, testInfo) => {
         const server = await startServer({
-            env: { ENABLE_UPLOAD: 'true', P2P_STUN_SERVERS: NO_ICE_SERVERS, ...serverEnv },
+            env: { ENABLE_UPLOAD: 'true', P2P_STUN_SERVERS: stun?.url ?? NO_ICE_SERVERS, ...serverEnv },
             clock: serverClock,
             requests: true,
         });

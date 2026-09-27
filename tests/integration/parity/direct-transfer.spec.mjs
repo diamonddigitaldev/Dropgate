@@ -2,43 +2,59 @@
 // in another browser context byte for byte, whether they type the code into the
 // home page or open the link. Several files sent together arrive as one ZIP.
 //
-// The server offers no ICE servers (see NO_ICE_SERVERS), so the two peers only
-// use this machine's own addresses, and nothing goes to an outside STUN server.
-// The request check can't see STUN, which runs over UDP. So each test also checks
-// that the server offered none, and that every peer connection that gathered
-// candidates had none and found only host candidates.
+// The server offers one ICE server: the tests' own STUN server on this machine
+// (localStun), so the two peers only use this machine's own addresses, and
+// nothing goes to an outside STUN server. The request check can't see STUN,
+// which runs over UDP. So each test also checks that the server offered only
+// that one, and that every peer connection that gathered candidates had only
+// that one, and found only host candidates and server-reflexive ones at this
+// machine's own addresses.
 //
 // If the peers never connect, the failure says why, as each page saw it.
+import os from 'node:os';
 import { madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, test } from '../helpers/test.mjs';
 import { download, peerConnections, recordPeerConnections, sendDirectFromHomePage, whyNotConnected } from '../helpers/webui.mjs';
 
-// WebKit is left out for now. Playwright's WebKit on Windows has no
-// RTCPeerConnection, and on Linux its two peers don't connect when there are
-// no ICE servers.
-test.skip(({ browserName }) => browserName === 'webkit',
-    "WebKit peers don't connect without ICE servers, and Windows WebKit has no RTCPeerConnection");
+test.use({ localStun: true });
+
+// A hook rather than a file-level test.skip(), whose callback would start and
+// stop a server of its own just to be asked.
+test.beforeEach(({ browserName }) => {
+    test.skip(browserName === 'webkit' && process.platform === 'win32', "Playwright's WebKit on Windows has no RTCPeerConnection");
+});
 
 // Several data channel messages' worth.
 const SIZE = 3_000_000;
 
 /** The server's own settings for direct transfer, as it gives them to every page. */
-async function expectNoIceServersOffered(page) {
+async function expectOnlyLocalStunOffered(page, stun) {
     const info = await (await page.request.get('/api/info')).json();
     expect(info.capabilities.p2p.enabled, 'direct transfer enabled').toBe(true);
-    expect(info.capabilities.p2p.iceServers, 'ICE servers the server offers').toEqual([]);
+    expect(info.capabilities.p2p.iceServers, 'ICE servers the server offers').toEqual([{ urls: [stun.url] }]);
 }
 
-/** Every peer connection each page started: the ICE servers it had, and the candidates it found. */
-async function expectNoIceServersUsed(...pages) {
+/**
+ * Every peer connection each page started: the ICE servers it had, and the
+ * candidates it found. A server-reflexive candidate is an address the STUN
+ * server saw, so it has to be one of this machine's own.
+ */
+async function expectOnlyLocalCandidates(stun, ...pages) {
+    const ownAddresses = Object.values(os.networkInterfaces()).flat().map((i) => i?.address);
     for (const page of pages) {
         const started = await peerConnections(page);
         const where = new URL(page.url()).pathname;
         expect(started?.length, `peer connections started on ${where}`).toBeGreaterThan(0);
-        for (const pc of started) {
-            expect(pc.iceServers, `ICE servers a peer connection on ${where} had`).toEqual([]);
+        for (const pc of started ?? []) {
+            expect(pc.iceServers.flatMap((s) => [s.urls].flat()), `ICE servers a peer connection on ${where} had`).toEqual([stun.url]);
             expect(pc.candidates.length, `candidates a peer connection on ${where} found`).toBeGreaterThan(0);
-            expect(new Set(pc.candidates.map((c) => c.type)), `kinds of candidate a peer connection on ${where} found`).toEqual(new Set(['host']));
+            for (const c of pc.candidates) {
+                expect(['host', 'srflx'], `the kind of a candidate a peer connection on ${where} found`).toContain(c.type);
+                if (c.type === 'srflx') {
+                    const at = `a server-reflexive candidate a peer connection on ${where} found, at ${c.address}, is one of this machine's addresses`;
+                    expect(ownAddresses.includes(c.address), at).toBe(true);
+                }
+            }
         }
     }
 }
@@ -66,10 +82,10 @@ async function receiveAndCompare(receiver, sender, file) {
     expect(summary(got.bytes)).toEqual(summary(file.buffer));
 }
 
-test('a file sent by direct transfer arrives intact when the receiver types the code into the home page', async ({ page, otherContext }) => {
+test('a file sent by direct transfer arrives intact when the receiver types the code into the home page', async ({ page, otherContext, stun }) => {
     await recordPeerConnections(page.context());
     await recordPeerConnections(otherContext);
-    await expectNoIceServersOffered(page);
+    await expectOnlyLocalStunOffered(page, stun);
     const file = madeUpFile('Sketches (direct) é.bin', SIZE, 30);
 
     const sent = await sendDirectFromHomePage(page, [file]);
@@ -81,13 +97,13 @@ test('a file sent by direct transfer arrives intact when the receiver types the 
     await expect(receiver).toHaveURL(new RegExp(`/p2p/${sent.code}$`));
 
     await receiveAndCompare(receiver, page, file);
-    await expectNoIceServersUsed(page, receiver);
+    await expectOnlyLocalCandidates(stun, page, receiver);
 });
 
-test('a file sent by direct transfer arrives intact when the receiver opens the link', async ({ page, otherContext }) => {
+test('a file sent by direct transfer arrives intact when the receiver opens the link', async ({ page, otherContext, stun }) => {
     await recordPeerConnections(page.context());
     await recordPeerConnections(otherContext);
-    await expectNoIceServersOffered(page);
+    await expectOnlyLocalStunOffered(page, stun);
     const file = madeUpFile('Sketches (linked) é.bin', SIZE, 31);
 
     const sent = await sendDirectFromHomePage(page, [file]);
@@ -97,10 +113,10 @@ test('a file sent by direct transfer arrives intact when the receiver opens the 
     await receiver.goto(sent.link);
 
     await receiveAndCompare(receiver, page, file);
-    await expectNoIceServersUsed(page, receiver);
+    await expectOnlyLocalCandidates(stun, page, receiver);
 });
 
-test('several files sent together by direct transfer arrive intact as one ZIP', async ({ page, otherContext }) => {
+test('several files sent together by direct transfer arrive intact as one ZIP', async ({ page, otherContext, stun }) => {
     await recordPeerConnections(page.context());
     await recordPeerConnections(otherContext);
     const files = [
@@ -126,5 +142,5 @@ test('several files sent together by direct transfer arrive intact as one ZIP', 
     for (const [i, file] of files.entries()) {
         expect(summary(entries[i].bytes), `${file.name} in the ZIP`).toEqual(summary(file.buffer));
     }
-    await expectNoIceServersUsed(page, receiver);
+    await expectOnlyLocalCandidates(stun, page, receiver);
 });
