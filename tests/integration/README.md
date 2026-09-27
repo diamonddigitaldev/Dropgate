@@ -20,10 +20,11 @@ Once a test has passed, it also checks what its browsers kept and what the serve
 * **Nothing is kept in the browser.** The server's origin has no cookies, localStorage, sessionStorage, IndexedDB or Cache Storage. At most one service worker is registered: the one the download pages use to stream files to disk.
 * **The server never gets a file name or a key.** No request that reaches the server has a file name, or the key from a link's `#`, in its URL, headers or body, and no WebSocket message a page sends has either. The one exception is a file uploaded without encryption: the server stores its name, so the upload sends it in a request body. The download pages' own download URLs carry the file name too, but their service worker answers them inside the browser, and this checks that none gets through.
 
-Tests for known issues use `test.fail()`, and each one's name says what fixes it. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. Each one only counts the failure its issue causes: if it fails for any other reason, it's reported as a failure. Today there are two:
+Tests for known issues use `test.fail()`, and each one's name says what fixes it. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. Each one only counts the failure its issue causes: if it fails for any other reason, it's reported as a failure. Today there are three:
 
 * **An encrypted upload on a plain-HTTP localhost server can't be downloaded.** Browsers count localhost as a secure context, so the web UI encrypts the upload, but the server only serves encrypted download pages to requests that came in over HTTPS, so the link shows "Secure Connection Required".
 * **Pasting an end-to-end encrypted link into "Enter Sharing Code" sends its key to the server.** The home page asks the server where the link leads, and sends the whole link, key and all, though the server only needs the part before the `#`. This test runs the checks above itself, and anything else they find still fails it.
+* **Pasting an end-to-end encrypted link into "Enter Sharing Code" opens its download page without the key.** The page goes where the server says the link leads, and that has no `#`, so the download page says the key is missing. Behind a TLS proxy the link starts with `https://`, so this test pastes it that way.
 
 
 ## Running the Tests
