@@ -146,7 +146,9 @@ If a new connection arrives while an existing one is present:
 
 ## 6. Handshake
 
-Once the data channel is open, both peers exchange `hello` messages.
+Once the data channel is open, both peers exchange `hello` messages. The receiver sends its `hello` as soon as its channel opens. The sender waits for it before sending anything, then replies with its own.
+
+The sender waits because its channel can open before the receiver's, and a message sent in that gap is sometimes never delivered (seen in Chromium). The receiver would then never get the sender's `hello`, and would ignore the file details that follow it.
 
 ### 6.1 Hello Message
 
@@ -339,10 +341,10 @@ Protocol version 3 introduced native multi-file transfer support.
 ```
 Sender                                      Receiver
   │                                           │
-  │  hello                                    │
-  │──────────────────────────────────────────►│
   │◄──────────────────────────────────────────│
   │                                     hello │
+  │  hello                                    │
+  │──────────────────────────────────────────►│
   │                                           │
   │  file_list                                │
   │──────────────────────────────────────────►│
@@ -787,10 +789,11 @@ Sender                                      Receiver
   │  [PeerJS signalling: SDP + ICE]           │
   │◄═════════════════════════════════════════►│
   │                                           │
-  │  hello { v3, sessionId }                  │
-  │──────────────────────────────────────────►│
   │◄──────────────────────────────────────────│
   │  hello { v3, sessionId }                  │
+  │                                           │
+  │  hello { v3, sessionId }                  │
+  │──────────────────────────────────────────►│
   │                                           │
   │  meta { name, size, mime }                │
   │──────────────────────────────────────────►│

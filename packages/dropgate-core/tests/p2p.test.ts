@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { startP2PReceive, isP2PMessage, P2P_PROTOCOL_VERSION } from '../src/p2p/index.js';
-import type { P2PReceiveOptions, P2PReceiveSession, PeerConstructor } from '../src/p2p/index.js';
+import { startP2PReceive, startP2PSend, isP2PMessage, P2P_PROTOCOL_VERSION } from '../src/p2p/index.js';
+import type { P2PReceiveOptions, P2PReceiveSession, P2PSendSession, PeerConstructor } from '../src/p2p/index.js';
+import type { FileSource } from '../src/types.js';
 import { FakePeer, type FakeConnection } from './helpers/fake-peer.js';
 import { onlyFailsWith, settle } from './helpers/known-issue.js';
 
@@ -8,6 +9,9 @@ import { onlyFailsWith, settle } from './helpers/known-issue.js';
 // states the behaviour the v4 transfer engine must have, and is marked
 // `it.fails` until then. The receiver runs against the fake PeerJS objects in
 // helpers/fake-peer.ts, with the test playing the sender.
+//
+// The sender's test is a plain one: its handshake was fixed in v3's engine,
+// because Chromium sometimes lost the first message it sent.
 
 const SESSION_ID = 'session-1';
 const sessions: P2PReceiveSession[] = [];
@@ -196,4 +200,42 @@ describe('P2P message parser', () => {
       expect(isP2PMessage(chunk), 'isP2PMessage() accepted a chunk with a string sequence and a negative size').toBe(false);
     })
   );
+});
+
+/** A file held in memory, as the sender reads files. */
+function memoryFile(name: string, bytes: Uint8Array, type = 'text/plain'): FileSource {
+  return {
+    name,
+    size: bytes.byteLength,
+    type,
+    slice: (start, end) => memoryFile(name, bytes.slice(start, end), type),
+    arrayBuffer: async () => bytes.slice().buffer,
+  };
+}
+
+describe('P2P sender', () => {
+  const sendSessions: P2PSendSession[] = [];
+
+  afterEach(() => {
+    for (const session of sendSessions.splice(0)) session.stop();
+  });
+
+  it('sends nothing until the receiver says hello, then its own hello and the file details', async () => {
+    const starting = startP2PSend({
+      file: memoryFile('notes.txt', new Uint8Array([1, 2, 3, 4])),
+      Peer: FakePeer as unknown as PeerConstructor,
+      codeGenerator: () => 'ABCD-1234',
+    });
+    FakePeer.latest().simulateOpen('ABCD-1234');
+    sendSessions.push(await starting);
+
+    const conn = FakePeer.latest().simulateConnection();
+    conn.simulateOpen();
+    await settle();
+    expect(conn.sent, 'what the sender sent before the receiver said hello').toEqual([]);
+
+    await conn.deliver({ t: 'hello', protocolVersion: P2P_PROTOCOL_VERSION, sessionId: '' });
+    await settle();
+    expect(conn.sent.map((msg) => (msg as { t?: unknown }).t), 'what the sender sent after it').toEqual(['hello', 'meta']);
+  });
 });

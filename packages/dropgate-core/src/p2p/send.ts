@@ -621,14 +621,11 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
         // Start health monitoring
         startHealthMonitoring(conn);
 
-        // Send hello first to negotiate protocol version
-        conn.send({
-          t: 'hello',
-          protocolVersion: P2P_PROTOCOL_VERSION,
-          sessionId,
-        });
-
-        // Wait for receiver's hello (with timeout)
+        // Wait for receiver's hello (with timeout) before sending anything.
+        // This side's channel can open before the receiver's does, and a
+        // message sent in that gap is sometimes never delivered (seen in
+        // Chromium). The receiver would then never see our hello, and would
+        // ignore the file details. It sends its hello once its channel is open.
         const receiverVersion = await Promise.race([
           helloPromise,
           sleep(10000).then(() => null as number | null),
@@ -643,6 +640,13 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
             `Protocol version mismatch: sender v${P2P_PROTOCOL_VERSION}, receiver v${receiverVersion}`
           );
         }
+
+        // Then send ours to negotiate protocol version
+        conn.send({
+          t: 'hello',
+          protocolVersion: P2P_PROTOCOL_VERSION,
+          sessionId,
+        });
 
         transitionTo('negotiating');
         if (!isStopped()) onStatus?.({ phase: 'waiting', message: 'Connected. Waiting for receiver to accept...' });

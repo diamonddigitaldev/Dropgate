@@ -100,4 +100,12 @@ export class FakePeer extends Emitter {
   simulateOpen(id = 'fake-peer-id'): void {
     this.emit('open', id);
   }
+
+  /** A remote peer connects to this one, as a receiver does to a sender. */
+  simulateConnection(peerId = 'remote-peer-id'): FakeConnection {
+    const conn = new FakeConnection(peerId);
+    this.connections.push(conn);
+    this.emit('connection', conn);
+    return conn;
+  }
 }

@@ -582,6 +582,7 @@ var ec = [
   "stream finished",
   "no stream handler",
   ,
+  // determined by compression function
   "no callback",
   "invalid UTF-8 data",
   "extra field too long",
@@ -1463,11 +1464,6 @@ async function startP2PSend(opts) {
       try {
         if (isStopped()) return;
         startHealthMonitoring(conn);
-        conn.send({
-          t: "hello",
-          protocolVersion: P2P_PROTOCOL_VERSION,
-          sessionId
-        });
         const receiverVersion = await Promise.race([
           helloPromise,
           sleep(1e4).then(() => null)
@@ -1480,6 +1476,11 @@ async function startP2PSend(opts) {
             `Protocol version mismatch: sender v${P2P_PROTOCOL_VERSION}, receiver v${receiverVersion}`
           );
         }
+        conn.send({
+          t: "hello",
+          protocolVersion: P2P_PROTOCOL_VERSION,
+          sessionId
+        });
         transitionTo("negotiating");
         if (!isStopped()) onStatus?.({ phase: "waiting", message: "Connected. Waiting for receiver to accept..." });
         if (isMultiFile) {
