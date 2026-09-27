@@ -317,13 +317,10 @@ jobs:
       - name: Chromium, 60 times each
         run: npx playwright test parity/direct-transfer.spec.mjs --project=chromium --repeat-each=60
 
-      - name: Firefox, 10 times each
+      - name: Firefox, 30 times each
         if: ${{ !cancelled() }}
-        run: npx playwright test parity/direct-transfer.spec.mjs --project=firefox --repeat-each=10
+        run: npx playwright test parity/direct-transfer.spec.mjs --project=firefox --repeat-each=30
 
-      # WebKit's direct transfer tests are skipped in the suite, so this runs them anyway.
-      - name: WebKit, twice each
+      - name: WebKit, 20 times each
         if: ${{ !cancelled() }}
-        run: |
-          sed -i "s/browserName === 'webkit'/false/" parity/direct-transfer.spec.mjs
-          npx playwright test parity/direct-transfer.spec.mjs --project=webkit --repeat-each=2
+        run: npx playwright test parity/direct-transfer.spec.mjs --project=webkit --repeat-each=20
