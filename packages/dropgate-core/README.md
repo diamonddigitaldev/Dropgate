@@ -79,7 +79,7 @@ console.log('P2P enabled:', serverInfo.capabilities?.p2p?.enabled);
 
 ```javascript
 const session = await client.uploadFiles({
-  file: myFile, // File or Blob (implements FileSource)
+  files: myFile, // File or Blob (implements FileSource), or an array of them
   lifetimeMs: 3600000, // 1 hour
   maxDownloads: 5,
   encrypt: true,
@@ -94,6 +94,17 @@ console.log('Download URL:', result.downloadUrl);
 // Cancel an in-progress upload:
 // session.cancel('User cancelled');
 ```
+
+> **If you pass your own `signal`, `session.cancel()` doesn't stop the upload.** It tells the server to discard the upload, but the client keeps sending chunks. The server refuses them, and after the client has retried (about 30 seconds with the default retry settings), the upload ends with an error instead of a cancellation. `onCancel` isn't called. To cancel straight away, call `session.cancel()` first, so the server is told, and then abort your own signal:
+>
+> ```javascript
+> const controller = new AbortController();
+> const session = await client.uploadFiles({ files: myFile, lifetimeMs: 3600000, signal: controller.signal });
+>
+> // To cancel:
+> session.cancel();
+> controller.abort();
+> ```
 
 ### Fetching File/Bundle Metadata
 

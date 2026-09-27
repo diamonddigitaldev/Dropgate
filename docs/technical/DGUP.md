@@ -392,8 +392,8 @@ Streams the raw file bytes. For encrypted files, the client decrypts the stream 
 ### 11.3 Download Counting
 
 - For **single files**, the download count is incremented after the stream completes.
-- For **bundles**, the client calls `POST /api/bundle/<bundleId>/downloaded` once all member files have been retrieved.
-- When `downloadCount >= maxDownloads` (and `maxDownloads > 0`), the file or bundle is immediately deleted.
+- For **bundles**, the client calls `POST /api/bundle/<bundleId>/downloaded` after downloading every member file together, as the Web UI's **Download All as ZIP** does. Downloading member files one at a time never counts towards the bundle's limit: the server doesn't count member downloads of unsealed bundles, and the members of sealed bundles have no limit of their own.
+- When `downloadCount >= maxDownloads` (and `maxDownloads > 0`), the file or bundle is immediately deleted. For a **sealed** bundle, that means the manifest record only: its member files stay on disk, and can still be downloaded by file ID, until they expire.
 
 ---
 
@@ -406,6 +406,8 @@ Files and bundles are automatically deleted once their `expiresAt` timestamp is 
 ### 12.2 Zombie Upload Cleanup
 
 Incomplete upload sessions (where chunks are no longer arriving) are cleaned every **5 minutes** by default (configurable). Temporary files are deleted and storage reservations are released.
+
+**Known issue in 3.x:** when a bundle upload is cancelled or abandoned part-way, member files that had already finished uploading are not deleted from disk, although their database records are. Expiry can't find them, so they stay until the next restart in non-persistent mode, and indefinitely with `UPLOAD_PRESERVE_UPLOADS=true`.
 
 ### 12.3 Server Restart Behaviour
 

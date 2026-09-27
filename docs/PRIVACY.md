@@ -11,7 +11,7 @@ The current log level is also exposed to clients via `GET /api/info` so users ca
 ## ✅ What Dropgate does *not* log
 
 Dropgate is intentionally opinionated about avoiding identifying data.
-By design, it does **not** log:
+By design, Dropgate's own log messages **never** include:
 
 - File contents / Bundle manifests
 - File names
@@ -24,6 +24,11 @@ By design, it does **not** log:
 
 If you’re running a public instance, this is one of the key ways the project tries to reduce “paper trails”.
 
+**Two exceptions sit outside `LOG_LEVEL`.** They write to stderr at every level, including `NONE`:
+
+- **Unexpected errors.** Express prints the stack trace of any error Dropgate doesn't handle itself. A stack trace can include the internal path of a stored file, which contains its file ID, or a few characters of a malformed request body.
+- **Misconfigured reverse proxies.** If a proxy passes an invalid client address (for example `IP:port`), the rate limiter prints a one-time warning that includes it.
+
 ---
 
 ## 🧾 What Dropgate *may* log
@@ -31,7 +36,7 @@ If you’re running a public instance, this is one of the key ways the project t
 Depending on your `LOG_LEVEL`, you may see:
 
 - Startup configuration (feature flags, limits, and server name)
-- Storage usage summaries (useful for capacity limits)
+- Storage usage at startup (useful for capacity limits)
 - Rate limit warnings
 - Internal errors and exceptions (from Node.js / the OS)
 
@@ -39,6 +44,7 @@ At `DEBUG` level you may also see:
 
 - Upload/download lifecycle events (init/chunk/complete/download)
 - Chunk counts and chunk sizes
+- The number of files in a bundle
 - Cleanup of expired or incomplete uploads
 
 File sizes and capacity values may appear in logs because they’re necessary for understanding limits and diagnosing issues.
@@ -48,7 +54,8 @@ File sizes and capacity values may appear in logs because they’re necessary fo
 ## 📊 Log levels
 
 - **`NONE`**
-  - Disables all server logging
+  - Turns off all of Dropgate's own log messages
+  - Stack traces from unexpected errors still reach stderr (see the exceptions above)
 
 - **`ERROR`**
   - Startup/config failures
@@ -61,7 +68,8 @@ File sizes and capacity values may appear in logs because they’re necessary fo
 - **`INFO`**
   - Startup and configuration summary
   - Feature flags and size/retention limits
-  - Storage usage summaries
+  - Storage usage at startup
+  - Nothing per upload or download
 
 - **`DEBUG`**
   - Detailed transfer flow logs
@@ -74,4 +82,4 @@ File sizes and capacity values may appear in logs because they’re necessary fo
 
 - Run with **`LOG_LEVEL=INFO`** for normal use.
 - Temporarily switch to **`LOG_LEVEL=DEBUG`** when diagnosing an issue, then turn it back down.
-- If you’re extremely sensitive about logging, use **`LOG_LEVEL=NONE`**.
+- If you’re extremely sensitive about logging, use **`LOG_LEVEL=NONE`**, and don't keep the server's stderr (see the exceptions above).
