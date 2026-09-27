@@ -123,9 +123,10 @@ const consoleLogs = new WeakMap();
 /**
  * Keep a record of every RTCPeerConnection in a context: the ICE servers it had,
  * as the browser reports them, the candidates it found and was given, any ICE
- * errors, and how its states and data channels changed. Also keep each page's
- * console errors and warnings. Read the record with peerConnections(), or ask
- * whyNotConnected().
+ * errors, how its states and data channels changed, and which kinds of message
+ * each data channel sent and received (the kind only, never what's in them).
+ * Also keep each page's console errors and warnings. Read the record with
+ * peerConnections(), or ask whyNotConnected().
  * @param {import('@playwright/test').BrowserContext} context
  */
 export async function recordPeerConnections(context) {
@@ -146,10 +147,28 @@ export async function recordPeerConnections(context) {
             const [, , protocol, , address, port, , type] = sdp.split(' ');
             return { type, protocol: protocol?.toLowerCase(), address, port: Number(port) };
         };
-        const watch = (channel, note) => {
+        // Which Dropgate message a data channel message is, from its type field
+        // (PeerJS packs { t: 'meta' } as b1 't' b4 'meta'), and nothing else.
+        const types = ['hello', 'file_list', 'meta', 'ready', 'chunk_ack', 'chunk', 'file_end_ack', 'file_end',
+            'end_ack', 'end', 'ping', 'pong', 'error', 'cancelled', 'resume_ack', 'resume'];
+        const kindOf = (data) => {
+            if (!(data instanceof ArrayBuffer || ArrayBuffer.isView(data))) return typeof data;
+            const bytes = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
+            const head = String.fromCharCode(...bytes.subarray(0, 64));
+            return types.find((t) => head.includes(`\xb1t${String.fromCharCode(0xb0 + t.length)}${t}`)) ?? 'binary';
+        };
+        const watch = (channel, note, record) => {
             for (const event of ['open', 'close', 'error']) {
                 channel.addEventListener(event, () => note(`data channel ${channel.label} ${event}`));
             }
+            const messages = { label: channel.label, sent: [], received: [] };
+            record.channels.push(messages);
+            channel.addEventListener('message', (e) => messages.received.push(kindOf(e.data)));
+            const send = channel.send.bind(channel);
+            channel.send = (data) => {
+                messages.sent.push(kindOf(data));
+                return send(data);
+            };
         };
         window.RTCPeerConnection = class extends Native {
             #record = {
@@ -159,6 +178,7 @@ export async function recordPeerConnections(context) {
                 remoteCandidates: [],
                 errors: [],
                 events: [],
+                channels: [],
             };
             #note;
 
@@ -184,12 +204,12 @@ export async function recordPeerConnections(context) {
                 this.addEventListener('icecandidateerror', (e) => {
                     record.errors.push(`${e.errorCode} ${e.errorText} (${e.url})`);
                 });
-                this.addEventListener('datachannel', (e) => watch(e.channel, note));
+                this.addEventListener('datachannel', (e) => watch(e.channel, note, record));
             }
 
             createDataChannel(...args) {
                 const channel = super.createDataChannel(...args);
-                watch(channel, this.#note);
+                watch(channel, this.#note, this.#record);
                 return channel;
             }
 
@@ -214,9 +234,10 @@ export async function recordPeerConnections(context) {
 
 /**
  * @typedef {{ type: string, protocol: string, address: string, port: number }} Candidate
+ * @typedef {{ label: string, sent: string[], received: string[] }} ChannelMessages
  * @typedef {{
  *   started: boolean, iceServers: RTCIceServer[], candidates: Candidate[],
- *   remoteCandidates: Candidate[], errors: string[], events: string[],
+ *   remoteCandidates: Candidate[], errors: string[], events: string[], channels: ChannelMessages[],
  * }} PeerConnectionRecord
  */
 
@@ -233,7 +254,8 @@ const allPeerConnections = (page) => page.evaluate(() => /** @type {any} */ (win
 /**
  * Why two pages' peers didn't connect, as far as each page can tell: what the
  * page says, what each peer connection found and was given, how its states
- * changed, and the page's console errors. For a failed test's message.
+ * changed, what its data channels carried, and the page's console errors. For a
+ * failed test's message.
  * @param {Record<string, import('@playwright/test').Page>} pages - Each page, by what to call it.
  */
 export async function whyNotConnected(pages) {
@@ -247,13 +269,27 @@ export async function whyNotConnected(pages) {
         }
         return [...counts].map(([key, n]) => (n > 1 ? `${key} (×${n})` : key)).join(', ') || 'none';
     };
+    // Runs of the same kind of message, in order: "hello, meta, chunk ×3".
+    const runs = (kinds) => {
+        const out = [];
+        for (const kind of kinds) {
+            const last = out.at(-1);
+            if (last?.kind === kind) last.n++;
+            else out.push({ kind, n: 1 });
+        }
+        return out.map(({ kind, n }) => (n > 1 ? `${kind} ×${n}` : kind)).join(', ') || 'nothing';
+    };
     for (const [name, page] of Object.entries(pages)) {
         try {
             lines.push(`${name}, at ${new URL(page.url()).pathname}:`);
-            const says = await page.evaluate(() => [...document.querySelectorAll('h5')]
-                .filter((h) => h.checkVisibility())
-                .map((h) => [h, h.nextElementSibling].map((el) => el?.textContent.trim()).filter(Boolean).join(' / ')));
-            lines.push(`  the page says: ${says.map((s) => `"${s}"`).join(', ') || 'nothing'}`);
+            // Each card's heading and the line under it, including cards a later step hid.
+            const cards = await page.evaluate(() => [...document.querySelectorAll('.card h5')].map((h) => ({
+                text: [h, h.nextElementSibling].map((el) => el?.textContent.trim()).filter(Boolean).join(' / '),
+                shown: h.checkVisibility(),
+            })));
+            const quote = (list) => list.map((c) => `"${c.text}"`).join(', ') || 'nothing';
+            lines.push(`  the page says: ${quote(cards.filter((c) => c.shown))}`);
+            lines.push(`  and in hidden cards: ${quote(cards.filter((c) => !c.shown))}`);
             const pcs = await allPeerConnections(page);
             if (!pcs) lines.push('  it has no RTCPeerConnection');
             for (const [i, pc] of (pcs ?? []).entries()) {
@@ -267,6 +303,9 @@ export async function whyNotConnected(pages) {
                 lines.push(`    the other peer's candidates: ${list(pc.remoteCandidates)}`);
                 if (pc.errors.length) lines.push(`    ICE errors: ${pc.errors.join('; ')}`);
                 lines.push(`    what happened: ${pc.events.join(', ') || 'nothing'}`);
+                for (const ch of pc.channels) {
+                    lines.push(`    data channel ${ch.label} sent: ${runs(ch.sent)}; received: ${runs(ch.received)}`);
+                }
             }
             const logged = consoleLogs.get(page) ?? [];
             if (logged.length) lines.push(`  console: ${logged.slice(-10).join(' | ')}`);
