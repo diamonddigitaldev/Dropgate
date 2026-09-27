@@ -92,8 +92,8 @@ export class DesktopApp {
         return child.exitCode === null && child.signalCode === null;
     }
 
-    /** Wait for the app to quit by itself, and return its exit code. */
-    async exited(timeout = 60_000) {
+    /** Wait for the app to quit by itself, and return its exit code. The wait ends well inside a test's time, so a hang says what the app did. */
+    async exited(timeout = 30_000) {
         try {
             return await exitOf(this.app.process(), timeout, 'The desktop app');
         } catch (err) {
@@ -203,7 +203,12 @@ class Desktop {
             env: appEnv(),
             stdio: 'ignore',
         });
-        return exitOf(child, 30_000, 'The second launch of the desktop app');
+        try {
+            return await exitOf(child, 30_000, 'The second launch of the desktop app');
+        } catch (err) {
+            child.kill();
+            throw err;
+        }
     }
 
     /**

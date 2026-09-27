@@ -91,7 +91,7 @@ test.describe('on a server with HTTPS', () => {
         await receive(page, desktop, link, file, { encrypted: true });
     });
 
-    test('Share with Dropgate while the app is open hands the file to the open app, which uploads it and shows its link', async ({ desktop, secrets, page }) => {
+    test('Share with Dropgate while the app is open hands the file to the open app, which uploads it and shows its link', async ({ desktop, server, secrets, page }) => {
         const file = madeUpFile('Minutes of the meeting.bin', SIZE, 22);
         secrets.addFiles([file]);
         const app = await desktop.launch();
@@ -106,6 +106,8 @@ test.describe('on a server with HTTPS', () => {
         await expect(window.locator('#download-link'), 'the link the open app shows').toHaveValue(link);
         secrets.addLink(link);
         expect(app.running, 'whether the app is still open').toBe(true);
+        expect(uploadsStarted(server).map(({ isEncrypted, lifetime }) => ({ isEncrypted, lifetime })),
+            'the upload the server was asked to start').toEqual([{ isEncrypted: true, lifetime: THIRTY_MINUTES }]);
 
         await receive(page, desktop, link, file, { encrypted: true });
     });
