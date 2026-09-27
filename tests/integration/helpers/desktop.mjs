@@ -299,6 +299,22 @@ class Desktop {
         for (const run of this.runs) await run.quit().catch(() => {});
     }
 
+    /** The app's requests that failed or never finished, as Playwright saw them, for report(). */
+    appRequests() {
+        const ms = (at) => `+${Math.round(at - this.started)} ms`;
+        const lines = [];
+        for (const [i, run] of this.runs.entries()) {
+            for (const { request, began, at, error } of run.failed) {
+                lines.push({ began, text: `${request.method()} ${request.url()} (run ${i + 1}): failed at ${ms(at)}, after ${at - began} ms (${error})${phases(request, ms)}` });
+            }
+            for (const [request, began] of run.unfinished) {
+                lines.push({ began, text: `${request.method()} ${request.url()} (run ${i + 1}): neither finished nor failed` });
+            }
+        }
+        lines.sort((a, b) => a.began - b.began);
+        return lines.map(({ began, text }) => `  ${ms(began)}  ${text}`).join('\n') || '  none';
+    }
+
     /**
      * What a run's network stack did, from its net log, for the test's addresses.
      * @param {DesktopApp} run
@@ -315,8 +331,13 @@ class Desktop {
      * finished, what each run's network stack did, what each run of the app wrote
      * down, and the end of its debug.log. Methods, URLs, statuses, sizes and times
      * only: never a header or a body.
+     *
+     * Chromium writes its net log in batches, and finishes it when the app quits,
+     * so the fixture closes the app before asking for this. Closing it ends the
+     * requests still going, so what Playwright saw of them is taken first.
+     * @param {string} appRequests - appRequests(), from before the app was closed.
      */
-    report() {
+    report(appRequests) {
         const ms = (at) => `+${Math.round(at - this.started)} ms`;
         const section = (heading, describe) => {
             let body;
@@ -345,19 +366,7 @@ class Desktop {
             return `  ${ms(at)}  ${method} ${url} from ${from}${size}: ${what}`;
         }).join('\n') || '  nothing'));
 
-        sections.push(section("The app's requests that failed or never finished:", () => {
-            const lines = [];
-            for (const [i, run] of this.runs.entries()) {
-                for (const { request, began, at, error } of run.failed) {
-                    lines.push({ began, text: `${request.method()} ${request.url()} (run ${i + 1}): failed at ${ms(at)}, after ${at - began} ms (${error})${phases(request, ms)}` });
-                }
-                for (const [request, began] of run.unfinished) {
-                    lines.push({ began, text: `${request.method()} ${request.url()} (run ${i + 1}): neither finished nor failed` });
-                }
-            }
-            lines.sort((a, b) => a.began - b.began);
-            return lines.map(({ began, text }) => `  ${ms(began)}  ${text}`).join('\n') || '  none';
-        }));
+        sections.push(`The app's requests that failed or never finished:\n${appRequests}`);
 
         for (const [i, run] of this.runs.entries()) {
             sections.push(section(`What run ${i + 1}'s network stack did (its net log):`, () => this.netLogOf(run)));
@@ -433,15 +442,20 @@ export const test = base.extend({
         try {
             await use(desktop);
             expect.soft(desktop.elsewhere, "requests the desktop app made that weren't to the test's server").toEqual([]);
+            const unexpected = testInfo.status !== testInfo.expectedStatus;
             // With DROPGATE_TEST_NETLOG_PRINT=1, every test prints its runs' net logs, passed or not.
-            if (process.env.DROPGATE_TEST_NETLOG_PRINT === '1') {
-                const logs = desktop.runs.map((run, i) => `run ${i + 1}:\n${desktop.netLogOf(run)}`).join('\n');
-                console.log(`Net logs of "${testInfo.title}" (${testInfo.status}):\n${logs}`);
-            }
-            if (testInfo.status !== testInfo.expectedStatus) {
+            const print = process.env.DROPGATE_TEST_NETLOG_PRINT === '1';
+            if (unexpected || print) {
+                const appRequests = desktop.appRequests();
+                // Quitting finishes each run's net log. A hung app gets 10 s, then the report goes on without it.
+                await Promise.race([desktop.close(), sleep(10_000)]);
+                if (print) {
+                    const logs = desktop.runs.map((run, i) => `run ${i + 1}:\n${desktop.netLogOf(run)}`).join('\n');
+                    console.log(`Net logs of "${testInfo.title}" (${testInfo.status}):\n${logs}`);
+                }
                 // A test.fail() test that passed: failing it now would count as the failure it expects, and hide the pass.
-                if (testInfo.expectedStatus === 'failed') console.error(`"${testInfo.title}" passed, though it's expected to fail.\n\n${desktop.report()}`);
-                else throw new Error(desktop.report());
+                if (unexpected && testInfo.expectedStatus === 'failed') console.error(`"${testInfo.title}" passed, though it's expected to fail.\n\n${desktop.report(appRequests)}`);
+                else if (unexpected) throw new Error(desktop.report(appRequests));
             }
         } finally {
             await desktop.close();

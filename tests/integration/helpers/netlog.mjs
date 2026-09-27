@@ -47,6 +47,9 @@ export function describeNetLog(file, since, origins) {
     const offset = Number(constants.timeTickOffset);
     const ms = (e) => `+${Math.round(Number(e.time) + offset - since)} ms`;
     const took = (a, b) => `${Number(b.time) - Number(a.time)} ms`;
+    const phaseOf = (e) => ({ [constants.logEventPhase.PHASE_BEGIN]: 'began', [constants.logEventPhase.PHASE_END]: 'ended' })[e.phase] ?? 'logged';
+    /** Where something that never finished got to: the last thing logged for it. */
+    const lastStep = (e) => `its last step, ${type(e)}, ${phaseOf(e)} at ${ms(e)}`;
 
     const sources = new Map();
     for (const e of events) {
@@ -81,16 +84,18 @@ export function describeNetLog(file, since, origins) {
             }
         }
         steps.sort((x, y) => x.t - y.t);
-        const whole = e ? `took ${took(b, e)}` : 'still running';
-        lines.push({ at: b, text: `proxy auto-detection ${whole}: ${steps.map((s) => s.text).join('; ') || 'no steps'}` });
+        const whole = e ? `took ${took(b, e)}` : `still going (${lastStep(list.at(-1))})`;
+        lines.push({ at: b, text: `looking for a proxy script ${whole}: ${steps.map((s) => s.text).join('; ') || 'no steps'}` });
     }
 
-    // Each request to the test's addresses, with the stream job it was bound to (where the proxy is decided).
+    // Each request to the test's addresses, whatever its scheme (v3 retries https:// as http://),
+    // with the stream job it was bound to, which is where the proxy is decided.
+    const hosts = new Set(origins.map((origin) => new URL(origin).host));
     const controllers = [...sources.values()].filter((s) => s.kind === 'HTTP_STREAM_JOB_CONTROLLER');
     for (const [id, { kind, events: list }] of sources) {
         if (kind !== 'URL_REQUEST') continue;
         const url = list.find((e) => e.params?.url)?.params.url;
-        if (!url || !origins.some((origin) => url.startsWith(origin))) continue;
+        if (!url || !hosts.has(new URL(url).host)) continue;
         const alive = span(list, 'REQUEST_ALIVE');
         if (!alive.b) continue;
         const parts = [];
@@ -103,12 +108,13 @@ export function describeNetLog(file, since, origins) {
         if (send.b) parts.push(`sent at ${ms(send.b)}`);
         const headers = span(list, 'HTTP_TRANSACTION_READ_HEADERS');
         if (headers.e) parts.push(`answer's headers at ${ms(headers.e)}`);
-        if (alive.e) {
-            const error = alive.e.params?.net_error;
-            parts.push(error ? `ended at ${ms(alive.e)} with ${errorName(error)}` : `done at ${ms(alive.e)}`);
-        } else {
-            parts.push('not ended');
-        }
+        // A request its page gave up on is cancelled; one that failed ends with an error.
+        const cancelled = list.findIndex((e) => type(e) === 'CANCELLED');
+        const error = [...list].reverse().find((e) => e.params?.net_error < 0)?.params.net_error;
+        if (cancelled > 0) parts.push(`cancelled at ${ms(list[cancelled])}, ${lastStep(list[cancelled - 1])}`);
+        else if (alive.e && error) parts.push(`ended at ${ms(alive.e)} with ${errorName(error)}`);
+        else if (alive.e) parts.push(`done at ${ms(alive.e)}`);
+        else parts.push(`not ended, ${lastStep(list.at(-1))}`);
         const method = list.find((e) => e.params?.method)?.params.method ?? '';
         lines.push({ at: alive.b, text: `${method} ${url}: ${parts.join(', ')}`.trim() });
     }
