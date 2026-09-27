@@ -26,7 +26,7 @@ describe('Copies of the build', () => {
       // Compared as a boolean, so a failure names the file instead of printing both.
       expect(
         actual === expected,
-        `${path} isn't this build: run npm run build in packages/dropgate-core and commit it`,
+        `${path} isn't the build in dist/: run npm run build in packages/dropgate-core, and commit the copy if it changes`,
       ).toBe(true);
     });
   }
