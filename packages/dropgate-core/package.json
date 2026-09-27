@@ -34,7 +34,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/copy-build.mjs",
     "dev": "tsup --watch",
     "test": "vitest",
     "test:coverage": "vitest --coverage",

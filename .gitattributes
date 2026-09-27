@@ -1,0 +1,4 @@
+# Core's build, written by `npm run build` in packages/dropgate-core. Marked as
+# generated, so GitHub collapses them in diffs.
+server/public/js/dropgate-core.js linguist-generated=true
+client/src/dropgate-core.js linguist-generated=true

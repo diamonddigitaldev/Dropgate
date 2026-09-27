@@ -1,0 +1,33 @@
+import { describe, it, expect } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
+import { copyContents } from '../scripts/copy-contents.mjs';
+
+// The web UI and the desktop app load this package's ESM build as their own
+// dropgate-core.js, which `npm run build` writes. CI builds before it tests, so
+// these fail if a copy was edited by hand, or not built again after a change to
+// core. The copies are listed here as well as in scripts/copy-build.mjs, so a
+// copy the script stops writing is still checked.
+
+const ROOT = new URL('../../../', import.meta.url);
+const BUILD = new URL('../dist/index.js', import.meta.url);
+
+const COPIES = [
+  { name: "the web UI's copy", path: 'server/public/js/dropgate-core.js' },
+  { name: "the desktop app's copy", path: 'client/src/dropgate-core.js' },
+];
+
+describe('Copies of the build', () => {
+  for (const { name, path } of COPIES) {
+    it(`${name} is this build`, () => {
+      expect(existsSync(BUILD), 'dist/index.js is missing: run npm run build first').toBe(true);
+      const expected = copyContents(readFileSync(BUILD, 'utf8'));
+      // Git may check a copy out with CRLF line endings, which is still the same file.
+      const actual = readFileSync(new URL(path, ROOT), 'utf8').replace(/\r\n/g, '\n');
+      // Compared as a boolean, so a failure names the file instead of printing both.
+      expect(
+        actual === expected,
+        `${path} isn't this build: run npm run build in packages/dropgate-core and commit it`,
+      ).toBe(true);
+    });
+  }
+});
