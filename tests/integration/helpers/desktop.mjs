@@ -14,6 +14,10 @@
 // A browser context watches the app's own requests too, and the test fails if
 // any goes anywhere but the test's server. The app checks for updates only when
 // it's packaged, so running it from source sends nothing to GitHub.
+//
+// When a desktop test doesn't go as expected, its failure says what the test saw
+// (Desktop.report()): what the TLS proxy saw, what reached the server, the app's
+// requests that failed or never finished, and what each run of the app wrote down.
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
@@ -54,17 +58,39 @@ async function exitOf(child, timeout, what) {
     return child.exitCode;
 }
 
+/** Whether a request is to a server, rather than for one of the app's own files. */
+const toServer = (url) => /^(https?|wss?):$/.test(new URL(url).protocol);
+
 /** One run of the app. */
 export class DesktopApp {
     /**
+     * The app's requests to servers that haven't finished or failed yet, with when each began.
+     * @type {Map<import('@playwright/test').Request, number>}
+     */
+    unfinished = new Map();
+    /**
+     * The app's requests to servers that failed: when each began and failed, and why.
+     * @type {{ request: import('@playwright/test').Request, began: number, at: number, error: string }[]}
+     */
+    failed = [];
+
+    /**
      * @param {import('@playwright/test').ElectronApplication} app
      * @param {string} eventsFile
-     * @param {Desktop} desktop
      */
-    constructor(app, eventsFile, desktop) {
+    constructor(app, eventsFile) {
         this.app = app;
         this.eventsFile = eventsFile;
-        this.desktop = desktop;
+        const context = app.context();
+        context.on('request', (request) => {
+            if (toServer(request.url())) this.unfinished.set(request, Date.now());
+        });
+        context.on('requestfinished', (request) => this.unfinished.delete(request));
+        context.on('requestfailed', (request) => {
+            if (!this.unfinished.has(request)) return;
+            this.failed.push({ request, began: this.unfinished.get(request), at: Date.now(), error: request.failure()?.errorText ?? 'no reason given' });
+            this.unfinished.delete(request);
+        });
     }
 
     /**
@@ -101,27 +127,14 @@ export class DesktopApp {
         return child.exitCode === null && child.signalCode === null;
     }
 
-    /** Wait for the app to quit by itself, and return its exit code. The wait ends well inside a test's time, so a hang says what the app did. */
-    async exited(timeout = 30_000) {
-        try {
-            return await exitOf(this.app.process(), timeout, 'The desktop app');
-        } catch (err) {
-            err.message += `\n\n${this.describe()}`;
-            throw err;
-        }
+    /** Wait for the app to quit by itself, and return its exit code. The wait ends well inside a test's time, so a hang gets its report. */
+    exited(timeout = 30_000) {
+        return exitOf(this.app.process(), timeout, 'The desktop app');
     }
 
     /** Quit, as Exit in the app's menu does. */
     async quit() {
         if (this.running) await this.app.close();
-    }
-
-    /** What the app wrote down and logged, for a failure message. */
-    describe() {
-        const events = this.events().map((e) => `  ${JSON.stringify(e)}`).join('\n') || '  (none)';
-        const log = path.join(this.desktop.profile, 'debug.log');
-        const debug = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').slice(-40).join('\n') : '(none)';
-        return `What the app did:\n${events}\n\nThe end of its debug.log:\n${debug}`;
     }
 }
 
@@ -134,13 +147,15 @@ class Desktop {
 
     /**
      * @param {object} opts
+     * @param {number} opts.started - When the test started, in ms since 1970: the report's times are from here.
      * @param {string} opts.root - A temporary folder for the profile, the files and the events.
-     * @param {{ baseUrl: string }} opts.server
-     * @param {{ url: string } | null} opts.proxy - The TLS proxy in front of the server, if there is one.
+     * @param {{ baseUrl: string, requests: () => any[] }} opts.server
+     * @param {{ url: string, describe: (since: number) => string } | null} opts.proxy - The TLS proxy in front of the server, if there is one.
      * @param {import('./privacy.mjs').Secrets} opts.secrets
      * @param {boolean} opts.real - Whether the clipboard and notifications are real.
      */
-    constructor({ root, server, proxy, secrets, real }) {
+    constructor({ started, root, server, proxy, secrets, real }) {
+        this.started = started;
         this.root = root;
         this.server = server;
         this.proxy = proxy;
@@ -181,10 +196,9 @@ class Desktop {
         });
         const allowed = new Set([new URL(this.server.baseUrl).origin, ...(this.proxy ? [this.proxy.url] : [])]);
         app.context().on('request', (request) => {
-            const { protocol, origin } = new URL(request.url());
-            if (/^(https?|wss?):$/.test(protocol) && !allowed.has(origin)) this.elsewhere.push(request.url());
+            if (toServer(request.url()) && !allowed.has(new URL(request.url()).origin)) this.elsewhere.push(request.url());
         });
-        const run = new DesktopApp(app, eventsFile, this);
+        const run = new DesktopApp(app, eventsFile);
         this.runs.push(run);
         return run;
     }
@@ -279,6 +293,88 @@ class Desktop {
     async close() {
         for (const run of this.runs) await run.quit().catch(() => {});
     }
+
+    /**
+     * What the test saw, for the message of a test that didn't go as expected,
+     * with times in ms from the test's start: what the TLS proxy saw, what reached
+     * the server and what it answered, the app's requests that failed or never
+     * finished, what each run of the app wrote down, and the end of its debug.log.
+     * Methods, URLs, statuses, sizes and times only: never a header or a body.
+     */
+    report() {
+        const ms = (at) => `+${Math.round(at - this.started)} ms`;
+        const section = (heading, describe) => {
+            let body;
+            try {
+                body = describe();
+            } catch (err) {
+                body = `  (couldn't look: ${err.message.split('\n')[0]})`;
+            }
+            return `${heading}\n${body}`;
+        };
+        const sections = ['What the desktop test saw, in ms from its start.'];
+
+        if (this.proxy) {
+            sections.push(section(`What the TLS proxy at ${this.proxy.url} saw:`, () => this.proxy.describe(this.started)));
+        }
+
+        sections.push(section('What reached the server:', () => this.server.requests().map(({ at, method, url, headers, body, answer }) => {
+            const from = /\bElectron\//.test(headers['user-agent'] ?? '') ? 'the app' : 'the browser';
+            const size = body.length ? `, ${body.length} bytes of body` : '';
+            let what;
+            if (headers.upgrade) what = `a ${headers.upgrade} upgrade`;
+            else if (!answer) what = 'no answer yet';
+            else if (answer.finished) what = `answered ${answer.status} at ${ms(answer.at)}`;
+            else if (answer.status) what = `the connection closed at ${ms(answer.at)}, before its ${answer.status} answer was sent in full`;
+            else what = `the connection closed at ${ms(answer.at)}, before the server answered`;
+            return `  ${ms(at)}  ${method} ${url} from ${from}${size}: ${what}`;
+        }).join('\n') || '  nothing'));
+
+        sections.push(section("The app's requests that failed or never finished:", () => {
+            const lines = [];
+            for (const [i, run] of this.runs.entries()) {
+                for (const { request, began, at, error } of run.failed) {
+                    lines.push({ began, text: `${request.method()} ${request.url()} (run ${i + 1}): failed at ${ms(at)}, after ${at - began} ms (${error})${phases(request, ms)}` });
+                }
+                for (const [request, began] of run.unfinished) {
+                    lines.push({ began, text: `${request.method()} ${request.url()} (run ${i + 1}): neither finished nor failed` });
+                }
+            }
+            lines.sort((a, b) => a.began - b.began);
+            return lines.map(({ began, text }) => `  ${ms(began)}  ${text}`).join('\n') || '  none';
+        }));
+
+        for (const [i, run] of this.runs.entries()) {
+            sections.push(section(`What run ${i + 1} of the app wrote down:`, () => run.events()
+                .map(({ at, event, ...rest }) => `  ${ms(at)}  ${event} ${JSON.stringify(rest)}`).join('\n') || '  nothing'));
+        }
+
+        sections.push(section("The end of the app's debug.log:", () => {
+            const log = path.join(this.profile, 'debug.log');
+            if (!fs.existsSync(log)) return '  (none)';
+            return fs.readFileSync(log, 'utf8').trim().split(/\r?\n/).slice(-40).map((line) => `  ${line}`).join('\n');
+        }));
+
+        return sections.join('\n\n');
+    }
+}
+
+/**
+ * How far a request got, as the browser tells it, for the report. The browser
+ * only gives this for a request that got some answer, so it's often nothing.
+ * @param {import('@playwright/test').Request} request
+ * @param {(at: number) => string} ms
+ */
+function phases(request, ms) {
+    const { startTime, connectStart, secureConnectionStart, connectEnd, requestStart, responseStart } = request.timing();
+    const at = (offset) => ms(startTime + offset);
+    const steps = [];
+    if (connectStart >= 0) steps.push(`began connecting at ${at(connectStart)}`);
+    if (secureConnectionStart >= 0) steps.push(`began TLS at ${at(secureConnectionStart)}`);
+    if (connectEnd >= 0) steps.push(`was connected by ${at(connectEnd)}`);
+    if (requestStart >= 0) steps.push(`sent the request at ${at(requestStart)}`);
+    if (responseStart >= 0) steps.push(`had the answer's first byte at ${at(responseStart)}`);
+    return steps.length ? `; it ${steps.join(', ')}` : '';
 }
 
 /**
@@ -306,6 +402,7 @@ export const test = base.extend({
     tlsProxy: [false, { option: true }],
 
     desktop: async ({ server, secrets, tlsProxy }, use, testInfo) => {
+        const started = Date.now();
         const real = realClipboard();
         // The clipboard is shared by everything on the machine, so two tests using it at once would mix up their links.
         if (real && testInfo.config.workers > 1) {
@@ -313,10 +410,15 @@ export const test = base.extend({
         }
         const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-desktop-test-'));
         const proxy = tlsProxy ? await startTlsProxy(server.baseUrl) : null;
-        const desktop = new Desktop({ root, server, proxy, secrets, real });
+        const desktop = new Desktop({ started, root, server, proxy, secrets, real });
         try {
             await use(desktop);
-            expect(desktop.elsewhere, "requests the desktop app made that weren't to the test's server").toEqual([]);
+            expect.soft(desktop.elsewhere, "requests the desktop app made that weren't to the test's server").toEqual([]);
+            if (testInfo.status !== testInfo.expectedStatus) {
+                // A test.fail() test that passed: failing it now would count as the failure it expects, and hide the pass.
+                if (testInfo.expectedStatus === 'failed') console.error(`"${testInfo.title}" passed, though it's expected to fail.\n\n${desktop.report()}`);
+                else throw new Error(desktop.report());
+            }
         } finally {
             await desktop.close();
             await proxy?.stop();

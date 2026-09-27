@@ -70,26 +70,111 @@ export function selfSignedCertificate() {
 
 /**
  * Start a TLS proxy in front of a server on this machine.
+ *
+ * It keeps a record of what it saw, for a failed test's message (describe()):
+ * each connection, when its TLS was set up or why it failed, and when it closed;
+ * and each request, when it arrived, when it was passed on in full, when the
+ * server answered and with what status, and when the answer was sent in full or
+ * the connection closed first. Methods, paths, sizes and times only: never a
+ * header or a body.
  * @param {string} target - The server's base URL, http://127.0.0.1:<port>.
- * @returns {Promise<{ url: string, stop: () => Promise<void> }>}
+ * @returns {Promise<{ url: string, describe: (since: number) => string, stop: () => Promise<void> }>}
  */
 export async function startTlsProxy(target) {
     const { hostname, port } = new URL(target);
+    /** @type {{ n: number, port: number, at: number, tls?: { at: number, protocol: string }, tlsError?: { at: number, message: string }, closed?: number }[]} */
+    const connections = [];
+    const requests = [];
+    // A connection is known by the app's end of it: its port on 127.0.0.1.
+    const byPort = new Map();
+    const sockets = new Set();
+    const connectionOf = (socket) => byPort.get(socket?.remotePort);
+    // OpenSSL's messages run to several lines; its reason is the part that says what went wrong.
+    const why = (err) => [err.code, err.reason ?? err.message.trim().split('\n')[0]].filter(Boolean).join(': ');
+
     const proxy = https.createServer(selfSignedCertificate(), (req, res) => {
+        const seen = { connection: connectionOf(req.socket)?.n, method: req.method, url: req.url, at: Date.now(), bytesIn: 0, bytesOut: 0 };
+        requests.push(seen);
+        req.on('data', (chunk) => { seen.bytesIn += chunk.length; });
+        req.on('end', () => { seen.receivedAll = Date.now(); });
+
         const headers = { ...req.headers, 'x-forwarded-proto': 'https' };
         const toServer = http.request({ hostname, port, method: req.method, path: req.url, headers }, (fromServer) => {
+            seen.answered = { at: Date.now(), status: fromServer.statusCode };
             res.writeHead(fromServer.statusCode, fromServer.headers);
+            fromServer.on('data', (chunk) => { seen.bytesOut += chunk.length; });
             fromServer.pipe(res);
         });
-        toServer.on('error', () => res.destroy());
+        toServer.on('finish', () => { seen.passedOn = Date.now(); });
+        toServer.on('error', (err) => {
+            seen.error = { at: Date.now(), message: why(err) };
+            res.destroy();
+        });
+        res.on('close', () => { seen.closed = { at: Date.now(), finished: res.writableFinished }; });
         req.pipe(toServer);
+    });
+    proxy.on('connection', (socket) => {
+        const connection = { n: connections.length + 1, port: socket.remotePort, at: Date.now() };
+        connections.push(connection);
+        byPort.set(socket.remotePort, connection);
+        sockets.add(socket);
+        socket.on('close', () => {
+            connection.closed = Date.now();
+            sockets.delete(socket);
+        });
+    });
+    proxy.on('secureConnection', (socket) => {
+        const connection = connectionOf(socket);
+        if (connection) connection.tls = { at: Date.now(), protocol: socket.getProtocol() };
+    });
+    proxy.on('tlsClientError', (err, socket) => {
+        const connection = connectionOf(socket) ?? connectionOf(socket?._parent);
+        const tlsError = { at: Date.now(), message: why(err) };
+        if (connection) connection.tlsError = tlsError;
+        else connections.push({ n: connections.length + 1, port: NaN, at: tlsError.at, tlsError });
     });
     proxy.listen(0, '127.0.0.1');
     await once(proxy, 'listening');
+    const url = `https://127.0.0.1:${proxy.address().port}`;
 
     return {
-        url: `https://127.0.0.1:${proxy.address().port}`,
+        url,
+        /**
+         * What the proxy saw, one line per connection and one per request, in the
+         * order they began, with times in ms from `since`.
+         * @param {number} since - A time in ms since 1970.
+         */
+        describe: (since) => {
+            const ms = (at) => `+${at - since} ms`;
+            const lines = [];
+            for (const c of connections) {
+                const what = [];
+                if (c.tls) what.push(`TLS set up at ${ms(c.tls.at)} (${c.tls.protocol})`);
+                if (c.tlsError) what.push(`TLS failed at ${ms(c.tlsError.at)} (${c.tlsError.message})`);
+                if (!c.tls && !c.tlsError) what.push('no TLS set up');
+                what.push(c.closed ? `closed at ${ms(c.closed)}` : 'still open');
+                const from = Number.isNaN(c.port) ? 'from an unknown port' : `from port ${c.port}`;
+                lines.push({ at: c.at, text: `connection ${c.n} opened, ${from}: ${what.join(', ')}` });
+            }
+            for (const r of requests) {
+                const what = [];
+                if (r.bytesIn) what.push(`${r.bytesIn} bytes of body`);
+                what.push(r.receivedAll ? `all of it received at ${ms(r.receivedAll)}` : 'not all of it received');
+                what.push(r.passedOn ? `passed on at ${ms(r.passedOn)}` : 'not passed on in full');
+                if (r.error) what.push(`couldn't reach the server at ${ms(r.error.at)} (${r.error.message})`);
+                what.push(r.answered ? `the server answered ${r.answered.status} at ${ms(r.answered.at)}` : 'no answer from the server');
+                if (r.closed?.finished) what.push(`${r.bytesOut} bytes sent to the app by ${ms(r.closed.at)}`);
+                else if (r.closed) what.push(`the connection closed at ${ms(r.closed.at)}, after ${r.bytesOut} bytes of the answer`);
+                else what.push(`${r.bytesOut} bytes of the answer sent so far`);
+                lines.push({ at: r.at, text: `${r.method} ${r.url} on connection ${r.connection ?? '?'}: ${what.join(', ')}` });
+            }
+            lines.sort((a, b) => a.at - b.at);
+            return lines.map(({ at, text }) => `  ${ms(at)}  ${text}`).join('\n') || '  nothing: no connection was opened';
+        },
         stop: async () => {
+            // closeAllConnections() only closes connections that got as far as HTTP.
+            // One whose TLS never finished would keep close() waiting for good.
+            for (const socket of sockets) socket.destroy();
             proxy.closeAllConnections();
             proxy.close();
             await once(proxy, 'close');
