@@ -2,7 +2,9 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    environment: 'happy-dom',
+    // Plain Node, with no browser environment. The web UI and the desktop app are
+    // tested in real browsers and Electron by the integration tests.
+    environment: 'node',
     globals: true,
     coverage: {
       provider: 'v8',
