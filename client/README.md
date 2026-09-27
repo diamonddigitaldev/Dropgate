@@ -88,6 +88,8 @@ npm ci
 npm start
 ```
 
+The app runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`src/dropgate-core.js`](src/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the app runs and packages without building core first. Don't edit it: change core's source and build it again ([Building and Testing](../packages/dropgate-core/README.md#building-and-testing)). GitHub Actions fails if it isn't core's build.
+
 
 ## Building
 
@@ -99,7 +101,7 @@ npm run build
 
 Distributable binaries will appear in the `dist` folder: the NSIS installer on Windows, or an AppImage, a `.deb` and a `.rpm` on Linux. The `.rpm` needs `rpmbuild`, from the `rpm` package on Debian and Ubuntu, or `rpm-build` on Fedora.
 
-GitHub Actions builds all four packages ([`ci.yml`](../.github/workflows/ci.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the tests aren't packaged into the app, and doesn't publish or upload anything.
+GitHub Actions builds all four packages ([`ci.yml`](../.github/workflows/ci.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the tests aren't packaged into the app and that the app carries core's build as it is, and doesn't publish or upload anything.
 
 
 ## Running the Tests

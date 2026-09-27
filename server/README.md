@@ -108,6 +108,11 @@ GitHub Actions runs the tests this way on Ubuntu and Windows ([`ci.yml`](../.git
 The Web UI is tested in real browsers by the [integration tests](../tests/integration/README.md), which start the server with the same harness.
 
 
+## The Web UI's Core Library
+
+The Web UI runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`public/js/dropgate-core.js`](public/js/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the server and its Docker image don't need core built first. Don't edit it: change core's source and build it again ([Building and Testing](../packages/dropgate-core/README.md#building-and-testing)). GitHub Actions fails if it isn't core's build.
+
+
 ## Running with Docker
 
 ```bash
