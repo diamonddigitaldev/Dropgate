@@ -126,7 +126,7 @@ test.describe('on a server without HTTPS', () => {
         const app = await desktop.share(shared);
         const window = await app.window();
         await expect(window.locator('#insecure-upload-modal')).toBeVisible();
-        expect(app.eventsOf('window-shown'), 'windows shown for the warning').toHaveLength(1);
+        await expect.poll(() => app.eventsOf('window-shown').length, { message: 'windows shown for the warning' }).toBe(1);
         await window.locator('#confirm-insecure-upload').click();
         expect(await app.exited(), "the app's exit code").toBe(0);
 
