@@ -17,7 +17,8 @@
 //
 // When a desktop test doesn't go as expected, its failure says what the test saw
 // (Desktop.report()): what the TLS proxy saw, what reached the server, the app's
-// requests that failed or never finished, and what each run of the app wrote down.
+// requests that failed or never finished, what each run's network stack did (its
+// net log, netlog.mjs), and what each run of the app wrote down.
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
@@ -28,6 +29,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from '@playwright/test';
 import { expect, test as base } from './test.mjs';
+import { describeNetLog } from './netlog.mjs';
 import { startTlsProxy } from './tls.mjs';
 
 export { expect };
@@ -77,10 +79,12 @@ export class DesktopApp {
     /**
      * @param {import('@playwright/test').ElectronApplication} app
      * @param {string} eventsFile
+     * @param {string} netLog - Where this run's network stack writes its net log (netlog.mjs).
      */
-    constructor(app, eventsFile) {
+    constructor(app, eventsFile, netLog) {
         this.app = app;
         this.eventsFile = eventsFile;
+        this.netLog = netLog;
         const context = app.context();
         context.on('request', (request) => {
             if (toServer(request.url())) this.unfinished.set(request, Date.now());
@@ -187,9 +191,10 @@ class Desktop {
      */
     async launch(...args) {
         const eventsFile = path.join(this.root, `events-${this.runs.length + 1}.jsonl`);
+        const netLog = path.join(this.root, `netlog-${this.runs.length + 1}.json`);
         const app = await electron.launch({
             executablePath: electronPath(),
-            args: ['-r', PRELOAD, `--user-data-dir=${this.profile}`, CLIENT_DIR, ...args],
+            args: ['-r', PRELOAD, `--user-data-dir=${this.profile}`, `--log-net-log=${netLog}`, CLIENT_DIR, ...args],
             env: appEnv({ DROPGATE_TEST_EVENTS: eventsFile, DROPGATE_TEST_REAL_CLIPBOARD: this.real ? '1' : '0' }),
             // The TLS proxy's certificate is made up for the test, so the app is told to accept it.
             ignoreHTTPSErrors: Boolean(this.proxy),
@@ -198,7 +203,7 @@ class Desktop {
         app.context().on('request', (request) => {
             if (toServer(request.url()) && !allowed.has(new URL(request.url()).origin)) this.elsewhere.push(request.url());
         });
-        const run = new DesktopApp(app, eventsFile);
+        const run = new DesktopApp(app, eventsFile, netLog);
         this.runs.push(run);
         return run;
     }
@@ -295,11 +300,21 @@ class Desktop {
     }
 
     /**
+     * What a run's network stack did, from its net log, for the test's addresses.
+     * @param {DesktopApp} run
+     */
+    netLogOf(run) {
+        const origins = [new URL(this.server.baseUrl).origin, ...(this.proxy ? [this.proxy.url] : [])];
+        return describeNetLog(run.netLog, this.started, origins);
+    }
+
+    /**
      * What the test saw, for the message of a test that didn't go as expected,
      * with times in ms from the test's start: what the TLS proxy saw, what reached
      * the server and what it answered, the app's requests that failed or never
-     * finished, what each run of the app wrote down, and the end of its debug.log.
-     * Methods, URLs, statuses, sizes and times only: never a header or a body.
+     * finished, what each run's network stack did, what each run of the app wrote
+     * down, and the end of its debug.log. Methods, URLs, statuses, sizes and times
+     * only: never a header or a body.
      */
     report() {
         const ms = (at) => `+${Math.round(at - this.started)} ms`;
@@ -343,6 +358,10 @@ class Desktop {
             lines.sort((a, b) => a.began - b.began);
             return lines.map(({ began, text }) => `  ${ms(began)}  ${text}`).join('\n') || '  none';
         }));
+
+        for (const [i, run] of this.runs.entries()) {
+            sections.push(section(`What run ${i + 1}'s network stack did (its net log):`, () => this.netLogOf(run)));
+        }
 
         for (const [i, run] of this.runs.entries()) {
             sections.push(section(`What run ${i + 1} of the app wrote down:`, () => run.events()

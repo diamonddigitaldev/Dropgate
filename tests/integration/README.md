@@ -89,7 +89,8 @@ xvfb-run npx playwright test --project=desktop
 * **A desktop test that fails says what the proxy, the server and the app saw.** Its failure ends with a report, with times from the start of the test:
   * each connection the TLS proxy got, and when its TLS was set up, or why it failed; and each request, when the proxy had all of it, when it passed it on, when the server answered and with what status, and whether the whole answer reached the app;
   * each request that reached the server, and what the server answered;
-  * each of the app's requests that failed, with its error, or that never finished. The browser only says how far a request got once some of an answer has arrived, so for most failures that's all it says;
+  * each of the app's requests that failed, with its error, or that never finished. Playwright only says how far a request got once some of an answer has arrived, so for most failures that's all it says;
+  * what each run's network stack did, from Chromium's net log, which each run writes to the test's temporary folder ([`helpers/netlog.mjs`](helpers/netlog.mjs)): the proxy settings it found, each time it looked for a proxy by itself, and each request to the test's addresses, with how long it waited for a proxy decision, when it was sent and answered, and how it ended. This says where a request that got no answer was held;
   * what each run of the app wrote down (the preload's record above), and the end of its `debug.log`.
 
   It gives methods, addresses, statuses, sizes and times, never a header or a body. In every test over HTTPS, the app's first connection to the proxy fails with "certificate unknown": Electron refuses the made-up certificate, then connects again once it's told to accept it. A test for a known issue that passes gets the report on stderr instead, because failing it would count as the failure it expects.
