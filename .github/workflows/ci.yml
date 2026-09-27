@@ -377,3 +377,25 @@ jobs:
       - name: Run tests
         if: runner.os == 'Windows'
         run: npx playwright test --project=desktop --workers=1
+
+  docs:
+    name: Docs checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tests/docs
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '^24.14'
+
+      # Nothing to install: the checks have no dependencies. They read the
+      # repository's Markdown and source, and never fetch a link. The TAP
+      # reporter prints each check's name.
+      - name: Run checks
+        run: node --test --test-reporter=tap "*.test.mjs"
