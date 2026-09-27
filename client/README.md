@@ -111,7 +111,7 @@ npm ci
 npm test
 ```
 
-The tests read the app's source rather than launching it, so they don't need a display and don't download Electron. They guard the things that break quietly:
+These tests read the app's source rather than launching it, so they don't need a display and don't download Electron. (The app itself is tested end to end, [below](#the-app-end-to-end).) They guard the things that break quietly:
 
 * **The preload contract.** The preload only loads modules a sandboxed preload can load, and every IPC channel is used on both sides. A mistake in either leaves the app doing nothing, with no error in the main process.
 * **Window security.** Every window keeps `contextIsolation` on, `nodeIntegration` off and the sandbox on.
@@ -124,6 +124,25 @@ node --test --test-reporter=tap "test/*.test.mjs"
 ```
 
 GitHub Actions runs the tests this way on Ubuntu and Windows ([`ci.yml`](../.github/workflows/ci.yml)).
+
+### The App, End to End
+
+The app itself is tested with the [integration tests](../tests/integration/README.md), which launch it from this folder with a throwaway profile, against a Dropgate Server started on your machine just for the test. They check its settings and **"Share with Dropgate"**: that a shared file uploads, end-to-end encrypted on a server with HTTPS, and that its link downloads intact. Off CI they leave your clipboard alone, and they never touch your own settings.
+
+They need this folder's and the server's dependencies. From the repository root:
+
+```bash
+cd server
+npm ci
+cd ../client
+npm ci
+cd ../tests/integration
+npm ci
+npx playwright install chromium
+npx playwright test --project=desktop
+```
+
+The app opens real windows while they run, so on Linux without a desktop, run the last command under `xvfb-run`. GitHub Actions runs them on Ubuntu and Windows.
 
 
 ## Self-Hosting & Networking

@@ -1,6 +1,6 @@
 # Dropgate Integration Tests
 
-End-to-end tests that drive Dropgate's web UI in real browsers (Chromium, Firefox and WebKit) with [Playwright Test](https://playwright.dev/).
+End-to-end tests that drive Dropgate's web UI in real browsers (Chromium, Firefox and WebKit), and its desktop app, with [Playwright Test](https://playwright.dev/).
 
 
 ## What They Cover
@@ -15,24 +15,38 @@ Each test sends files through the web UI the way a person would, then receives t
 
 For encrypted uploads, they also check that the files the server stores hold none of the plaintext and none of the file names.
 
-Once a test has passed, it also checks what its browsers kept and what the server was sent. For direct transfers, that's both the sender's browser and the receiver's:
+The desktop app's tests launch it from [`client/`](../../client) and open its links in Chromium:
+
+* **Settings.** A new profile starts with no server and the default options, and makes no requests. The server, file lifetime and max downloads set in the window are what an upload uses, and its link downloads intact. After a restart, the server and file lifetime are still set, and the next upload uses them.
+* **"Share with Dropgate".** The app is launched with a file's path and `--upload`, as the Windows context menu does, after being set up with a server and a file lifetime:
+  * on a server with HTTPS, it uploads the file end-to-end encrypted with the saved file lifetime, without showing a window. It copies the link, says so in a notification, and quits. The server stores none of the plaintext and not the file's name;
+  * on a server without HTTPS, it first shows its window to warn that the upload won't be encrypted, uploads once told to, and quits;
+  * if the app is already open, the new launch hands the file to it and quits, and the open window shows the link.
+
+  Each link downloads intact. The link is copied once, and only after the upload has succeeded, and no notification says where the file is.
+
+Once a test has passed, it also checks what its browsers kept and what the server was sent. For direct transfers, that's both the sender's browser and the receiver's. For the desktop app, it's the browser that opens its links, and everything the app sent the server:
 
 * **Nothing is kept in the browser.** The server's origin has no cookies, localStorage, sessionStorage, IndexedDB or Cache Storage. At most one service worker is registered: the one the download pages use to stream files to disk.
 * **The server never gets a file name or a key.** No request that reaches the server has a file name, or the key from a link's `#`, in its URL, headers or body, and no WebSocket message a page sends has either. The one exception is a file uploaded without encryption: the server stores its name, so the upload sends it in a request body. The download pages' own download URLs carry the file name too, but their service worker answers them inside the browser, and this checks that none gets through.
 
-Tests for known issues use `test.fail()`, and each one's name says what fixes it. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. Each one only counts the failure its issue causes: if it fails for any other reason, it's reported as a failure. Today there are three:
+Tests for known issues use `test.fail()`, and each one's name says what fixes it. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. Each one only counts the failure its issue causes: if it fails for any other reason, it's reported as a failure. Today there are five:
 
 * **An encrypted upload on a plain-HTTP localhost server can't be downloaded.** Browsers count localhost as a secure context, so the web UI encrypts the upload, but the server only serves encrypted download pages to requests that came in over HTTPS, so the link shows "Secure Connection Required".
 * **Pasting an end-to-end encrypted link into "Enter Sharing Code" sends its key to the server.** The home page asks the server where the link leads, and sends the whole link, key and all, though the server only needs the part before the `#`. This test runs the checks above itself, and anything else they find still fails it.
 * **Pasting an end-to-end encrypted link into "Enter Sharing Code" opens its download page without the key.** The page goes where the server says the link leads, and that has no `#`, so the download page says the key is missing. Behind a TLS proxy the link starts with `https://`, so this test pastes it that way.
+* **The desktop app forgets Max Downloads when it restarts.** It saves the setting, but never reads it back, so it starts at 1 again.
+* **The desktop app forgets a server that has only been tested.** It saves the server only along with the other settings, when one of them changes or an upload starts. Until then, "Share with Dropgate" says no server is set.
 
 
 ## Running the Tests
 
-Requires Node.js 24 or later. The tests start the server from `server/`, so install its dependencies first. From the repository root:
+Requires Node.js 24 or later. The tests start the server from `server/` and the desktop app from `client/`, so install their dependencies first. From the repository root:
 
 ```bash
 cd server
+npm ci
+cd ../client
 npm ci
 cd ../tests/integration
 npm ci
@@ -40,13 +54,20 @@ npx playwright install chromium firefox webkit
 npm test
 ```
 
-`npx playwright install` downloads the browser builds this version of Playwright needs into Playwright's own cache, outside the repository. On Linux, add `--with-deps` to install the system libraries they need as well.
+`npx playwright install` downloads the browser builds this version of Playwright needs into Playwright's own cache, outside the repository. On Linux, add `--with-deps` to install the system libraries they need as well. Electron downloads its own build into its package, in `client/node_modules`, the first time a test launches the desktop app.
 
 To run the tests in one browser, or to watch them:
 
 ```bash
 npx playwright test --project=chromium
 npx playwright test --project=firefox --headed
+```
+
+The desktop app's tests are the `desktop` project. The app opens real windows while they run, so on Linux without a desktop, run them on a virtual display:
+
+```bash
+npx playwright test --project=desktop
+xvfb-run npx playwright test --project=desktop
 ```
 
 
@@ -60,9 +81,14 @@ npx playwright test --project=firefox --headed
 * **The server's clock can be moved forward.** Tests about time start the server with the test clock, which moves the server's `Date.now()` and runs any repeating timer that would have come due, such as the one-minute sweep for expired uploads. Checking a five-minute lifetime takes milliseconds.
 * **The browser plays the part of a TLS reverse proxy.** The server only serves encrypted download pages to requests that came in over HTTPS, because it expects a reverse proxy in front of it to terminate TLS. So the browser sends `X-Forwarded-Proto: https` with every request, as that proxy would. Only the localhost known-issue test leaves it out. The pages load from `http://127.0.0.1`, which browsers treat as a secure context, so encryption works as it would over HTTPS.
 * **The browsers ask for reduced motion.** Bootstrap otherwise scrolls smoothly, and a page that's still scrolling can move a button out from under a click.
+* **The desktop app runs from source, with a throwaway profile.** Each test launches `client/` with the client's own Electron build, through Playwright's `_electron`, with `--user-data-dir` set to a temporary folder, so it never reads or changes your own settings. `ELECTRON_RUN_AS_NODE`, which some shells set, is removed from its environment. The app only checks for updates when it's packaged, so running it from source sends nothing to GitHub, and a test fails if the app makes a request to anywhere but the test's server.
+* **A preload writes down what the desktop app does outside its windows.** [`helpers/desktop-preload.cjs`](helpers/desktop-preload.cjs) is loaded before the app's own code, and writes down every notification it shows, what it copies to the clipboard, which windows it shows, and how its uploads finish. It takes its own `-r` back out of the command line, so the app sees only its usual arguments.
+* **Your clipboard is left alone.** Off CI, the preload only writes down what the app copies and the notifications it shows: nothing reaches your clipboard or your screen. In CI, the app uses the real clipboard and shows its notifications, and each link is read back from the clipboard once it's copied. To do that locally, set `DROPGATE_TEST_REAL_CLIPBOARD=1` and add `--workers=1`: the clipboard is shared, so two tests at once would mix up their links.
+* **The desktop app reaches the server over HTTPS through a proxy on this machine.** The app only encrypts uploads to an `https://` address, so the tests that need encryption put a TLS proxy ([`helpers/tls.mjs`](helpers/tls.mjs)) in front of the server, with a self-signed certificate made up for the test, which the app is told to accept. It passes each request on with `X-Forwarded-Proto: https`, as a real one would. The app's links are then opened from the server's own address, like every other test's pages.
+* **"Share with Dropgate" while the app is open** is a second launch of the app, as Windows makes it, with nothing watching it: it hands its arguments to the app that's running, and quits.
 * **Flaky tests get fixed, not retried.** Retries are off.
 
-GitHub Actions runs the tests in all three browsers on Ubuntu ([`ci.yml`](../../.github/workflows/ci.yml)). Playwright's WebKit on Windows has no WebRTC, so on Windows the direct transfer tests are skipped in WebKit.
+GitHub Actions runs the tests in all three browsers on Ubuntu, and the desktop app's tests on Ubuntu, under Xvfb, and on Windows, one test at a time ([`ci.yml`](../../.github/workflows/ci.yml)). Playwright's WebKit on Windows has no WebRTC, so on Windows the direct transfer tests are skipped in WebKit.
 
 
 ## License
