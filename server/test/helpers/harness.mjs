@@ -139,8 +139,9 @@ export async function startServer({ env = {}, clock = false, requests = false, p
             return import(pathToFileURL(copy).href);
         },
         /**
-         * Every request the server has received so far, in order, as { method, url, headers, body }.
-         * WebSocket upgrades are included, with an empty body. Needs { requests: true }.
+         * Every request the server has received so far, in order, as { at, method, url, headers, body },
+         * with `answer: { at, status, finished }` once the server is done with it (see requests.cjs).
+         * WebSocket upgrades are included, with an empty body and no answer. Needs { requests: true }.
          */
         requests: () => {
             if (!requests) throw new Error('Start the server with { requests: true } to use requests().');
@@ -149,11 +150,12 @@ export async function startServer({ env = {}, clock = false, requests = false, p
             lines.pop();
             const received = [];
             for (const line of lines) {
-                const entry = JSON.parse(line);
-                if (entry.body === undefined) received[entry.n - 1] = { ...entry, body: [] };
-                else received[entry.n - 1].body.push(Buffer.from(entry.body, 'base64'));
+                const { n, ...entry } = JSON.parse(line);
+                if (entry.method !== undefined) received[n - 1] = { ...entry, body: [] };
+                else if (entry.body !== undefined) received[n - 1].body.push(Buffer.from(entry.body, 'base64'));
+                else received[n - 1].answer = entry;
             }
-            return received.map(({ n, body, ...request }) => ({ ...request, body: Buffer.concat(body) }));
+            return received.map(({ body, ...request }) => ({ ...request, body: Buffer.concat(body) }));
         },
         /** Move the server's clock forward. Repeating timers due in that time run once before it resolves. */
         advanceClock: async (ms) => {
