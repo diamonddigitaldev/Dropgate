@@ -1,0 +1,14 @@
+{
+  "name": "dropgate-docs-checks",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Checks that the links in Dropgate's docs resolve, and that the names they give match the code.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=24.14.0"
+  },
+  "license": "AGPL-3.0-only"
+}
