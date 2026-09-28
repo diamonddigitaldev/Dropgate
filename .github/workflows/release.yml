@@ -1,0 +1,78 @@
+name: Release
+
+# One workflow releases everything. Core, the server and the desktop client share
+# a version, and each release is built from its tag.
+#
+# So far it has only its dry run, which publishes nothing. It checks the
+# versions against the release it would make, then runs every test and builds
+# the desktop app, as CI does. It runs by hand (gh workflow run release.yml
+# --ref 4.0.0), optionally pretending a tag and pre-release flag, and by itself
+# on a push that changes this file.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release's tag, to pretend. Leave it empty for the packages' version."
+        required: false
+        default: ''
+      prerelease:
+        description: 'Whether the release is a pre-release, to pretend. "From the version" means when it has a pre-release part, such as 4.0.0-alpha.1.'
+        type: choice
+        options: ['from the version', 'yes', 'no']
+        default: 'from the version'
+  push:
+    branches: ['4.0.0']
+    paths: ['.github/workflows/release.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    name: Versions and branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # Releases come from the main branch, or from 4.0.0 until it's merged.
+      - name: Check the branch
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          case "$BRANCH" in
+            master|4.0.0) echo "Releasing from $BRANCH." ;;
+            *) echo "Releases are made from master or 4.0.0, not from $BRANCH."; exit 1 ;;
+          esac
+
+      # The tag must be the version itself, and the release a pre-release exactly
+      # when the version has a pre-release part, so a pre-release can never become
+      # the latest release. With nothing given, it checks the release the packages'
+      # version would make.
+      - name: Check the versions against the release
+        env:
+          TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          version=$(node -p "require('./server/package.json').version")
+          tag=${TAG:-$version}
+          case "$PRERELEASE" in
+            yes) prerelease=true ;;
+            no) prerelease=false ;;
+            *) case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac ;;
+          esac
+          echo "The release: tag $tag, pre-release: $prerelease. This is a dry run, so nothing is published."
+          node .github/scripts/check-versions.mjs --tag "$tag" --prerelease "$prerelease"
+
+  # Every test, and the desktop builds, exactly as CI runs them.
+  tests:
+    name: Tests and builds
+    needs: versions
+    uses: ./.github/workflows/ci.yml

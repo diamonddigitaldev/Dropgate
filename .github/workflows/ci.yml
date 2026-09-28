@@ -5,6 +5,8 @@ on:
     branches: ['4.0.0']
   pull_request:
     branches: ['4.0.0']
+  # The release workflow runs all of this before it releases anything.
+  workflow_call:
 
 permissions:
   contents: read

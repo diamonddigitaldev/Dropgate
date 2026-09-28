@@ -136,6 +136,19 @@ GitHub Actions checks their links, and the names they give, against the code on 
 
 Core, the server and the client share one version, and are released together, from a tag that is that version (such as `3.0.13`). The version is changed by hand, in one commit, in each part's `package.json` and `package-lock.json`, and in the version badge at the top of its README. On every push and pull request, GitHub Actions checks that they all give the same version, and fails if one doesn't ([`check-versions.mjs`](./.github/scripts/check-versions.mjs)).
 
+Each release is to be built and published from its tag by one workflow, [`release.yml`](./.github/workflows/release.yml). So far it only has its dry run, which publishes nothing:
+
+* it checks that it's on `master`, or on `4.0.0` until that's merged;
+* it checks that the release's tag is the version, and that the release is a pre-release exactly when the version has a pre-release part, such as `4.0.0-alpha.1`, so a pre-release can never become the latest release;
+* it runs every test and builds the client, as CI does.
+
+It runs by itself on a push that changes `release.yml`, and by hand, where it can pretend a tag and pre-release flag to show what the checks would say:
+
+```bash
+gh workflow run release.yml --ref 4.0.0
+gh workflow run release.yml --ref 4.0.0 -f tag=4.0.0-alpha.1 -f prerelease=yes
+```
+
 
 ## Licenses
 
