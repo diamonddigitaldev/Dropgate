@@ -5,9 +5,11 @@ name: Release
 #
 # So far it has only its dry run, which publishes nothing. It checks the
 # versions against the release it would make, then runs every test and builds
-# the desktop app, as CI does. It runs by hand (gh workflow run release.yml
-# --ref 4.0.0), optionally pretending a tag and pre-release flag, and by itself
-# on a push that changes this file.
+# the desktop app, as CI does, then builds the server's image for each platform
+# with the tags the release would push, and checks each one, without pushing
+# it. It runs by hand (gh workflow run release.yml --ref 4.0.0), optionally
+# pretending a tag and pre-release flag, and by itself on a push that changes
+# this file.
 
 on:
   workflow_dispatch:
@@ -33,6 +35,9 @@ jobs:
     name: Versions and branch
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -57,6 +62,7 @@ jobs:
       # the latest release. With nothing given, it checks the release the packages'
       # version would make.
       - name: Check the versions against the release
+        id: release
         env:
           TAG: ${{ inputs.tag }}
           PRERELEASE: ${{ inputs.prerelease }}
@@ -70,9 +76,87 @@ jobs:
           esac
           echo "The release: tag $tag, pre-release: $prerelease. This is a dry run, so nothing is published."
           node .github/scripts/check-versions.mjs --tag "$tag" --prerelease "$prerelease"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
   # Every test, and the desktop builds, exactly as CI runs them.
   tests:
     name: Tests and builds
     needs: versions
     uses: ./.github/workflows/ci.yml
+
+  # The server's image, built for each platform the release publishes, with the
+  # tags it would push. Nothing is pushed, and nothing is uploaded.
+  server-image:
+    name: Server image (not pushed)
+    needs: [versions, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE: willtda/dropgate-server
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Stable releases get their version, its major and minor, its major, and
+      # latest. Pre-releases get only their version and next, never latest.
+      - name: Work out the tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.versions.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.versions.outputs.tag }},enable=${{ needs.versions.outputs.prerelease == 'false' }}
+            type=semver,pattern={{major}},value=${{ needs.versions.outputs.tag }},enable=${{ needs.versions.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.versions.outputs.prerelease == 'false' }}
+            type=raw,value=next,enable=${{ needs.versions.outputs.prerelease == 'true' }}
+
+      # The same tags, worked out another way, so a mistake in either shows.
+      - name: Check the tags
+        env:
+          TAG: ${{ needs.versions.outputs.tag }}
+          PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          if [ "$PRERELEASE" = true ]; then
+            expected="$IMAGE:$TAG $IMAGE:next"
+          else
+            IFS=. read -r major minor _ <<< "$TAG"
+            expected="$IMAGE:$TAG $IMAGE:$major.$minor $IMAGE:$major $IMAGE:latest"
+          fi
+          echo "The release would push these tags:"
+          printf '  %s\n' $TAGS
+          if [ "$(printf '%s\n' $TAGS | sort)" != "$(printf '%s\n' $expected | sort)" ]; then
+            echo "They should be:"
+            printf '  %s\n' $expected
+            exit 1
+          fi
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Both platforms, with the release's tags and labels, kept in the build
+      # cache only.
+      - name: Build for linux/amd64 and linux/arm64
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: server
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=cacheonly
+
+      # Each platform's image, loaded from that build's cache, gets CI's checks.
+      # linux/arm64 runs under emulation.
+      - name: Check each platform's image
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            docker buildx build --platform "$platform" --load -t "dropgate-server:${platform#linux/}" server/
+            bash .github/scripts/check-server-image.sh "dropgate-server:${platform#linux/}" "$platform"
+          done
