@@ -19,7 +19,8 @@
 // proxy by itself when the system says to, as Windows does by default
 // ("Automatically detect settings"): it asks the network for a WPAD proxy script
 // over DHCP and DNS. After a test passes, each launch's net log must show it
-// never looked.
+// never looked, and never looked up any name beyond this machine. The app's
+// spell checker is pointed at this machine for its dictionaries too.
 //
 // When a desktop test doesn't go as expected, its failure says what the test saw
 // (Desktop.report()): what the TLS proxy saw, what reached the server, the app's
@@ -49,6 +50,14 @@ const electronPath = () => createRequire(path.join(CLIENT_DIR, 'package.json'))(
 
 /** Don't look for a proxy: connect directly (see the top of this file). */
 const NO_PROXY = '--no-proxy-server';
+
+/**
+ * Where the app's spell checker is told to download its dictionaries from, unless
+ * a test says otherwise: a port on this machine that nothing answers. On Linux
+ * the app would otherwise download them from Google's servers as it starts (see
+ * desktop-preload.cjs, and desktop/dictionaries.spec.mjs).
+ */
+const NO_DICTIONARIES = 'http://127.0.0.1:9/';
 
 /** Whether the app may use the real clipboard and show notifications: in CI, or when asked to. */
 export const realClipboard = () => Boolean(process.env.CI) || process.env.DROPGATE_TEST_REAL_CLIPBOARD === '1';
@@ -171,6 +180,8 @@ class Desktop {
      * @type {{ label: string, file: string, handsOn: boolean }[]}
      */
     netLogs = [];
+    /** Where the app's spell checker downloads its dictionaries from, for the next launch. */
+    dictionaryUrl = NO_DICTIONARIES;
 
     /**
      * @param {object} opts
@@ -219,7 +230,11 @@ class Desktop {
         const app = await electron.launch({
             executablePath: electronPath(),
             args: ['-r', PRELOAD, `--user-data-dir=${this.profile}`, NO_PROXY, `--log-net-log=${netLog}`, CLIENT_DIR, ...args],
-            env: appEnv({ DROPGATE_TEST_EVENTS: eventsFile, DROPGATE_TEST_REAL_CLIPBOARD: this.real ? '1' : '0' }),
+            env: appEnv({
+                DROPGATE_TEST_EVENTS: eventsFile,
+                DROPGATE_TEST_REAL_CLIPBOARD: this.real ? '1' : '0',
+                DROPGATE_TEST_DICTIONARY_URL: this.dictionaryUrl,
+            }),
             // The TLS proxy's certificate is made up for the test, so the app is told to accept it.
             ignoreHTTPSErrors: Boolean(this.proxy),
         });

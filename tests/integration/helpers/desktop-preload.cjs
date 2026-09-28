@@ -22,10 +22,15 @@
 // and the clipboard is read back once each copy has finished, if the app is still
 // running by then. (Holding the app open until then made it hang in CI on Linux:
 // after a copy made just before the app quit, the read-back never finished.)
+//
+// On Linux, Electron's spell checker downloads its dictionaries from Google's
+// servers as the app starts (a known issue, fixed in the v4 desktop client). So
+// every session the app creates is pointed at DROPGATE_TEST_DICTIONARY_URL
+// instead, an address on this machine.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, clipboard, ipcMain, Notification } = require('electron');
+const { app, BrowserWindow, clipboard, ipcMain, Notification, session } = require('electron');
 
 // Take this preload's own "-r <path>" back out of the command line, so the app
 // sees only the arguments it would be given when launched normally.
@@ -37,6 +42,13 @@ if (!EVENTS) throw new Error('DROPGATE_TEST_EVENTS must name the file to write e
 const real = process.env.DROPGATE_TEST_REAL_CLIPBOARD === '1';
 
 const record = (event) => fs.appendFileSync(EVENTS, `${JSON.stringify({ at: Date.now(), pid: process.pid, ...event })}\n`);
+
+const DICTIONARIES = process.env.DROPGATE_TEST_DICTIONARY_URL;
+if (!DICTIONARIES?.startsWith('http://127.0.0.1:')) {
+    throw new Error('DROPGATE_TEST_DICTIONARY_URL must be an address on 127.0.0.1, for the spell checker\'s dictionaries.');
+}
+app.on('session-created', (created) => created.setSpellCheckerDictionaryDownloadURL(DICTIONARIES));
+app.whenReady().then(() => session.defaultSession.setSpellCheckerDictionaryDownloadURL(DICTIONARIES));
 
 const writeText = clipboard.writeText;
 clipboard.writeText = function (text, ...rest) {
