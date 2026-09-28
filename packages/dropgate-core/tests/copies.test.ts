@@ -1,14 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
-import { copyContents } from '../scripts/copy-contents.mjs';
+import { ROOT, copyContents, inRepository } from '../scripts/copy-contents.mjs';
 
 // The web UI and the desktop app load this package's ESM build as their own
 // dropgate-core.js, which `npm run build` writes. CI builds before it tests, so
 // these fail if a copy was edited by hand, or not built again after a change to
 // core. The copies are listed here as well as in scripts/copy-build.mjs, so a
-// copy the script stops writing is still checked.
+// copy the script stops writing is still checked. Unpacked on its own, from a
+// release's source archive, the package has no copies, so these are skipped.
 
-const ROOT = new URL('../../../', import.meta.url);
 const BUILD = new URL('../dist/index.js', import.meta.url);
 
 const COPIES = [
@@ -16,7 +16,13 @@ const COPIES = [
   { name: "the desktop app's copy", path: 'client/src/dropgate-core.js' },
 ];
 
-describe('Copies of the build', () => {
+// Skipping them must never hide a copy in the repository, so this always runs.
+it('counts as in the repository exactly when the web UI and the desktop app are there', () => {
+  const copiesThere = COPIES.every(({ path }) => existsSync(new URL(path, ROOT)));
+  expect(inRepository()).toBe(copiesThere);
+});
+
+describe.skipIf(!inRepository())('Copies of the build (in the repository only)', () => {
   for (const { name, path } of COPIES) {
     it(`${name} is this build`, () => {
       expect(existsSync(BUILD), 'dist/index.js is missing: run npm run build first').toBe(true);
