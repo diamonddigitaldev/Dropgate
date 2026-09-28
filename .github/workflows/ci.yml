@@ -301,11 +301,34 @@ jobs:
       - name: Install browsers
         run: npx playwright install --with-deps --only-shell chromium firefox webkit
 
+      # Temporary: every DNS name looked up on the runner while the tests run, to
+      # see whether any browser, WebKit in particular, looks for a proxy (wpad).
+      - name: Watch DNS lookups (temporary)
+        run: |
+          sudo resolvectl monitor > "$RUNNER_TEMP/dns.txt" 2>&1 &
+          echo $! > "$RUNNER_TEMP/dns.pid"
+          sleep 2
+          getent ahosts github.com > /dev/null
+          sleep 1
+          grep -q 'github\.com' "$RUNNER_TEMP/dns.txt" && echo "The watch sees lookups." || { echo "The watch saw nothing:"; cat "$RUNNER_TEMP/dns.txt"; }
+
       # The list reporter prints every test's name, browser and result. Every test
       # talks only to its own server on 127.0.0.1. The desktop app's tests run in
       # their own job, below.
       - name: Run tests
         run: npx playwright test --project=chromium --project=firefox --project=webkit
+
+      - name: List the DNS lookups (temporary)
+        if: always()
+        run: |
+          sudo kill "$(cat "$RUNNER_TEMP/dns.pid")" || true
+          sleep 1
+          echo "Names looked up while the tests ran (count, name):"
+          grep -E 'Q: '"$RUNNER_TEMP/dns.txt" | sed -E 's/^.*Q: //' | sort | uniq -c | sort -rn || true
+          echo "Lines naming wpad:"
+          grep -i wpad "$RUNNER_TEMP/dns.txt" || echo "none"
+          echo "The first 60 lines of the watch, as written:"
+          head -n 60 "$RUNNER_TEMP/dns.txt"
 
   desktop:
     name: Desktop app tests (${{ matrix.os }})
