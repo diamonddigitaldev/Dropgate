@@ -1,0 +1,148 @@
+name: Client build
+
+# The desktop app's build on one platform, as CI and the release workflow run
+# it: the packages from the "build" config in client/package.json, listed and
+# checked. Nothing is published, and nothing is uploaded as a workflow artifact:
+# on a public repository, anyone signed in could download it.
+#
+# For a release, it also lists the files the release would attach from this
+# platform, and hands its update file on to the release's last job.
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: The runner, windows-latest or ubuntu-latest.
+        type: string
+        required: true
+      release:
+        description: Whether to list the files a release would attach.
+        type: boolean
+        default: false
+      prerelease:
+        description: Whether that release is a pre-release, "true" or "false". A pre-release attaches no update file.
+        type: string
+        default: 'false'
+    outputs:
+      update-file-name:
+        description: The update file a stable release attaches, latest.yml or latest-linux.yml.
+        value: ${{ jobs.build.outputs.update-file-name }}
+      update-file:
+        description: Its contents, in base64.
+        value: ${{ jobs.build.outputs.update-file }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 20
+    outputs:
+      update-file-name: ${{ steps.release.outputs.update-file-name }}
+      update-file: ${{ steps.release.outputs.update-file }}
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      # Windows runners install global packages outside Node's own folder, and
+      # setup-node puts Node's folder, with its bundled npm, first on PATH.
+      - name: Put npm 12 first on PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npm prefix -g >> $env:GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          npm --version
+          npm ci
+
+      # The .rpm target needs rpmbuild, from the rpm package. The Ubuntu image
+      # ships it today, so this only installs it if a later image drops it.
+      - name: Check for rpmbuild
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v rpmbuild > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends rpm
+          fi
+          rpmbuild --version
+
+      # Builds this platform's targets from the "build" config in package.json.
+      # Nothing is published, and no token is passed to it.
+      - name: Build the packages
+        run: npx --no-install electron-builder ${{ runner.os == 'Windows' && '--win' || '--linux' }} --publish never
+
+      - name: List the built files
+        shell: bash
+        run: |
+          for f in dist/*; do
+            [ -f "$f" ] || continue
+            size=$(wc -c < "$f")
+            printf '%-45s %11d bytes  %s\n' "${f#dist/}" "$size" \
+              "$(numfmt --to=iec-i --suffix=B --format=%.1f "$size")"
+          done
+          for ext in ${{ runner.os == 'Windows' && 'exe' || 'AppImage deb rpm' }}; do
+            ls dist/*."$ext" > /dev/null || { echo "No .$ext package was built"; exit 1; }
+          done
+
+      - name: Show the .deb and .rpm metadata
+        if: runner.os == 'Linux'
+        run: |
+          dpkg-deb --info dist/*.deb
+          rpm -qip dist/*.rpm
+
+      # package.json leaves client/test/ out of the app. This lists what the
+      # packaged app holds outside node_modules, and fails if test/ is back in.
+      - name: Check the packaged app
+        shell: bash
+        run: |
+          list=$(npx --no-install asar list dist/*-unpacked/resources/app.asar | tr '\\' '/')
+          echo "app.asar holds $(printf '%s\n' "$list" | wc -l) entries. Outside node_modules:"
+          printf '%s\n' "$list" | grep -v '^/node_modules/'
+          if printf '%s\n' "$list" | grep -q '^/test\(/\|$\)'; then
+            echo "client/test/ is in the package"
+            exit 1
+          fi
+
+      # The app loads core's build from src/dropgate-core.js, which the core job
+      # checks against core's source. This checks the package carries it as is.
+      - name: Check the packaged app carries core's build
+        shell: bash
+        run: |
+          node -e '
+            const { extractFile } = require("@electron/asar");
+            const fs = require("fs");
+            const packaged = extractFile(process.argv[1], "src/dropgate-core.js");
+            if (!packaged.equals(fs.readFileSync("src/dropgate-core.js"))) {
+              console.error("The packaged src/dropgate-core.js is not the one in client/src.");
+              process.exit(1);
+            }
+            console.log("The packaged app carries client/src/dropgate-core.js as it is.");
+          ' dist/*-unpacked/resources/app.asar
+
+      # Every file a release would attach from this platform, in order, and the
+      # update file, which must name only those files, with their sizes and
+      # hashes. It goes up last, in the release's last job.
+      - name: List the release's files
+        id: release
+        if: inputs.release
+        shell: bash
+        env:
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: node ../.github/scripts/desktop-release-files.mjs dist --prerelease "$PRERELEASE"
