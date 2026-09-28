@@ -12,7 +12,9 @@
 //
 // WebKit keeps no log of how it finds a proxy, so it's skipped. On Windows it has
 // no proxy auto-detection to run: it only reads the http_proxy and no_proxy
-// variables, and Playwright only sets them when told to use a proxy.
+// variables, and Playwright only sets them when told to use a proxy. On GitHub's
+// Ubuntu runner, a watch on the runner's DNS resolver saw no browser look up
+// wpad while the tests ran.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
