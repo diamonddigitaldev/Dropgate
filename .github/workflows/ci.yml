@@ -324,11 +324,26 @@ jobs:
           sudo kill "$(cat "$RUNNER_TEMP/dns.pid")" || true
           sleep 1
           echo "Names looked up while the tests ran (count, name):"
-          grep -E 'Q: '"$RUNNER_TEMP/dns.txt" | sed -E 's/^.*Q: //' | sort | uniq -c | sort -rn || true
+          grep -E 'Q: ' "$RUNNER_TEMP/dns.txt" | sed -E 's/^.*Q: //' | sort | uniq -c | sort -rn || true
           echo "Lines naming wpad:"
           grep -i wpad "$RUNNER_TEMP/dns.txt" || echo "none"
-          echo "The first 60 lines of the watch, as written:"
-          head -n 60 "$RUNNER_TEMP/dns.txt"
+
+      # Temporary: the same, one browser at a time, to see which looks up what.
+      - name: DNS lookups by browser (temporary)
+        if: always()
+        run: |
+          for p in chromium firefox webkit; do
+            sudo resolvectl monitor > "$RUNNER_TEMP/dns-$p.txt" 2>&1 &
+            pid=$!
+            sleep 2
+            npx playwright test --project=$p --reporter=dot > "$RUNNER_TEMP/run-$p.txt" 2>&1 || true
+            sleep 1
+            sudo kill "$pid" || true
+            sleep 1
+            echo "=== $p: $(tail -n 3 "$RUNNER_TEMP/run-$p.txt" | tr '\n' ' ')"
+            echo "Names looked up (count, name):"
+            grep -E 'Q: ' "$RUNNER_TEMP/dns-$p.txt" | sed -E 's/^.*Q: //' | sort | uniq -c | sort -rn || true
+          done
 
   desktop:
     name: Desktop app tests (${{ matrix.os }})
