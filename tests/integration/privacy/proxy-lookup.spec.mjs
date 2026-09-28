@@ -4,7 +4,8 @@
 // up the name "wpad" in DNS. That would leave this machine, so the tests stop it,
 // and this checks each browser from its own log of what it did:
 // - Chromium is launched with --proxy-server=direct:// (playwright.config.mjs),
-//   and its net log must show no proxy lookup;
+//   and its net log must show no proxy lookup, and no DNS lookup of any name
+//   beyond this machine;
 // - Firefox only follows Windows' setting when network.proxy.system_wpad is on,
 //   which it isn't by default, and its proxy log must show no WPAD or proxy script.
 // The desktop app's own launches are checked after every desktop test
@@ -18,7 +19,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { proxyLookups, proxySettings, requestedUrls } from '../helpers/netlog.mjs';
+import { hostLookups, outsideLookups, proxyLookups, proxySettings, requestedUrls } from '../helpers/netlog.mjs';
 import { expect, test } from '../helpers/test.mjs';
 
 // A hook rather than a file-level test.skip(), whose callback would start and
@@ -57,6 +58,9 @@ test('the browser never looks for a proxy by itself, so nothing leaves this mach
             expect(requestedUrls(netLog), 'the requests in the net log').toContain(url);
             expect(proxySettings(netLog), 'the proxy settings in the net log').not.toEqual([]);
             expect(proxyLookups(netLog), 'the times Chromium looked for a proxy by itself (its net log)').toEqual([]);
+            // Its own lookup of the page's address shows the log records lookups.
+            expect(hostLookups(netLog), 'the DNS lookups in the net log').toContain(server.baseUrl);
+            expect(outsideLookups(netLog), 'the names Chromium looked up beyond this machine (its net log)').toEqual([]);
         } else {
             const base = path.join(folder, 'firefox');
             await openOnce(browserType, launchOptions, { env: { ...process.env, MOZ_LOG: 'timestamp,proxy:5', MOZ_LOG_FILE: base } }, url);

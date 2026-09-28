@@ -135,9 +135,18 @@ const keepLog = (key, line) => {
  * Also keep the console errors and warnings of its pages and service workers,
  * and any error they threw and didn't catch. Read the record with
  * peerConnections(), or ask describePeers().
+ *
+ * With `dropMdnsNames`, candidates the other peer gives under an mDNS name
+ * (<uuid>.local) are noted as dropped and never reach the browser, whether they
+ * come one at a time or in a session description. It's for WebKit, which hides
+ * its own addresses behind those names and can't be told not to: given one, it
+ * looks the name up with the system's resolver, and on Linux that adds the
+ * network's search domain and asks the network's DNS server. It can't use them
+ * anyway, so its peers connect by the tests' own STUN server, as without this.
  * @param {import('@playwright/test').BrowserContext} context
+ * @param {{ dropMdnsNames?: boolean }} [options]
  */
-export async function recordPeerConnections(context) {
+export async function recordPeerConnections(context, { dropMdnsNames = false } = {}) {
     context.on('console', (msg) => {
         if (msg.type() !== 'error' && msg.type() !== 'warning') return;
         keepLog(msg.page() ?? context, `${msg.type()}: ${msg.text()}`);
@@ -145,7 +154,7 @@ export async function recordPeerConnections(context) {
     context.on('weberror', (webError) => {
         keepLog(webError.page() ?? context, `uncaught: ${webError.error().message}`);
     });
-    await context.addInitScript(() => {
+    await context.addInitScript((dropMdns) => {
         const Native = window.RTCPeerConnection;
         if (!Native) return;
         const all = [];
@@ -155,6 +164,7 @@ export async function recordPeerConnections(context) {
             const [, , protocol, , address, port, , type] = sdp.split(' ');
             return { type, protocol: protocol?.toLowerCase(), address, port: Number(port) };
         };
+        const isMdnsName = (candidate) => /\.local\.?$/i.test(candidate.address ?? '');
         // Which Dropgate message a data channel message is, from its type field
         // (PeerJS packs { t: 'meta' } as b1 't' b4 'meta'), and nothing else.
         const types = ['hello', 'file_list', 'meta', 'ready', 'chunk_ack', 'chunk', 'file_end_ack', 'file_end',
@@ -232,16 +242,46 @@ export async function recordPeerConnections(context) {
                 return super.setLocalDescription(...args);
             }
 
+            // The other peer's candidates, one at a time. With dropMdns, one under an
+            // mDNS name is noted and goes no further, as if it had been added.
             addIceCandidate(candidate, ...rest) {
-                if (candidate?.candidate) this.#record.remoteCandidates.push(parse(candidate.candidate));
+                if (candidate?.candidate) {
+                    const given = parse(candidate.candidate);
+                    if (dropMdns && isMdnsName(given)) {
+                        this.#record.remoteCandidates.push({ ...given, dropped: true });
+                        if (typeof rest[0] === 'function') rest[0]();
+                        return Promise.resolve();
+                    }
+                    this.#record.remoteCandidates.push(given);
+                }
                 return super.addIceCandidate(candidate, ...rest);
             }
+
+            // The other peer's candidates can also come in its session description.
+            setRemoteDescription(description, ...rest) {
+                const lines = description?.sdp?.split(/\r?\n/);
+                if (!lines) return super.setRemoteDescription(description, ...rest);
+                const kept = [];
+                for (const line of lines) {
+                    if (line.startsWith('a=candidate:')) {
+                        const given = parse(line.slice(2));
+                        if (dropMdns && isMdnsName(given)) {
+                            this.#record.remoteCandidates.push({ ...given, dropped: true });
+                            continue;
+                        }
+                        this.#record.remoteCandidates.push(given);
+                    }
+                    kept.push(line);
+                }
+                if (kept.length === lines.length) return super.setRemoteDescription(description, ...rest);
+                return super.setRemoteDescription({ type: description.type, sdp: kept.join('\r\n') }, ...rest);
+            }
         };
-    });
+    }, dropMdnsNames);
 }
 
 /**
- * @typedef {{ type: string, protocol: string, address: string, port: number }} Candidate
+ * @typedef {{ type: string, protocol: string, address: string, port: number, dropped?: boolean }} Candidate
  * @typedef {{ label: string, sent: string[], received: string[] }} ChannelMessages
  * @typedef {{
  *   started: boolean, iceServers: RTCIceServer[], candidates: Candidate[],
@@ -272,7 +312,7 @@ export async function describePeers(pages) {
     const list = (candidates) => {
         const counts = new Map();
         for (const c of candidates) {
-            const key = `${c.type} ${c.protocol} ${where(c)}`;
+            const key = `${c.type} ${c.protocol} ${where(c)}${c.dropped ? ' (dropped)' : ''}`;
             counts.set(key, (counts.get(key) ?? 0) + 1);
         }
         return [...counts].map(([key, n]) => (n > 1 ? `${key} (×${n})` : key)).join(', ') || 'none';

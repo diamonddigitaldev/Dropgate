@@ -10,6 +10,12 @@
 // that one, and found only host candidates and server-reflexive ones at this
 // machine's own addresses.
 //
+// No browser may look up the other's addresses under mDNS names (<uuid>.local)
+// either, which goes out to the local network. Chromium and Firefox are set up
+// to use real addresses (playwright.config.mjs), so neither may find or be given
+// such a name. WebKit can't be, so its pages drop the names they're given
+// (recordPeerConnections()), and none may reach it.
+//
 // If the peers never connect, or the transfer fails after they do, the failure
 // says what each page saw.
 import os from 'node:os';
@@ -35,12 +41,24 @@ async function expectOnlyLocalStunOffered(page, stun) {
     expect(info.capabilities.p2p.iceServers, 'ICE servers the server offers').toEqual([{ urls: [stun.url] }]);
 }
 
+/** Whether a browser hides its own addresses behind mDNS names whatever it's told (see the top of this file). */
+const hidesAddresses = (browserName) => browserName === 'webkit';
+
+/** Record the peer connections in both contexts, with WebKit's dropping the mDNS names it's given. */
+async function recordBoth(browserName, ...contexts) {
+    for (const context of contexts) await recordPeerConnections(context, { dropMdnsNames: hidesAddresses(browserName) });
+}
+
+const isMdnsName = (address) => /\.local\.?$/i.test(address ?? '');
+
 /**
- * Every peer connection each page started: the ICE servers it had, and the
- * candidates it found. A server-reflexive candidate is an address the STUN
- * server saw, so it has to be one of this machine's own.
+ * Every peer connection each page started: the ICE servers it had, the
+ * candidates it found, and those it was given. A server-reflexive candidate is
+ * an address the STUN server saw, so it has to be one of this machine's own; so
+ * does a host candidate, unless it's hidden behind an mDNS name, which only a
+ * browser that can't be told otherwise may give. A browser may never take one.
  */
-async function expectOnlyLocalCandidates(stun, ...pages) {
+async function expectOnlyLocalCandidates(stun, browserName, ...pages) {
     const ownAddresses = Object.values(os.networkInterfaces()).flat().map((i) => i?.address);
     for (const page of pages) {
         const started = await peerConnections(page);
@@ -51,10 +69,16 @@ async function expectOnlyLocalCandidates(stun, ...pages) {
             expect(pc.candidates.length, `candidates a peer connection on ${where} found`).toBeGreaterThan(0);
             for (const c of pc.candidates) {
                 expect(['host', 'srflx'], `the kind of a candidate a peer connection on ${where} found`).toContain(c.type);
-                if (c.type === 'srflx') {
-                    const at = `a server-reflexive candidate a peer connection on ${where} found, at ${c.address}, is one of this machine's addresses`;
-                    expect(ownAddresses.includes(c.address), at).toBe(true);
+                if (isMdnsName(c.address)) {
+                    expect(hidesAddresses(browserName), `a peer connection on ${where} found a ${c.type} candidate under an mDNS name`).toBe(true);
+                    continue;
                 }
+                const at = `a ${c.type} candidate a peer connection on ${where} found, at ${c.address}, is one of this machine's addresses`;
+                expect(ownAddresses.includes(c.address), at).toBe(true);
+            }
+            for (const c of pc.remoteCandidates) {
+                if (!isMdnsName(c.address)) continue;
+                expect(c.dropped, `a peer connection on ${where} was given a ${c.type} candidate under an mDNS name, and it reached the browser`).toBe(true);
             }
         }
     }
@@ -95,9 +119,8 @@ async function receiveAndCompare(receiver, sender, file) {
     expect(summary(got.bytes)).toEqual(summary(file.buffer));
 }
 
-test('a file sent by direct transfer arrives intact when the receiver types the code into the home page', async ({ page, otherContext, stun }) => {
-    await recordPeerConnections(page.context());
-    await recordPeerConnections(otherContext);
+test('a file sent by direct transfer arrives intact when the receiver types the code into the home page', async ({ page, otherContext, stun, browserName }) => {
+    await recordBoth(browserName, page.context(), otherContext);
     await expectOnlyLocalStunOffered(page, stun);
     const file = madeUpFile('Sketches (direct) é.bin', SIZE, 30);
 
@@ -110,12 +133,11 @@ test('a file sent by direct transfer arrives intact when the receiver types the 
     await expect(receiver).toHaveURL(new RegExp(`/p2p/${sent.code}$`));
 
     await receiveAndCompare(receiver, page, file);
-    await expectOnlyLocalCandidates(stun, page, receiver);
+    await expectOnlyLocalCandidates(stun, browserName, page, receiver);
 });
 
-test('a file sent by direct transfer arrives intact when the receiver opens the link', async ({ page, otherContext, stun }) => {
-    await recordPeerConnections(page.context());
-    await recordPeerConnections(otherContext);
+test('a file sent by direct transfer arrives intact when the receiver opens the link', async ({ page, otherContext, stun, browserName }) => {
+    await recordBoth(browserName, page.context(), otherContext);
     await expectOnlyLocalStunOffered(page, stun);
     const file = madeUpFile('Sketches (linked) é.bin', SIZE, 31);
 
@@ -126,12 +148,11 @@ test('a file sent by direct transfer arrives intact when the receiver opens the 
     await receiver.goto(sent.link);
 
     await receiveAndCompare(receiver, page, file);
-    await expectOnlyLocalCandidates(stun, page, receiver);
+    await expectOnlyLocalCandidates(stun, browserName, page, receiver);
 });
 
-test('several files sent together by direct transfer arrive intact as one ZIP', async ({ page, otherContext, stun }) => {
-    await recordPeerConnections(page.context());
-    await recordPeerConnections(otherContext);
+test('several files sent together by direct transfer arrive intact as one ZIP', async ({ page, otherContext, stun, browserName }) => {
+    await recordBoth(browserName, page.context(), otherContext);
     const files = [
         madeUpFile('plan.txt', 1_000, 32),
         madeUpFile('drawings (rev 3).pdf', 400_000, 33),
@@ -152,5 +173,5 @@ test('several files sent together by direct transfer arrive intact as one ZIP', 
     for (const [i, file] of files.entries()) {
         expect(summary(entries[i].bytes), `${file.name} in the ZIP`).toEqual(summary(file.buffer));
     }
-    await expectOnlyLocalCandidates(stun, page, receiver);
+    await expectOnlyLocalCandidates(stun, browserName, page, receiver);
 });

@@ -1,6 +1,6 @@
 // Chromium's net log for one run of a browser or the desktop app: for a failed
 // desktop test's report, and to check that nothing a test starts looks for a
-// proxy by itself.
+// proxy by itself, or looks up any name beyond this machine.
 //
 // The desktop fixtures launch the app with --log-net-log, so its network stack
 // writes down everything it does, as it does it. Playwright only says how far a
@@ -10,7 +10,8 @@
 // DNS lookups), and each request to the test's addresses: how long it waited for
 // a proxy decision, when it connected, sent and had its answer, and how it ended.
 // proxyLookups() gives only the times it looked for a proxy, which on a network
-// with WPAD go out to that network. Names, times and error codes only. The log
+// with WPAD go out to that network, and outsideLookups() every DNS lookup of a
+// name that isn't this machine's. Names, times and error codes only. The log
 // itself stays in the test's temporary folder, which is deleted with it.
 import fs from 'node:fs';
 
@@ -149,6 +150,44 @@ export function proxyLookups(file) {
     }
     lines.sort((a, b) => Number(a.at.time) - Number(b.at.time));
     return lines.map(({ at, text }) => `${ms(at)}  ${text}`);
+}
+
+/** A name that never leaves this machine: loopback, or "localhost" itself. */
+const LOCAL_HOST = /^(?:127(?:\.\d+){3}|localhost|\[?::1\]?)$/i;
+
+/**
+ * Each DNS lookup the network stack made of a name that isn't this machine's
+ * own (127.x, localhost or ::1), one line each, with times in ms from the log's
+ * first event. A lookup like that goes out to the network's DNS server, so a
+ * test should never start one. An empty log gives none; no log at all gives a
+ * line, as there's nothing to tell from.
+ * @param {string} file - The net log.
+ * @returns {string[]}
+ */
+export function outsideLookups(file) {
+    if (!fs.existsSync(file)) return [`no net log at ${file}, so there's nothing to tell from`];
+    return lookups(file)
+        .filter(({ host }) => !LOCAL_HOST.test(/^(?:[a-z][a-z0-9+.-]*:\/\/)?(\[[^\]]*\]|[^:/]*)/i.exec(host)?.[1] ?? host))
+        .map(({ at, host }) => `+${at} ms  a DNS lookup of ${host}`);
+}
+
+/**
+ * Every host the network stack was asked to look up, in order, as the log gives
+ * it: a scheme, host and port ("http://127.0.0.1:52443"), or a host and port.
+ * @param {string} file - The net log.
+ * @returns {string[]}
+ */
+export const hostLookups = (file) => (fs.existsSync(file) ? lookups(file).map(({ host }) => host) : []);
+
+/** @returns {{ at: number, host: string }[]} Each lookup, with its time in ms from the log's first event. */
+function lookups(file) {
+    const read = readNetLog(file);
+    if (!read) return [];
+    const log = netLog(read);
+    const start = read.events.length ? log.timeOf(read.events[0]) : 0;
+    return read.events
+        .filter((e) => log.type(e) === 'HOST_RESOLVER_MANAGER_REQUEST' && e.phase === log.begin)
+        .map((e) => ({ at: Math.round(log.timeOf(e) - start), host: String(e.params?.host ?? '') }));
 }
 
 /**

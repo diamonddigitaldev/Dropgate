@@ -35,7 +35,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from '@playwright/test';
 import { expect, passed, test as base } from './test.mjs';
-import { describeNetLog, proxyLookups, proxySettings } from './netlog.mjs';
+import { describeNetLog, outsideLookups, proxyLookups, proxySettings } from './netlog.mjs';
 import { startTlsProxy } from './tls.mjs';
 
 export { expect };
@@ -433,15 +433,17 @@ function phases(request, ms) {
 }
 
 /**
- * Check that no launch of the app looked for a proxy by itself, from each one's
- * net log. They're soft, so a failure still gets the report, whose net log
- * sections show what each run found. A launch that started its network stack
- * must have logged its proxy settings, or its log can't show a lookup either.
+ * Check that no launch of the app looked for a proxy by itself, or looked up any
+ * name beyond this machine, from each one's net log. They're soft, so a failure
+ * still gets the report, whose net log sections show what each run found. A
+ * launch that started its network stack must have logged its proxy settings, or
+ * its log can't show a lookup either.
  * @param {Desktop} desktop
  */
-function expectNoProxyLookups(desktop) {
+function expectNoLookups(desktop) {
     for (const { label, file, handsOn } of desktop.netLogs) {
         expect.soft(proxyLookups(file), `the times ${label} of the app looked for a proxy by itself (its net log)`).toEqual([]);
+        expect.soft(outsideLookups(file), `the names ${label} of the app looked up beyond this machine (its net log)`).toEqual([]);
         if (!handsOn) expect.soft(proxySettings(file), `the proxy settings ${label} of the app found (its net log)`).not.toEqual([]);
     }
 }
@@ -489,7 +491,7 @@ export const test = base.extend({
             const appRequests = desktop.appRequests();
             // Quitting finishes each run's net log.
             await close();
-            if (bodyPassed) expectNoProxyLookups(desktop);
+            if (bodyPassed) expectNoLookups(desktop);
             if (testInfo.status !== testInfo.expectedStatus) {
                 // A test.fail() test that passed: failing it now would count as the failure it expects, and hide the pass.
                 if (testInfo.expectedStatus === 'failed') console.error(`"${testInfo.title}" passed, though it's expected to fail.\n\n${desktop.report(appRequests)}`);

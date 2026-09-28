@@ -105,9 +105,10 @@ export const test = base.extend({
     },
 
     // A second, separate browser context, like another person on another device.
-    // It has the same base URL and headers as the first, and the same checks.
-    otherContext: async ({ browser, baseURL, extraHTTPHeaders, server, secrets }, use, testInfo) => {
-        const context = await browser.newContext({ baseURL, extraHTTPHeaders });
+    // It has the same base URL, headers and permissions as the first, and the
+    // same checks.
+    otherContext: async ({ browser, baseURL, extraHTTPHeaders, permissions, server, secrets }, use, testInfo) => {
+        const context = await browser.newContext({ baseURL, extraHTTPHeaders, permissions });
         keepSecretsFor(context, secrets);
         const check = watchContext(context, server, secrets);
         try {
