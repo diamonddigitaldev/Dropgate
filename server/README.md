@@ -132,6 +132,8 @@ docker run -d \
 
 If you want uploads to persist across restarts, map `/usr/src/app/uploads` to a path on the host machine and set `UPLOAD_PRESERVE_UPLOADS=true`.
 
+The image holds only what the server runs: the Dockerfile copies the package files, `server.js`, `views/`, `public/` and `entrypoint.sh`, and `.dockerignore` keeps the tests, `test/`, out of the build context altogether.
+
 Images are built for `linux/amd64` and `linux/arm64`. Each release's image is tagged with its version. A stable release also moves `latest`, and its major and minor tags, so `3` and `3.0` always give the newest 3.x release; pin one of those to stay on a major version. A pre-release is tagged `next` as well, and never `latest`. See [Releases](../README.md#releases) for how an image is built and checked before it's published.
 
 
