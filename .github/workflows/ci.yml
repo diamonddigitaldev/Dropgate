@@ -440,7 +440,7 @@ jobs:
           ls "$W"
           echo "=== pw_run.sh"; cat "$W/pw_run.sh"
           echo "=== --help"; timeout 20 "$W/pw_run.sh" --headless --help 2>&1 | head -60 || true
-          echo "=== --features=help (WebRTC, ICE, mDNS)"; timeout 20 "$W/pw_run.sh" --headless --features=help 2>&1 | grep -iE 'rtc|ice|mdns|usage|unknown' | head -40 || true
+          echo "=== --features=help (WebRTC, ICE, mDNS)"; timeout 20 "$W/pw_run.sh" --headless --features=help 2>&1 | grep -iE 'mdns|icecandidate|unknown' || true
 
       - name: Probe each browser's lookups
         run: |
@@ -456,8 +456,8 @@ jobs:
           const options = {
               'chromium-feature': { args: [`--disable-features=${PW},WebRtcHideLocalIpsWithMdns`] },
               'firefox-off': { firefoxUserPrefs: { 'media.peerconnection.ice.obfuscate_host_addresses': false, 'extensions.systemAddon.update.enabled': false } },
-              'webkit-mdns': { args: ['--features=-WebRTCMDNSICECandidatesEnabled'] },
-              'webkit-filter': { args: ['--features=-ICECandidateFilteringEnabled'] },
+              'webkit-mdns': { args: ['--features=-WebRTCMDNSICECandidates'] },
+              'webkit-filter': { args: ['--features=-ICECandidateFiltering'] },
           }[variant] ?? {};
           const contextOptions = variant === 'chromium-perms' ? { permissions: ['camera', 'microphone'] } : {};
           const own = new Set(Object.values(os.networkInterfaces()).flat().map((i) => i.address));
@@ -505,7 +505,7 @@ jobs:
           });
           EOF
           IF=$(ip route show default | awk '{print $5; exit}')
-          for v in chromium chromium-perms chromium-feature firefox firefox-off webkit webkit-mdns webkit-filter; do
+          for v in webkit webkit-mdns webkit-filter; do
             p=${v%%-*}
             hold=0; [ "$v" = firefox-off ] && hold=40000
             sudo resolvectl monitor > "$RUNNER_TEMP/$v.dns" 2>&1 & dpid=$!
@@ -518,9 +518,9 @@ jobs:
             echo "=================== $v"
             grep -E 'PROBE|passed|failed|Error' "$RUNNER_TEMP/$v.out" | head -8
             echo "--- names asked of the resolver (count, name):"
-            grep -E 'Q: ' "$RUNNER_TEMP/$v.dns" | sed -E 's/^.*Q: //; s/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/g' | sort | uniq -c | sort -rn | head -12 || true
+            grep -E 'Q: ' "$RUNNER_TEMP/$v.dns" | sed -E 's/^.*Q: //; s/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/g; s/\.local\.[^ ]+/.local.<search domain>/g' | sort | uniq -c | sort -rn | head -12 || true
             echo "--- packets on $IF, ports 53 and 5353: $(grep -c . "$RUNNER_TEMP/$v.pkt")"
-            sed -E 's/^[0-9:.]+ //; s/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/g; s/224\.0\.0\.251/MDNS4/g; s/ff02::fb/MDNS6/g; s/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<ip>/g; s/([0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}/<ip6>/g; s/ [0-9]+\+? / /' "$RUNNER_TEMP/$v.pkt" | cut -c1-150 | sort | uniq -c | sort -rn | head -10
+            sed -E 's/^[0-9:.]+ //; s/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/g; s/\.local\.[^ ]+/.local.<search domain>/g; s/224\.0\.0\.251/MDNS4/g; s/ff02::fb/MDNS6/g; s/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/<ip>/g; s/([0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}/<ip6>/g; s/ [0-9]+\+? / /' "$RUNNER_TEMP/$v.pkt" | cut -c1-150 | sort | uniq -c | sort -rn | head -10
           done
 
   docs:
