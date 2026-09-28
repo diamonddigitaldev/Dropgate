@@ -136,9 +136,10 @@ jobs:
       prerelease: ${{ needs.versions.outputs.prerelease }}
 
   # The server's and core's source, as the release would attach it: each folder
-  # at the release's commit, from git archive, with every file dated at that
-  # commit. Each is unpacked on its own and tested, so each stands alone.
-  # Nothing is attached.
+  # at the release's commit, from git archive, with its line endings as
+  # committed and every file dated at that commit, so the same commit gives the
+  # same archive on any machine. Each is unpacked on its own and tested, so each
+  # stands alone. Nothing is attached.
   archives:
     name: Source archives (not attached)
     needs: [versions, tests]
@@ -174,7 +175,7 @@ jobs:
             name=dropgate-${part%%:*}-$TAG
             folder=${part#*:}
             file=$RUNNER_TEMP/archives/$name.tar.gz
-            git archive --format=tar.gz --prefix="$name/" --mtime="$date" -o "$file" "HEAD:$folder"
+            git -c core.autocrlf=false archive --format=tar.gz --prefix="$name/" --mtime="$date" -o "$file" "HEAD:$folder"
             if ! diff <(git -c core.quotePath=false ls-tree -r --name-only "HEAD:$folder" | sort) \
                       <(tar -tzf "$file" | grep -v '/$' | sed "s|^$name/||" | sort); then
               echo "$name.tar.gz doesn't hold exactly $folder/ at the commit."
