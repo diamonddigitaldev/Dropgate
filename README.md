@@ -143,12 +143,19 @@ Each release is to be built and published from its tag by one workflow, [`releas
 * it looks the version up on npm, which never takes a version twice. A real release is to stop there if npm already has it. The dry run warns and goes on;
 * it runs every test and builds the client, as CI does;
 * it builds the client again on Windows and on Ubuntu, and lists the files a release would attach from each, with their sizes and SHA-256: the NSIS installer and its `.blockmap`, the AppImage, the `.deb` and the `.rpm` ([`desktop-release-files.mjs`](./.github/scripts/desktop-release-files.mjs)). Any other file the build writes fails the run, until it's decided whether a release attaches it;
-* it makes the server's and core's source archives, `dropgate-server-<version>.tar.gz` and `dropgate-core-<version>.tar.gz`: each folder as it is at the release's commit, from `git archive`, with every file dated at that commit, so the same commit always gives the same archive. Each is unpacked on its own, away from the repository, then installed and tested (core is also typechecked and built), so each stands alone;
+* it makes the server's and core's source archives, `dropgate-server-<version>.tar.gz` and `dropgate-core-<version>.tar.gz`: each folder as it is at the release's commit, from `git archive`, with its line endings as committed and every file dated at that commit, so the same commit gives the same archive on any machine (see below). Each is unpacked on its own, away from the repository, then installed and tested (core is also typechecked and built), so each stands alone;
 * it builds the server's Docker image for `linux/amd64` and `linux/arm64`, with the tags the release would push to `willtda/dropgate-server`, and checks each platform's image as CI checks its own (below). A stable release is tagged with its version, its major and minor version, its major version and `latest` (`4.0.0`, `4.0`, `4` and `latest`). A pre-release is tagged only with its version and `next` (`4.0.0-alpha.1` and `next`), never `latest`;
 * it lists the client's update files, `latest.yml` for Windows and `latest-linux.yml` for Linux, which the installed app reads to update itself. A stable release attaches them after every other file and the image, so the app never finds one before everything it names is there. Each must name only files its own build attaches, with the same size and SHA-512. A pre-release attaches neither, so the app never updates to one;
 * last of all, it runs npm's dry run of publishing core, tagged `latest` for a stable release and `next` for a pre-release, with provenance. That lists every file in the package. While npm already has the version, as it has `3.0.13`, the dry run passes `--force`, which skips only npm's own checks against the registry. npm's dry run skips provenance itself, so the run first checks what provenance needs, without asking for a token ([`check-npm-provenance.mjs`](./.github/scripts/check-npm-provenance.mjs)): npm 11.5.1 or later, the package's `repository` naming this repository and its folder, the repository and the package public, and the workflow being `release.yml`.
 
 Nothing is attached, pushed or published, and nothing is uploaded as a workflow artifact.
+
+A release's source archive can be made again from its tag, to compare with the one attached. For the server's (core's is `packages/dropgate-core`, named `dropgate-core-`):
+
+```bash
+v=4.0.0-alpha.1
+git -c core.autocrlf=false archive --format=tar.gz --prefix=dropgate-server-$v/ --mtime="$(git log -1 --format=%cI $v)" -o dropgate-server-$v.tar.gz $v:server
+```
 
 It runs by itself on a push that changes `release.yml`, and by hand, where it can pretend a tag and pre-release flag to show what the checks would say:
 
