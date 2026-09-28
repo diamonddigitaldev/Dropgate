@@ -132,6 +132,11 @@ If you self-host, you decide how strict you want to be — from private-only to 
 GitHub Actions checks their links, and the names they give, against the code on every push and pull request ([docs checks](./tests/docs/README.md)).
 
 
+## Releases
+
+Core, the server and the client share one version, and are released together, from a tag that is that version (such as `3.0.13`). The version is changed by hand, in one commit, in each part's `package.json` and `package-lock.json`, and in the version badge at the top of its README. On every push and pull request, GitHub Actions checks that they all give the same version, and fails if one doesn't ([`check-versions.mjs`](./.github/scripts/check-versions.mjs)).
+
+
 ## Licenses
 
 * **Client:** GPL-3.0 License – See [`client/LICENSE`](./client/LICENSE)

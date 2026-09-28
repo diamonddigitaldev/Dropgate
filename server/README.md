@@ -107,6 +107,8 @@ GitHub Actions runs the tests this way on Ubuntu and Windows ([`ci.yml`](../.git
 
 The Web UI is tested in real browsers by the [integration tests](../tests/integration/README.md), which start the server with the same harness.
 
+The server shares its version with the client and core, and they're released together ([Releases](../README.md#releases)). Change it in `package.json`, `package-lock.json` and the badge at the top of this README together, or GitHub Actions fails.
+
 
 ## The Web UI's Core Library
 

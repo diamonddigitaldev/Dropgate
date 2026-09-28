@@ -514,6 +514,8 @@ The tests run in plain Node, with no browser environment. The P2P tests use stan
 
 GitHub Actions runs these steps on Ubuntu ([`ci.yml`](../../.github/workflows/ci.yml)). It fails if the build changes either copy: that means a copy was edited by hand, or not built again after a change to core.
 
+Core shares its version with the server and the client, and they're released together ([Releases](../../README.md#releases)). Change it in `package.json`, `package-lock.json` and the badge at the top of this README together, or GitHub Actions fails.
+
 ## License
 
 Licensed under the **Apache-2.0 License**.

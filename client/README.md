@@ -103,6 +103,8 @@ Distributable binaries will appear in the `dist` folder: the NSIS installer on W
 
 GitHub Actions builds all four packages ([`ci.yml`](../.github/workflows/ci.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the tests aren't packaged into the app and that the app carries core's build as it is, and doesn't publish or upload anything.
 
+The client shares its version with the server and core, and they're released together ([Releases](../README.md#releases)). Change it in `package.json`, `package-lock.json` and the badge at the top of this README together, or GitHub Actions fails.
+
 
 ## Running the Tests
 
