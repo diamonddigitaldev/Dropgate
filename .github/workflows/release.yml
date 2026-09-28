@@ -4,12 +4,16 @@ name: Release
 # a version, and each release is built from its tag.
 #
 # So far it has only its dry run, which publishes nothing. It checks the
-# versions against the release it would make, then runs every test and builds
-# the desktop app, as CI does, then builds the server's image for each platform
-# with the tags the release would push, and checks each one, without pushing
-# it. It runs by hand (gh workflow run release.yml --ref 4.0.0), optionally
-# pretending a tag and pre-release flag, and by itself on a push that changes
-# this file.
+# versions against the release it would make, and looks the version up on npm.
+# Then it runs every test and builds the desktop app, as CI does. Then, as the
+# release would, it builds each platform's desktop packages, the server's and
+# core's source archives, and the server's image for each platform, with the
+# tags the release would push, and checks each one. It lists every file the
+# release would attach, with the update files last, and runs npm's dry run of
+# core's package last of all. Nothing is attached, pushed or published, and
+# nothing is uploaded as a workflow artifact. It runs by hand (gh workflow run
+# release.yml --ref 4.0.0), optionally pretending a tag and pre-release flag,
+# and by itself on a push that changes this file.
 
 on:
   workflow_dispatch:
@@ -38,6 +42,7 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       prerelease: ${{ steps.release.outputs.prerelease }}
+      on-npm: ${{ steps.npm.outputs.on-npm }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -79,11 +84,129 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
+      # npm never takes a version twice, so a version it already has can't be
+      # released. Read with no credentials. The dry run warns and goes on.
+      - name: Look the version up on npm
+        id: npm
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          name=$(node -p "require('./packages/dropgate-core/package.json').name")
+          status=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${name/\//%2f}/$TAG")
+          case "$status" in
+            200)
+              echo "::warning title=Already on npm::$name $TAG is already on npm, so a real release of it would stop here. The dry run goes on."
+              echo "on-npm=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "$name $TAG isn't on npm yet."
+              echo "on-npm=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "npm answered $status for $name $TAG."
+              exit 1
+              ;;
+          esac
+
   # Every test, and the desktop builds, exactly as CI runs them.
   tests:
     name: Tests and builds
     needs: versions
     uses: ./.github/workflows/ci.yml
+
+  # Each platform's desktop packages, built after the tests as CI builds them
+  # (client-build.yml). Each lists the files the release would attach from it,
+  # and hands its update file on to update-files. Nothing is attached.
+  desktop-windows:
+    name: Desktop build, Windows (not attached)
+    needs: [versions, tests]
+    uses: ./.github/workflows/client-build.yml
+    with:
+      os: windows-latest
+      release: true
+      prerelease: ${{ needs.versions.outputs.prerelease }}
+
+  desktop-linux:
+    name: Desktop build, Linux (not attached)
+    needs: [versions, tests]
+    uses: ./.github/workflows/client-build.yml
+    with:
+      os: ubuntu-latest
+      release: true
+      prerelease: ${{ needs.versions.outputs.prerelease }}
+
+  # The server's and core's source, as the release would attach it: each folder
+  # at the release's commit, from git archive, with every file dated at that
+  # commit. Each is unpacked on its own and tested, so each stands alone.
+  # Nothing is attached.
+  archives:
+    name: Source archives (not attached)
+    needs: [versions, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TAG: ${{ needs.versions.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          # The server's expected-failure tests use node:test's expectFailure, added in 24.14.
+          node-version: '^24.14'
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            packages/dropgate-core/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      # Each must hold exactly its folder's files at the commit.
+      - name: Make the archives
+        run: |
+          mkdir -p "$RUNNER_TEMP/archives"
+          date=$(git log -1 --format=%cI HEAD)
+          echo "From $(git rev-parse HEAD), every file dated $date. The release would attach:"
+          for part in server:server core:packages/dropgate-core; do
+            name=dropgate-${part%%:*}-$TAG
+            folder=${part#*:}
+            file=$RUNNER_TEMP/archives/$name.tar.gz
+            git archive --format=tar.gz --prefix="$name/" --mtime="$date" -o "$file" "HEAD:$folder"
+            if ! diff <(git -c core.quotePath=false ls-tree -r --name-only "HEAD:$folder" | sort) \
+                      <(tar -tzf "$file" | grep -v '/$' | sed "s|^$name/||" | sort); then
+              echo "$name.tar.gz doesn't hold exactly $folder/ at the commit."
+              exit 1
+            fi
+            printf '  %-30s %9d bytes  %4d files  sha256 %s\n' "$name.tar.gz" "$(wc -c < "$file")" \
+              "$(tar -tzf "$file" | grep -vc '/$')" "$(sha256sum "$file" | cut -d' ' -f1)"
+          done
+          echo "Nothing was attached or uploaded."
+
+      # Unpacked away from the repository, it installs and passes its tests.
+      - name: Check the server's archive stands alone
+        run: |
+          cd "$RUNNER_TEMP"
+          tar -xzf "archives/dropgate-server-$TAG.tar.gz"
+          cd "dropgate-server-$TAG"
+          npm --version
+          npm ci
+          node --test --test-reporter=tap "test/*.test.mjs"
+
+      # Unpacked away from the repository, it installs, typechecks, builds and
+      # passes its tests. Its build and tests skip the copies in the server and
+      # the client, which aren't there.
+      - name: Check core's archive stands alone
+        run: |
+          cd "$RUNNER_TEMP"
+          tar -xzf "archives/dropgate-core-$TAG.tar.gz"
+          cd "dropgate-core-$TAG"
+          npm ci
+          npm run typecheck
+          npm run build
+          npx vitest run --reporter=verbose
 
   # The server's image, built for each platform the release publishes, with the
   # tags it would push. Nothing is pushed, and nothing is uploaded.
@@ -160,3 +283,102 @@ jobs:
             docker buildx build --platform "$platform" --load -t "dropgate-server:${platform#linux/}" server/
             bash .github/scripts/check-server-image.sh "dropgate-server:${platform#linux/}" "$platform"
           done
+
+  # The desktop app's update files go up after every other file and the image,
+  # so the app never finds one before everything it names is there. A
+  # pre-release attaches none, so the app never updates to it. Nothing is
+  # attached.
+  update-files:
+    name: Update files (not attached)
+    needs: [versions, desktop-windows, desktop-linux, archives, server-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: List the update files
+        env:
+          PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+          WINDOWS_NAME: ${{ needs.desktop-windows.outputs.update-file-name }}
+          WINDOWS_FILE: ${{ needs.desktop-windows.outputs.update-file }}
+          LINUX_NAME: ${{ needs.desktop-linux.outputs.update-file-name }}
+          LINUX_FILE: ${{ needs.desktop-linux.outputs.update-file }}
+        run: |
+          if [ "$PRERELEASE" = true ]; then
+            echo "A pre-release attaches no update file, so the desktop app never updates to it."
+            exit 0
+          fi
+          dir=$(mktemp -d)
+          show() {
+            if [ "$2" != "$1" ] || [ -z "$3" ]; then
+              echo "Expected $1 from the desktop build, but it handed on ${2:-nothing}."
+              exit 1
+            fi
+            printf '%s' "$3" | base64 -d > "$dir/$1"
+            printf '  %-17s %5d bytes  sha256 %s\n' "$1" "$(wc -c < "$dir/$1")" "$(sha256sum "$dir/$1" | cut -d' ' -f1)"
+            sed 's/^/      /' "$dir/$1"
+          }
+          echo "The release would attach these last, each checked against its build's files:"
+          show latest.yml "$WINDOWS_NAME" "$WINDOWS_FILE"
+          show latest-linux.yml "$LINUX_NAME" "$LINUX_FILE"
+          echo "Nothing was attached or uploaded."
+
+  # Core's npm package, last of all, since npm never takes a version twice.
+  # A stable release is tagged latest, and a pre-release next. npm's dry run
+  # lists what it would publish, and publishes nothing. The job asks for no ID
+  # token: given one, npm swaps it for a publish token, even in a dry run.
+  npm:
+    name: npm package (not published)
+    needs: [versions, update-files]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/dropgate-core
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/dropgate-core/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      - name: Install dependencies
+        run: |
+          npm --version
+          npm ci
+
+      # npm's dry run skips provenance, so this checks what it needs, as far as
+      # it can without a token.
+      - name: Check what provenance needs
+        run: node ../../.github/scripts/check-npm-provenance.mjs
+
+      # A version npm already has would have stopped a real release at the
+      # start. The dry run goes on with --force, which skips only npm's own
+      # checks against the registry, so the package is still listed.
+      - name: Publish, as a dry run
+        env:
+          PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+          ON_NPM: ${{ needs.versions.outputs.on-npm }}
+        run: |
+          tag=latest
+          if [ "$PRERELEASE" = true ]; then tag=next; fi
+          force=()
+          if [ "$ON_NPM" = true ]; then force=(--force); fi
+          npm publish --dry-run --provenance --access public --tag "$tag" "${force[@]}"
+
+      # npm builds core first (prepublishOnly), which writes the server's and
+      # the client's copies too. They must be as committed.
+      - name: Check the copies are as committed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            echo "Building core for npm changed the files above."
+            exit 1
+          fi
+          echo "The server's and client's copies are as committed."
