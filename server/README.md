@@ -112,7 +112,7 @@ The server shares its version with the client and core, and they're released tog
 
 ## The Web UI's Core Library
 
-The Web UI runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`public/js/dropgate-core.js`](public/js/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the server and its Docker image don't need core built first. Don't edit it: change core's source and build it again ([Building and Testing](../packages/dropgate-core/README.md#building-and-testing)). GitHub Actions fails if it isn't core's build.
+The Web UI runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`public/js/dropgate-core.js`](public/js/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the server and its Docker image don't need core built first. Don't edit it: change core's source and build it again ([Building and Testing](../packages/dropgate-core/README.md#building-and-testing)). GitHub Actions fails if it isn't core's build, or if the Docker image doesn't carry it as it is.
 
 
 ## Running with Docker
@@ -131,6 +131,8 @@ docker run -d \
 ```
 
 If you want uploads to persist across restarts, map `/usr/src/app/uploads` to a path on the host machine and set `UPLOAD_PRESERVE_UPLOADS=true`.
+
+Images are built for `linux/amd64` and `linux/arm64`. Each release's image is tagged with its version. A stable release also moves `latest`, and its major and minor tags, so `3` and `3.0` always give the newest 3.x release; pin one of those to stay on a major version. A pre-release is tagged `next` as well, and never `latest`. See [Releases](../README.md#releases) for how an image is built and checked before it's published.
 
 
 ## Environment Variables

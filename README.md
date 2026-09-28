@@ -140,7 +140,8 @@ Each release is to be built and published from its tag by one workflow, [`releas
 
 * it checks that it's on `master`, or on `4.0.0` until that's merged;
 * it checks that the release's tag is the version, and that the release is a pre-release exactly when the version has a pre-release part, such as `4.0.0-alpha.1`, so a pre-release can never become the latest release;
-* it runs every test and builds the client, as CI does.
+* it runs every test and builds the client, as CI does;
+* it builds the server's Docker image for `linux/amd64` and `linux/arm64`, with the tags the release would push to `willtda/dropgate-server`, and checks each platform's image as CI checks its own (below). A stable release is tagged with its version, its major and minor version, its major version and `latest` (`4.0.0`, `4.0`, `4` and `latest`). A pre-release is tagged only with its version and `next` (`4.0.0-alpha.1` and `next`), never `latest`. Nothing is pushed.
 
 It runs by itself on a push that changes `release.yml`, and by hand, where it can pretend a tag and pre-release flag to show what the checks would say:
 
@@ -148,6 +149,8 @@ It runs by itself on a push that changes `release.yml`, and by hand, where it ca
 gh workflow run release.yml --ref 4.0.0
 gh workflow run release.yml --ref 4.0.0 -f tag=4.0.0-alpha.1 -f prerelease=yes
 ```
+
+On every push and pull request, GitHub Actions also builds the server's Docker image and checks it ([`check-server-image.sh`](./.github/scripts/check-server-image.sh)): it must carry core's build, `server/public/js/dropgate-core.js`, byte for byte, and when it's started, with a port on `127.0.0.1` only, it must answer `GET /api/info` with the server's version and pass its health check.
 
 
 ## Licenses
