@@ -1,4 +1,6 @@
-// Chromium's net log for one run of the desktop app, for a failed test's report.
+// Chromium's net log for one run of a browser or the desktop app: for a failed
+// desktop test's report, and to check that nothing a test starts looks for a
+// proxy by itself.
 //
 // The desktop fixtures launch the app with --log-net-log, so its network stack
 // writes down everything it does, as it does it. Playwright only says how far a
@@ -7,18 +9,24 @@
 // time it looked for a proxy on its own (proxy auto-detection, with its DHCP and
 // DNS lookups), and each request to the test's addresses: how long it waited for
 // a proxy decision, when it connected, sent and had its answer, and how it ended.
-// Names, times and error codes only. The log itself stays in the test's
-// temporary folder, which is deleted with it.
+// proxyLookups() gives only the times it looked for a proxy, which on a network
+// with WPAD go out to that network. Names, times and error codes only. The log
+// itself stays in the test's temporary folder, which is deleted with it.
 import fs from 'node:fs';
 
 /**
- * The log's constants and events. It's only valid JSON once the app has quit,
- * so it's read a line at a time: the constants on the first line, then one
- * event per line. While the app runs, the last line may be half written.
+ * The log's constants and events, or null for an empty log. It's only valid
+ * JSON once the app has quit, so it's read a line at a time: the constants on
+ * the first line, then one event per line. While the app runs, the last line may
+ * be half written.
  * @param {string} file
  */
 function readNetLog(file) {
-    const [first, ...rest] = fs.readFileSync(file, 'utf8').split('\n');
+    const text = fs.readFileSync(file, 'utf8');
+    // A launch that only hands its arguments to the app already running quits
+    // before its network stack starts, and leaves its log empty.
+    if (!text) return null;
+    const [first, ...rest] = text.split('\n');
     const { constants } = JSON.parse(`${first.replace(/,\s*$/, '')}}`);
     const events = [];
     for (const line of rest) {
@@ -33,43 +41,53 @@ function readNetLog(file) {
 }
 
 /**
- * What the app's network stack did, one line each, with times in ms from `since`.
- * @param {string} file - The net log.
- * @param {number} since - A time in ms since 1970.
- * @param {string[]} origins - The test's own addresses (the server's, and the TLS proxy's if there is one).
+ * A net log, read for the functions below: its events, grouped by what they
+ * belong to (their source), with ways to name and time them.
+ * @param {{ constants: any, events: any[] }} log - What readNetLog() gave.
  */
-export function describeNetLog(file, since, origins) {
-    if (!fs.existsSync(file)) return '  (no net log)';
-    const { constants, events } = readNetLog(file);
+function netLog({ constants, events }) {
     const name = (table, value) => Object.keys(constants[table]).find((key) => constants[table][key] === value) ?? String(value);
     const type = (e) => name('logEventTypes', e.type);
-    const errorName = (code) => `${name('netError', code)} (${code})`;
-    const offset = Number(constants.timeTickOffset);
-    const ms = (e) => `+${Math.round(Number(e.time) + offset - since)} ms`;
-    const took = (a, b) => `${Number(b.time) - Number(a.time)} ms`;
-    const phaseOf = (e) => ({ [constants.logEventPhase.PHASE_BEGIN]: 'began', [constants.logEventPhase.PHASE_END]: 'ended' })[e.phase] ?? 'logged';
-    /** Where something that never finished got to: the last thing logged for it. */
-    const lastStep = (e) => `its last step, ${type(e)}, ${phaseOf(e)} at ${ms(e)}`;
-
+    const begin = constants.logEventPhase.PHASE_BEGIN;
+    const end = constants.logEventPhase.PHASE_END;
     const sources = new Map();
     for (const e of events) {
         if (!sources.has(e.source.id)) sources.set(e.source.id, { kind: name('logSourceType', e.source.type), events: [] });
         sources.get(e.source.id).events.push(e);
     }
-    const begin = constants.logEventPhase.PHASE_BEGIN;
-    const end = constants.logEventPhase.PHASE_END;
-    /** The first begin and the next end of an event type in a list, if they're there. */
-    const span = (list, kind) => {
-        const b = list.find((e) => type(e) === kind && e.phase === begin);
-        const en = b && list.find((e) => type(e) === kind && e.phase === end && Number(e.time) >= Number(b.time));
-        return { b, e: en };
+    return {
+        events,
+        sources,
+        type,
+        begin,
+        end,
+        errorName: (code) => `${name('netError', code)} (${code})`,
+        /** When an event happened, in ms since 1970. */
+        timeOf: (e) => Number(e.time) + Number(constants.timeTickOffset),
+        took: (a, b) => `${Number(b.time) - Number(a.time)} ms`,
+        phaseOf: (e) => ({ [begin]: 'began', [end]: 'ended' })[e.phase] ?? 'logged',
+        /** The first begin and the next end of an event type in a list, if they're there. */
+        span: (list, kind) => {
+            const b = list.find((e) => type(e) === kind && e.phase === begin);
+            const en = b && list.find((e) => type(e) === kind && e.phase === end && Number(e.time) >= Number(b.time));
+            return { b, e: en };
+        },
     };
+}
 
+/**
+ * Each time the network stack looked for a proxy script (proxy auto-detection,
+ * or a proxy script's address), with each place it looked, in order.
+ * @param {ReturnType<typeof netLog>} log
+ * @param {(e: any) => string} ms - How to give an event's time.
+ * @returns {{ at: any, text: string }[]}
+ */
+function proxyScriptSearches(log, ms) {
+    const { type, begin, end, took, errorName, span } = log;
+    /** Where something that never finished got to: the last thing logged for it. */
+    const lastStep = (e) => `its last step, ${type(e)}, ${log.phaseOf(e)} at ${ms(e)}`;
     const lines = [];
-    for (const e of events) {
-        if (type(e) === 'PROXY_CONFIG_CHANGED') lines.push({ at: e, text: `proxy settings: ${JSON.stringify(e.params?.new_config ?? {})}` });
-    }
-    for (const { kind, events: list } of sources.values()) {
+    for (const { kind, events: list } of log.sources.values()) {
         if (kind !== 'PAC_FILE_DECIDER') continue;
         const { b, e } = span(list, 'PAC_FILE_DECIDER');
         if (!b) continue;
@@ -87,6 +105,102 @@ export function describeNetLog(file, since, origins) {
         const whole = e ? `took ${took(b, e)}` : `still going (${lastStep(list.at(-1))})`;
         lines.push({ at: b, text: `looking for a proxy script ${whole}: ${steps.map((s) => s.text).join('; ') || 'no steps'}` });
     }
+    return lines;
+}
+
+/** A host name WPAD looks up: "wpad", or "wpad" in a domain, with or without a port. */
+const WPAD_HOST = /^(?:[a-z]+:\/\/)?wpad(?:[.:/]|$)/i;
+
+/**
+ * Each time the network stack looked for a proxy by itself, one line each, with
+ * times in ms from the log's first event:
+ * - proxy settings that tell it to (auto-detection, or a proxy script's address);
+ * - each search for a proxy script, with where it looked;
+ * - any other DNS lookup of the name "wpad".
+ *
+ * On a network with WPAD, each of these goes out to that network. An empty log
+ * gives none: its network stack never started, so it couldn't look. No log at
+ * all gives a line, as there's nothing to tell from.
+ * @param {string} file - The net log.
+ * @returns {string[]}
+ */
+export function proxyLookups(file) {
+    if (!fs.existsSync(file)) return [`no net log at ${file}, so there's nothing to tell from`];
+    const read = readNetLog(file);
+    if (!read) return [];
+    const log = netLog(read);
+    const start = read.events.length ? log.timeOf(read.events[0]) : 0;
+    const ms = (e) => `+${Math.round(log.timeOf(e) - start)} ms`;
+    const lines = proxyScriptSearches(log, ms);
+    for (const e of read.events) {
+        const config = e.params?.new_config;
+        if (log.type(e) === 'PROXY_CONFIG_CHANGED' && (config?.auto_detect || config?.pac_url)) {
+            lines.push({ at: e, text: `proxy settings that look for a proxy: ${JSON.stringify(config)}` });
+        }
+    }
+    // A search for a proxy script logs its own lookups, so these are any others.
+    for (const { kind, events: list } of log.sources.values()) {
+        if (kind === 'PAC_FILE_DECIDER') continue;
+        for (const e of list) {
+            if (log.type(e) === 'HOST_RESOLVER_MANAGER_REQUEST' && e.phase === log.begin && WPAD_HOST.test(e.params?.host ?? '')) {
+                lines.push({ at: e, text: `a DNS lookup of ${e.params.host}` });
+            }
+        }
+    }
+    lines.sort((a, b) => Number(a.at.time) - Number(b.at.time));
+    return lines.map(({ at, text }) => `${ms(at)}  ${text}`);
+}
+
+/**
+ * The proxy settings the network stack found, one for each of its network
+ * contexts, in order. A log with none recorded nothing a proxy check could go on.
+ * @param {string} file - The net log.
+ * @returns {object[]}
+ */
+export function proxySettings(file) {
+    const read = fs.existsSync(file) && readNetLog(file);
+    if (!read) return [];
+    const log = netLog(read);
+    return read.events.filter((e) => log.type(e) === 'PROXY_CONFIG_CHANGED').map((e) => e.params?.new_config ?? {});
+}
+
+/**
+ * The address of every request in the log, in the order they began.
+ * @param {string} file - The net log.
+ * @returns {string[]}
+ */
+export function requestedUrls(file) {
+    const read = fs.existsSync(file) && readNetLog(file);
+    if (!read) return [];
+    const log = netLog(read);
+    return [...log.sources.values()]
+        .filter(({ kind }) => kind === 'URL_REQUEST')
+        .map(({ events: list }) => list.find((e) => e.params?.url)?.params.url)
+        .filter(Boolean);
+}
+
+/**
+ * What the app's network stack did, one line each, with times in ms from `since`.
+ * @param {string} file - The net log.
+ * @param {number} since - A time in ms since 1970.
+ * @param {string[]} origins - The test's own addresses (the server's, and the TLS proxy's if there is one).
+ */
+export function describeNetLog(file, since, origins) {
+    if (!fs.existsSync(file)) return '  (no net log)';
+    const read = readNetLog(file);
+    if (!read) return '  (an empty net log: its network stack never started)';
+    const log = netLog(read);
+    const { events } = read;
+    const { type, sources, errorName, took, phaseOf, span } = log;
+    const ms = (e) => `+${Math.round(log.timeOf(e) - since)} ms`;
+    /** Where something that never finished got to: the last thing logged for it. */
+    const lastStep = (e) => `its last step, ${type(e)}, ${phaseOf(e)} at ${ms(e)}`;
+
+    const lines = [];
+    for (const e of events) {
+        if (type(e) === 'PROXY_CONFIG_CHANGED') lines.push({ at: e, text: `proxy settings: ${JSON.stringify(e.params?.new_config ?? {})}` });
+    }
+    lines.push(...proxyScriptSearches(log, ms));
 
     // The cookie store on disk: a request reads cookies before anything else, so it waits for this.
     for (const { kind, events: list } of sources.values()) {

@@ -1,5 +1,13 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// Chromium looks for a proxy by itself when the system says to, as Windows does
+// by default ("Automatically detect settings"): it asks the network for a WPAD
+// proxy script, over DHCP and DNS. direct:// has it connect directly instead.
+// Playwright's headless Chromium ignores --no-proxy-server, which the desktop
+// app is given (helpers/desktop.mjs). privacy/proxy-lookup.spec.mjs checks the
+// browsers, and every desktop test checks the app.
+const chromium = { ...devices['Desktop Chrome'], launchOptions: { args: ['--proxy-server=direct://'] } };
+
 export default defineConfig({
     testDir: '.',
     testMatch: '**/*.spec.mjs',
@@ -25,10 +33,10 @@ export default defineConfig({
         reducedMotion: 'reduce',
     },
     projects: [
-        { name: 'chromium', testIgnore: 'desktop/**', use: { ...devices['Desktop Chrome'] } },
+        { name: 'chromium', testIgnore: 'desktop/**', use: chromium },
         { name: 'firefox', testIgnore: 'desktop/**', use: { ...devices['Desktop Firefox'] } },
         { name: 'webkit', testIgnore: 'desktop/**', use: { ...devices['Desktop Safari'] } },
         // The desktop app, from client/. Its links are opened in Chromium.
-        { name: 'desktop', testMatch: 'desktop/**/*.spec.mjs', use: { ...devices['Desktop Chrome'] } },
+        { name: 'desktop', testMatch: 'desktop/**/*.spec.mjs', use: chromium },
     ],
 });

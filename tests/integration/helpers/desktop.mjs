@@ -15,6 +15,12 @@
 // any goes anywhere but the test's server. The app checks for updates only when
 // it's packaged, so running it from source sends nothing to GitHub.
 //
+// Every launch also gets --no-proxy-server. Without it, the app looks for a
+// proxy by itself when the system says to, as Windows does by default
+// ("Automatically detect settings"): it asks the network for a WPAD proxy script
+// over DHCP and DNS. After a test passes, each launch's net log must show it
+// never looked.
+//
 // When a desktop test doesn't go as expected, its failure says what the test saw
 // (Desktop.report()): what the TLS proxy saw, what reached the server, the app's
 // requests that failed or never finished, what each run's network stack did (its
@@ -28,8 +34,8 @@ import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from '@playwright/test';
-import { expect, test as base } from './test.mjs';
-import { describeNetLog } from './netlog.mjs';
+import { expect, passed, test as base } from './test.mjs';
+import { describeNetLog, proxyLookups, proxySettings } from './netlog.mjs';
 import { startTlsProxy } from './tls.mjs';
 
 export { expect };
@@ -40,6 +46,9 @@ const PRELOAD = fileURLToPath(new URL('./desktop-preload.cjs', import.meta.url))
 
 /** The client's own Electron build. The electron package downloads it the first time it's asked for. */
 const electronPath = () => createRequire(path.join(CLIENT_DIR, 'package.json'))('electron');
+
+/** Don't look for a proxy: connect directly (see the top of this file). */
+const NO_PROXY = '--no-proxy-server';
 
 /** Whether the app may use the real clipboard and show notifications: in CI, or when asked to. */
 export const realClipboard = () => Boolean(process.env.CI) || process.env.DROPGATE_TEST_REAL_CLIPBOARD === '1';
@@ -155,6 +164,13 @@ class Desktop {
     runs = [];
     /** @type {string[]} */
     elsewhere = [];
+    /**
+     * Every launch's net log, with what to call it. A launch that hands its
+     * arguments to the app already running (launchAgain()) quits before its
+     * network stack starts, so its log is empty.
+     * @type {{ label: string, file: string, handsOn: boolean }[]}
+     */
+    netLogs = [];
 
     /**
      * @param {object} opts
@@ -199,9 +215,10 @@ class Desktop {
     async launch(...args) {
         const eventsFile = path.join(this.root, `events-${this.runs.length + 1}.jsonl`);
         const netLog = path.join(this.root, `netlog-${this.runs.length + 1}.json`);
+        this.netLogs.push({ label: `run ${this.runs.length + 1}`, file: netLog, handsOn: false });
         const app = await electron.launch({
             executablePath: electronPath(),
-            args: ['-r', PRELOAD, `--user-data-dir=${this.profile}`, `--log-net-log=${netLog}`, CLIENT_DIR, ...args],
+            args: ['-r', PRELOAD, `--user-data-dir=${this.profile}`, NO_PROXY, `--log-net-log=${netLog}`, CLIENT_DIR, ...args],
             env: appEnv({ DROPGATE_TEST_EVENTS: eventsFile, DROPGATE_TEST_REAL_CLIPBOARD: this.real ? '1' : '0' }),
             // The TLS proxy's certificate is made up for the test, so the app is told to accept it.
             ignoreHTTPSErrors: Boolean(this.proxy),
@@ -234,7 +251,10 @@ class Desktop {
     async launchAgain(...args) {
         // Playwright turns Chromium's sandbox off on Linux, where it needs setting up as root.
         const noSandbox = process.platform === 'linux' ? ['--no-sandbox'] : [];
-        const child = spawn(electronPath(), [...noSandbox, `--user-data-dir=${this.profile}`, CLIENT_DIR, ...args], {
+        const count = this.netLogs.filter((log) => log.handsOn).length + 1;
+        const netLog = path.join(this.root, `netlog-again-${count}.json`);
+        this.netLogs.push({ label: `second launch ${count}`, file: netLog, handsOn: true });
+        const child = spawn(electronPath(), [...noSandbox, `--user-data-dir=${this.profile}`, NO_PROXY, `--log-net-log=${netLog}`, CLIENT_DIR, ...args], {
             env: appEnv(),
             stdio: 'ignore',
         });
@@ -413,6 +433,20 @@ function phases(request, ms) {
 }
 
 /**
+ * Check that no launch of the app looked for a proxy by itself, from each one's
+ * net log. They're soft, so a failure still gets the report, whose net log
+ * sections show what each run found. A launch that started its network stack
+ * must have logged its proxy settings, or its log can't show a lookup either.
+ * @param {Desktop} desktop
+ */
+function expectNoProxyLookups(desktop) {
+    for (const { label, file, handsOn } of desktop.netLogs) {
+        expect.soft(proxyLookups(file), `the times ${label} of the app looked for a proxy by itself (its net log)`).toEqual([]);
+        if (!handsOn) expect.soft(proxySettings(file), `the proxy settings ${label} of the app found (its net log)`).not.toEqual([]);
+    }
+}
+
+/**
  * Wait for the app to have saved the settings a window just changed. The window
  * saves them over IPC as they change, without waiting for an answer, and the
  * app answers IPC in the order it's sent. So once it has answered a request for
@@ -450,11 +484,13 @@ export const test = base.extend({
         const close = () => Promise.race([desktop.close(), sleep(10_000)]);
         try {
             await use(desktop);
+            const bodyPassed = passed(testInfo);
             expect.soft(desktop.elsewhere, "requests the desktop app made that weren't to the test's server").toEqual([]);
+            const appRequests = desktop.appRequests();
+            // Quitting finishes each run's net log.
+            await close();
+            if (bodyPassed) expectNoProxyLookups(desktop);
             if (testInfo.status !== testInfo.expectedStatus) {
-                const appRequests = desktop.appRequests();
-                // Quitting finishes each run's net log.
-                await close();
                 // A test.fail() test that passed: failing it now would count as the failure it expects, and hide the pass.
                 if (testInfo.expectedStatus === 'failed') console.error(`"${testInfo.title}" passed, though it's expected to fail.\n\n${desktop.report(appRequests)}`);
                 else throw new Error(desktop.report(appRequests));

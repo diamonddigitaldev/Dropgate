@@ -23,7 +23,7 @@ export { expect };
 export const NO_ICE_SERVERS = ',';
 
 /** Whether the test body passed, as it was meant to. */
-const passed = (testInfo) => testInfo.status === 'passed' && testInfo.expectedStatus === 'passed';
+export const passed = (testInfo) => testInfo.status === 'passed' && testInfo.expectedStatus === 'passed';
 
 /**
  * Record every http(s) and ws(s) request a browser context makes to anywhere but
