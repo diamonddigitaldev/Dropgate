@@ -399,6 +399,25 @@ jobs:
         if: runner.os == 'Windows'
         run: npx playwright test --project=desktop --workers=1
 
+  server-image:
+    name: Server image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The image is built from server/ alone, as docker-compose builds it. The
+      # release workflow builds it for each platform it publishes.
+      - name: Build the image
+        run: docker build -t dropgate-server:ci server/
+
+      # It must carry core's build, which the core job checks against core's
+      # source, and start and answer on a port on 127.0.0.1 only.
+      - name: Check the image
+        run: bash .github/scripts/check-server-image.sh dropgate-server:ci
+
   docs:
     name: Docs checks
     runs-on: ubuntu-latest
