@@ -1,6 +1,9 @@
 # Use an official Node.js runtime as a parent image
 FROM node:24-alpine
 
+# The server's license, as package.json gives it
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
+
 # Set the working directory in the container
 WORKDIR /usr/src/app
 

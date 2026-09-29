@@ -173,7 +173,7 @@ gh workflow run release.yml --ref 4.0.0
 gh workflow run release.yml --ref 4.0.0 -f tag=4.0.0-alpha.1 -f prerelease=yes
 ```
 
-On every push and pull request, GitHub Actions also builds the server's Docker image and checks it ([`check-server-image.sh`](./.github/scripts/check-server-image.sh)): it must carry core's build, `server/public/js/dropgate-core.js`, and the server's license, `server/LICENSE`, byte for byte, and when it's started, with a port on `127.0.0.1` only, it must answer `GET /api/info` with the server's version and pass its health check.
+On every push and pull request, GitHub Actions also builds the server's Docker image and checks it ([`check-server-image.sh`](./.github/scripts/check-server-image.sh)): it must carry core's build, `server/public/js/dropgate-core.js`, and the server's license, `server/LICENSE`, byte for byte; its `org.opencontainers.image.licenses` label must be the license `server/package.json` gives; and when it's started, with a port on `127.0.0.1` only, it must answer `GET /api/info` with the server's version and pass its health check.
 
 
 ## Licenses

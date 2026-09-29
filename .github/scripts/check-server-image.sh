@@ -7,7 +7,8 @@
 #   server/public/js/dropgate-core.js byte for byte. CI checks that file is
 #   core's build.
 # - The server's license in the image, LICENSE, must be server/LICENSE byte for
-#   byte.
+#   byte, and its org.opencontainers.image.licenses label must be the license
+#   server/package.json gives.
 # - Started as it is, with a port on 127.0.0.1 only, it must answer GET
 #   /api/info with server/package.json's version, and its health check must
 #   pass.
@@ -32,6 +33,14 @@ for file in public/js/dropgate-core.js LICENSE; do
     fi
     echo "$label: it carries server/$file as it is."
 done
+
+license=$(node -p "require('./server/package.json').license")
+labelled=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' "$image")
+if [ "$labelled" != "$license" ]; then
+    echo "$label: its org.opencontainers.image.licenses label is $labelled, but server/package.json's license is $license."
+    exit 1
+fi
+echo "$label: its license label is $license, as server/package.json gives it."
 
 version=$(node -p "require('./server/package.json').version")
 id=$(docker run -d "${on[@]}" -p 127.0.0.1::52443 "$image")

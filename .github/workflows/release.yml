@@ -275,7 +275,9 @@ jobs:
           persist-credentials: false
 
       # Stable releases get their version, its major and minor, its major, and
-      # latest. Pre-releases get only their version and next, never latest.
+      # latest. Pre-releases get only their version and next, never latest. The
+      # license label is the Dockerfile's: without it here, the action would put
+      # GitHub's reading of the repository's license, AGPL-3.0, over it.
       - &image-tags
         name: Work out the tags
         id: meta
@@ -289,14 +291,18 @@ jobs:
             type=semver,pattern={{major}},value=${{ needs.versions.outputs.tag }},enable=${{ needs.versions.outputs.prerelease == 'false' }}
             type=raw,value=latest,enable=${{ needs.versions.outputs.prerelease == 'false' }}
             type=raw,value=next,enable=${{ needs.versions.outputs.prerelease == 'true' }}
+          labels: |
+            org.opencontainers.image.licenses=AGPL-3.0-only
 
-      # The same tags, worked out another way, so a mistake in either shows.
+      # The same tags, worked out another way, so a mistake in either shows, and
+      # the license label, which must be the license server/package.json gives.
       - &image-check-tags
-        name: Check the tags
+        name: Check the tags and the license label
         env:
           TAG: ${{ needs.versions.outputs.tag }}
           PRERELEASE: ${{ needs.versions.outputs.prerelease }}
           TAGS: ${{ steps.meta.outputs.tags }}
+          LABELS: ${{ steps.meta.outputs.labels }}
         run: |
           if [ "$PRERELEASE" = true ]; then
             expected="$IMAGE:$TAG $IMAGE:next"
@@ -311,6 +317,13 @@ jobs:
             printf '  %s\n' $expected
             exit 1
           fi
+          license=$(node -p "require('./server/package.json').license")
+          if ! printf '%s\n' "$LABELS" | grep -qxF "org.opencontainers.image.licenses=$license"; then
+            echo "The image's labels don't give the license server/package.json gives, $license:"
+            printf '%s\n' "$LABELS" | sed 's/^/  /'
+            exit 1
+          fi
+          echo "Its license label is $license, as server/package.json gives it."
 
       - &image-qemu
         uses: docker/setup-qemu-action@v4
