@@ -6,6 +6,8 @@
 # - The Web UI's core library in the image, public/js/dropgate-core.js, must be
 #   server/public/js/dropgate-core.js byte for byte. CI checks that file is
 #   core's build.
+# - The server's license in the image, LICENSE, must be server/LICENSE byte for
+#   byte.
 # - Started as it is, with a port on 127.0.0.1 only, it must answer GET
 #   /api/info with server/package.json's version, and its health check must
 #   pass.
@@ -22,12 +24,14 @@ if [ -n "$platform" ]; then on=(--platform "$platform"); fi
 label=${platform:-$image}
 
 copy=$(mktemp)
-docker run --rm "${on[@]}" --entrypoint cat "$image" /usr/src/app/public/js/dropgate-core.js > "$copy"
-if ! cmp -s "$copy" server/public/js/dropgate-core.js; then
-    echo "$label: the image's public/js/dropgate-core.js isn't server/public/js/dropgate-core.js."
-    exit 1
-fi
-echo "$label: it carries server/public/js/dropgate-core.js as it is."
+for file in public/js/dropgate-core.js LICENSE; do
+    if ! docker run --rm "${on[@]}" --entrypoint cat "$image" "/usr/src/app/$file" > "$copy" ||
+        ! cmp -s "$copy" "server/$file"; then
+        echo "$label: the image's $file isn't server/$file."
+        exit 1
+    fi
+    echo "$label: it carries server/$file as it is."
+done
 
 version=$(node -p "require('./server/package.json').version")
 id=$(docker run -d "${on[@]}" -p 127.0.0.1::52443 "$image")

@@ -10,10 +10,11 @@ COPY package*.json ./
 # Install app dependencies
 RUN npm ci
 
-# Copy application source
+# Copy application source, and its license
 COPY server.js ./
 COPY views/ ./views/
 COPY public/ ./public/
+COPY LICENSE ./
 
 # Expose the port the app runs on
 EXPOSE 52443
