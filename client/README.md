@@ -101,7 +101,7 @@ npm run build
 
 Distributable binaries will appear in the `dist` folder: the NSIS installer on Windows, or an AppImage, a `.deb` and a `.rpm` on Linux. The `.rpm` needs `rpmbuild`, from the `rpm` package on Debian and Ubuntu, or `rpm-build` on Fedora.
 
-GitHub Actions builds all four packages ([`client-build.yml`](../.github/workflows/client-build.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the tests aren't packaged into the app and that the app carries core's build as it is, and doesn't publish or upload anything. The release workflow builds them the same way, and also lists the files a release would attach, with the update files, `latest.yml` and `latest-linux.yml`, checked against them ([Releases](../README.md#releases)).
+GitHub Actions builds all four packages ([`client-build.yml`](../.github/workflows/client-build.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the tests aren't packaged into the app and that the app carries core's build as it is, and doesn't publish or upload anything. The release workflow builds them the same way, lists the files a release attaches, with the update files, `latest.yml` and `latest-linux.yml`, checked against them, and attaches them to the release from the same build. The update files go up last, after every other file of the release; its dry run only lists them ([Releases](../README.md#releases)).
 
 The client shares its version with the server and core, and they're released together ([Releases](../README.md#releases)). Change it in `package.json`, `package-lock.json` and the badge at the top of this README together, or GitHub Actions fails.
 
