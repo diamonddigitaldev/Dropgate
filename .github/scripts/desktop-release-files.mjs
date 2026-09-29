@@ -14,8 +14,9 @@
 //   be one this build attaches, with the same size and SHA-512. A pre-release
 //   attaches none, so the app never updates to one.
 //
-// Writes the update file's name and contents (base64) to GITHUB_OUTPUT, for the
-// release's last job. It uploads nothing.
+// Writes the names of the files to attach, and the update file's name and
+// contents (base64), to GITHUB_OUTPUT: a release attaches the files straight
+// after, and the update file in its last job. It uploads nothing.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -156,5 +157,6 @@ if (problems.length) {
 
 if (process.env.GITHUB_OUTPUT) {
     const contents = update ? fs.readFileSync(path.join(dist, update.name)).toString('base64') : '';
-    fs.appendFileSync(process.env.GITHUB_OUTPUT, `update-file-name=${update?.name ?? ''}\nupdate-file=${contents}\n`);
+    fs.appendFileSync(process.env.GITHUB_OUTPUT,
+        `attach=${attached.join(' ')}\nupdate-file-name=${update?.name ?? ''}\nupdate-file=${contents}\n`);
 }

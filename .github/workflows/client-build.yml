@@ -6,7 +6,8 @@ name: Client build
 # on a public repository, anyone signed in could download it.
 #
 # For a release, it also lists the files the release would attach from this
-# platform, and hands its update file on to the release's last job.
+# platform, and hands its update file on to the release's last job. A published
+# release's own copy of the job attaches them, straight from this build.
 
 on:
   workflow_call:
@@ -23,6 +24,10 @@ on:
         description: Whether that release is a pre-release, "true" or "false". A pre-release attaches no update file.
         type: string
         default: 'false'
+      attach-to:
+        description: A published release's tag, to attach the files to. Empty, as in CI and the dry run, attaches nothing.
+        type: string
+        default: ''
     outputs:
       update-file-name:
         description: The update file a stable release attaches, latest.yml or latest-linux.yml.
@@ -31,8 +36,9 @@ on:
         description: Its contents, in base64.
         value: ${{ jobs.build.outputs.update-file }}
 
-permissions:
-  contents: read
+# No permissions of its own: a called workflow can only lower its caller's.
+# CI and the release's dry run call it with a read-only token, and a published
+# release with one that can attach files.
 
 jobs:
   build:
@@ -146,3 +152,17 @@ jobs:
         env:
           PRERELEASE: ${{ inputs.prerelease }}
         run: node ../.github/scripts/desktop-release-files.mjs dist --prerelease "$PRERELEASE"
+
+      # A published release attaches those files, from the build that made
+      # them. Its update file goes up later, after every other file.
+      - name: Attach the files to the release
+        if: inputs.release && inputs.attach-to != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.attach-to }}
+          FILES: ${{ steps.release.outputs.attach }}
+        run: |
+          files=()
+          for name in $FILES; do files+=("dist/$name"); done
+          bash ../.github/scripts/attach-release-files.sh "$TAG" "${files[@]}"

@@ -1,12 +1,13 @@
 // Checks what publishing core to npm with provenance, through npm's trusted
 // publishing, needs, as far as it can without a token. The release workflow's npm
-// job runs it from packages/dropgate-core, before npm publish:
+// jobs run it from packages/dropgate-core, before npm stage publish (or, in the
+// dry run, npm publish --dry-run):
 //
 //   node ../../.github/scripts/check-npm-provenance.mjs
 //
 // npm's own dry run skips provenance, so this checks what it will need:
-// - npm 11.5.1 or later, which publishes with a GitHub Actions ID token, and the
-//   Node it needs, 22.14 or later;
+// - npm 11.15.0 or later, which stages a publish with a GitHub Actions ID token,
+//   and the Node it needs, 22.14 or later;
 // - the package's repository.url names this repository, and its
 //   repository.directory this folder, which npm checks against the provenance;
 // - the repository is public, since npm only takes provenance from a public one;
@@ -15,6 +16,7 @@
 // - it runs in release.yml, the workflow npm's trusted publisher names.
 //
 // It asks for no token, and publishes nothing. It only runs in GitHub Actions.
+// A real release's npm job has an ID token, which this leaves alone.
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -55,7 +57,7 @@ const event = JSON.parse(fs.readFileSync(GITHUB_EVENT_PATH, 'utf8'));
 const npm = execSync('npm --version', { encoding: 'utf8' }).trim();
 
 const checks = [
-    [atLeast(npm, '11.5.1'), `npm ${npm}: 11.5.1 or later, which publishes with an ID token.`],
+    [atLeast(npm, '11.15.0'), `npm ${npm}: 11.15.0 or later, which stages a publish with an ID token.`],
     [atLeast(process.version, '22.14.0'), `Node ${process.version}: 22.14 or later, which that npm needs.`],
     [plain(pkg.repository?.url) === plain(`https://github.com/${GITHUB_REPOSITORY}`),
         `repository.url: ${pkg.repository?.url ?? '(none)'}, which must name ${GITHUB_REPOSITORY}.`],
