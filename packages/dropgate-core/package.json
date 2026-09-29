@@ -72,7 +72,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/diamonddigitaldev/Dropgate.git",
+    "url": "git+https://github.com/diamonddigitaldev/Dropgate.git",
     "directory": "packages/dropgate-core"
   },
   "keywords": [
