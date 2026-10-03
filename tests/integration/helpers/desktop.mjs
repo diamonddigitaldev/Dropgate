@@ -36,7 +36,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from '@playwright/test';
 import { expect, passed, test as base } from './test.mjs';
-import { describeNetLog, outsideLookups, proxyLookups, proxySettings } from './netlog.mjs';
+import { describeNetLog, outsideLookups, proxyLookups, proxySettings, requestedUrls } from './netlog.mjs';
 import { startTlsProxy } from './tls.mjs';
 
 export { expect };
@@ -453,15 +453,18 @@ function phases(request, ms) {
  * Check that no launch of the app looked for a proxy by itself, or looked up any
  * name beyond this machine, from each one's net log. They're soft, so a failure
  * still gets the report, whose net log sections show what each run found. A
- * launch that started its network stack must have logged its proxy settings, or
- * its log can't show a lookup either.
+ * launch that asked a server anything must have logged its proxy settings, or
+ * its log can't show a lookup either. One that asked nothing (a new profile
+ * with no server) may have none: on Linux, Chromium only reads them for a
+ * request, and the app makes none by itself.
  * @param {Desktop} desktop
  */
 function expectNoLookups(desktop) {
     for (const { label, file, handsOn } of desktop.netLogs) {
         expect.soft(proxyLookups(file), `the times ${label} of the app looked for a proxy by itself (its net log)`).toEqual([]);
         expect.soft(outsideLookups(file), `the names ${label} of the app looked up beyond this machine (its net log)`).toEqual([]);
-        if (!handsOn) expect.soft(proxySettings(file), `the proxy settings ${label} of the app found (its net log)`).not.toEqual([]);
+        const askedAServer = requestedUrls(file).some((url) => /^(https?|wss?):/.test(url));
+        if (!handsOn && askedAServer) expect.soft(proxySettings(file), `the proxy settings ${label} of the app found (its net log)`).not.toEqual([]);
     }
 }
 
