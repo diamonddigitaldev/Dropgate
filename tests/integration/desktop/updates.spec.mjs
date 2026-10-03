@@ -6,8 +6,8 @@
 //
 // v3's updater sent a random ID of the install with every check, kept in the
 // profile's .updaterId, so GitHub could link one install's checks across time
-// and addresses (PB-D4). The kit sends a fixed value in its place, and makes no
-// ID at all. Two new profiles' checks, on each channel, must carry nothing that
+// and addresses (PB-D4). The kit sends a fixed value in its place, makes no ID
+// at all, and deletes the .updaterId v3 left. Two new profiles' checks, on each channel, must carry nothing that
 // tells them apart or ties them together, and leave no ID behind.
 //
 // The update server never has the installer it names, so nothing is ever

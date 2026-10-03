@@ -107,7 +107,8 @@ test('the build extends the kit\'s base config, and keeps the client\'s own', ()
     assert.equal(build.nsis.include, 'installer.nsh');
     assert.ok(!build.mac, 'there\'s no macOS build');
     // The Windows app ID is the one the installer's shortcut carries, so notifications show.
-    assert.match(main, new RegExp(`app\\.setAppUserModelId\\('${build.appId.replace(/\./g, '\\.')}'\\)`));
+    assert.match(main, new RegExp(`\\bappId: '${build.appId.replace(/\./g, '\\.')}',`));
+    assert.doesNotMatch(main, /setAppUserModelId/, 'the kit sets it, from start({ appId })');
 });
 
 test('the packaged app holds what it loads: the client\'s src/, and only the kit\'s, Bootstrap\'s and Material Icons\' files the pages use', () => {

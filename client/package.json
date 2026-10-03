@@ -75,7 +75,7 @@
     "electron-builder": "^26.15.3"
   },
   "dependencies": {
-    "@diamonddigitaldev/electron-kit": "0.1.0-beta.4",
+    "@diamonddigitaldev/electron-kit": "0.1.0-beta.5",
     "bootstrap": "^5.3.8",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.9",

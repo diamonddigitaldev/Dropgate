@@ -17,8 +17,11 @@ const { menuItems } = require('./menu');
 //   keeps it there (keepLogOnDisk, off): v3 wrote debug.log at every launch,
 //   with every argv's paths in it (PB-D1).
 // - The updater checks GitHub 5 seconds after a packaged launch and when
-//   asked, never sends an ID of the install, and makes none (PB-D4). As in v3,
-//   a launch for Share with Dropgate doesn't check.
+//   asked, never sends an ID of the install, makes none, and deletes the one
+//   v3's updater kept (PB-D4). As in v3, a launch for Share with Dropgate
+//   doesn't check.
+// - Windows' app ID is build.appId, the one the installer's Start menu
+//   shortcut carries, so Share with Dropgate's notifications show.
 // - Links open in the browser only on Dropgate's own pages, beside the ones
 //   the kit shows (Credits, its donate link, the repository).
 // Share with Dropgate (Windows' context menu) launches the app with a file's
@@ -27,6 +30,7 @@ const { menuItems } = require('./menu');
 const wasLaunchedForBackgroundTask = process.argv.includes('--upload');
 
 const kit = require('@diamonddigitaldev/electron-kit/main').start({
+    appId: 'com.diamonddigitaldev.dropgateclient',
     // package.json's name, dropgate-client, names the userData folder, so it stays.
     name: APP_NAME,
     settings: {
@@ -51,13 +55,6 @@ const kit = require('@diamonddigitaldev/electron-kit/main').start({
     updates: wasLaunchedForBackgroundTask ? { checkOnLaunch: false } : {},
     openExternal: { allow: ['https://github.com/diamonddigitaldev/Dropgate/'] },
 });
-
-// Windows shows a notification only for the app ID its Start menu shortcut
-// carries, which the installer gives as build.appId. The kit sets the app's
-// npm-style name instead, so Share with Dropgate's notifications wouldn't show.
-// Once the kit has start({ appId }), this goes for that.
-// kit-gap: https://github.com/diamonddigitaldev/electron-kit/pull/40
-if (process.platform === 'win32') app.setAppUserModelId('com.diamonddigitaldev.dropgateclient');
 
 let uploadQueue = [];
 let isUploading = false;
@@ -128,10 +125,6 @@ if (kit.primary) {
     });
 
     kit.ready.then(() => {
-        // v3's updater kept a random ID of the install here (PB-D4). Nothing reads it now, but it's an
-        // identifier on disk, so it goes, as the kit's updater will delete it itself.
-        // kit-gap: https://github.com/diamonddigitaldev/electron-kit/pull/41
-        if (app.isPackaged) fs.rmSync(path.join(app.getPath('userData'), '.updaterId'), { force: true });
         if (!wasLaunchedForBackgroundTask) createWindow();
         handleArgs(process.argv);
     });
