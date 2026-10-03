@@ -128,6 +128,10 @@ if (kit.primary) {
     });
 
     kit.ready.then(() => {
+        // v3's updater kept a random ID of the install here (PB-D4). Nothing reads it now, but it's an
+        // identifier on disk, so it goes, as the kit's updater will delete it itself.
+        // kit-gap: https://github.com/diamonddigitaldev/electron-kit/pull/41
+        if (app.isPackaged) fs.rmSync(path.join(app.getPath('userData'), '.updaterId'), { force: true });
         if (!wasLaunchedForBackgroundTask) createWindow();
         handleArgs(process.argv);
     });

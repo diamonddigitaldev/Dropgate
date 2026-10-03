@@ -90,6 +90,6 @@ File sizes and capacity values may appear in logs because they’re necessary fo
 
 The Dropgate Client keeps its log **in memory** and writes nothing to disk. Each line is redacted before it's kept: a file's path keeps only its file name, and a link loses its query and its `#` fragment, where an encrypted upload's key is. The log goes when the app quits, and a `debug.log` an earlier version left behind is deleted when it starts.
 
-It checks GitHub for updates, and sends nothing that identifies the installation: the update library's install ID is replaced with a fixed value, the same for everyone, and no ID is made or kept. It downloads no spell-check dictionaries.
+It checks GitHub for updates, and sends nothing that identifies the installation: the update library's install ID is replaced with a fixed value, the same for everyone, no ID is made or kept, and the one version 3 kept is deleted. It downloads no spell-check dictionaries.
 
 What it stores, and what each update check sends, is in [Data Processing](./technical/DATA-PROCESSING.md#25-dropgate-client-electron).

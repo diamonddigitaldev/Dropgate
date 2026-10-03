@@ -82,7 +82,7 @@ The client's settings are kept by `electron-store` in `config.json` in its user 
 | **Whether the navigation rail is collapsed**, and whether to keep the log on disk | Yes | `config.json` | Remembers how the window was left, and the log setting (off; see §8.6). | On user change. | On user change. Uninstalling leaves them in place. |
 | **Window bounds** (x, y, width, height) | Yes | `config.json` | Restores window position and size between sessions. | On window move/resize. | Never deleted automatically. Uninstalling leaves it in place. |
 | **Log** | In memory | The app's memory | Troubleshooting. The run's last 1,000 lines, redacted before they're kept (see §8.6). Nothing is written to disk. | As the app runs. | When the app quits. A `debug.log` an earlier version wrote is deleted when the app starts. |
-| **Update-check ID** | **No** | — | The app sends a fixed value, the same for every installation, in place of an ID, and never makes or keeps one (see [§9.3](#93-github-dropgate-client-update-checks)). An `.updaterId` file written by version 3 is left where it is, and never read or sent. | — | — |
+| **Update-check ID** | **No** | — | The app sends a fixed value, the same for every installation, in place of an ID, and never makes or keeps one (see [§9.3](#93-github-dropgate-client-update-checks)). An `.updaterId` file written by version 3 is deleted when the app starts, and never read or sent. | — | — |
 | **Spell-check dictionaries** | **No** | — | The app has no spell checking, so it downloads no dictionaries. (On Linux, Electron would otherwise download them from Google as the app starts.) | — | — |
 | **Update downloads** | Yes, until installed | The user's cache folder (`dropgate-client-updater`) | An update the app has downloaded, waiting to be installed when the app closes. | When an update is downloaded. | Replaced by the next update. |
 
@@ -194,7 +194,7 @@ The server has no access to encryption keys and therefore **cannot**:
 
 ### 5.3 What Is NOT Automatically Deleted
 
-- **Electron client settings** (`electron-store`) — persist until the user changes them. Uninstalling the app leaves them in the user data directory, with any `.updaterId` version 3 wrote.
+- **Electron client settings** (`electron-store`) — persist until the user changes them. Uninstalling the app leaves them in the user data directory.
 - **Server operator logs** (stdout/stderr) — Dropgate has no control over log retention once data is written to the process output streams. This is the operator's responsibility.
 
 ---

@@ -53,10 +53,12 @@ const CACHE = path.join(process.platform === 'win32' ? process.env.LOCALAPPDATA 
  * @param {{ requests: { file: string }[] }} server
  * @param {(window: import('@playwright/test').Page) => Promise<void>} [whileOpen]
  */
-async function runOnce(settings, server, whileOpen) {
+async function runOnce(settings, server, whileOpen, { oldInstallId } = {}) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-update-test-'));
     const profile = path.join(root, 'profile');
     fs.mkdirSync(profile);
+    // The ID of the install v3's updater kept, in a profile it used.
+    if (oldInstallId) fs.writeFileSync(path.join(profile, '.updaterId'), oldInstallId);
     // The kit's own store, at its settings' version, so the person's choices are in place from the start.
     fs.writeFileSync(path.join(profile, 'config.json'), JSON.stringify({ settings, settingsSchema: 1 }));
     const netLog = path.join(root, 'netlog.json');
@@ -70,6 +72,7 @@ async function runOnce(settings, server, whileOpen) {
     });
     try {
         const window = await app.firstWindow();
+        if (oldInstallId) await expect.poll(() => fs.existsSync(path.join(profile, '.updaterId')), { message: "whether v3's .updaterId is still there" }).toBe(false);
         await expect.poll(() => server.requests.length - before, { message: 'the check at launch', timeout: 20_000 }).toBeGreaterThan(0);
         await whileOpen?.(window);
     } finally {
@@ -126,6 +129,18 @@ test('with automatic downloads off, an update found shows the dot on Settings an
             await expect(pane.getByRole('button', { name: 'Download Update' })).toBeVisible();
         });
         expect(requests.map((r) => r.file), 'what the app asked for').toEqual([`latest${process.platform === 'linux' ? '-linux' : ''}.yml`]);
+    } finally {
+        await server.close();
+    }
+});
+
+test("an upgrade from v3 deletes the ID of the install v3's updater kept, and never sends it", async () => {
+    const server = await startUpdateServer(OFFERS);
+    const old = '6f1c2a3b-4d5e-5f60-8a7b-9c0d1e2f3a4b';
+    try {
+        const { requests, updaterId } = await runOnce({ updateChannel: 'stable', autoDownloadUpdates: false }, server, undefined, { oldInstallId: old });
+        expect(updaterId, 'whether the profile has a .updaterId after the launch').toBe(false);
+        for (const { headers } of requests) expect(Object.values(headers), 'what the check sent').not.toContain(old);
     } finally {
         await server.close();
     }
