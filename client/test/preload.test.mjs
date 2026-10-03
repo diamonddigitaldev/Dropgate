@@ -1,107 +1,106 @@
 // The preload contract: what the sandboxed preload may load, and the IPC
-// channels main.js and the preload have to agree on.
+// channels main.js, the preload and src/constants.js have to agree on.
 //
 // When this breaks, the app just goes quiet. A preload that requires the wrong
 // module leaves window.electronAPI undefined, and a channel name that's wrong
 // on one side drops its messages. Neither logs an error in the main process.
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { test } from 'node:test';
-import { channelsCalled, countCalls, readSource } from './helpers/source.mjs';
+import { fileURLToPath } from 'node:url';
+import { readSource } from './helpers/source.mjs';
 
+const require = createRequire(import.meta.url);
+const { loadPreload } = require('@diamonddigitaldev/electron-kit/testing');
+const { IPC, PUSHES } = require('../src/constants.js');
+
+const PRELOAD = fileURLToPath(new URL('../src/preload.js', import.meta.url));
 const preload = readSource('preload.js');
 const main = readSource('main.js');
-const pages = ['renderer.js', 'index.html', 'credits.html'].map((name) => ({ name, code: readSource(name) }));
-
-// The only modules a sandboxed preload can load.
-const SANDBOX_SAFE_MODULES = new Set(['electron', 'events', 'timers', 'url', 'node:events', 'node:timers', 'node:url']);
-
-// Each IPC call and the call on the other side that has to use the same channel.
-const PRELOAD_INVOKES = String.raw`ipcRenderer\.invoke`;
-const PRELOAD_SENDS = String.raw`ipcRenderer\.(?:send|sendSync)`;
-const PRELOAD_LISTENS = String.raw`ipcRenderer\.(?:on|once)`;
-const MAIN_HANDLES = String.raw`ipcMain\.(?:handle|handleOnce)`;
-const MAIN_LISTENS = String.raw`ipcMain\.(?:on|once)`;
-const MAIN_SENDS = String.raw`(?:webContents|sender)\.send`;
+const renderer = readSource('renderer.js');
+const html = readSource('index.html');
 
 const unique = (list) => [...new Set(list)];
-const missingFrom = (list, known) => unique(list).filter((channel) => !new Set(known).has(channel));
 
-test('the preload only loads modules a sandboxed preload can load', () => {
-    const required = [...preload.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((match) => match[1]);
-    assert.ok(required.length > 0, 'expected the preload to require electron');
+/** Each bridge method, called once, and the IPC call it made. */
+function bridgeCalls() {
+    const { required, exposed, calls } = loadPreload(PRELOAD);
+    const made = {};
+    for (const [name, fn] of Object.entries(exposed.electronAPI)) {
+        const before = calls.length;
+        fn(() => {});
+        made[name] = calls.slice(before);
+    }
+    return { required, exposed, made };
+}
 
-    const unsafe = required.filter((name) => !SANDBOX_SAFE_MODULES.has(name));
-    assert.deepEqual(unsafe, [], `a sandboxed preload can't load: ${unsafe.join(', ')}`);
+test('the preload runs sandboxed, requiring electron only', () => {
+    const { required, exposed } = bridgeCalls();
+    assert.deepEqual(unique(required), ['electron']);
+    assert.deepEqual(Object.keys(exposed), ['electronAPI'], 'one bridge, window.electronAPI; the kit\'s is window.kitAPI');
 });
 
-test('every IPC call names its channel as a string, so these checks can see it', () => {
-    for (const [code, file, callees] of [
-        [preload, 'preload.js', [PRELOAD_INVOKES, PRELOAD_SENDS, PRELOAD_LISTENS]],
-        [main, 'main.js', [MAIN_HANDLES, MAIN_LISTENS, MAIN_SENDS]],
-    ]) {
-        for (const callee of callees) {
-            assert.equal(channelsCalled(code, callee).length, countCalls(code, callee),
-                `${file} has a ${callee.replace(/\\/g, '')} call without a literal channel name`);
-        }
+test('every call of the bridge makes one IPC call, on a channel in constants.js', () => {
+    const known = new Set(Object.values(IPC));
+    for (const [name, calls] of Object.entries(bridgeCalls().made)) {
+        assert.equal(calls.length, 1, `electronAPI.${name}() makes one IPC call`);
+        assert.ok(known.has(calls[0].channel), `electronAPI.${name}() uses "${calls[0].channel}", which isn't in constants.js`);
     }
 });
 
-test('every request from the preload has a handler in main.js', () => {
-    const invokes = channelsCalled(preload, PRELOAD_INVOKES);
-    const sends = channelsCalled(preload, PRELOAD_SENDS);
-    assert.ok(invokes.length > 0 && sends.length > 0, 'expected the preload to invoke and send');
-
-    const unhandled = [
-        ...missingFrom(invokes, channelsCalled(main, MAIN_HANDLES)),
-        ...missingFrom(sends, channelsCalled(main, MAIN_LISTENS)),
-    ];
-    assert.deepEqual(unhandled, [], `main.js has no handler for: ${unhandled.join(', ')}`);
+test('the page asks main with invoke(), and only listens for pushes', () => {
+    for (const [name, [call]] of Object.entries(bridgeCalls().made)) {
+        const push = PUSHES.includes(call.channel);
+        assert.equal(call.method, push ? 'on' : 'invoke', `electronAPI.${name}() on "${call.channel}"`);
+    }
 });
 
-test('every handler in main.js can be reached from the preload', () => {
-    const unreachable = [
-        ...missingFrom(channelsCalled(main, MAIN_HANDLES), channelsCalled(preload, PRELOAD_INVOKES)),
-        ...missingFrom(channelsCalled(main, MAIN_LISTENS), channelsCalled(preload, PRELOAD_SENDS)),
-    ];
-    assert.deepEqual(unreachable, [], `nothing in the preload reaches: ${unreachable.join(', ')}`);
+test('every channel in constants.js is one the bridge uses', () => {
+    const used = new Set(Object.values(bridgeCalls().made).flat().map((c) => c.channel));
+    const unused = Object.values(IPC).filter((channel) => !used.has(channel));
+    assert.deepEqual(unused, [], `nothing in the preload uses: ${unused.join(', ')}`);
 });
 
-test('every message main.js sends reaches the page', {
-    expectFailure: {
-        label: 'known issue until the v4 desktop client: main.js sends file-open-error, and the preload never passes it on',
-        match: /never reach the page: file-open-error$/m,
-    },
-}, () => {
-    const sent = channelsCalled(main, MAIN_SENDS);
-    assert.ok(sent.length > 0, 'expected main.js to send messages to the page');
-
-    const unheard = missingFrom(sent, channelsCalled(preload, PRELOAD_LISTENS));
-    assert.deepEqual(unheard, [], `these messages never reach the page: ${unheard.join(', ')}`);
+test('the preload\'s inlined channel table is constants.js\' map', () => {
+    const table = Object.fromEntries([...preload.matchAll(/^\s*([A-Z_]+):\s*'([^']+)',/gm)].map((m) => [m[1], m[2]]));
+    assert.deepEqual(table, { ...IPC });
 });
 
-test('every message the preload listens for is sent by main.js', () => {
-    const listens = channelsCalled(preload, PRELOAD_LISTENS);
-    assert.ok(listens.length > 0, 'expected the preload to listen for messages');
-
-    const neverSent = missingFrom(listens, channelsCalled(main, MAIN_SENDS));
-    assert.deepEqual(neverSent, [], `main.js never sends: ${neverSent.join(', ')}`);
+test('every request from the page is answered in main.js, through kit.ipc.handle(), which answers the app\'s own page only', () => {
+    assert.ok(!/\bipcMain\b/.test(main), 'main.js must not register a handler straight on ipcMain: it would answer any page');
+    const handled = [...main.matchAll(/kit\.ipc\.handle\(IPC\.([A-Z_]+)/g)].map((m) => IPC[m[1]]);
+    assert.equal(handled.length, unique(handled).length, 'each channel is handled once');
+    assert.deepEqual(handled.sort(), Object.values(IPC).filter((c) => !PUSHES.includes(c)).sort());
 });
 
-test('the preload exposes one bridge, and the pages only call what it has', () => {
-    const bridges = [...preload.matchAll(/exposeInMainWorld\(\s*['"]([^'"]+)['"]/g)].map((match) => match[1]);
-    assert.deepEqual(bridges, ['electronAPI']);
-
-    const exposed = new Set([...preload.matchAll(/^\s*(\w+):\s*\(/gm)].map((match) => match[1]));
-    assert.ok(exposed.size > 0, 'expected the bridge to expose methods');
-
-    const called = pages.flatMap(({ code }) => [...code.matchAll(/electronAPI\.(\w+)/g)].map((match) => match[1]));
-    assert.ok(called.length > 0, 'expected the pages to use the bridge');
-    const missing = unique(called).filter((name) => !exposed.has(name));
-    assert.deepEqual(missing, [], `the pages call bridge methods the preload doesn't expose: ${missing.join(', ')}`);
+test('every message main.js sends reaches the page, and the page hears nothing main.js never sends', () => {
+    // v3 sent file-open-error, which its preload never passed on, so an Open File that failed said nothing.
+    const sent = unique([...main.matchAll(/\.send\(IPC\.([A-Z_]+)/g)].map((m) => IPC[m[1]]));
+    assert.deepEqual(sent.sort(), [...PUSHES].sort());
 });
 
-test('the pages reach Node only through the bridge', () => {
-    for (const { name, code } of pages) {
+test('channel names are "domain:action", unique, and none is one of the kit\'s', () => {
+    const values = Object.values(IPC);
+    assert.equal(new Set(values).size, values.length, 'a channel name is used twice');
+    for (const [name, channel] of Object.entries(IPC)) {
+        assert.match(channel, /^[a-z][a-z0-9]*(-[a-z0-9]+)*:[a-z][a-z0-9]*(-[a-z0-9]+)*$/, `${name} ("${channel}")`);
+    }
+    const { CHANNELS } = require('@diamonddigitaldev/electron-kit/main');
+    for (const channel of Object.values(CHANNELS)) assert.ok(!values.includes(channel), `${channel} is the kit's`);
+});
+
+test('the page only calls what the bridges have', () => {
+    const exposed = new Set(Object.keys(bridgeCalls().exposed.electronAPI));
+    const called = unique([...renderer.matchAll(/\bapi\.(\w+)/g)].map((m) => m[1]));
+    assert.ok(called.length > 0, 'expected the page to use its bridge');
+    const missing = called.filter((name) => !exposed.has(name));
+    assert.deepEqual(missing, [], `the page calls bridge methods the preload doesn't expose: ${missing.join(', ')}`);
+    assert.match(renderer, /const api = window\.electronAPI;/);
+    assert.match(renderer, /const kitApi = window\.kitAPI;/);
+});
+
+test('the page reaches Node only through the bridges', () => {
+    for (const [name, code] of [['renderer.js', renderer], ['index.html', html]]) {
         assert.ok(!/\brequire\s*\(/.test(code), `${name} must not call require()`);
         assert.ok(!/\bprocess\.(?:env|versions|platform)\b/.test(code), `${name} must not reach for process`);
     }

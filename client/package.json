@@ -1,7 +1,7 @@
 {
   "name": "dropgate-client",
   "version": "3.0.13",
-  "description": "A self-hosted, privacy-first file sharing system with both hosted upload and direct P2P transfer capabilities.",
+  "description": "An Electron-based desktop app for sharing files through Dropgate, a self-hosted, privacy-first file sharing system.",
   "main": "src/main.js",
   "funding": {
     "type": "buymeacoffee",
@@ -17,12 +17,21 @@
     "url": "https://github.com/diamonddigitaldev/Dropgate"
   },
   "build": {
+    "extends": "@diamonddigitaldev/electron-kit/builder/base.json",
     "appId": "com.diamonddigitaldev.dropgateclient",
     "productName": "Dropgate Client",
-    "artifactName": "Dropgate-Client-Setup-${version}.${ext}",
+    "artifactName": "Dropgate-Client-${version}.${ext}",
     "files": [
-      "**/*",
-      "!test/**"
+      "src/**/*",
+      "!src/img/*.icns",
+      "!node_modules/@diamonddigitaldev/electron-kit/{testing,builder}{,/**/*}",
+      "!node_modules/@diamonddigitaldev/electron-kit/README.md",
+      "!node_modules/bootstrap/{js,scss}{,/**/*}",
+      "!node_modules/bootstrap/dist/js{,/**/*}",
+      "!node_modules/bootstrap/dist/css/!(bootstrap.min.css)",
+      "!node_modules/material-icons/{_data,css}{,/**/*}",
+      "!node_modules/material-icons/iconfont/!(round.css|material-icons-round.woff|material-icons-round.woff2)",
+      "!node_modules/material-icons/index.d.ts"
     ],
     "publish": {
       "provider": "github",
@@ -30,9 +39,6 @@
       "repo": "Dropgate"
     },
     "win": {
-      "target": [
-        "nsis"
-      ],
       "icon": "src/img/dropgate.ico",
       "fileAssociations": [
         {
@@ -43,23 +49,12 @@
       ]
     },
     "nsis": {
+      "artifactName": "Dropgate-Client-Setup-${version}.${ext}",
       "perMachine": true,
       "createDesktopShortcut": true,
-      "menuCategory": "Diamond Digital Development",
       "include": "installer.nsh"
     },
-    "mac": {
-      "target": [
-        "dmg"
-      ],
-      "icon": "src/img/dropgate.icns"
-    },
     "linux": {
-      "target": [
-        "AppImage",
-        "deb",
-        "rpm"
-      ],
       "icon": "src/img/dropgate.png"
     }
   },
@@ -80,6 +75,7 @@
     "electron-builder": "^26.15.3"
   },
   "dependencies": {
+    "@diamonddigitaldev/electron-kit": "0.1.0-beta.4",
     "bootstrap": "^5.3.8",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.9",

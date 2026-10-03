@@ -1,450 +1,213 @@
-const { app, BrowserWindow, ipcMain, Menu, globalShortcut, dialog, clipboard, Notification, shell } = require('electron');
-const { autoUpdater } = require('electron-updater');
+const { app, BrowserWindow, dialog, clipboard, Notification } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const Store = require('electron-store').default;
 
-// Create a log file for debugging
-const logFile = path.join(app.getPath('userData'), 'debug.log');
-const originalConsoleLog = console.log; // Save the original console.log
+const { APP_NAME, IPC, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS } = require('./constants');
+const { menuItems } = require('./menu');
 
-function log(...args) {
-    const message = `[${new Date().toISOString()}] ${args.join(' ')}\n`;
-    try {
-        fs.appendFileSync(logFile, message);
-    } catch (e) {
-        // If we can't write to log, at least show in console
-    }
-    originalConsoleLog(...args); // Use the original console.log
-}
+// The house frame (electron-kit): one instance, the shared preload
+// (window.kitAPI) on the app's session, the settings, the log, the menu, the
+// theme push, the main window with its bounds kept, and the updater behind
+// Settings > Update.
+//
+// - The settings are the kit's, under one "settings" key in config.json.
+//   v3's were top-level keys, which v4 doesn't carry over (Will, 2026-10-03):
+//   version 1 deletes them, once. windowBounds is the kit's key too.
+// - The log is kept in memory, redacted, and on disk only while the person
+//   keeps it there (keepLogOnDisk, off): v3 wrote debug.log at every launch,
+//   with every argv's paths in it (PB-D1).
+// - The updater checks GitHub 5 seconds after a packaged launch and when
+//   asked, never sends an ID of the install, and makes none (PB-D4). As in v3,
+//   a launch for Share with Dropgate doesn't check.
+// - Links open in the browser only on Dropgate's own pages, beside the ones
+//   the kit shows (Credits, its donate link, the repository).
+// Share with Dropgate (Windows' context menu) launches the app with a file's
+// path and --upload: it uploads the file in a hidden window, without opening
+// the main one, and quits once it's done.
+const wasLaunchedForBackgroundTask = process.argv.includes('--upload');
 
-try {
-    fs.writeFileSync(logFile, `=== App started at ${new Date().toISOString()} ===\n`);
-    log('Log file created at:', logFile);
-} catch (e) {
-    console.error('Could not create log file:', e);
-}
+const kit = require('@diamonddigitaldev/electron-kit/main').start({
+    // package.json's name, dropgate-client, names the userData folder, so it stays.
+    name: APP_NAME,
+    settings: {
+        defaults: SETTINGS_DEFAULTS,
+        version: SETTINGS_SCHEMA_VERSION,
+        obsoleteKeys: V3_STORE_KEYS,
+    },
+    log: 'memory',
+    files: true,
+    credits: {
+        lines: [
+            ['Created and maintained by ', { text: 'Diamond Digital Development', href: 'https://diamonddigital.dev' }, '.'],
+            ['Logo designed by ', { text: 'TheFuturisticIdiot', href: 'https://github.com/TheFuturisticIdiot' }, '.'],
+            'This software is licensed under the GNU General Public License v3.0.',
+            'Dropgate Server is licensed under the GNU Affero General Public License v3.0.',
+            '@dropgate/core is licensed under the Apache License v2.0.',
+            'Privacy and anonymity is a human right. Nobody should have to give anything for their right to data freedom.',
+        ],
+        donate: 'https://buymeacoff.ee/willtda',
+    },
+    menu: { items: menuItems({ openFile: handleOpenDialog }) },
+    updates: wasLaunchedForBackgroundTask ? { checkOnLaunch: false } : {},
+    openExternal: { allow: ['https://github.com/diamonddigitaldev/Dropgate/'] },
+});
 
-log('process.argv on startup:', JSON.stringify(process.argv));
+// Windows shows a notification only for the app ID its Start menu shortcut
+// carries, which the installer gives as build.appId. The kit sets the app's
+// npm-style name instead, so Share with Dropgate's notifications wouldn't show.
+// Once the kit has start({ appId }), this goes for that.
+// kit-gap: https://github.com/diamonddigitaldev/electron-kit/pull/40
+if (process.platform === 'win32') app.setAppUserModelId('com.diamonddigitaldev.dropgateclient');
 
-if (process.platform === 'win32') {
-    app.setAppUserModelId('com.diamonddigitaldev.dropgateclient');
-}
-
-const store = new Store();
-
-let mainWindow = null;
 let uploadQueue = [];
 let isUploading = false;
 let activeUploadNotification = null;
+
+// The windows running an upload, by webContents id, so Restart Now can ask first.
+const uploadingIn = new Set();
 
 // Electron 43+ opens file dialogs in Downloads unless told otherwise. Remember the
 // last folder for this session only, so it's never written to disk.
 let lastOpenDialogDir;
 
-// Tracks file paths the renderer is allowed to read ranges from (defense-in-depth for context isolation)
+// The files the page may read ranges of: those main handed it, from Open File,
+// a drop, or Share with Dropgate.
 const authorizedFilePaths = new Set();
 
 // Batch collection for multi-file context menu selections.
 // Windows launches one process per selected file; we debounce them into a single bundle.
 let batchFiles = [];
 let batchTimer = null;
-const BATCH_DEBOUNCE_MS = 500;
+
+// Background uploads waiting for their window's page to be ready, by window id.
+const pendingBackgroundUploads = new Map();
+
+const mainWindow = () => kit.windows.main();
+const ICON = path.join(__dirname, 'img', 'dropgate');
+
+function createWindow() {
+    return kit.windows.createMain({
+        page: path.join(__dirname, 'index.html'),
+        size: { width: WINDOW.WIDTH, height: WINDOW.HEIGHT },
+        min: { width: WINDOW.MIN_WIDTH, height: WINDOW.MIN_HEIGHT },
+        title: APP_NAME,
+        icon: ICON,
+        webPreferences: { preload: path.join(__dirname, 'preload.js') },
+    });
+}
 
 function showNotification(title, body) {
     const notification = new Notification({ title, body });
     notification.on('click', () => {
-        if (!mainWindow || mainWindow.isDestroyed()) {
-            createWindow();
-        }
-        if (mainWindow.isMinimized()) mainWindow.restore();
-        mainWindow.show();
-        mainWindow.focus();
+        const win = mainWindow() ?? createWindow();
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
     });
     notification.show();
     return notification;
 }
 
-// Auto-updater configuration
-autoUpdater.autoDownload = false;
-autoUpdater.autoInstallOnAppQuit = true;
-
-function initAutoUpdater() {
-    // Check for updates after a short delay to let the app initialize
-    setTimeout(() => {
-        log('Checking for updates...');
-        autoUpdater.checkForUpdates().catch(err => {
-            log('Update check failed: ' + err.message);
-        });
-    }, 5000);
-
-    autoUpdater.on('update-available', (info) => {
-        const currentVersion = app.getVersion();
-        const newVersion = info.version;
-
-        log(`Update available: ${currentVersion} -> ${newVersion}`);
-
-        dialog.showMessageBox(mainWindow, {
-            type: 'info',
-            title: 'Update Available',
-            message: 'A new version of Dropgate Client is available!',
-            detail: `Current version: ${currentVersion}\nNew version: ${newVersion}\n\nWould you like to download and install this update?`,
-            buttons: ['Yes, Update Now', 'No, Later', 'View Changelog'],
-            defaultId: 0,
-            cancelId: 1
-        }).then(result => {
-            if (result.response === 0) {
-                log('User chose to download update');
-                autoUpdater.downloadUpdate();
-            } else if (result.response === 2) {
-                log('User chose to view changelog');
-                shell.openExternal(`https://github.com/diamonddigitaldev/Dropgate/releases/tag/${newVersion}`);
-            } else {
-                log('User declined update');
-            }
-        });
-    });
-
-    autoUpdater.on('update-not-available', () => {
-        log('No updates available');
-    });
-
-    autoUpdater.on('download-progress', (progress) => {
-        log(`Download progress: ${Math.round(progress.percent)}%`);
-    });
-
-    autoUpdater.on('update-downloaded', (info) => {
-        log('Update downloaded: ' + info.version);
-
-        dialog.showMessageBox(mainWindow, {
-            type: 'info',
-            title: 'Update Ready',
-            message: 'Update downloaded successfully!',
-            detail: `Version ${info.version} is ready to install. The application will restart to complete the update.`,
-            buttons: ['Install Now', 'Install on Quit'],
-            defaultId: 0,
-            cancelId: 1
-        }).then(result => {
-            if (result.response === 0) {
-                log('User chose to install update now');
-                autoUpdater.quitAndInstall();
-            } else {
-                log('Update will install on quit');
-            }
-        });
-    });
-
-    autoUpdater.on('error', (err) => {
-        log('Auto-updater error: ' + err.message);
-    });
+/** A file on disk, handed to the page: it may read it from now on. */
+function handOver(filePath) {
+    const stats = fs.statSync(filePath);
+    authorizedFilePaths.add(filePath);
+    return { name: path.basename(filePath), size: stats.size, filePath };
 }
 
-function checkForUpdatesManually() {
-    log('Manual update check triggered');
-    autoUpdater.checkForUpdates().then(result => {
-        if (!result || !result.updateInfo || result.updateInfo.version === app.getVersion()) {
-            dialog.showMessageBox(mainWindow, {
-                type: 'info',
-                title: 'No Updates',
-                message: 'You\'re up to date!',
-                detail: `Dropgate Client ${app.getVersion()} is the latest version.`,
-                buttons: ['OK', 'View Changelog']
-            }).then(result => {
-                if (result.response === 1) {
-                    shell.openExternal(`https://github.com/diamonddigitaldev/Dropgate/releases/tag/${app.getVersion()}`);
-                }
-            });
-        }
-    }).catch(err => {
-        log('Manual update check failed: ' + err.message);
-        dialog.showMessageBox(mainWindow, {
-            type: 'error',
-            title: 'Update Check Failed',
-            message: 'Could not check for updates.',
-            detail: err.message,
-            buttons: ['OK']
-        });
-    });
-}
-
-function getIconPath() {
-    let iconName;
-    switch (process.platform) {
-        case 'win32':
-            iconName = 'dropgate.ico';
-            break;
-        case 'darwin': // macOS
-            iconName = 'dropgate.icns';
-            break;
-        case 'linux':
-        default:
-            iconName = 'dropgate.png';
-            break;
-    }
-    return path.join(__dirname, 'img', iconName);
-}
-
-// Determine if the app was launched SOLELY for a background task.
-// This is a crucial flag to manage the app's lifecycle.
-const wasLaunchedForBackgroundTask = process.argv.some(arg => arg === '--upload');
-
-const gotTheLock = app.requestSingleInstanceLock();
-
-if (!gotTheLock) {
-    // We're a second instance, the first instance will handle our args
-    log('Another instance exists, passing arguments and quitting');
-    app.quit();
-} else {
-    // We're the first instance
-    log('Primary instance starting');
-
-    app.on('second-instance', (event, commandLine, workingDirectory) => {
-        log('=== Second instance detected ===');
-        log('commandLine:', commandLine);
-
-        const isBackgroundUpload = commandLine.some(arg => arg === '--upload');
-
-        if (isBackgroundUpload) {
-            log('Background upload via second-instance');
+if (kit.primary) {
+    // A second launch: the kit restores and focuses the main window, if there is
+    // one. A share is uploaded in the background; anything else opens the main
+    // window if it isn't open.
+    app.on('second-instance', (_event, commandLine) => {
+        if (commandLine.includes('--upload')) {
             handleArgs(commandLine);
-        } else {
-            log('Normal app launch via second-instance');
-            if (mainWindow) {
-                if (mainWindow.isMinimized()) mainWindow.restore();
-                mainWindow.focus();
-            } else {
-                createWindow();
-            }
-        }
-    });
-
-    // Handle initial launch
-    app.whenReady().then(() => {
-        log('=== App ready ===');
-        log('wasLaunchedForBackgroundTask:', wasLaunchedForBackgroundTask);
-        log('process.argv:', JSON.stringify(process.argv));
-
-        // If the app was NOT launched for a background task, create the main window.
-        if (!wasLaunchedForBackgroundTask) {
-            log('Creating main window (not a background task)');
+        } else if (!mainWindow()) {
             createWindow();
-            initAutoUpdater();
-        } else {
-            log('Skipping main window creation (background task detected)');
         }
+    });
 
-        // Always handle arguments on startup
-        log('Processing startup arguments...');
+    kit.ready.then(() => {
+        if (!wasLaunchedForBackgroundTask) createWindow();
         handleArgs(process.argv);
-
-        app.on('activate', () => {
-            if (BrowserWindow.getAllWindows().length === 0) {
-                createWindow();
-            }
-        });
-    });
-}
-
-
-function createWindow() {
-    // Restore saved window bounds or use defaults
-    const defaultBounds = {
-        width: 600,
-        height: 900
-    };
-    const savedBounds = store.get('windowBounds', defaultBounds);
-
-    mainWindow = new BrowserWindow({
-        width: savedBounds.width,
-        height: savedBounds.height,
-        x: savedBounds.x,
-        y: savedBounds.y,
-        minWidth: 400,
-        minHeight: 700,
-        resizable: true,
-        title: "Dropgate Client",
-        webPreferences: {
-            preload: path.join(__dirname, 'preload.js'),
-            contextIsolation: true,
-            nodeIntegration: false
-        },
-        icon: getIconPath()
-    });
-
-    mainWindow.loadFile(path.join(__dirname, 'index.html'));
-    // mainWindow.webContents.openDevTools();
-
-    // Save window bounds when resized or moved
-    const saveBounds = () => {
-        if (!mainWindow || mainWindow.isDestroyed()) return;
-        const bounds = mainWindow.getBounds();
-        store.set('windowBounds', bounds);
-    };
-
-    // Debounce saving to avoid excessive writes during resizing
-    let saveBoundsTimeout;
-    const debouncedSaveBounds = () => {
-        clearTimeout(saveBoundsTimeout);
-        saveBoundsTimeout = setTimeout(saveBounds, 500);
-    };
-
-    mainWindow.on('resize', debouncedSaveBounds);
-    mainWindow.on('move', debouncedSaveBounds);
-
-    // Save immediately on close
-    mainWindow.on('close', saveBounds);
-
-    mainWindow.on('closed', () => {
-        mainWindow = null;
     });
 }
 
 // Manage the background upload queue
 function processUploadQueue() {
-    log('=== processUploadQueue called ===');
-    log('isUploading:', isUploading);
-    log('Queue length:', uploadQueue.length);
-
-    if (isUploading) {
-        log('Already uploading, skipping');
-        return;
-    }
-
-    if (uploadQueue.length === 0) {
-        log('Queue is empty');
-        return;
-    }
-
+    if (isUploading || uploadQueue.length === 0) return;
     isUploading = true;
     const { filePaths } = uploadQueue.shift();
-    log('Processing upload from queue:', filePaths.length, 'file(s)');
     triggerBackgroundUpload(filePaths);
 }
 
 function handleArgs(argv) {
-    log('=== handleArgs called ===');
-    log('argv:', JSON.stringify(argv));
-    log('app.isPackaged:', app.isPackaged);
+    if (!argv.includes('--upload')) return;
 
-    // For packaged apps, we need to skip:
-    // - argv[0]: the executable path
-    // - Any paths that are the app executable itself
+    // The first file in argv: past the executable, not a switch, and a file.
     const executablePath = process.execPath.toLowerCase();
-    log('Executable path:', executablePath);
-
     const filePath = argv.find((arg, index) => {
-        // Skip first argument (always the executable)
-        if (index === 0) {
-            log('Skipping index 0:', arg);
-            return false;
-        }
-
-        // Skip if it's the executable itself
-        if (arg.toLowerCase() === executablePath) {
-            log('Skipping executable path:', arg);
-            return false;
-        }
-
-        // Skip our custom flags
-        if (arg === '--upload') {
-            log('Skipping flag:', arg);
-            return false;
-        }
-
-        // Check if it's a valid file
+        if (index === 0 || arg.toLowerCase() === executablePath || arg.startsWith('-')) return false;
         try {
-            const exists = fs.existsSync(arg);
-            const isFile = exists && fs.lstatSync(arg).isFile();
-            log(`Checking arg [${index}]: "${arg}" - exists: ${exists}, isFile: ${isFile}`);
-            return isFile;
-        } catch (e) {
-            log(`Error checking arg [${index}]: "${arg}" - ${e.message}`);
+            return fs.existsSync(arg) && fs.lstatSync(arg).isFile();
+        } catch {
             return false;
         }
     });
-
-    log('Found file path:', filePath);
-
     if (!filePath) {
-        log('No valid file path found in arguments');
+        kit.log.info('Share with Dropgate: no file to upload in the arguments.');
         return;
     }
 
-    const isUploadAction = argv.includes('--upload');
+    // Check if this file is already pending or queued to prevent duplicates
+    const alreadyBatched = batchFiles.includes(filePath);
+    const alreadyQueued = uploadQueue.some(item => item.filePaths.includes(filePath));
+    if (alreadyBatched || alreadyQueued) return;
 
-    log('Is upload action:', isUploadAction);
-
-    if (isUploadAction) {
-        // Check if this file is already pending or queued to prevent duplicates
-        const alreadyBatched = batchFiles.includes(filePath);
-        const alreadyQueued = uploadQueue.some(item => item.filePaths.includes(filePath));
-        if (alreadyBatched || alreadyQueued) {
-            log('File already batched/queued, skipping duplicate');
-            return;
+    // Collect files and debounce — Windows launches one process per selected
+    // file, so multi-select arrivals are spaced milliseconds apart.
+    batchFiles.push(filePath);
+    if (batchTimer) clearTimeout(batchTimer);
+    batchTimer = setTimeout(() => {
+        const filePaths = [...batchFiles];
+        batchFiles = [];
+        batchTimer = null;
+        if (filePaths.length > 0) {
+            uploadQueue.push({ filePaths });
+            processUploadQueue();
         }
-
-        // Collect files and debounce — Windows launches one process per selected
-        // file, so multi-select arrivals are spaced milliseconds apart.
-        batchFiles.push(filePath);
-        log('Added to batch. Batch size:', batchFiles.length);
-
-        if (batchTimer) clearTimeout(batchTimer);
-        batchTimer = setTimeout(() => {
-            if (batchFiles.length > 0) {
-                const filePaths = [...batchFiles];
-                batchFiles = [];
-                batchTimer = null;
-                log('Batch timer fired, queuing', filePaths.length, 'file(s)');
-                uploadQueue.push({ filePaths });
-                processUploadQueue();
-            }
-        }, BATCH_DEBOUNCE_MS);
-    } else {
-        log('Not an upload action, ignoring');
-    }
+    }, BATCH_DEBOUNCE_MS);
 }
 
-app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-        app.quit();
-    }
-});
-
-app.on('will-quit', () => {
-    globalShortcut.unregisterAll();
-});
-
-ipcMain.on('upload-progress', (event, progressData) => {
+kit.ipc.handle(IPC.UPLOAD_PROGRESS, (event, progressData) => {
+    uploadingIn.add(event.sender.id);
+    const main = mainWindow();
     // Send to main window if it exists
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('update-ui', { type: 'progress', data: progressData });
+    if (main) {
+        main.webContents.send(IPC.UPLOAD_STATUS, { type: 'progress', data: progressData });
 
         // Update window title and taskbar progress
         if (progressData.percent !== undefined) {
-            mainWindow.setTitle(`Dropgate Client \u2014 Uploading ${progressData.percent.toFixed(0)}%`);
-            mainWindow.setProgressBar(progressData.percent / 100);
+            main.setTitle(`${APP_NAME} — Uploading ${progressData.percent.toFixed(0)}%`);
+            main.setProgressBar(progressData.percent / 100);
         } else if (progressData.text) {
-            mainWindow.setTitle(`Dropgate Client \u2014 ${progressData.text}`);
+            main.setTitle(`${APP_NAME} — ${progressData.text}`);
         }
-    }
-
-    // ALSO send to the window that's uploading (might be a background window)
-    const uploaderWindow = BrowserWindow.fromWebContents(event.sender);
-    if (uploaderWindow && uploaderWindow !== mainWindow && !uploaderWindow.isDestroyed()) {
-        uploaderWindow.webContents.send('update-ui', { type: 'progress', data: progressData });
     }
 });
 
-ipcMain.on('upload-finished', (event, result) => {
-    log('Upload finished:', result.status);
+kit.ipc.handle(IPC.UPLOAD_FINISHED, (event, result) => {
+    uploadingIn.delete(event.sender.id);
+    kit.log.info(`Upload finished: ${result.status}`);
+    const main = mainWindow();
 
     // Reset window title and taskbar progress
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setTitle('Dropgate Client');
-        mainWindow.setProgressBar(result.status === 'success' ? 1 : 0,
+    if (main) {
+        main.setTitle(APP_NAME);
+        main.setProgressBar(result.status === 'success' ? 1 : 0,
             { mode: result.status === 'success' ? 'none' : 'error' });
         setTimeout(() => {
-            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(-1);
+            if (mainWindow()) mainWindow().setProgressBar(-1);
         }, 3000);
     }
 
@@ -455,56 +218,37 @@ ipcMain.on('upload-finished', (event, result) => {
     }
 
     const uploaderWindow = BrowserWindow.fromWebContents(event.sender);
-    const isFocused = mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused();
+    const isFocused = main?.isFocused() ?? false;
 
     if (result.status === 'success') {
-        clipboard.writeText(result.link).catch(err => log('Failed to copy link to clipboard:', err));
-
-        // Send to main window if it exists
-        if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('update-ui', { type: 'success', data: result });
-        }
-
+        clipboard.writeText(result.link).catch(err => kit.log.warn('Failed to copy link to clipboard:', err));
+        if (main) main.webContents.send(IPC.UPLOAD_STATUS, { type: 'success', data: result });
         // Show notification if main window doesn't exist or isn't focused
-        if (!mainWindow || !isFocused) {
-            showNotification('Upload Successful', 'Link copied to clipboard.');
-        }
+        if (!main || !isFocused) showNotification('Upload Successful', 'Link copied to clipboard.');
     } else {
-        // Send to main window if it exists
-        if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('update-ui', { type: 'error', data: result });
-        }
-
-        // Show notification if main window doesn't exist or isn't focused
-        if (!mainWindow || !isFocused) {
-            showNotification('Upload Failed', result.error || 'An unknown error occurred.');
-        }
+        if (main) main.webContents.send(IPC.UPLOAD_STATUS, { type: 'error', data: result });
+        if (!main || !isFocused) showNotification('Upload Failed', result.error || 'An unknown error occurred.');
     }
 
     // Only destroy background windows, not the main window
-    if (uploaderWindow && uploaderWindow !== mainWindow) {
-        log('Destroying background window');
-        uploaderWindow.destroy();
-    }
+    if (uploaderWindow && uploaderWindow !== main) uploaderWindow.destroy();
 
     isUploading = false;
 
     // If there are more items, process them.
     if (uploadQueue.length > 0) {
         processUploadQueue();
-    } else if (wasLaunchedForBackgroundTask && !mainWindow) {
-        log('Background task complete, quitting app');
+    } else if (wasLaunchedForBackgroundTask && !mainWindow()) {
+        kit.log.info('Background task complete, quitting app');
         app.quit();
     }
 });
 
-ipcMain.on('cancel-upload', (event) => {
-    log('Cancel upload requested');
-
-    // Reset window title and taskbar progress
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setTitle('Dropgate Client');
-        mainWindow.setProgressBar(-1);
+kit.ipc.handle(IPC.UPLOAD_CANCEL, () => {
+    const main = mainWindow();
+    if (main) {
+        main.setTitle(APP_NAME);
+        main.setProgressBar(-1);
     }
 
     // Close the active upload notification
@@ -516,50 +260,15 @@ ipcMain.on('cancel-upload', (event) => {
     // Broadcast cancellation to all windows — the upload may be running in a
     // background window while the user clicks cancel in the main window.
     for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) {
-            win.webContents.send('cancel-upload-trigger');
-        }
+        if (!win.isDestroyed()) win.webContents.send(IPC.UPLOAD_CANCEL_REQUESTED);
     }
 });
 
-ipcMain.handle('get-settings', () => {
-    return {
-        serverURL: store.get('serverURL', ''),
-        lifetimeValue: store.get('lifetimeValue', '24'),
-        lifetimeUnit: store.get('lifetimeUnit', 'hours'),
-    };
-});
-
-ipcMain.handle('set-settings', (event, settings) => {
-    try {
-        for (const [key, value] of Object.entries(settings)) {
-            if (value !== undefined) {
-                store.set(key, value);
-            }
-        }
-    } catch (error) {
-        console.error('Failed to save settings:', error);
-    }
-});
-
-ipcMain.handle('get-client-version', () => {
-    return app.getVersion();
-});
-
-ipcMain.on('open-external', (event, url) => {
-    const allowed = [
-        'https://github.com/',
-        'https://buymeacoff.ee/',
-        'https://diamonddigital.dev'
-    ];
-
-    if (allowed.some(prefix => url.startsWith(prefix))) {
-        shell.openExternal(url);
-    }
-});
+// Restart Now asks first while any window, the main one or a hidden one, uploads.
+kit.ipc.handle(IPC.UPLOAD_BUSY, () => uploadingIn.size > 0);
 
 // Lazy file reading: renderer requests byte ranges instead of loading entire files into memory
-ipcMain.handle('read-file-range', async (event, filePath, start, end) => {
+kit.ipc.handle(IPC.FILE_READ_RANGE, async (_event, filePath, start, end) => {
     if (!authorizedFilePaths.has(filePath)) {
         throw new Error('File access not authorized.');
     }
@@ -576,11 +285,31 @@ ipcMain.handle('read-file-range', async (event, filePath, start, end) => {
     }
 });
 
-ipcMain.on('revoke-file-access', (event, filePath) => {
+kit.ipc.handle(IPC.FILE_REVOKE, (_event, filePath) => {
     authorizedFilePaths.delete(filePath);
 });
 
-ipcMain.on('show-window', (event) => {
+// Files dropped on Upload: the kit's drop zone hands the page their paths
+// (kitAPI.getPathForFile, from the File the person dropped). Folders aren't
+// uploaded, and are counted so the page can say so.
+kit.ipc.handle(IPC.FILES_ADD, (_event, paths) => {
+    if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string' && path.isAbsolute(p))) {
+        throw new Error('Expected a list of paths.');
+    }
+    const files = [];
+    let folders = 0;
+    for (const filePath of paths) {
+        try {
+            if (fs.statSync(filePath).isDirectory()) folders++;
+            else files.push(handOver(filePath));
+        } catch {
+            // Gone since it was dropped: nothing to add.
+        }
+    }
+    return { files, folders };
+});
+
+kit.ipc.handle(IPC.WINDOW_SHOW, (event) => {
     const senderWindow = BrowserWindow.fromWebContents(event.sender);
     if (senderWindow && !senderWindow.isDestroyed()) {
         senderWindow.show();
@@ -588,74 +317,36 @@ ipcMain.on('show-window', (event) => {
     }
 });
 
-const menuTemplate = [
-    {
-        label: 'Menu',
-        submenu: [
-            {
-                label: 'Open File',
-                accelerator: 'CmdOrCtrl+O',
-                click: handleOpenDialog
-            },
-            { type: 'separator' },
-            {
-                label: 'Check for Updates',
-                click: checkForUpdatesManually
-            },
-            { type: 'separator' },
-            {
-                label: 'Exit',
-                accelerator: 'Alt+F4',
-                role: 'quit'
-            }
-        ]
-    },
-    {
-        label: 'Credits',
-        accelerator: 'CmdOrCtrl+Shift+C',
-        click: () => {
-            createCreditsWindow();
-        }
+// A window's page has set itself up. A hidden one made for Share with
+// Dropgate is sent its files now.
+kit.ipc.handle(IPC.WINDOW_READY, (event) => {
+    const senderWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!senderWindow || !pendingBackgroundUploads.has(senderWindow.id)) return;
+
+    const windowId = senderWindow.id;
+    const { filePaths } = pendingBackgroundUploads.get(windowId);
+    pendingBackgroundUploads.delete(windowId);
+    try {
+        const files = filePaths.map(handOver);
+        const notifBody = files.length === 1
+            ? `Uploading ${files[0].name}...`
+            : `Uploading ${files.length} files...`;
+        activeUploadNotification = showNotification('Upload Started', notifBody);
+        senderWindow.webContents.send(IPC.UPLOAD_BACKGROUND_START, { files });
+    } catch (error) {
+        kit.log.error('Failed to read file for background upload:', error);
+        showNotification('Upload Failed', 'Could not read the selected file.');
+        if (!senderWindow.isDestroyed()) senderWindow.destroy();
+        isUploading = false;
+        processUploadQueue();
     }
-];
-
-const menu = Menu.buildFromTemplate(menuTemplate);
-Menu.setApplicationMenu(menu);
-
-function createCreditsWindow() {
-    const creditsWindow = new BrowserWindow({
-        width: 875,
-        height: 550,
-        parent: mainWindow,
-        modal: true,
-        resizable: false,
-        minimizable: false,
-        maximizable: false,
-        fullscreenable: false,
-        webPreferences: {
-            preload: path.join(__dirname, 'preload.js'),
-            contextIsolation: true,
-            nodeIntegration: false
-        },
-        icon: getIconPath()
-    });
-
-    // Ensure it cannot be minimized (also disable minimize/maximize buttons)
-    creditsWindow.on('minimize', (e) => {
-        e.preventDefault();
-        creditsWindow.show();
-        creditsWindow.focus();
-    });
-
-    creditsWindow.setMenu(null);
-    creditsWindow.loadFile(path.join(__dirname, 'credits.html'));
-}
+});
 
 async function handleOpenDialog() {
-    const focusedWindow = BrowserWindow.getFocusedWindow();
-    if (!focusedWindow) return;
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow();
+    if (!win) return;
 
-    const { canceled, filePaths } = await dialog.showOpenDialog(focusedWindow, {
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
         properties: ['openFile'],
         title: 'Select a file',
         buttonLabel: 'Select',
@@ -669,87 +360,19 @@ async function handleOpenDialog() {
     const filePath = filePaths[0];
     lastOpenDialogDir = path.dirname(filePath);
     try {
-        const stats = fs.statSync(filePath);
-        authorizedFilePaths.add(filePath);
-        focusedWindow.webContents.send('file-opened', {
-            name: path.basename(filePath),
-            size: stats.size,
-            filePath: filePath
-        });
+        win.webContents.send(IPC.FILE_OPENED, handOver(filePath));
     } catch (error) {
-        console.error('Failed to read the selected file:', error);
-        focusedWindow.webContents.send('file-open-error', 'Could not read the selected file.');
+        kit.log.warn('Failed to read the selected file:', error);
+        win.webContents.send(IPC.FILE_OPEN_ERROR, `Could not read ${path.basename(filePath)}.`);
     }
 }
 
-// BACKGROUND UPLOAD
-// Store pending uploads with their windows
-const pendingBackgroundUploads = new Map();
-
-// Set up the renderer-ready listener ONCE at the top level
-ipcMain.on('renderer-ready', (event) => {
-    log('Renderer ready signal received');
-
-    // Find which window sent this event
-    const senderWindow = BrowserWindow.fromWebContents(event.sender);
-    if (!senderWindow) {
-        console.error('Could not find sender window');
-        return;
-    }
-
-    const windowId = senderWindow.id;
-    log('Renderer ready from window ID:', windowId);
-
-    // Check if we have a pending upload for this window
-    if (pendingBackgroundUploads.has(windowId)) {
-        const { filePaths } = pendingBackgroundUploads.get(windowId);
-        log('Found pending upload for this window:', filePaths.length, 'file(s)');
-
-        try {
-            const files = filePaths.map(fp => {
-                const stats = fs.statSync(fp);
-                authorizedFilePaths.add(fp);
-                return { name: path.basename(fp), size: stats.size, filePath: fp };
-            });
-
-            log('Sending background-upload-start with', files.length, 'file(s)');
-
-            const notifBody = files.length === 1
-                ? `Uploading ${files[0].name}...`
-                : `Uploading ${files.length} files...`;
-            activeUploadNotification = showNotification('Upload Started', notifBody);
-
-            senderWindow.webContents.send('background-upload-start', { files });
-
-            // Clear this pending upload
-            pendingBackgroundUploads.delete(windowId);
-        } catch (error) {
-            console.error('Failed to read file for background upload:', error);
-            showNotification('Upload Failed', 'Could not read the selected file.');
-
-            if (senderWindow && !senderWindow.isDestroyed()) {
-                senderWindow.destroy();
-            }
-
-            pendingBackgroundUploads.delete(windowId);
-            isUploading = false;
-            processUploadQueue();
-        }
-    } else {
-        log('No pending upload for this window (normal GUI window)');
-    }
-});
-
+// BACKGROUND UPLOAD: a hidden window, in the app's session, runs the upload
+// with the page's own code. It has no menu of its own: the house menu is the
+// main window's.
 function triggerBackgroundUpload(filePaths) {
-    log('=== triggerBackgroundUpload called ===');
-    log('Files:', filePaths.length);
-
     // Filter out any files that no longer exist
-    const validPaths = filePaths.filter(fp => {
-        const exists = fs.existsSync(fp);
-        if (!exists) log('File no longer exists, skipping:', fp);
-        return exists;
-    });
+    const validPaths = filePaths.filter(fp => fs.existsSync(fp));
 
     if (validPaths.length === 0) {
         showNotification('Upload Failed', 'File(s) not found.');
@@ -759,29 +382,32 @@ function triggerBackgroundUpload(filePaths) {
     }
 
     const backgroundWindow = new BrowserWindow({
-        show: false,  // use true for debugging!
-        width: 600,
-        height: 800,
-        minWidth: 400,
-        minHeight: 700,
-        resizable: true,
+        show: false,
+        width: WINDOW.WIDTH,
+        height: WINDOW.HEIGHT,
+        minWidth: WINDOW.MIN_WIDTH,
+        minHeight: WINDOW.MIN_HEIGHT,
+        title: APP_NAME,
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
+            sandbox: true,
             contextIsolation: true,
-            nodeIntegration: false
+            nodeIntegration: false,
+            spellcheck: false,
         },
-        icon: getIconPath()
+        icon: `${ICON}${process.platform === 'win32' ? '.ico' : '.png'}`,
     });
+    backgroundWindow.removeMenu();
 
     const windowId = backgroundWindow.id;
-    log('Created background window with ID:', windowId);
+    const contentsId = backgroundWindow.webContents.id;
 
     // Store the pending upload BEFORE loading the file
     pendingBackgroundUploads.set(windowId, { filePaths: validPaths });
 
     // Clean up if window is closed before upload starts
     backgroundWindow.on('closed', () => {
-        log('Background window closed, cleaning up');
+        uploadingIn.delete(contentsId);
         if (pendingBackgroundUploads.has(windowId)) {
             pendingBackgroundUploads.delete(windowId);
             isUploading = false;
@@ -789,13 +415,10 @@ function triggerBackgroundUpload(filePaths) {
         }
     });
 
-    // backgroundWindow.webContents.openDevTools();
-
     const notifBody = validPaths.length === 1
         ? `Preparing ${path.basename(validPaths[0])}...`
         : `Preparing ${validPaths.length} files...`;
     activeUploadNotification = showNotification('Initialising Upload', notifBody);
 
-    log('Loading index.html into background window');
     backgroundWindow.loadFile(path.join(__dirname, 'index.html'));
 }

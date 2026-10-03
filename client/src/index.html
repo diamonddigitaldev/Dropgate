@@ -1,141 +1,100 @@
 <!DOCTYPE html>
-<html lang="en" data-bs-theme="auto">
+<html lang="en">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dropgate Client</title>
-    <script>
-        (() => {
-            const mql = window.matchMedia("(prefers-color-scheme: dark)");
-            const root = document.documentElement;
-
-            const apply = () => root.setAttribute("data-bs-theme", mql.matches ? "dark" : "light");
-
-            apply();
-            mql.addEventListener?.("change", apply);
-        })();
-    </script>
-    <link href="../node_modules/bootstrap/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="./styles.css">
-    <link href="../node_modules/material-icons/iconfont/round.css" rel="stylesheet">
+    <link rel="stylesheet" href="../node_modules/bootstrap/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="../node_modules/material-icons/iconfont/round.css">
+    <link rel="stylesheet" href="../node_modules/@diamonddigitaldev/electron-kit/css/kit.css">
+    <link rel="stylesheet" href="styles/accent.css">
+    <link rel="stylesheet" href="styles.css">
+    <!-- Draws the page in the OS theme before the body parses, then follows it. -->
+    <script src="../node_modules/@diamonddigitaldev/electron-kit/page/theme.js"></script>
 </head>
 
-<body class="p-4">
+<body>
 
-    <div class="container">
-        <h3 class="text-center mb-4">Dropgate Client</h3>
+    <!-- kit.ui.mountShell() (renderer.js) builds the frame around what's here:
+         the nav rail (Upload, then Settings and Collapse), the header, and the
+         Settings view, with Dropgate's Server tab, then Update, then Credits. -->
 
-        <div id="drop-zone" class="text-center mb-3">
-            <input type="file" id="file-input" hidden multiple>
-            <div id="dz-empty">
-                <span class="material-icons-round drop-icon">upload_file</span>
-                <p class="drop-label mb-1">Drag & Drop Files Here</p>
-                <p class="text-body-secondary small mb-2">or</p>
-                <button id="select-file-btn" class="btn btn-secondary btn-sm">Select Files</button>
+    <!-- Upload: the files, their lifetime and download limit, how they'll be
+         sent, and the action bar. -->
+    <div id="upload-view" class="upload-view">
+        <div class="upload-column">
+            <!-- The kit's drop zone (renderer.js, kit.ui.dropZone()), while there are no files. -->
+            <div id="empty-state" class="empty-state"></div>
+
+            <div id="file-list-section" class="d-none">
+                <div class="d-flex align-items-center gap-2 mb-2">
+                    <span id="file-count" class="fw-semibold"></span>
+                    <span id="file-chosen-total" class="small text-body-secondary"></span>
+                    <button id="browse-more-btn" class="btn btn-sm btn-secondary d-inline-flex align-items-center gap-1 ms-auto" type="button">
+                        <span class="material-icons-round" aria-hidden="true" style="font-size:16px">add</span>Add More
+                    </button>
+                </div>
+                <div id="file-list" class="file-list"></div>
             </div>
-            <div id="dz-has-files" class="d-none">
-                <span class="material-icons-round accent" style="font-size:28px">add_circle_outline</span>
-                <p class="drop-label mb-1"><span id="dz-file-count"></span></p>
-                <p class="text-body-secondary small mb-2">drag and drop more files or</p>
-                <div class="d-flex gap-2 justify-content-center">
-                    <button id="browse-more-btn" class="btn btn-sm btn-secondary">Select More Files</button>
-                    <button id="btn-clear-all" class="btn btn-sm btn-outline-secondary">Clear All</button>
+            <div class="form-text mt-2 mb-3" id="max-upload-hint">Loading server limits…</div>
+
+            <div class="row g-3 mb-3">
+                <div class="col-sm-7">
+                    <label for="file-lifetime-value" class="form-label">File lifetime</label>
+                    <div class="input-group input-group-sm">
+                        <input type="number" class="form-control" id="file-lifetime-value" value="24" min="0.5" step="0.5">
+                        <select class="form-select" id="file-lifetime-unit" aria-label="Unit">
+                            <option value="minutes">Minutes</option>
+                            <option value="hours" selected>Hours</option>
+                            <option value="days">Days</option>
+                            <option value="unlimited">Unlimited</option>
+                        </select>
+                    </div>
+                    <div id="file-lifetime-help" class="form-text reserved">Loading…</div>
+                </div>
+                <div class="col-sm-5" id="max-downloads-section">
+                    <label for="max-downloads-value" class="form-label">Max downloads</label>
+                    <input type="number" class="form-control form-control-sm" id="max-downloads-value" value="1" min="0" step="1">
+                    <div id="max-downloads-help" class="form-text reserved">Loading…</div>
                 </div>
             </div>
-            <div class="mt-4 small text-body-secondary" id="max-upload-hint">Loading server limits...</div>
-        </div>
 
-        <div id="file-list-section" class="d-none mb-3">
-            <div id="file-list"></div>
-            <div class="mt-1 text-body-secondary small" id="file-chosen-total"></div>
-        </div>
-
-        <div class="mb-3">
-            <label for="server-url" class="form-label">Server URL</label>
-            <div class="input-group">
-                <input type="url" class="form-control" id="server-url" placeholder="https://dropgate.link"
-                    value="https://dropgate.link">
-                <button class="btn btn-outline-secondary" type="button" id="test-connection-btn">Test</button>
+            <!-- How the upload will be sent, from the server's capabilities. -->
+            <div id="security-status" class="security-status-card mb-3">
+                <span id="security-icon" class="material-icons-round" aria-hidden="true">https</span>
+                <span id="security-text">Checking security…</span>
             </div>
-            <div id="connection-status" class="form-text mt-1" style="min-height: 1.2em;"></div>
-        </div>
-        <div class="mb-3">
-            <label for="file-lifetime-value" class="form-label">File Lifetime</label>
-            <div class="input-group">
-                <input type="number" class="form-control" id="file-lifetime-value" value="24" min="0.5" step="0.5">
-                <select class="form-select" id="file-lifetime-unit">
-                    <option value="minutes">Minutes</option>
-                    <option value="hours" selected>Hours</option>
-                    <option value="days">Days</option>
-                    <option value="unlimited">Unlimited</option>
-                </select>
-            </div>
-            <div id="file-lifetime-help" class="form-text">Loading...</div>
-        </div>
 
-        <div class="mb-3" id="max-downloads-section">
-            <label for="max-downloads-value" class="form-label">Max Downloads</label>
-            <div class="input-group">
-                <input type="number" class="form-control" id="max-downloads-value" value="1" min="0" step="1">
-                <span class="input-group-text">downloads</span>
-            </div>
-            <div id="max-downloads-help" class="form-text">Loading...</div>
-        </div>
+            <!-- The kit's action bar (renderer.js, kit.ui.actionBar()): the status line, the bar, Upload and Cancel. -->
+            <div id="action-bar"></div>
 
-        <!-- Security Status Card -->
-        <div id="security-status" class="security-status-card mb-3">
-            <span id="security-icon" class="material-icons-round">https</span>
-            <span id="security-text">Checking security...</span>
-        </div>
-
-        <div class="d-grid mb-3">
-            <button id="upload-btn" class="btn btn-primary" disabled>Upload</button>
-            <button id="cancel-upload-btn" class="btn btn-danger" style="display: none;">Cancel Upload</button>
-        </div>
-
-        <div class="progress">
-            <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar"
-                aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width: 0%;"></div>
-        </div>
-        <div id="upload-status" class="form-text mt-1" style="min-height: 1.2em;"></div>
-
-        <div id="link-section" class="mt-4" style="display: none;">
-            <label for="download-link" class="form-label">Your Link:</label>
-            <div class="input-group">
-                <input type="text" id="download-link" class="form-control" readonly>
-                <button id="copy-btn" class="btn btn-outline-secondary">Copy</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Insecure Upload Warning Modal -->
-    <div class="modal fade" id="insecure-upload-modal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header border-0">
-                    <h5 class="modal-title d-flex align-items-center gap-2">
-                        <span class="material-icons-round text-warning">warning</span>
-                        Upload Security Warning
-                    </h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <p>This server does not support end-to-end encryption. Your file will be uploaded without
-                        encryption.</p>
-                    <p class="text-body-secondary small mb-0">The server administrator may be able to access your file
-                        contents.</p>
-                </div>
-                <div class="modal-footer border-0">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="button" class="btn btn-warning" id="confirm-insecure-upload">Upload Anyway</button>
+            <div id="link-section" class="mt-3 d-none">
+                <label for="download-link" class="form-label">Your link</label>
+                <div class="input-group">
+                    <input type="text" id="download-link" class="form-control selectable" readonly>
+                    <button id="copy-btn" class="btn btn-outline-secondary" type="button">Copy</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <script src="../node_modules/bootstrap/dist/js/bootstrap.bundle.min.js"></script>
-    <script type="module" src="./renderer.js"></script>
+    <!-- Settings > Server, moved into its tab by renderer.js: the server uploads go to, saved as it's tested. -->
+    <div id="server-settings" class="settings-column">
+        <label for="server-url" class="form-label">Server URL</label>
+        <div class="input-group">
+            <input type="url" class="form-control selectable" id="server-url" placeholder="https://dropgate.link" spellcheck="false">
+            <button class="btn btn-outline-secondary" type="button" id="test-connection-btn">Test</button>
+        </div>
+        <div id="connection-status" class="form-text reserved"></div>
+        <p class="form-text">Uploads go to this server, and so does Share with Dropgate.</p>
+    </div>
+
+    <!-- The browse button's picker. Files picked here are uploaded as they are. -->
+    <input type="file" id="file-input" hidden multiple>
+
+    <script src="../node_modules/@diamonddigitaldev/electron-kit/page/kit.js"></script>
+    <script type="module" src="renderer.js"></script>
 </body>
 
 </html>

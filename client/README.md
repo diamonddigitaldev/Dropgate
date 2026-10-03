@@ -57,12 +57,22 @@ To install Dropgate Client:
 ### Sending a file
 
 1. **Launch** the client.
-2. **Enter the server address** you want to connect to (for example, your home server or a private Dropgate instance).
-3. **Select a file** to upload (or drag and drop it into the window).
+2. **Enter the server address** you want to connect to in **Settings**, under **Server**, and choose **Test** (for example, your home server or a private Dropgate instance). It's remembered from then on.
+3. **Select a file** to upload on **Upload** (or drag and drop it into the window).
 4. **Choose your options** (E2EE is auto-applied when available, file lifetime, etc.).
 5. **Hit upload!** When it finishes, the **download link is copied to your clipboard**.
 
 **Protip (Windows):** Right-click a file and choose **"Share with Dropgate"** to upload in the background. E2EE is auto-applied when available; if not, you'll see a warning.
+
+### Settings and updates
+
+**Settings** is at the bottom of the sidebar, and in the menu (`Ctrl+,`). Its tabs are:
+
+* **Server**: the server your uploads go to, and **Share with Dropgate**'s.
+* **Update**: the version you're running, **Check for Updates**, and whether updates download by themselves (on by default; an update downloaded is installed when you close the app). The update channel is **Stable**, **Beta** or **Alpha**: a new install starts on its own version's channel, and your choice is kept from then on. The app never offers an older version than the one you have.
+* **Credits**.
+
+The app checks GitHub for updates a few seconds after it starts, and sends nothing that identifies your installation. Its log is kept in memory, never on disk. What it stores and sends is in [Data Processing](../docs/technical/DATA-PROCESSING.md#25-dropgate-client-electron).
 
 ### Receiving a file
 
@@ -88,7 +98,9 @@ npm ci
 npm start
 ```
 
-The app runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`src/dropgate-core.js`](src/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the app runs and packages without building core first. Don't edit it: change core's source and build it again ([Building and Testing](../packages/dropgate-core/README.md#building-and-testing)). GitHub Actions fails if it isn't core's build.
+The app is built on [electron-kit](https://github.com/diamonddigitaldev/electron-kit), Diamond Digital Development's shared library for its desktop apps: the window and its sidebar, Settings with its Update and Credits tabs, the updater, the menu, prompts and notifications in the window, and the log. Dropgate's own parts are its Upload section, its Server tab and Share with Dropgate.
+
+It runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`src/dropgate-core.js`](src/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the app runs and packages without building core first. Don't edit it: change core's source and build it again ([Building and Testing](../packages/dropgate-core/README.md#building-and-testing)). GitHub Actions fails if it isn't core's build.
 
 
 ## Building
@@ -101,7 +113,7 @@ npm run build
 
 Distributable binaries will appear in the `dist` folder: the NSIS installer on Windows, or an AppImage, a `.deb` and a `.rpm` on Linux. The `.rpm` needs `rpmbuild`, from the `rpm` package on Debian and Ubuntu, or `rpm-build` on Fedora.
 
-GitHub Actions builds all four packages ([`client-build.yml`](../.github/workflows/client-build.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the tests aren't packaged into the app and that the app carries core's build as it is, and doesn't publish or upload anything. The release workflow builds them the same way, lists the files a release attaches, with the update files, `latest.yml` and `latest-linux.yml`, checked against them, and attaches them to the release from the same build. The update files go up last, after every other file of the release; its dry run only lists them ([Releases](../README.md#releases)).
+GitHub Actions builds all four packages ([`client-build.yml`](../.github/workflows/client-build.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the app holds only what `build.files` in `package.json` keeps (the app's `src/`, and only the files of electron-kit, Bootstrap and Material Icons its pages load) and that it carries core's build as it is, and doesn't publish or upload anything. The release workflow builds them the same way, lists the files a release attaches, with the update files, `latest.yml` and `latest-linux.yml`, checked against them, and attaches them to the release from the same build. Every release has the update files, pre-releases too, since the app's Beta and Alpha channels read a pre-release's. They go up last, after every other file of the release; its dry run only lists them ([Releases](../README.md#releases)).
 
 The client shares its version with the server and core, and they're released together ([Releases](../README.md#releases)). Change it in `package.json`, `package-lock.json` and the badge at the top of this README together, or GitHub Actions fails.
 
@@ -115,13 +127,14 @@ npm ci
 npm test
 ```
 
-These tests read the app's source rather than launching it, so they don't need a display and don't download Electron. (The app itself is tested end to end, [below](#the-app-end-to-end).) They guard the things that break quietly:
+These tests read the app's source rather than launching it, so they don't need a display and don't download Electron. (The app itself is tested end to end, [below](#the-app-end-to-end).) Several use electron-kit's own test helpers. They guard the things that break quietly:
 
-* **The preload contract.** The preload only loads modules a sandboxed preload can load, and every IPC channel is used on both sides. A mistake in either leaves the app doing nothing, with no error in the main process.
+* **The preload contract.** The preload is run as a sandboxed preload would be, and only loads what one can. Every call of its bridge reaches a channel in `src/constants.js`, every channel the page asks is answered in `main.js` through electron-kit (which answers the app's own page only), and every message `main.js` sends reaches the page. A mistake in any of these leaves the app doing nothing, with no error in the main process.
 * **Window security.** Every window keeps `contextIsolation` on, `nodeIntegration` off and the sandbox on.
 * **Menu shortcuts.** Every shortcut has a modifier, so none of them fires while you're typing.
+* **What comes from electron-kit.** The accent colour meets WCAG 2.2 AA in both themes, the page loads electron-kit's styles and scripts in order, the shared parts (prompts, notifications in the window, the drop zone, the progress bar) are electron-kit's, the log is kept in memory, the updater is electron-kit's, and the build extends electron-kit's and packs only what the pages load.
 
-Tests for known issues are marked as expected failures. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. To see what each one is waiting on, run the tests with the TAP reporter, which prints each label:
+Tests for known issues are marked as expected failures, and there are none today. To see each test's name and label, run the tests with the TAP reporter:
 
 ```bash
 node --test --test-reporter=tap "test/*.test.mjs"
@@ -131,7 +144,7 @@ GitHub Actions runs the tests this way on Ubuntu and Windows ([`ci.yml`](../.git
 
 ### The App, End to End
 
-The app itself is tested with the [integration tests](../tests/integration/README.md), which launch it from this folder with a throwaway profile, against a Dropgate Server started on your machine just for the test. They check its settings and **"Share with Dropgate"**: that a shared file uploads, end-to-end encrypted on a server with HTTPS, and that its link downloads intact. Off CI they leave your clipboard alone, and they never touch your own settings.
+The app itself is tested with the [integration tests](../tests/integration/README.md), which launch it from this folder with a throwaway profile, against a Dropgate Server started on your machine just for the test. They check its settings, its Settings view, that it keeps no log on disk and downloads no spell-check dictionaries, and **"Share with Dropgate"**: that a shared file uploads, end-to-end encrypted on a server with HTTPS, and that its link downloads intact. A packaged build's update checks are tested too, for anything that could identify an installation. Off CI they leave your clipboard alone, and they never touch your own settings.
 
 They need this folder's and the server's dependencies. From the repository root:
 
