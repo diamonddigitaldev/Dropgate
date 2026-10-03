@@ -356,8 +356,9 @@ jobs:
           done
 
   # The desktop app's update files go up after every other file and the image,
-  # so the app never finds one before everything it names is there. A
-  # pre-release attaches none, so the app never updates to it. Nothing is
+  # so the app never finds one before everything it names is there. Every
+  # release has them, pre-releases too: the app's Beta and Alpha channels read a
+  # pre-release's, and its updater never offers one on Stable. Nothing is
   # attached.
   update-files:
     name: Update files (not attached)
@@ -375,10 +376,6 @@ jobs:
       - &list-update-files
         name: List the update files
         run: |
-          if [ "$PRERELEASE" = true ]; then
-            echo "A pre-release attaches no update file, so the desktop app never updates to it."
-            exit 0
-          fi
           dir=$RUNNER_TEMP/update-files
           mkdir -p "$dir"
           show() {
@@ -390,7 +387,8 @@ jobs:
             printf '  %-17s %5d bytes  sha256 %s\n' "$1" "$(wc -c < "$dir/$1")" "$(sha256sum "$dir/$1" | cut -d' ' -f1)"
             sed 's/^/      /' "$dir/$1"
           }
-          echo "The release would attach these last, each checked against its build's files:"
+          kind=stable; if [ "$PRERELEASE" = true ]; then kind=pre-release; fi
+          echo "The $kind would attach these last, each checked against its build's files:"
           show latest.yml "$WINDOWS_NAME" "$WINDOWS_FILE"
           show latest-linux.yml "$LINUX_NAME" "$LINUX_FILE"
           echo "Nothing was attached or uploaded."
@@ -581,8 +579,8 @@ jobs:
             bash .github/scripts/check-server-image.sh "$IMAGE@$DIGEST" "$platform"
           done
 
-  # The update files, attached after every other file and the image. A
-  # pre-release attaches none.
+  # The update files, attached after every other file and the image, on every
+  # release, pre-releases too.
   release-update-files:
     name: Update files
     if: github.event_name == 'release'
@@ -602,7 +600,6 @@ jobs:
       - *list-update-files
 
       - name: Attach the update files to the release
-        if: needs.versions.outputs.prerelease == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.versions.outputs.tag }}

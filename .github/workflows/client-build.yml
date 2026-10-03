@@ -21,7 +21,7 @@ on:
         type: boolean
         default: false
       prerelease:
-        description: Whether that release is a pre-release, "true" or "false". A pre-release attaches no update file.
+        description: Whether that release is a pre-release, "true" or "false". It attaches the same files, update file included.
         type: string
         default: 'false'
       attach-to:
@@ -30,7 +30,7 @@ on:
         default: ''
     outputs:
       update-file-name:
-        description: The update file a stable release attaches, latest.yml or latest-linux.yml.
+        description: The update file every release attaches, latest.yml or latest-linux.yml.
         value: ${{ jobs.build.outputs.update-file-name }}
       update-file:
         description: Its contents, in base64.
@@ -113,16 +113,31 @@ jobs:
           dpkg-deb --info dist/*.deb
           rpm -qip dist/*.rpm
 
-      # package.json leaves client/test/ out of the app. This lists what the
-      # packaged app holds outside node_modules, and fails if test/ is back in.
+      # package.json's build.files is an allowlist: the app's own src/, and only
+      # the files of the kit, Bootstrap and Material Icons the pages load (the
+      # other packages are what electron-store and electron-updater need). This
+      # lists what the packaged app holds outside node_modules, and those three
+      # packages' files, and fails on anything else of theirs.
       - name: Check the packaged app
         shell: bash
         run: |
-          list=$(npx --no-install asar list dist/*-unpacked/resources/app.asar | tr '\\' '/')
-          echo "app.asar holds $(printf '%s\n' "$list" | wc -l) entries. Outside node_modules:"
-          printf '%s\n' "$list" | grep -v '^/node_modules/'
-          if printf '%s\n' "$list" | grep -q '^/test\(/\|$\)'; then
-            echo "client/test/ is in the package"
+          list="$RUNNER_TEMP/app-asar.txt"
+          npx --no-install asar list dist/*-unpacked/resources/app.asar | tr '\\' '/' > "$list"
+          echo "app.asar holds $(wc -l < "$list") entries. Outside node_modules:"
+          grep -v '^/node_modules/' "$list"
+          echo
+          echo "The kit's, Bootstrap's and Material Icons' files:"
+          grep -E '^/node_modules/(@diamonddigitaldev|bootstrap|material-icons)(/|$)' "$list"
+          # What the allowlist keeps of the app and of those three packages.
+          own='^/(node_modules|src|package\.json)(/|$)'
+          kit='^/node_modules/@diamonddigitaldev(/electron-kit(/(LICENSE|package\.json|preload\.js|(main|page|css|format)(/.*)?))?)?$'
+          bootstrap='^/node_modules/bootstrap(/(LICENSE|package\.json|dist(/css(/bootstrap\.min\.css)?)?))?$'
+          icons='^/node_modules/material-icons(/(LICENSE|package\.json|iconfont(/(round\.css|material-icons-round\.woff2?))?))?$'
+          unexpected=$( (grep -vE "$own" "$list"; grep -E '^/node_modules/(@diamonddigitaldev|bootstrap|material-icons)(/|$)' "$list" | grep -vE "$kit|$bootstrap|$icons") || true)
+          if [ -n "$unexpected" ]; then
+            echo
+            echo "Outside the allowlist in client/package.json:"
+            echo "$unexpected"
             exit 1
           fi
 

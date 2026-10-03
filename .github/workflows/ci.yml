@@ -235,7 +235,7 @@ jobs:
   desktop:
     name: Desktop app tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -283,6 +283,26 @@ jobs:
           npm ci
           node -e "console.log(require('electron'))"
 
+      # The updater only runs in a packaged app, so the update tests
+      # (desktop/updates.spec.mjs) run a build of the app made for them: its
+      # build config with the update address swapped for this machine's. On
+      # Windows they run its unpacked app, on Linux its AppImage, as a person
+      # would. It's never published or attached.
+      - name: Build the app for the update tests
+        working-directory: client
+        shell: bash
+        run: |
+          node ../.github/scripts/client-test-build-config.mjs "$RUNNER_TEMP/test-build.json"
+          npx --no-install electron-builder ${{ runner.os == 'Windows' && '--win' || '--linux AppImage' }} --publish never --config "$RUNNER_TEMP/test-build.json"
+          if [ "$RUNNER_OS" = Windows ]; then
+            app="$PWD/dist/win-unpacked/Dropgate Client.exe"
+          else
+            app=$(ls "$PWD"/dist/*.AppImage)
+            chmod +x "$app"
+          fi
+          [ -f "$app" ] || { echo "No packaged app at $app"; exit 1; }
+          echo "DROPGATE_PACKAGED_APP=$app" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: |
           npm ci
@@ -294,7 +314,7 @@ jobs:
         run: npx playwright install --with-deps --only-shell chromium
 
       # One test at a time: in CI the app copies its links to the real clipboard,
-      # which every test shares.
+      # which every test shares, and the update tests share their server's port.
       - name: Run tests
         if: runner.os == 'Linux'
         run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" npx playwright test --project=desktop --workers=1

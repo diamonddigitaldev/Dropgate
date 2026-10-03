@@ -8,11 +8,12 @@
 //   to be. Anything else fails, so nothing new is attached without a decision.
 // - Each attached file's name must be one GitHub keeps as it is, because the
 //   update file names them.
-// - A stable release also attaches the update file (latest.yml on Windows,
-//   latest-linux.yml on Linux), which the desktop app reads to update itself. It
-//   goes up after every other file of the release, so every file it names must
-//   be one this build attaches, with the same size and SHA-512. A pre-release
-//   attaches none, so the app never updates to one.
+// - Every release, pre-releases too, also attaches the update file (latest.yml
+//   on Windows, latest-linux.yml on Linux), which the desktop app reads to update
+//   itself: its Beta and Alpha channels read a pre-release's. It goes up after
+//   every other file of the release, so every file it names must be one this
+//   build attaches, with the same size and SHA-512. The app's own updater (the
+//   kit's) never offers a pre-release on Stable, or anything older than it runs.
 //
 // Writes the names of the files to attach, and the update file's name and
 // contents (base64), to GITHUB_OUTPUT: a release attaches the files straight
@@ -24,7 +25,7 @@ import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 
 // What electron-builder writes on each platform that a release attaches: one of
-// each package, and on a stable release the update file.
+// each package (and the installer's blockmap), and the update file.
 const PLATFORMS = {
     win32: { name: 'Windows', packages: ['.exe', '.exe.blockmap'], update: 'latest.yml' },
     linux: { name: 'Linux', packages: ['.AppImage', '.deb', '.rpm'], update: 'latest-linux.yml' },
@@ -42,6 +43,7 @@ if (!dist || !['true', 'false'].includes(values.prerelease ?? '')) {
     console.error('Usage: node desktop-release-files.mjs <dist folder> --prerelease true|false');
     process.exit(2);
 }
+// It changes only what's printed: a pre-release attaches the same files as a stable release.
 const prerelease = values.prerelease === 'true';
 const platform = PLATFORMS[process.platform];
 if (!platform) {
@@ -117,16 +119,13 @@ const files = attached.map(describe);
 const width = Math.max(...files.map((f) => f.name.length), platform.update.length);
 const line = (f) => `${f.name.padEnd(width)}  ${String(f.size).padStart(10)} bytes  ${readable(f.size).padStart(10)}  sha256 ${f.sha256}`;
 
-console.log(`A release would attach these from this build (${platform.name}), in this order:`);
+console.log(`A ${prerelease ? 'pre-release' : 'stable release'} would attach these from this build (${platform.name}), in this order:`);
 files.forEach((f, i) => console.log(`  ${i + 1}. ${line(f)}`));
 console.log();
 
 let update;
-if (prerelease) {
-    console.log(`A pre-release attaches no update file, so the desktop app never updates to it.`);
-    if (updateFiles.length) console.log(`Not attached: ${updateFiles.join(', ')}.`);
-} else if (updateFiles.length !== 1 || updateFiles[0] !== platform.update) {
-    problems.push(`A stable release attaches ${platform.update}, but the build wrote ${updateFiles.length ? updateFiles.join(', ') : 'no update file'}.`);
+if (updateFiles.length !== 1 || updateFiles[0] !== platform.update) {
+    problems.push(`A release attaches ${platform.update}, but the build wrote ${updateFiles.length ? updateFiles.join(', ') : 'no update file'}.`);
 } else {
     update = describe(platform.update);
     const info = yaml.load(fs.readFileSync(path.join(dist, platform.update), 'utf8'));

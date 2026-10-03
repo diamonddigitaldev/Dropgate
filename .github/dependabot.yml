@@ -1,14 +1,29 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+# Weekly, with patches and minors grouped into one pull request per folder.
+# Majors come one at a time, and are taken on evidence: the real app driven,
+# not only the tests passing. The integration tests' own packages are checked
+# too, and the workflows' actions are kept current the same way. Until 4.0.0
+# is out, the updates go to its branch.
 
 version: 2
 updates:
-  - package-ecosystem: "npm" # See documentation for possible values
+  - package-ecosystem: npm
     directories:
       - "/client"
       - "/server"
       - "/packages/dropgate-core"
+      - "/tests/integration"
+    target-branch: "4.0.0"
     schedule:
-      interval: "monthly"
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: "4.0.0"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
