@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { holdsPlaintext, madeUpFile, summary } from '../helpers/files.mjs';
-import { expect, test, uploadsStarted } from '../helpers/desktop.mjs';
+import { expect, securityWarning, test, uploadsStarted, uploadStatus } from '../helpers/desktop.mjs';
 import { download } from '../helpers/webui.mjs';
 
 // Big enough for two 5 MiB chunks.
@@ -97,7 +97,7 @@ test.describe('on a server with HTTPS', () => {
         const shared = desktop.addFile(file);
         expect(await desktop.launchAgain(shared, '--upload'), "the second launch's exit code").toBe(0);
 
-        await expect(window.locator('#upload-status')).toHaveText(/upload successful/i, { timeout: 30_000 });
+        await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });
         const { link } = expectLinkCopied(app, shared);
         await expect(window.locator('#download-link'), 'the link the open app shows').toHaveValue(link);
         if (desktop.real) {
@@ -125,9 +125,9 @@ test.describe('on a server without HTTPS', () => {
         const shared = desktop.addFile(file);
         const app = await desktop.share(shared);
         const window = await app.window();
-        await expect(window.locator('#insecure-upload-modal')).toBeVisible();
+        await expect(securityWarning(window)).toBeVisible();
         await expect.poll(() => app.eventsOf('window-shown').length, { message: 'windows shown for the warning' }).toBe(1);
-        await window.locator('#confirm-insecure-upload').click();
+        await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();
         expect(await app.exited(), "the app's exit code").toBe(0);
 
         const { link, notifications } = expectLinkCopied(app, shared);

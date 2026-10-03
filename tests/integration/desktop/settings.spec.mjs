@@ -1,8 +1,7 @@
 // Parity: the desktop app's settings. It starts with no server and the default
 // options, remembers what it's given across a restart, and uploads with it.
 import { madeUpFile, summary } from '../helpers/files.mjs';
-import { expect, test, uploadsStarted } from '../helpers/desktop.mjs';
-import { onlyFailsWith } from '../helpers/test.mjs';
+import { expect, test, uploadsStarted, uploadStatus } from '../helpers/desktop.mjs';
 import { download } from '../helpers/webui.mjs';
 
 // Above v3's default of 1, which makes the app lock Max Downloads at 1.
@@ -15,7 +14,7 @@ test('starts with no server and the default options, then remembers the server a
     let window = await app.window();
 
     // A new profile has no server, so it asks nothing of any.
-    await expect(window.locator('#upload-status')).toHaveText(/no server url/i);
+    await expect(uploadStatus(window)).toHaveText(/no server url/i);
     await expect(window.locator('#server-url')).toHaveValue('');
     await expect(window.locator('#file-lifetime-value')).toHaveValue('24');
     await expect(window.locator('#file-lifetime-unit')).toHaveValue('hours');
@@ -40,7 +39,7 @@ test('starts with no server and the default options, then remembers the server a
     window = await app.window();
 
     await expect(window.locator('#server-url'), 'the server after a restart').toHaveValue(desktop.serverUrl);
-    await expect(window.locator('#upload-status')).not.toHaveText(/no server url|could not connect/i);
+    await expect(uploadStatus(window)).not.toHaveText(/no server url|could not connect/i);
     await expect(window.locator('#file-lifetime-value'), 'File Lifetime after a restart').toHaveValue('30');
     await expect(window.locator('#file-lifetime-unit'), 'File Lifetime after a restart').toHaveValue('minutes');
 
@@ -48,8 +47,8 @@ test('starts with no server and the default options, then remembers the server a
     expect(uploadsStarted(server).at(-1).lifetime, 'the file lifetime of an upload after a restart').toBe(THIRTY_MINUTES);
 });
 
-// v3 saves Max Downloads, but never reads it back, so it starts at 1 again.
-test.fail('remembers Max Downloads after a restart (known issue until the v4 desktop client)', async ({ desktop }) => onlyFailsWith(/Max Downloads after a restart/, async () => {
+// v3 saved Max Downloads, but never read it back, so it started at 1 again.
+test('remembers Max Downloads after a restart', async ({ desktop }) => {
     let app = await desktop.launch();
     let window = await app.window();
     await desktop.setUp(window, { maxDownloads: 3 });
@@ -61,11 +60,11 @@ test.fail('remembers Max Downloads after a restart (known issue until the v4 des
     await expect(window.locator('#server-url')).toHaveValue(desktop.serverUrl);
     await expect(window.locator('#max-downloads-value')).toBeEnabled();
     await expect(window.locator('#max-downloads-value'), 'Max Downloads after a restart').toHaveValue('3');
-}));
+});
 
-// v3 saves the server only along with the other settings, when one of them
-// changes or an upload starts, so a server that has only been tested is forgotten.
-test.fail('remembers a server after a restart once it has been tested (known issue until the v4 desktop client)', async ({ desktop }) => onlyFailsWith(/a tested server after a restart/, async () => {
+// v3 saved the server only along with the other settings, when one of them
+// changed or an upload started, so a server that had only been tested was forgotten.
+test('remembers a server after a restart once it has been tested', async ({ desktop }) => {
     let app = await desktop.launch();
     let window = await app.window();
     await desktop.setUp(window);
@@ -75,4 +74,4 @@ test.fail('remembers a server after a restart once it has been tested (known iss
     window = await app.window();
 
     await expect(window.locator('#server-url'), 'a tested server after a restart').toHaveValue(desktop.serverUrl);
-}));
+});

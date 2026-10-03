@@ -24,9 +24,10 @@
 // after a copy made just before the app quit, the read-back never finished.)
 //
 // On Linux, Electron's spell checker downloads its dictionaries from Google's
-// servers as the app starts (a known issue, fixed in the v4 desktop client). So
+// servers as the app starts, unless the app turns it off, as the kit does. So
 // every session the app creates is pointed at DROPGATE_TEST_DICTIONARY_URL
-// instead, an address on this machine.
+// instead, an address on this machine: if the app ever asks again, it asks
+// there (desktop/dictionaries.spec.mjs).
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -80,13 +81,15 @@ app.on('browser-window-created', (_event, win) => {
     win.on('show', () => record({ event: 'window-shown', id }));
 });
 
-// Registered before the app's own handlers, so each is written down before the app acts on it.
-// A window says it's ready once it has loaded its settings and set up its buttons.
-ipcMain.on('renderer-ready', (event) => {
-    record({ event: 'window-ready', id: BrowserWindow.fromWebContents(event.sender)?.id });
-});
-ipcMain.on('upload-finished', (_event, result) => {
-    record({ event: 'upload-finished', status: result?.status, error: result?.error });
+// The app answers its own channels with ipcMain.handle(), through the kit
+// (kit.ipc.handle()). Wrapping it here, before the app starts, writes each one
+// down before the app acts on it. A window says it's ready once it has loaded
+// its settings and set up its buttons.
+const handle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, listener) => handle(channel, (event, ...args) => {
+    if (channel === 'window:ready') record({ event: 'window-ready', id: BrowserWindow.fromWebContents(event.sender)?.id });
+    if (channel === 'upload:finished') record({ event: 'upload-finished', status: args[0]?.status, error: args[0]?.error });
+    return listener(event, ...args);
 });
 
 process.on('exit', (code) => record({ event: 'exit', code }));

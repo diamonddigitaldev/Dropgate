@@ -117,9 +117,9 @@ export class DesktopApp {
 
     /**
      * The first window the app opens (its main window, or the one a background
-     * upload runs in), once it has finished setting itself up. Until then it may
-     * still be filling in its saved settings over what a test types, and its
-     * buttons may do nothing.
+     * upload runs in), once it has finished setting itself up (window:ready). Until
+     * then it may still be filling in its saved settings over what a test types,
+     * and its buttons may do nothing.
      *
      * It also waits for the app's cookie store to load. Every request reads it
      * first, and it only starts loading from disk at the first one. With a new
@@ -282,17 +282,21 @@ class Desktop {
     }
 
     /**
-     * Point the app at the test's server and set its options in the main
-     * window, as a person would.
+     * Point the app at the test's server, in Settings > Server, and set its
+     * options on Upload, as a person would.
      * @param {import('@playwright/test').Page} window
      * @param {object} [opts]
      * @param {{ value: number, unit: 'minutes' | 'hours' | 'days' }} [opts.lifetime]
      * @param {number} [opts.maxDownloads]
      */
     async setUp(window, { lifetime, maxDownloads } = {}) {
+        await window.getByRole('button', { name: 'Settings', exact: true }).click();
+        await window.getByRole('tab', { name: 'Server' }).click();
         await window.locator('#server-url').fill(this.serverUrl);
         await window.locator('#test-connection-btn').click();
         await expect(window.locator('#connection-status')).toHaveText(/connection successful/i);
+        await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
+        await expect(window.locator('#security-status')).toBeVisible();
         if (lifetime) {
             await window.locator('#file-lifetime-unit').selectOption(lifetime.unit);
             await window.locator('#file-lifetime-value').fill(String(lifetime.value));
@@ -304,23 +308,21 @@ class Desktop {
     }
 
     /**
-     * Upload files from the main window with its Upload button, and return the
-     * link the window shows.
+     * Upload files from Upload with the action bar's Upload button, and return
+     * the link the window shows.
      * @param {import('@playwright/test').Page} window
      * @param {{ name: string, mimeType: string, buffer: Buffer }[]} files
      * @param {{ encrypted: boolean }} opts - Whether the window should say the upload will be
-     *   end-to-end encrypted. When it won't be, the window asks first, and this answers "Upload Anyway".
+     *   end-to-end encrypted. When it won't be, the window asks first (the Upload Security Warning), and
+     *   this answers "Upload Anyway".
      */
     async upload(window, files, { encrypted }) {
         this.secrets.addFiles(files, { storedByServer: !encrypted });
         await expect(window.locator('#security-text')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
         await window.locator('#file-input').setInputFiles(files);
-        await window.locator('#upload-btn').click();
-        if (!encrypted) {
-            await expect(window.locator('#insecure-upload-modal')).toBeVisible();
-            await window.locator('#confirm-insecure-upload').click();
-        }
-        await expect(window.locator('#upload-status')).toHaveText(/upload successful/i, { timeout: 30_000 });
+        await uploadButton(window).click();
+        if (!encrypted) await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();
+        await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });
         const link = await window.locator('#download-link').inputValue();
         this.secrets.addLink(link);
         return link;
@@ -470,7 +472,16 @@ function expectNoLookups(desktop) {
  * its settings, it has saved them.
  * @param {import('@playwright/test').Page} window
  */
-export const saved = (window) => window.evaluate(() => window.electronAPI.getSettings());
+export const saved = (window) => window.evaluate(() => window.kitAPI.getSettings());
+
+/** Upload's status line: the action bar's. */
+export const uploadStatus = (window) => window.locator('#action-bar .kit-action-line');
+
+/** The action bar's Upload button (the rail's Upload is a section, not this). */
+export const uploadButton = (window) => window.locator('#action-bar').getByRole('button', { name: 'Upload', exact: true });
+
+/** The Upload Security Warning: the kit's prompt, asked before an upload that won't be encrypted. */
+export const securityWarning = (window) => window.getByRole('alertdialog', { name: 'Upload Security Warning' });
 
 /**
  * The body of every upload the server was asked to start, in order: single
