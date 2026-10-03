@@ -83,3 +83,13 @@ File sizes and capacity values may appear in logs because they’re necessary fo
 - Run with **`LOG_LEVEL=INFO`** for normal use.
 - Temporarily switch to **`LOG_LEVEL=DEBUG`** when diagnosing an issue, then turn it back down.
 - If you’re extremely sensitive about logging, use **`LOG_LEVEL=NONE`**, and don't keep the server's stderr (see the exceptions above).
+
+---
+
+## 🖥️ The desktop app
+
+The Dropgate Client keeps its log **in memory** and writes nothing to disk. Each line is redacted before it's kept: a file's path keeps only its file name, and a link loses its query and its `#` fragment, where an encrypted upload's key is. The log goes when the app quits, and a `debug.log` an earlier version left behind is deleted when it starts.
+
+It checks GitHub for updates, and sends nothing that identifies the installation: the update library's install ID is replaced with a fixed value, the same for everyone, and no ID is made or kept. It downloads no spell-check dictionaries.
+
+What it stores, and what each update check sends, is in [Data Processing](./technical/DATA-PROCESSING.md#25-dropgate-client-electron).

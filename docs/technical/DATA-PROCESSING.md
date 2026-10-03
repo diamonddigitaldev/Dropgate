@@ -71,14 +71,20 @@ These guarantees assume the server relays signalling honestly. The SDP it relays
 
 ### 2.5 Dropgate Client (Electron)
 
+The client's settings are kept by `electron-store` in `config.json` in its user data directory, under one `settings` key. Version 3's settings were top-level keys of the same file; the first launch of version 4 deletes them, once, so the server has to be entered again.
+
 | Data | Stored? | Where | Why | When Created | When Deleted |
 |------|---------|-------|-----|--------------|--------------|
-| **Server URL** | Yes | `electron-store` (`config.json` in user data directory) | Remembers the user's preferred server between sessions. | On user input (settings form). | On user change. Uninstalling leaves it in place. |
-| **Lifetime preference** (value + unit) | Yes | `electron-store` | Remembers the user's preferred file lifetime. | On user input. | On user change. Uninstalling leaves it in place. |
-| **Max downloads preference** | Yes | `electron-store` | Remembers the user's preferred download limit. | On user input. | On user change. Uninstalling leaves it in place. |
-| **Window bounds** (x, y, width, height) | Yes | `electron-store` | Restores window position and size between sessions. | On window move/resize. | Never deleted automatically. Uninstalling leaves it in place. |
-| **Debug log** | Yes | `{userData}/debug.log` | Troubleshooting application issues. Contains timestamps, process arguments, app lifecycle events, and upload progress. Process arguments include the full paths of files sent with **Share with Dropgate** or opened with the app, so the log can contain file names and folder paths. Does not contain file content, download links or encryption keys. Always written; there is no setting to turn it off. | On application start. | Overwritten each time the app starts. Not removed on uninstall. |
-| **Update-check ID** | Yes | `{userData}/.updaterId` | Created by the auto-updater library (`electron-updater`) for staged rollouts, which Dropgate doesn't use. It's a random UUID, not derived from the device or user. It's sent with every update check (see [§9.3](#93-github-dropgate-client-update-checks)). | On the first update check. | Not removed on uninstall; deleting the file makes a new one. |
+| **Server URL** | Yes | `config.json` | Remembers the user's server between sessions. Set in **Settings**, under **Server**. | When it's changed, or when **Test** finds it. | On user change. Uninstalling leaves it in place. |
+| **Lifetime preference** (value + unit) | Yes | `config.json` | Remembers the user's preferred file lifetime, which **Share with Dropgate** uses too. | On user input. | On user change. Uninstalling leaves it in place. |
+| **Max downloads preference** | Yes | `config.json` | Remembers the user's preferred download limit, which **Share with Dropgate** uses too. | On user input. | On user change. Uninstalling leaves it in place. |
+| **Update preferences** (download automatically, update channel) | Yes | `config.json` | **Settings**, under **Update**. The channel starts as the running build's own (Stable, Beta or Alpha) and is then the user's choice. | On the first launch, and on user change. | On user change. Uninstalling leaves them in place. |
+| **Whether the navigation rail is collapsed**, and whether to keep the log on disk | Yes | `config.json` | Remembers how the window was left, and the log setting (off; see §8.6). | On user change. | On user change. Uninstalling leaves them in place. |
+| **Window bounds** (x, y, width, height) | Yes | `config.json` | Restores window position and size between sessions. | On window move/resize. | Never deleted automatically. Uninstalling leaves it in place. |
+| **Log** | In memory | The app's memory | Troubleshooting. The run's last 1,000 lines, redacted before they're kept (see §8.6). Nothing is written to disk. | As the app runs. | When the app quits. A `debug.log` an earlier version wrote is deleted when the app starts. |
+| **Update-check ID** | **No** | — | The app sends a fixed value, the same for every installation, in place of an ID, and never makes or keeps one (see [§9.3](#93-github-dropgate-client-update-checks)). An `.updaterId` file written by version 3 is left where it is, and never read or sent. | — | — |
+| **Spell-check dictionaries** | **No** | — | The app has no spell checking, so it downloads no dictionaries. (On Linux, Electron would otherwise download them from Google as the app starts.) | — | — |
+| **Update downloads** | Yes, until installed | The user's cache folder (`dropgate-client-updater`) | An update the app has downloaded, waiting to be installed when the app closes. | When an update is downloaded. | Replaced by the next update. |
 
 ### 2.6 Web UI (Browser)
 
@@ -188,8 +194,7 @@ The server has no access to encryption keys and therefore **cannot**:
 
 ### 5.3 What Is NOT Automatically Deleted
 
-- **Electron client settings** (`electron-store`) — persist until the user changes them. Uninstalling the app leaves them, the debug log and the update-check ID in the user data directory.
-- **Electron debug log** — persists until the app next starts, which overwrites it.
+- **Electron client settings** (`electron-store`) — persist until the user changes them. Uninstalling the app leaves them in the user data directory, with any `.updaterId` version 3 wrote.
 - **Server operator logs** (stdout/stderr) — Dropgate has no control over log retention once data is written to the process output streams. This is the operator's responsibility.
 
 ---
@@ -319,6 +324,16 @@ Dropgate writes logs to stdout/stderr. Whether these logs are persisted, rotated
 - Consider the sensitivity of `DEBUG`-level output before enabling it.
 - Be aware that reverse proxy access logs (e.g., Nginx, Caddy) may capture client IP addresses, request paths, and file IDs even if Dropgate itself does not log them.
 
+### 8.6 Dropgate Client Log
+
+The desktop client keeps its log in memory: the run's last 1,000 lines, which go when it quits. Nothing is written to disk. Every line is redacted before it's kept:
+
+- A file's path keeps only its file name: `C:\Users\you\Documents\report.pdf` becomes `…\report.pdf`, and a Linux path the same.
+- A URL keeps its scheme, host and path, and loses its query, its fragment (where an encrypted upload's key is) and any user name.
+- Errors are kept as their stack traces, redacted the same way.
+
+The log never holds file contents or encryption keys. A `debug.log` an earlier version wrote in the user data directory is deleted when the client starts.
+
 ---
 
 ## 9. Third-Party Data Exposure
@@ -343,13 +358,16 @@ A TLS-terminating reverse proxy (Nginx, Caddy, etc.) sits between clients and th
 
 ### 9.3 GitHub (Dropgate Client Update Checks)
 
-The Dropgate Client checks GitHub for updates about 5 seconds after its window opens, and when you choose **Check for Updates**. It doesn't check during a background upload from **Share with Dropgate**.
+The Dropgate Client checks GitHub for updates about 5 seconds after it starts, when you choose **Check for Updates**, and when you change the update channel. It doesn't check when it's started for a background upload from **Share with Dropgate**, and a copy run from source never checks.
 
 Each check sends requests to GitHub (`github.com`, and GitHub's release-asset host for the update file). GitHub sees:
 
 - The client's IP address and the time.
-- An `x-user-staging-id` header holding the update-check ID from `{userData}/.updaterId` (see [§2.5](#25-dropgate-client-electron)). The auto-updater library adds it for staged rollouts, which Dropgate doesn't use. Because it stays the same for as long as the file exists, it lets GitHub link one installation's update checks together, even across different IP addresses.
+- The update channel the check is for, from the files it asks for: Stable reads the latest release, and Beta and Alpha read pre-releases too.
+- An `x-user-staging-id` header, which the auto-updater library (`electron-updater`) sends for staged rollouts. Dropgate doesn't use them, so it sends `00000000-0000-0000-0000-000000000000`, the same for every installation, and never makes or keeps an ID of its own. Nothing in a check tells one installation from another.
 - The user agent `electron-builder` and the system's preferred languages (`Accept-Language`). The check doesn't send the installed Dropgate version or any user details.
+
+When a check finds an update, the client downloads it from GitHub straight away, unless **Download updates automatically** is off in **Settings**, under **Update**, and installs it when you close the app. Those downloads send the same headers.
 
 Dropgate itself receives none of this.
 
