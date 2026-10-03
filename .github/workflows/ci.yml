@@ -295,7 +295,8 @@ jobs:
           node ../.github/scripts/client-test-build-config.mjs "$RUNNER_TEMP/test-build.json"
           npx --no-install electron-builder ${{ runner.os == 'Windows' && '--win' || '--linux AppImage' }} --publish never --config "$RUNNER_TEMP/test-build.json"
           if [ "$RUNNER_OS" = Windows ]; then
-            app="$PWD/dist/win-unpacked/Dropgate Client.exe"
+            # A Windows path (D:/a/…), not Git Bash's (/d/a/…), which Node can't launch.
+            app="$(pwd -W)/dist/win-unpacked/Dropgate Client.exe"
           else
             app=$(ls "$PWD"/dist/*.AppImage)
             chmod +x "$app"
