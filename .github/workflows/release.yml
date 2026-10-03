@@ -387,8 +387,8 @@ jobs:
             printf '  %-17s %5d bytes  sha256 %s\n' "$1" "$(wc -c < "$dir/$1")" "$(sha256sum "$dir/$1" | cut -d' ' -f1)"
             sed 's/^/      /' "$dir/$1"
           }
-          kind=stable; if [ "$PRERELEASE" = true ]; then kind=pre-release; fi
-          echo "The $kind would attach these last, each checked against its build's files:"
+          kind="stable release"; if [ "$PRERELEASE" = true ]; then kind=pre-release; fi
+          echo "A $kind would attach these last, each checked against its build's files:"
           show latest.yml "$WINDOWS_NAME" "$WINDOWS_FILE"
           show latest-linux.yml "$LINUX_NAME" "$LINUX_FILE"
           echo "Nothing was attached or uploaded."
