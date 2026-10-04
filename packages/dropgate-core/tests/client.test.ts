@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { DropgateClient, getServerInfo } from '../src/index.js';
-import type { FileSource, UploadSession } from '../src/index.js';
+import { DropgateClient, DropgateError, getServerInfo } from '../src/index.js';
+import type { DownloadOutcome, FileSource, Outcome, UploadSession } from '../src/index.js';
 import { onlyFailsWith } from './helpers/known-issue.js';
 
 // DropgateClient against a fake server, through its `fetchFn` option: no
@@ -31,6 +31,8 @@ function fakeServer() {
   const requests: RecordedRequest[] = [];
   const chunkIndexes: number[] = [];
   let onChunk: (index: number) => void = () => {};
+  // Answers that replace the usual one, by `METHOD /path`. One that throws is a network failure.
+  const answers = new Map<string, (init: RequestInit) => Response | Promise<Response>>();
 
   const json = (status: number, value: unknown): Response =>
     new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
@@ -59,6 +61,9 @@ function fakeServer() {
     if (init.signal?.aborted) {
       throw init.signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
     }
+
+    const answer = answers.get(`${method} ${path}`);
+    if (answer) return answer(init);
 
     switch (`${method} ${path}`) {
       case 'GET /api/info':
@@ -102,8 +107,27 @@ function fakeServer() {
     chunkIndexes,
     paths: () => requests.map((r) => `${r.method} ${new URL(r.url).pathname}`),
     set onChunk(callback: (index: number) => void) { onChunk = callback; },
+    answer: (route: string, respond: ((init: RequestInit) => Response | Promise<Response>) | null) => {
+      if (respond) answers.set(route, respond);
+      else answers.delete(route);
+    },
+    json,
   };
 }
+
+/** A response whose body never ends, like a download still arriving. */
+function endlessBody(): Response {
+  return new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(CHUNK_SIZE)); } }));
+}
+
+/** An answer that never comes: the request waits until it's aborted, as a real one would. */
+function noAnswer(init: RequestInit): Promise<never> {
+  return new Promise((_, reject) => {
+    init.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+  });
+}
+
+const fileNamed = (name: string, chunks = 1) => new File([new Uint8Array(CHUNK_SIZE * chunks)], name) as unknown as FileSource;
 
 function createClient(fetchFn: typeof fetch): DropgateClient {
   return new DropgateClient({ clientVersion: '3.0.13', server: BASE_URL, fetchFn });
@@ -140,14 +164,14 @@ describe('DropgateClient', () => {
         signal: external.signal,
         retry: { retries: 0 },
       });
-      const outcome = await session.result.then(() => 'resolved', () => 'rejected');
+      const outcome = await session.result;
       expect(cancelPressed, 'cancel() should be pressed during the first chunk').toBe(true);
 
       expect(
         { chunks: server.chunkIndexes, completed: server.paths().includes('POST /upload/complete'), status: session.getStatus() },
         'the upload kept going after cancel()'
       ).toEqual({ chunks: [0], completed: false, status: 'cancelled' });
-      expect(outcome).toBe('rejected');
+      expect(outcome).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'upload' } });
     })
   );
 
@@ -219,13 +243,16 @@ describe('DropgateClient', () => {
     await client.resolveShareTarget(`${BASE_URL}/${FILE_ID}#${LINK_KEY}`);
     await client.getFileMetadata(FILE_ID);
     await client.getBundleMetadata(BUNDLE_ID);
-    await (await client.uploadFiles({ files: file('one.txt'), lifetimeMs: 60_000, encrypt: false })).result;
-    await (await client.uploadFiles({ files: [file('one.txt'), file('two.txt')], lifetimeMs: 60_000, encrypt: false })).result;
-    await client.downloadFiles({ fileId: FILE_ID });
-    await client.downloadFiles({ bundleId: BUNDLE_ID, asZip: true, onData: () => {} });
+    const completed = [
+      await (await client.uploadFiles({ files: file('one.txt'), lifetimeMs: 60_000, encrypt: false })).result,
+      await (await client.uploadFiles({ files: [file('one.txt'), file('two.txt')], lifetimeMs: 60_000, encrypt: false })).result,
+      await client.downloadFiles({ fileId: FILE_ID }),
+      await client.downloadFiles({ bundleId: BUNDLE_ID, asZip: true, onData: () => {} }),
+    ];
+    expect(completed.map((outcome) => outcome.status)).toEqual(['completed', 'completed', 'completed', 'completed']);
     const cancelled = await client.uploadFiles({ files: file('three.txt'), lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 } });
     server.onChunk = () => cancelled.cancel();
-    await cancelled.result.catch(() => {});
+    expect((await cancelled.result).status).toBe('cancelled');
     // cancel() tells the server without waiting for it.
     await expect.poll(() => server.paths()).toContain('POST /upload/cancel');
 
@@ -242,5 +269,178 @@ describe('DropgateClient', () => {
       server.requests.filter((r) => r.credentials !== 'omit').map((r) => `${r.method} ${new URL(r.url).pathname}: ${r.credentials}`),
       'requests that could carry cookies'
     ).toEqual([]);
+  });
+});
+
+/** The code of a failed outcome, or its status if it didn't fail. */
+const codeOf = (outcome: Outcome<unknown>): string => (outcome.status === 'failed' ? outcome.error.code : outcome.status);
+
+describe('Outcomes', () => {
+  it('an upload ends with one completed outcome, with its link', async () => {
+    const server = fakeServer();
+    const session = await createClient(server.fetchFn).uploadFiles({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false });
+    const outcome = await session.result;
+    expect(outcome).toEqual({ status: 'completed', value: expect.objectContaining({ downloadUrl: `${BASE_URL}/${FILE_ID}`, fileId: FILE_ID }) });
+    expect(session.getStatus()).toBe('completed');
+  });
+
+  it('cancel() ends an upload as cancelled by itself: no more chunks are sent, and the server is told', async () => {
+    const server = fakeServer();
+    const session = await createClient(server.fetchFn).uploadFiles({
+      files: fileNamed('notes.txt', 3), lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 },
+    });
+    server.onChunk = (index) => { if (index === 0) session.cancel(); };
+
+    expect(await session.result).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'upload' } });
+    expect(session.getStatus()).toBe('cancelled');
+    expect(server.chunkIndexes).toEqual([0]);
+    expect(server.paths()).not.toContain('POST /upload/complete');
+    await expect.poll(() => server.requests.filter((r) => r.url.endsWith('/upload/cancel')).map((r) => JSON.parse(r.body)))
+      .toEqual([{ uploadId: 'upload-1' }]);
+
+    // Once it has ended, cancel() does nothing.
+    session.cancel();
+    expect(session.getStatus()).toBe('cancelled');
+  });
+
+  it('cancelAll() cancels every upload and download running, each by its parent, once, and the client keeps working', async () => {
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
+    server.answer(`GET /api/file/${FILE_ID}`, endlessBody);
+    server.answer('POST /upload/chunk', noAnswer);
+
+    const settled: string[] = [];
+    const download = client.downloadFiles({ fileId: FILE_ID, onData: () => {} }).then((o) => { settled.push('download'); return o; });
+    const session = await client.uploadFiles({ files: [fileNamed('one.txt'), fileNamed('two.txt')], lifetimeMs: 60_000, encrypt: false });
+    const upload = session.result.then((o) => { settled.push('upload'); return o; });
+    await expect.poll(() => server.paths()).toEqual(expect.arrayContaining([`GET /api/file/${FILE_ID}`, 'POST /upload/chunk']));
+
+    client.cancelAll();
+    const byClient = { status: 'cancelled', cancellation: { by: 'parent', source: 'client' } };
+    expect(await download).toEqual(byClient);
+    expect(await upload).toEqual(byClient);
+    expect(settled.sort()).toEqual(['download', 'upload']);
+    await expect.poll(() => server.requests.filter((r) => r.url.endsWith('/upload/cancel')).map((r) => JSON.parse(r.body).uploadId))
+      .toEqual(['upload-1', 'upload-2']);
+
+    // A cancel after the fact reaches nothing, and new operations run as normal.
+    client.cancelAll();
+    server.answer('POST /upload/chunk', null);
+    server.answer(`GET /api/file/${FILE_ID}`, null);
+    const next = await client.uploadFiles({ files: fileNamed('three.txt'), lifetimeMs: 60_000, encrypt: false });
+    expect((await next.result).status).toBe('completed');
+    expect((await client.downloadFiles({ fileId: FILE_ID })).status).toBe('completed');
+    expect(settled.sort()).toEqual(['download', 'upload']);
+  });
+
+  it('a download whose signal is aborted ends as cancelled by signal', async () => {
+    const server = fakeServer();
+    server.answer(`GET /api/file/${FILE_ID}`, endlessBody);
+    const controller = new AbortController();
+    const download = createClient(server.fetchFn).downloadFiles({ fileId: FILE_ID, onData: () => {}, signal: controller.signal });
+    await expect.poll(() => server.paths()).toContain(`GET /api/file/${FILE_ID}`);
+    controller.abort();
+    expect(await download).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'download' } });
+  });
+
+  it('a failure ends as failed, with the code for what went wrong', async () => {
+    const run = async (setUp: (server: ReturnType<typeof fakeServer>) => void, operation: (client: DropgateClient) => Promise<Outcome<unknown>>) => {
+      const server = fakeServer();
+      setUp(server);
+      return codeOf(await operation(createClient(server.fetchFn)));
+    };
+    const upload = (files: FileSource | FileSource[] = fileNamed('notes.txt')) => async (client: DropgateClient) =>
+      (await client.uploadFiles({ files, lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 } })).result;
+    const download = (opts: { keyB64?: string; onData?: () => void } = {}) => (client: DropgateClient): Promise<DownloadOutcome> =>
+      client.downloadFiles({ fileId: FILE_ID, ...opts });
+    const encryptedMeta = (s: ReturnType<typeof fakeServer>) => s.answer(`GET /api/file/${FILE_ID}/meta`, () =>
+      s.json(200, { isEncrypted: true, sizeBytes: 64, encryptedFilename: Buffer.from(new Uint8Array(48)).toString('base64') }));
+
+    const codes = {
+      tooLarge: await run((s) => s.answer('POST /upload/init', () => s.json(413, { error: 'File exceeds limit of 1 MB.' })), upload()),
+      rateLimited: await run((s) => s.answer('POST /upload/init', () => s.json(429, { error: 'Too many requests.' })), upload()),
+      serverFull: await run((s) => s.answer('POST /upload/init', () => s.json(507, { error: 'Server out of capacity.' })), upload()),
+      chunkServerError: await run((s) => s.answer('POST /upload/chunk', () => new Response('Write failed.', { status: 500 })), upload()),
+      unreachable: await run((s) => s.answer('POST /upload/init', () => { throw new TypeError('fetch failed'); }), upload()),
+      noFileId: await run((s) => s.answer('POST /upload/complete', () => s.json(200, {})), upload()),
+      empty: await run(() => {}, upload(new File([], 'empty.txt') as unknown as FileSource)),
+      unsupported: await run((s) => s.answer('GET /api/info', () => s.json(200, { version: '2.0.0', capabilities: {} })), upload()),
+      notFound: await run((s) => s.answer(`GET /api/file/${FILE_ID}/meta`, () => s.json(404, { error: 'File not found.' })), download()),
+      writeFailed: await run(() => {}, download({ onData: () => { throw new Error('Disk full.'); } })),
+      keyRequired: await run(encryptedMeta, download()),
+      wrongKey: await run(encryptedMeta, download({ keyB64: LINK_KEY })),
+    };
+    expect(codes).toEqual({
+      tooLarge: 'FILE_TOO_LARGE', rateLimited: 'RATE_LIMITED', serverFull: 'SERVER_FULL', chunkServerError: 'SERVER_ERROR',
+      unreachable: 'SERVER_UNREACHABLE', noFileId: 'INVALID_RESPONSE', empty: 'FILE_EMPTY', unsupported: 'VERSION_UNSUPPORTED',
+      notFound: 'NOT_FOUND', writeFailed: 'OUTPUT_WRITE_FAILED', keyRequired: 'KEY_REQUIRED', wrongKey: 'DECRYPT_FAILED',
+    });
+  });
+
+  it('keeps the server\'s own message and status on a failure it answered', async () => {
+    const server = fakeServer();
+    server.answer('POST /upload/init', () => server.json(413, { error: 'File exceeds limit of 1 MB.' }));
+    const outcome = await (await createClient(server.fetchFn).uploadFiles({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false })).result;
+    expect(outcome.status === 'failed' && outcome.error).toMatchObject({ code: 'FILE_TOO_LARGE', status: 413, message: 'File exceeds limit of 1 MB.', origin: 'server', retryable: false });
+  });
+
+  it('throws INVALID_ARGUMENT for an upload with no files or a download with nothing to download, before one starts', async () => {
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
+    await expect(client.uploadFiles({ files: [], lifetimeMs: 60_000 })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(client.downloadFiles({})).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(server.requests).toEqual([]);
+  });
+
+  it("throws typed errors from the calls that aren't operations", async () => {
+    const server = fakeServer();
+    server.answer('GET /api/info', () => new Response('<html>Not Dropgate</html>', { status: 404 }));
+    await expect(createClient(server.fetchFn).connect()).rejects.toMatchObject({ code: 'INVALID_RESPONSE', status: 404 });
+
+    const down = fakeServer();
+    down.answer('GET /api/info', () => { throw new TypeError('fetch failed'); });
+    const err = await createClient(down.fetchFn).connect().catch((e: unknown) => e);
+    expect(DropgateError.is(err, 'SERVER_UNREACHABLE')).toBe(true);
+
+    const gone = fakeServer();
+    gone.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => gone.json(404, { error: 'Bundle not found.' }));
+    await expect(createClient(gone.fetchFn).getBundleMetadata(BUNDLE_ID)).rejects.toMatchObject({ code: 'NOT_FOUND', message: 'Bundle not found.' });
+
+    const sealed = fakeServer();
+    sealed.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => sealed.json(200, { isEncrypted: true, sealed: true, encryptedManifest: 'AAAA' }));
+    await expect(createClient(sealed.fetchFn).getBundleMetadata(BUNDLE_ID)).rejects.toMatchObject({ code: 'KEY_REQUIRED' });
+    await expect(createClient(sealed.fetchFn).getBundleMetadata(BUNDLE_ID, LINK_KEY)).rejects.toMatchObject({ code: 'DECRYPT_FAILED' });
+  });
+
+  // Hard requirement 8: what a failed or cancelled operation reports is safe to
+  // show and to log. Its value, when it completes, is the link the caller asked for.
+  it("a failed or cancelled outcome never carries a file name or a key, even serialised", async () => {
+    const name = 'Tax return 2026 for Sam.pdf';
+    const reported: unknown[] = [];
+
+    // An encrypted upload the server fails at the end, and one that's cancelled.
+    const failing = fakeServer();
+    failing.answer('POST /upload/complete', () => failing.json(500, { error: 'Server error during file validation.' }));
+    reported.push(await (await createClient(failing.fetchFn).uploadFiles({ files: fileNamed(name), lifetimeMs: 60_000, encrypt: true })).result);
+    const cancelling = fakeServer();
+    const session = await createClient(cancelling.fetchFn).uploadFiles({ files: fileNamed(name, 2), lifetimeMs: 60_000, encrypt: true });
+    cancelling.onChunk = () => session.cancel();
+    reported.push(await session.result);
+
+    // A download with the wrong key, and one whose output fails with an error naming the file.
+    const wrongKey = fakeServer();
+    wrongKey.answer(`GET /api/file/${FILE_ID}/meta`, () =>
+      wrongKey.json(200, { isEncrypted: true, sizeBytes: 64, encryptedFilename: Buffer.from(new Uint8Array(48)).toString('base64') }));
+    reported.push(await createClient(wrongKey.fetchFn).downloadFiles({ fileId: FILE_ID, keyB64: LINK_KEY }));
+    reported.push(await createClient(fakeServer().fetchFn).downloadFiles({
+      fileId: FILE_ID, keyB64: LINK_KEY, onData: () => { throw new Error(`Couldn't write ${name} with key ${LINK_KEY}`); },
+    }));
+
+    expect(reported.map((o) => (o as Outcome<unknown>).status)).toEqual(['failed', 'cancelled', 'failed', 'failed']);
+    const secrets = [...piecesOf(name, 8), ...piecesOf(LINK_KEY, 8)];
+    for (const outcome of reported) {
+      const shown = [JSON.stringify(outcome), (outcome as { error?: Error }).error?.message ?? ''].join('\n');
+      expect(secrets.filter((piece) => shown.includes(piece)), shown).toEqual([]);
+    }
   });
 });

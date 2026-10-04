@@ -1,4 +1,4 @@
-import { DropgateValidationError, DropgateNetworkError } from '../errors.js';
+import { DropgateError, directTransferDisabled } from '../errors.js';
 import { sleep } from '../utils/network.js';
 import type { P2PReceiveOptions, P2PReceiveSession, P2PReceiveState, DataConnection } from './types.js';
 import { isP2PCodeLike } from './utils.js';
@@ -90,25 +90,24 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
 
   // Validate required options
   if (!code) {
-    throw new DropgateValidationError('No sharing code was provided.');
+    throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'No sharing code was provided.' });
   }
 
   if (!Peer) {
-    throw new DropgateValidationError(
-      'PeerJS Peer constructor is required. Install peerjs and pass it as the Peer option.'
-    );
+    throw new DropgateError({
+      code: 'INVALID_ARGUMENT',
+      message: 'PeerJS Peer constructor is required. Install peerjs and pass it as the Peer option.',
+    });
   }
 
   // Check P2P capabilities if serverInfo is provided
   const p2pCaps = serverInfo?.capabilities?.p2p;
-  if (serverInfo && !p2pCaps?.enabled) {
-    throw new DropgateValidationError('Direct transfer is disabled on this server.');
-  }
+  if (serverInfo && !p2pCaps?.enabled) throw directTransferDisabled();
 
   // Validate and normalize code
   const normalizedCode = String(code).trim().replace(/\s+/g, '').toUpperCase();
   if (!isP2PCodeLike(normalizedCode)) {
-    throw new DropgateValidationError('Invalid direct transfer code.');
+    throw new DropgateError({ code: 'INVALID_CODE', message: 'Invalid direct transfer code.' });
   }
 
   // Resolve config from user options and server capabilities
@@ -187,13 +186,15 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
       if (state === 'transferring') {
         const sinceActivity = Date.now() - lastSenderActivityMs;
         if (sinceActivity < 10000) {
-          safeError(new DropgateNetworkError(
-            'Connection is too unstable. Sender is reachable but file data has stopped arriving.'
-          ));
+          safeError(new DropgateError({
+            code: 'CONNECTION_LOST',
+            message: 'Connection is too unstable. Sender is reachable but file data has stopped arriving.',
+          }));
         } else {
-          safeError(new DropgateNetworkError(
-            'Sender stopped responding. No file data or heartbeats received for over ' + watchdogTimeoutMs + ' ms.'
-          ));
+          safeError(new DropgateError({
+            code: 'CONNECTION_LOST',
+            message: 'Sender stopped responding. No file data or heartbeats received for over ' + watchdogTimeoutMs + ' ms.',
+          }));
         }
       }
     }, watchdogTimeoutMs);
@@ -330,9 +331,11 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
           // 2. Consented to receive (sent 'ready' signal)
           // Without this check, a malicious sender could force data onto the receiver
           if (state !== 'transferring') {
-            throw new DropgateValidationError(
-              'Received binary data before transfer was accepted. Possible malicious sender.'
-            );
+            throw new DropgateError({
+              code: 'INTEGRITY_FAILED',
+              origin: 'peer',
+              message: 'Received binary data before transfer was accepted. Possible malicious sender.',
+            });
           }
 
           // Security: Only reset watchdog on actual binary data (prevents keep-alive attacks)
@@ -340,7 +343,7 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
 
           // Security: Check write queue depth to prevent memory exhaustion
           if (writeQueueDepth >= MAX_WRITE_QUEUE_DEPTH) {
-            throw new DropgateNetworkError('Write queue overflow - receiver cannot keep up');
+            throw new DropgateError({ code: 'OUTPUT_WRITE_FAILED', message: 'Write queue overflow - receiver cannot keep up' });
           }
 
           // Process the binary chunk
@@ -370,17 +373,21 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
 
               // Security: Validate chunk size matches declared size
               if (expectedSize !== undefined && buf.byteLength !== expectedSize) {
-                throw new DropgateValidationError(
-                  `Chunk size mismatch: expected ${expectedSize}, got ${buf.byteLength}`
-                );
+                throw new DropgateError({
+                  code: 'INTEGRITY_FAILED',
+                  origin: 'peer',
+                  message: `Chunk size mismatch: expected ${expectedSize}, got ${buf.byteLength}`,
+                });
               }
 
               // Security: Validate we don't receive more than declared total
               const newReceived = received + buf.byteLength;
               if (total > 0 && newReceived > total) {
-                throw new DropgateValidationError(
-                  `Received more data than expected: ${newReceived} > ${total}`
-                );
+                throw new DropgateError({
+                  code: 'INTEGRITY_FAILED',
+                  origin: 'peer',
+                  message: `Received more data than expected: ${newReceived} > ${total}`,
+                });
               }
 
               // Call consumer's onData handler (stream-through, no buffering)
@@ -436,15 +443,16 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
 
             // Security: Validate file count
             if (fileListMsg.fileCount > MAX_FILE_COUNT) {
-              throw new DropgateValidationError(`Too many files: ${fileListMsg.fileCount}`);
+              throw new DropgateError({ code: 'INVALID_MANIFEST', message: `Too many files: ${fileListMsg.fileCount}` });
             }
 
             // Security: Validate total size matches sum of file sizes
             const sumSize = fileListMsg.files.reduce((sum, f) => sum + f.size, 0);
             if (sumSize !== fileListMsg.totalSize) {
-              throw new DropgateValidationError(
-                `File list size mismatch: declared ${fileListMsg.totalSize}, actual sum ${sumSize}`
-              );
+              throw new DropgateError({
+                code: 'INVALID_MANIFEST',
+                message: `File list size mismatch: declared ${fileListMsg.totalSize}, actual sum ${sumSize}`,
+              });
             }
 
             fileList = fileListMsg;
@@ -540,16 +548,20 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
 
             // Security: Only accept chunk messages if we're in 'transferring' state
             if (state !== 'transferring') {
-              throw new DropgateValidationError(
-                'Received chunk message before transfer was accepted.'
-              );
+              throw new DropgateError({
+                code: 'INTEGRITY_FAILED',
+                origin: 'peer',
+                message: 'Received chunk message before transfer was accepted.',
+              });
             }
 
             // Security: Validate chunk sequence (must be in order)
             if (chunkMsg.seq !== expectedChunkSeq) {
-              throw new DropgateValidationError(
-                `Chunk sequence error: expected ${expectedChunkSeq}, got ${chunkMsg.seq}`
-              );
+              throw new DropgateError({
+                code: 'INTEGRITY_FAILED',
+                origin: 'peer',
+                message: `Chunk sequence error: expected ${expectedChunkSeq}, got ${chunkMsg.seq}`,
+              });
             }
             expectedChunkSeq++;
 
@@ -597,9 +609,10 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
             const finalTotal = fileList ? fileList.totalSize : total;
 
             if (finalTotal && finalReceived < finalTotal) {
-              const err = new DropgateNetworkError(
-                'Transfer ended before all data was received.'
-              );
+              const err = new DropgateError({
+                code: 'CONNECTION_LOST',
+                message: 'Transfer ended before all data was received.',
+              });
               try {
                 conn.send({ t: 'error', message: err.message });
               } catch {
@@ -632,7 +645,7 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
             break;
 
           case 'error':
-            throw new DropgateNetworkError(msg.message || 'Sender reported an error.');
+            throw new DropgateError({ code: 'PEER_FAILED', message: 'The sender reported an error.' });
 
           case 'cancelled':
             if (state === 'cancelled' || state === 'closed' || state === 'completed') return;
@@ -668,7 +681,7 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
         onDisconnect?.();
       } else {
         // Disconnected before we even got file metadata
-        safeError(new DropgateNetworkError('Sender disconnected before file details were received.'));
+        safeError(new DropgateError({ code: 'CONNECTION_LOST', message: 'Sender disconnected before file details were received.' }));
       }
     });
   });

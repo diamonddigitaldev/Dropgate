@@ -1,3 +1,5 @@
+import type { Outcome } from './outcome.js';
+
 /**
  * Server upload capabilities returned from the server info endpoint.
  */
@@ -113,17 +115,23 @@ export interface UploadResult {
   files?: Array<{ fileId: string; name: string; size: number }>;
 }
 
+/** How an upload ended: `completed` with its UploadResult, `cancelled`, or `failed`. */
+export type UploadOutcome = Outcome<UploadResult>;
+
+/** Where an upload is: one of the steps while it runs, then its outcome's status. */
+export type UploadStatus = 'initializing' | 'uploading' | 'completing' | Outcome<unknown>['status'];
+
 /**
  * Upload session with cancellation support.
  * Returned by uploadFiles() to allow cancelling uploads in progress.
  */
 export interface UploadSession {
-  /** Promise that resolves with upload result when complete. */
-  result: Promise<UploadResult>;
-  /** Cancel the upload. */
-  cancel: (reason?: string) => void;
+  /** The upload's one outcome. It never rejects. */
+  result: Promise<UploadOutcome>;
+  /** Cancel the upload: its outcome is then `cancelled`, `by: 'self'`. Does nothing once it has ended. */
+  cancel: () => void;
   /** Get current upload status. */
-  getStatus: () => 'initializing' | 'uploading' | 'completing' | 'completed' | 'cancelled' | 'error';
+  getStatus: () => UploadStatus;
 }
 
 /**
@@ -256,8 +264,6 @@ export interface UploadFilesOptions {
   filenameOverrides?: Record<number, string>;
   /** Callback for progress updates. */
   onProgress?: (evt: UploadProgressEvent) => void;
-  /** Callback when upload is cancelled by user. */
-  onCancel?: () => void;
   /** Max downloads before file/bundle is deleted (0 = unlimited). */
   maxDownloads?: number;
   /** AbortSignal to cancel the upload. */
@@ -399,6 +405,9 @@ export interface DownloadResult {
   /** The file data (only for small single files when onData callback was not provided). */
   data?: Uint8Array;
 }
+
+/** How a download ended: `completed` with its DownloadResult, `cancelled`, or `failed`. */
+export type DownloadOutcome = Outcome<DownloadResult>;
 
 /**
  * Bundle metadata returned from the server.

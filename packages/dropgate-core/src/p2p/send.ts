@@ -1,4 +1,4 @@
-import { DropgateValidationError, DropgateNetworkError } from '../errors.js';
+import { DropgateError, directTransferDisabled } from '../errors.js';
 import { sleep } from '../utils/network.js';
 import type {
   P2PSendOptions,
@@ -119,19 +119,20 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
 
   // Validate required options
   if (!files.length) {
-    throw new DropgateValidationError('At least one file is required.');
+    throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'At least one file is required.' });
   }
 
   if (!Peer) {
-    throw new DropgateValidationError(
-      'PeerJS Peer constructor is required. Install peerjs and pass it as the Peer option.'
-    );
+    throw new DropgateError({
+      code: 'INVALID_ARGUMENT',
+      message: 'PeerJS Peer constructor is required. Install peerjs and pass it as the Peer option.',
+    });
   }
 
   // Check P2P capabilities if serverInfo is provided
   const p2pCaps = serverInfo?.capabilities?.p2p;
   if (serverInfo && !p2pCaps?.enabled) {
-    throw new DropgateValidationError('Direct transfer is disabled on this server.');
+    throw directTransferDisabled();
   }
 
   // Resolve config from user options and server capabilities
@@ -367,13 +368,15 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
             // receiver (bytes left cleanly but no acks come back).
             const bufferedBytes = conn._dc?.bufferedAmount ?? 0;
             if (bufferedBytes >= 1024 * 1024) {
-              throw new DropgateNetworkError(
-                'Connection is too unstable. Data is queued locally but not being delivered to the receiver.'
-              );
+              throw new DropgateError({
+                code: 'CONNECTION_LOST',
+                message: 'Connection is too unstable. Data is queued locally but not being delivered to the receiver.',
+              });
             }
-            throw new DropgateNetworkError(
-              'Receiver stopped responding. No acknowledgments received for over ' + P2P_UNACKED_CHUNK_TIMEOUT_MS + ' ms.'
-            );
+            throw new DropgateError({
+              code: 'CONNECTION_LOST',
+              message: 'Receiver stopped responding. No acknowledgments received for over ' + P2P_UNACKED_CHUNK_TIMEOUT_MS + ' ms.',
+            });
           }
         }
 
@@ -441,11 +444,11 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
 
       // Check if connection is still alive
       if (isStopped()) {
-        throw new DropgateNetworkError('Connection closed during completion.');
+        throw new DropgateError({ code: 'CONNECTION_LOST', message: 'Connection closed during completion.' });
       }
     }
 
-    throw new DropgateNetworkError('Receiver did not confirm completion after retries.');
+    throw new DropgateError({ code: 'CONNECTION_LOST', message: 'Receiver did not confirm completion after retries.' });
   };
 
   peer.on('connection', (conn: DataConnection) => {
@@ -603,7 +606,7 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
           break;
 
         case 'error':
-          safeError(new DropgateNetworkError(msg.message || 'Receiver reported an error.'));
+          safeError(new DropgateError({ code: 'PEER_FAILED', message: 'The receiver reported an error.' }));
           break;
 
         case 'cancelled':
@@ -638,11 +641,13 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
         if (isStopped()) return;
 
         if (receiverVersion === null) {
-          throw new DropgateNetworkError('Receiver did not respond to handshake.');
+          throw new DropgateError({ code: 'TIMED_OUT', origin: 'peer', message: 'Receiver did not respond to handshake.' });
         } else if (receiverVersion !== P2P_PROTOCOL_VERSION) {
-          throw new DropgateNetworkError(
-            `Protocol version mismatch: sender v${P2P_PROTOCOL_VERSION}, receiver v${receiverVersion}`
-          );
+          throw new DropgateError({
+            code: 'VERSION_UNSUPPORTED',
+            origin: 'peer',
+            message: `Protocol version mismatch: sender v${P2P_PROTOCOL_VERSION}, receiver v${receiverVersion}`,
+          });
         }
 
         // Then send ours to negotiate protocol version
@@ -754,7 +759,7 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
             if (isStopped()) return;
 
             if (!feAck) {
-              throw new DropgateNetworkError(`Receiver did not confirm receipt of file ${fi + 1}/${files.length}.`);
+              throw new DropgateError({ code: 'CONNECTION_LOST', message: `Receiver did not confirm receipt of file ${fi + 1}/${files.length}.` });
             }
           }
         }
@@ -773,7 +778,7 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
         const ackReceived = Number(ackResult.received) || 0;
 
         if (ackTotal && ackReceived < ackTotal) {
-          throw new DropgateNetworkError('Receiver reported an incomplete transfer.');
+          throw new DropgateError({ code: 'PEER_FAILED', message: 'Receiver reported an incomplete transfer.' });
         }
 
         reportProgress({ received: ackReceived || ackTotal, total: ackTotal });
@@ -801,7 +806,7 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
         setTimeout(() => {
           if (state === 'awaiting_ack') {
             // Still waiting, treat as failure
-            safeError(new DropgateNetworkError('Connection closed while awaiting confirmation.'));
+            safeError(new DropgateError({ code: 'CONNECTION_LOST', message: 'Connection closed while awaiting confirmation.' }));
           }
         }, P2P_CLOSE_GRACE_PERIOD_MS);
         return;

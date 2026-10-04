@@ -124,15 +124,20 @@ export function envReads(fileList) {
 
 /**
  * The error codes the code gives its errors: a string code set with `code:`,
- * `code =` or `code: something || 'CODE'`. A comparison such as
- * `err.code === 'ABORT_ERR'` is a code it reads, not one it gives.
+ * `code =` or `code: something || 'CODE'`, and every code in core's catalogue
+ * (an entry `NAME: { origin: ..., retryable: ..., message: ... }`), which can
+ * hold a code nothing gives yet. A comparison such as `err.code === 'ABORT_ERR'`
+ * is a code it reads, not one it gives.
  */
 export function errorCodes(fileList) {
     const codes = new Map();
+    const add = (name, file) => codes.set(name, [...new Set([...(codes.get(name) ?? []), file])]);
     for (const file of fileList.filter((f) => SCRIPT.test(f))) {
         const code = readCode(file);
         const pattern = /\bcode\??\s*(?::|=(?!=))\s*(?:[\w$.?]+\s*\|\|\s*)?(['"`])([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\1/g;
-        for (const match of code.matchAll(pattern)) codes.set(match[2], [...new Set([...(codes.get(match[2]) ?? []), file])]);
+        for (const match of code.matchAll(pattern)) add(match[2], file);
+        const catalogue = /^\s*([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\s*:\s*\{\s*origin\s*:[^\n]*\bmessage\s*:/gm;
+        for (const match of code.matchAll(catalogue)) add(match[1], file);
     }
     return codes;
 }

@@ -112,7 +112,7 @@ async function startDownload() {
     statusTitle.textContent = downloadState.isEncrypted ? 'Downloading & Decrypting' : 'Downloading';
     statusMessage.textContent = 'Streaming directly to file...';
 
-    await client.downloadFiles({
+    const outcome = await client.downloadFiles({
       fileId: downloadState.fileId,
       keyB64: downloadState.keyB64,
       timeoutMs: 0, // No timeout for large file downloads
@@ -128,6 +128,7 @@ async function startDownload() {
         await writer.write(chunk);
       },
     });
+    if (outcome.status !== 'completed') throw outcome.error ?? new Error('Download cancelled.');
 
     await writer.close();
 

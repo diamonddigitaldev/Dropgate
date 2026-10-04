@@ -13,14 +13,18 @@ import {
   parseServerUrl,
   buildBaseUrl,
 } from '../src/index.js';
-import {
-  DropgateError,
-  DropgateValidationError,
-  DropgateNetworkError,
-  DropgateProtocolError,
-  DropgateAbortError,
-  DropgateTimeoutError,
-} from '../src/errors.js';
+import { DropgateError } from '../src/errors.js';
+
+/** The code of the DropgateError `run` throws. */
+function codeThrownBy(run: () => unknown): string {
+  try {
+    run();
+  } catch (err) {
+    expect(err).toBeInstanceOf(DropgateError);
+    return (err as DropgateError).code;
+  }
+  throw new Error('expected it to throw');
+}
 
 describe('lifetimeToMs', () => {
   it('converts minutes to milliseconds', () => {
@@ -71,19 +75,19 @@ describe('validatePlainFilename', () => {
   });
 
   it('rejects empty filenames', () => {
-    expect(() => validatePlainFilename('')).toThrow(DropgateValidationError);
-    expect(() => validatePlainFilename('   ')).toThrow(DropgateValidationError);
+    expect(codeThrownBy(() => validatePlainFilename(''))).toBe('INVALID_FILENAME');
+    expect(codeThrownBy(() => validatePlainFilename('   '))).toBe('INVALID_FILENAME');
   });
 
   it('rejects filenames with path separators', () => {
-    expect(() => validatePlainFilename('../test.txt')).toThrow(DropgateValidationError);
-    expect(() => validatePlainFilename('path/to/file.txt')).toThrow(DropgateValidationError);
-    expect(() => validatePlainFilename('path\\to\\file.txt')).toThrow(DropgateValidationError);
+    expect(codeThrownBy(() => validatePlainFilename('../test.txt'))).toBe('INVALID_FILENAME');
+    expect(codeThrownBy(() => validatePlainFilename('path/to/file.txt'))).toBe('INVALID_FILENAME');
+    expect(codeThrownBy(() => validatePlainFilename('path\\to\\file.txt'))).toBe('INVALID_FILENAME');
   });
 
   it('rejects filenames that are too long', () => {
     const longName = 'a'.repeat(256);
-    expect(() => validatePlainFilename(longName)).toThrow(DropgateValidationError);
+    expect(codeThrownBy(() => validatePlainFilename(longName))).toBe('INVALID_FILENAME');
   });
 });
 
@@ -232,88 +236,11 @@ describe('buildBaseUrl', () => {
   });
 
   it('throws error for missing host', () => {
-    expect(() => buildBaseUrl({ host: '' })).toThrow(DropgateValidationError);
-    expect(() => buildBaseUrl({ host: undefined as unknown as string })).toThrow(DropgateValidationError);
-  });
-});
-
-describe('Error classes', () => {
-  describe('DropgateError', () => {
-    it('creates error with message and default code', () => {
-      const err = new DropgateError('Test error');
-      expect(err.message).toBe('Test error');
-      expect(err.code).toBe('DROPGATE_ERROR');
-      expect(err.name).toBe('DropgateError');
-    });
-
-    it('creates error with custom code and details', () => {
-      const err = new DropgateError('Test error', {
-        code: 'CUSTOM_CODE',
-        details: { foo: 'bar' },
-      });
-      expect(err.code).toBe('CUSTOM_CODE');
-      expect(err.details).toEqual({ foo: 'bar' });
-    });
-
-    it('creates error with cause', () => {
-      const cause = new Error('Original error');
-      const err = new DropgateError('Wrapped error', { cause });
-      expect(err.cause).toBe(cause);
-    });
+    expect(codeThrownBy(() => buildBaseUrl({ host: '' }))).toBe('INVALID_ARGUMENT');
+    expect(codeThrownBy(() => buildBaseUrl({ host: undefined as unknown as string }))).toBe('INVALID_ARGUMENT');
   });
 
-  describe('DropgateValidationError', () => {
-    it('creates error with VALIDATION_ERROR code', () => {
-      const err = new DropgateValidationError('Invalid input');
-      expect(err.message).toBe('Invalid input');
-      expect(err.code).toBe('VALIDATION_ERROR');
-      expect(err.name).toBe('DropgateValidationError');
-    });
-  });
-
-  describe('DropgateNetworkError', () => {
-    it('creates error with NETWORK_ERROR code', () => {
-      const err = new DropgateNetworkError('Connection failed');
-      expect(err.message).toBe('Connection failed');
-      expect(err.code).toBe('NETWORK_ERROR');
-      expect(err.name).toBe('DropgateNetworkError');
-    });
-  });
-
-  describe('DropgateProtocolError', () => {
-    it('creates error with PROTOCOL_ERROR code', () => {
-      const err = new DropgateProtocolError('Server returned invalid response');
-      expect(err.message).toBe('Server returned invalid response');
-      expect(err.code).toBe('PROTOCOL_ERROR');
-      expect(err.name).toBe('DropgateProtocolError');
-    });
-  });
-
-  describe('DropgateAbortError', () => {
-    it('creates error with default message', () => {
-      const err = new DropgateAbortError();
-      expect(err.message).toBe('Operation aborted');
-      expect(err.code).toBe('ABORT_ERROR');
-      expect(err.name).toBe('AbortError');
-    });
-
-    it('creates error with custom message', () => {
-      const err = new DropgateAbortError('Upload cancelled');
-      expect(err.message).toBe('Upload cancelled');
-    });
-  });
-
-  describe('DropgateTimeoutError', () => {
-    it('creates error with default message', () => {
-      const err = new DropgateTimeoutError();
-      expect(err.message).toBe('Request timed out');
-      expect(err.code).toBe('TIMEOUT_ERROR');
-      expect(err.name).toBe('TimeoutError');
-    });
-
-    it('creates error with custom message', () => {
-      const err = new DropgateTimeoutError('Server did not respond in time');
-      expect(err.message).toBe('Server did not respond in time');
-    });
+  it('throws INVALID_ARGUMENT for an address that is not a URL', () => {
+    expect(codeThrownBy(() => parseServerUrl('http://exa mple.com:99999'))).toBe('INVALID_ARGUMENT');
   });
 });

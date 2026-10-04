@@ -40,14 +40,21 @@ const session = await client.uploadFiles({
   },
 });
 
-const result = await session.result;
-console.log('Download URL:', result.downloadUrl);
+// The upload's one outcome: completed, cancelled or failed. It never rejects.
+const outcome = await session.result;
+if (outcome.status === 'completed') {
+  console.log('Download URL:', outcome.value.downloadUrl);
+} else if (outcome.status === 'failed') {
+  console.error('Upload failed:', outcome.error.code, outcome.error.message);
+}
 
-// Cancel an in-progress upload:
-// session.cancel('User cancelled');
+// Cancel an in-progress upload (its outcome is then 'cancelled'):
+// session.cancel();
 ```
 
-> **If you pass your own `signal`, `session.cancel()` doesn't stop the upload.** It tells the server to discard the upload, but the client keeps sending chunks. The server refuses them, and after the client has retried (about 30 seconds with the default retry settings), the upload ends with an error instead of a cancellation. `onCancel` isn't called. To cancel straight away, call `session.cancel()` first, so the server is told, and then abort your own signal:
+[Outcomes and Cancellation](outcomes.md) has the rest, including cancelling everything at once with `client.cancelAll()`.
+
+> **If you pass your own `signal`, `session.cancel()` doesn't stop the upload.** It tells the server to discard the upload, but the client keeps sending chunks. To cancel straight away, call `session.cancel()` first, so the server is told, and then abort your own signal:
 >
 > ```javascript
 > const controller = new AbortController();
@@ -87,8 +94,8 @@ bundleMeta.files.forEach(file => {
 ## Downloading Files
 
 ```javascript
-// Download with streaming (for large files)
-const result = await client.downloadFiles({
+// Download with streaming (for large files). Like an upload, it ends with one outcome.
+const outcome = await client.downloadFiles({
   fileId: 'abc123',
   keyB64: 'base64-key-from-url-hash', // Required for encrypted files
   onProgress: ({ phase, percent, processedBytes, totalBytes }) => {
@@ -99,12 +106,15 @@ const result = await client.downloadFiles({
   },
 });
 
-console.log('Downloaded:', result.filename);
+if (outcome.status === 'completed') console.log('Downloaded:', outcome.value.filename);
+else if (outcome.status === 'failed') console.error('Download failed:', outcome.error.code);
 
 // Or download to memory (for small files — omit onData)
-const memoryResult = await client.downloadFiles({ fileId: 'abc123' });
-console.log('File size:', memoryResult.data?.length);
+const inMemory = await client.downloadFiles({ fileId: 'abc123' });
+if (inMemory.status === 'completed') console.log('File size:', inMemory.value.data?.length);
 ```
+
+A download takes a `signal` too: aborting it ends the download with a `cancelled` outcome.
 
 ## P2P File Transfer (Sender)
 

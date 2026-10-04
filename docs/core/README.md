@@ -15,7 +15,8 @@ This package is **headless** and **environment-agnostic** — it contains no DOM
 
 * [Quick Start](quick-start.md): configuring a client, connecting, uploading, downloading, metadata, and P2P transfers.
 * [API Reference](api-reference.md): the client's options, properties and methods, and every exported function, constant and class.
-* [Errors](errors.md): the error classes and the codes they carry.
+* [Outcomes and Cancellation](outcomes.md): how an upload or a download ends, and the cancellation tree that cancels it.
+* [Errors](errors.md): the one error class, and the codes it carries.
 * [Browser Usage](browser-usage.md): loading core with a `<script>` tag or as an ES module.
 * [P2P Consumer Responsibilities](p2p.md): what your code has to do for P2P transfers, and the behaviour to account for.
 * [Building and Testing](building-and-testing.md): building core, its tests, the copies the server and the client load, and how it's released.

@@ -195,7 +195,7 @@ async function downloadSingleFile(index, dlBtn) {
     const fileStream = streamSaver.createWriteStream(name, size ? { size } : undefined);
     const writer = fileStream.getWriter();
 
-    await client.downloadFiles({
+    const outcome = await client.downloadFiles({
       fileId,
       keyB64: bundleState.keyB64,
       timeoutMs: 0,
@@ -207,6 +207,7 @@ async function downloadSingleFile(index, dlBtn) {
         await writer.write(chunk);
       },
     });
+    if (outcome.status !== 'completed') throw outcome.error ?? new Error('Download cancelled.');
 
     await writer.close();
     if (fileProgressBar) fileProgressBar.style.width = '100%';
@@ -293,7 +294,7 @@ async function downloadAllAsZip() {
     const fileStream = streamSaver.createWriteStream(zipName);
     const writer = fileStream.getWriter();
 
-    await client.downloadFiles({
+    const outcome = await client.downloadFiles({
       bundleId: bundleState.bundleId,
       keyB64: bundleState.keyB64,
       asZip: true,
@@ -309,6 +310,7 @@ async function downloadAllAsZip() {
         await writer.write(chunk);
       },
     });
+    if (outcome.status !== 'completed') throw outcome.error ?? new Error('Download cancelled.');
 
     await writer.close();
 

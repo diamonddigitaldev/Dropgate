@@ -32,12 +32,22 @@ The main client class for interacting with Dropgate servers.
 | `connect(opts?)` | Fetch server info, check compatibility, cache result |
 | `getFileMetadata(fileId, opts?)` | Fetch metadata for a single file |
 | `getBundleMetadata(bundleId, keyB64?, opts?)` | Fetch bundle metadata with automatic manifest decryption and field derivation |
-| `uploadFiles(opts)` | Upload a file with optional encryption |
-| `downloadFiles(opts)` | Download a file with optional decryption |
+| `uploadFiles(opts)` | Upload one or more files with optional encryption. Gives a session: `result`, the upload's one [outcome](outcomes.md); `cancel()`; and `getStatus()`, which is `initializing`, `uploading` or `completing` while it runs, then the outcome's status |
+| `downloadFiles(opts)` | Download a file or a bundle with optional decryption. Gives the download's one [outcome](outcomes.md); pass `signal` to cancel it |
+| `cancelAll()` | Cancel every upload and download running on the client. Each ends as `cancelled`, `by: 'parent'`; the client stays usable |
 | `p2pSend(opts)` | Start a P2P send session |
 | `p2pReceive(opts)` | Start a P2P receive session |
 | `validateUploadInputs(opts)` | Validate file and settings before upload |
 | `resolveShareTarget(value, opts?)` | Resolve a sharing code or link via the server. A link is read locally, and only the ID or code in it is sent: never anything after its `#` (the encryption key), which comes back on the end of `target`. A link to another server is refused without a request. |
+
+An upload or a download reports how it ended in its outcome, and never throws once it has started. The other methods throw a [`DropgateError`](errors.md).
+
+## Errors
+
+| Export | Description |
+| --- | --- |
+| `DropgateError` | The one error core gives, with a stable `code`. `DropgateError.is(err, code?)` tells one apart |
+| `ERROR_CODES` | Every code, each with its default `origin`, `retryable` and `message` |
 
 ## P2P Utility Functions
 

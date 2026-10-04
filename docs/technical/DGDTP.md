@@ -620,15 +620,23 @@ Invalid state transitions are logged as warnings but do not throw exceptions, pr
 
 When one peer encounters an error, it transmits an `error` message to the other peer before closing the connection. Both peers invoke their `onError` callbacks.
 
-### 17.3 Error Classes
+### 17.3 Error Codes
 
-| Class | Meaning |
+Core reports each error as a `DropgateError`, with one of these codes (the full list is in [core's docs](../core/errors.md)). A peer's own `message` isn't passed on: an `error` message from the other peer is reported as `PEER_FAILED`, with core's own wording.
+
+| Code | Meaning |
 |-------|---------|
-| `DropgateValidationError` | Invalid input: malformed code, unexpected sequence number, size mismatch. |
-| `DropgateNetworkError` | Connection failure, stalled acknowledgements, write queue overflow. |
-| `DropgateProtocolError` | Signalling error, PeerJS failure. |
-| `DropgateAbortError` | User-initiated cancellation. |
-| `DropgateTimeoutError` | Handshake timeout, end-ack timeout. |
+| `INVALID_ARGUMENT` | No code, no files, or no PeerJS `Peer` given. |
+| `INVALID_CODE` | The code isn't the shape of one. |
+| `CAPABILITY_UNSUPPORTED` | Direct transfer is disabled on the server. |
+| `INTEGRITY_FAILED` | Data before acceptance, an unexpected sequence number, or a size mismatch. |
+| `INVALID_MANIFEST` | Too many files, or a file list whose sizes don't add up. |
+| `CONNECTION_LOST` | The connection closed, acknowledgements stalled, or a confirmation never came. |
+| `OUTPUT_WRITE_FAILED` | The receiver's write queue overflowed. |
+| `TIMED_OUT` | The receiver didn't answer the handshake. |
+| `VERSION_UNSUPPORTED` | The peers' protocol versions differ. |
+| `PEER_FAILED` | The other peer sent an `error` message, or reported an incomplete transfer. |
+| `SERVER_UNREACHABLE` | The PeerJS signalling server couldn't be reached. |
 
 ---
 

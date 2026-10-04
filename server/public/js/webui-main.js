@@ -854,11 +854,6 @@ async function startStandardUpload() {
           iconColor: 'text-primary',
         });
       },
-      onCancel: () => {
-        resetTitleProgress();
-        showToast('Upload cancelled.', 'warning');
-        resetToMain();
-      },
     });
 
     // Store session and show cancel button
@@ -866,38 +861,37 @@ async function startStandardUpload() {
     els.cancelStandardUpload.style.display = 'inline-block';
 
     // Wire up cancel button
-    els.cancelStandardUpload.onclick = () => {
-      resetTitleProgress();
-      session.cancel('User cancelled upload.');
-      state.uploadSession = null;
-      els.cancelStandardUpload.style.display = 'none';
-    };
+    els.cancelStandardUpload.onclick = () => session.cancel();
 
-    const result = await session.result;
+    // The upload's one outcome: completed, cancelled or failed.
+    const outcome = await session.result;
 
-    // Hide cancel button on success
-    els.cancelStandardUpload.style.display = 'none';
-    state.uploadSession = null;
-
-    resetTitleProgress();
-    showProgress({ title: 'Uploading', sub: 'Upload successful!', percent: 100, doneBytes: totalSize, totalBytes: totalSize, icon: 'cloud_upload' });
-    showShare({ link: result.downloadUrl });
-  } catch (err) {
-    // Hide cancel button on error
     els.cancelStandardUpload.style.display = 'none';
     state.uploadSession = null;
     resetTitleProgress();
 
-    // Check if it was a cancellation (handle both native AbortError and DropgateAbortError)
-    if (err?.name === 'AbortError' || err?.code === 'ABORT_ERROR') {
-      // Already handled by onCancel
-      return;
+    if (outcome.status === 'completed') {
+      showProgress({ title: 'Uploading', sub: 'Upload successful!', percent: 100, doneBytes: totalSize, totalBytes: totalSize, icon: 'cloud_upload' });
+      showShare({ link: outcome.value.downloadUrl });
+    } else if (outcome.status === 'cancelled') {
+      showToast('Upload cancelled.', 'warning');
+      resetToMain();
+    } else {
+      showUploadFailed(outcome.error, totalSize);
     }
-
-    console.error(err);
-    showProgress({ title: 'Upload Failed', sub: err?.message || 'An error occurred during upload.', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'error', iconColor: 'text-danger' });
-    showToast(err?.message || 'Upload failed.', 'danger');
+  } catch (err) {
+    // Only an upload that never started gets here, such as one with no files.
+    els.cancelStandardUpload.style.display = 'none';
+    state.uploadSession = null;
+    resetTitleProgress();
+    showUploadFailed(err, totalSize);
   }
+}
+
+function showUploadFailed(err, totalSize) {
+  console.error(err);
+  showProgress({ title: 'Upload Failed', sub: err?.message || 'An error occurred during upload.', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'error', iconColor: 'text-danger' });
+  showToast(err?.message || 'Upload failed.', 'danger');
 }
 
 async function loadPeerJS() {

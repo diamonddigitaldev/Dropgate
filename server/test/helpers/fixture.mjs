@@ -46,6 +46,12 @@ export function createRecorder() {
     return { fetch: recordingFetch, secrets, responses, note };
 }
 
+/** The value of an operation's completed outcome. Any other outcome fails the test, with its error. */
+export function completed(outcome) {
+    if (outcome.status !== 'completed') throw outcome.error ?? new Error(`The operation was ${outcome.status}.`);
+    return outcome.value;
+}
+
 /** A client on the web UI's own copy of dropgate-core, plus an upload helper. */
 export async function createClient(server, recorder) {
     const { DropgateClient } = await server.loadCore();
@@ -53,7 +59,7 @@ export async function createClient(server, recorder) {
     const upload = async (files, encrypt) => {
         for (const f of [files].flat()) recorder.note(f.name);
         const session = await client.uploadFiles({ files, encrypt, lifetimeMs: 60 * 60 * 1000, maxDownloads: 1 });
-        const result = await session.result;
+        const result = completed(await session.result);
         for (const value of [result.fileId, result.bundleId, result.uploadId, result.keyB64, result.downloadUrl]) recorder.note(value);
         for (const f of result.files || []) recorder.note(f.fileId);
         return result;
@@ -93,9 +99,9 @@ export async function runFixture(server, { faults = false } = {}) {
     }
 
     // Downloads up to each limit. The bundle counts only as a whole ("Download All as ZIP").
-    await client.downloadFiles({ fileId: encrypted.fileId, keyB64: encrypted.keyB64, onData: () => {} });
-    await client.downloadFiles({ fileId: plain.fileId, onData: () => {} });
-    await client.downloadFiles({ bundleId: bundle.bundleId, keyB64: bundle.keyB64, asZip: true, onData: () => {} });
+    completed(await client.downloadFiles({ fileId: encrypted.fileId, keyB64: encrypted.keyB64, onData: () => {} }));
+    completed(await client.downloadFiles({ fileId: plain.fileId, onData: () => {} }));
+    completed(await client.downloadFiles({ bundleId: bundle.bundleId, keyB64: bundle.keyB64, asZip: true, onData: () => {} }));
 
     if (faults) {
         await recorder.fetch(`${server.baseUrl}/api/resolve`, {

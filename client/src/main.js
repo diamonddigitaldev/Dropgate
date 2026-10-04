@@ -247,11 +247,15 @@ kit.ipc.handle(IPC.UPLOAD_FINISHED, (event, result) => {
     // Reset window title and taskbar progress
     if (main) {
         main.setTitle(APP_NAME);
-        main.setProgressBar(result.status === 'success' ? 1 : 0,
-            { mode: result.status === 'success' ? 'none' : 'error' });
-        setTimeout(() => {
-            if (mainWindow()) mainWindow().setProgressBar(-1);
-        }, 3000);
+        if (result.status === 'cancelled') {
+            main.setProgressBar(-1);
+        } else {
+            main.setProgressBar(result.status === 'success' ? 1 : 0,
+                { mode: result.status === 'success' ? 'none' : 'error' });
+            setTimeout(() => {
+                if (mainWindow()) mainWindow().setProgressBar(-1);
+            }, 3000);
+        }
     }
 
     // Close the active upload notification
@@ -268,6 +272,9 @@ kit.ipc.handle(IPC.UPLOAD_FINISHED, (event, result) => {
         if (main) main.webContents.send(IPC.UPLOAD_STATUS, { type: 'success', data: result });
         // Show notification if main window doesn't exist or isn't focused
         if (!main || !isFocused) showNotification('Upload Successful', 'Link copied to clipboard.');
+    } else if (result.status === 'cancelled') {
+        // Whoever cancelled it knows; nothing to notify.
+        if (main) main.webContents.send(IPC.UPLOAD_STATUS, { type: 'cancelled', data: {} });
     } else {
         if (main) main.webContents.send(IPC.UPLOAD_STATUS, { type: 'error', data: result });
         if (!main || !isFocused) showNotification('Upload Failed', result.error || 'An unknown error occurred.');

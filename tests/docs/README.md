@@ -46,7 +46,7 @@ And in the code:
 * **Environment variables** are read with `process.env.LOG_LEVEL`, `process.env['LOG_LEVEL']` or `const { LOG_LEVEL } = process.env`.
 * **Routes** are Express's calls in the server's own files, `server/*.js`: routers made with `express.Router()` and mounted with `app.use()`, and `app.get()`, `app.post()` and so on, with the path as a string or a constant.
 * **Statuses** are `.status()`, `.sendStatus()` and `.writeHead()` with a number, in the same files.
-* **Error codes** are set as `code: 'VALIDATION_ERROR'`, or as a fallback, `code: opts.code || 'VALIDATION_ERROR'`.
+* **Error codes** are set as `code: 'NOT_FOUND'`, or as a fallback, `code: opts.code || 'NOT_FOUND'`, and every entry of core's `ERROR_CODES` catalogue counts, given or not.
 
 Comments aren't read. Core is read from its source, not from its copies in the server and the client.
 

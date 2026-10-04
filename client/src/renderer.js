@@ -312,13 +312,21 @@ document.addEventListener('DOMContentLoaded', async () => {
                         resetUI(false);
                         break;
                     }
+                case 'cancelled':
+                    {
+                        uploading = false;
+                        setStatus('Upload cancelled.');
+                        actions.update({ running: false });
+                        resetUI(false);
+                        break;
+                    }
             }
         });
 
         // Cancel the upload this window runs (main passes on a Cancel from any window).
         api.onCancelUpload(() => {
             if (activeUploadSession) {
-                activeUploadSession.cancel('Upload cancelled.');
+                activeUploadSession.cancel();
                 activeUploadSession = null;
             }
         });
@@ -553,14 +561,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                         if (evt?.percent !== undefined) payload.percent = evt.percent;
                         if (Object.keys(payload).length) api.uploadProgress(payload);
                     },
-                    onCancel: () => {
-                        setStatus('Upload cancelled.');
-                        activeUploadSession = null;
-                        uploading = false;
-                        actions.update({ running: false });
-                        setUploadingState(false);
-                        resetUI(false);
-                    }
                 });
 
                 activeUploadSession = session;
@@ -568,14 +568,26 @@ document.addEventListener('DOMContentLoaded', async () => {
                 actions.update({ running: true });
                 setUploadingState(true);
 
-                const result = await session.result;
+                // The upload's one outcome: completed, cancelled or failed.
+                const outcome = await session.result;
 
                 activeUploadSession = null;
                 setUploadingState(false);
-
                 revokeAllLazyFiles();
-                api.uploadFinished({ status: 'success', link: result.downloadUrl });
+
+                if (outcome.status === 'completed') {
+                    api.uploadFinished({ status: 'success', link: outcome.value.downloadUrl });
+                } else if (outcome.status === 'cancelled') {
+                    uploading = false;
+                    actions.update({ running: false });
+                    api.uploadFinished({ status: 'cancelled' });
+                } else {
+                    uploading = false;
+                    actions.update({ running: false });
+                    api.uploadFinished({ status: 'error', error: outcome.error.message });
+                }
             } catch (error) {
+                // Only an upload that never started gets here.
                 activeUploadSession = null;
                 uploading = false;
                 actions.update({ running: false });

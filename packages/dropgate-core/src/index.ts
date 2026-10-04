@@ -7,15 +7,12 @@ export {
 } from './constants.js';
 
 // Errors
-export {
-  DropgateError,
-  DropgateValidationError,
-  DropgateNetworkError,
-  DropgateProtocolError,
-  DropgateAbortError,
-  DropgateTimeoutError,
-} from './errors.js';
-export type { DropgateErrorOptions } from './errors.js';
+export { DropgateError, ERROR_CODES } from './errors.js';
+export type { DropgateErrorOptions, DropgateErrorCode, ErrorOrigin } from './errors.js';
+
+// Outcomes and cancellation
+export type { Outcome, CompletedOutcome, CancelledOutcome, FailedOutcome } from './outcome.js';
+export type { Cancellation, CancelledBy } from './cancel.js';
 
 // Types
 export type {
@@ -46,8 +43,8 @@ export type {
   BundleMetadata,
 } from './types.js';
 
-// Upload session type
-export type { UploadSession } from './types.js';
+// Upload session and outcome types
+export type { UploadSession, UploadStatus, UploadOutcome, DownloadOutcome } from './types.js';
 
 // Utils - Base64
 export { bytesToBase64, arrayBufferToBase64, base64ToBytes } from './utils/base64.js';
