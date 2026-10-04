@@ -219,6 +219,46 @@ export function requestedUrls(file) {
 }
 
 /**
+ * Each request to the given addresses, with whether it could carry cookies:
+ * its privacy mode as the log gives it. A request made with credentials
+ * omitted goes in privacy mode, so the network stack never reads cookies for it,
+ * and never waits for the cookie store to load from disk.
+ * @param {string} file - The net log.
+ * @param {string[]} origins - The addresses to look at.
+ * @returns {{ method: string, url: string, privacyMode: string }[]}
+ */
+export function requestsTo(file, origins) {
+    const read = fs.existsSync(file) && readNetLog(file);
+    if (!read) return [];
+    const log = netLog(read);
+    const hosts = new Set(origins.map((origin) => new URL(origin).host));
+    const requests = [];
+    for (const { kind, events: list } of log.sources.values()) {
+        if (kind !== 'URL_REQUEST') continue;
+        const start = list.find((e) => log.type(e) === 'URL_REQUEST_START_JOB' && e.params?.url);
+        if (!start || !hosts.has(new URL(start.params.url).host)) continue;
+        const privacy = list.find((e) => log.type(e) === 'COMPUTED_PRIVACY_MODE');
+        requests.push({ method: start.params.method ?? '', url: start.params.url, privacyMode: String(privacy?.params?.privacy_mode ?? 'not logged') });
+    }
+    return requests;
+}
+
+/**
+ * Each time the cookie store started loading from disk, in ms from `since`.
+ * @param {string} file - The net log.
+ * @param {number} since - A time in ms since 1970.
+ * @returns {number[]}
+ */
+export function cookieStoreLoads(file, since) {
+    const read = fs.existsSync(file) && readNetLog(file);
+    if (!read) return [];
+    const log = netLog(read);
+    return read.events
+        .filter((e) => log.type(e) === 'COOKIE_PERSISTENT_STORE_LOAD' && e.phase === log.begin)
+        .map((e) => Math.round(log.timeOf(e) - since));
+}
+
+/**
  * What the app's network stack did, one line each, with times in ms from `since`.
  * @param {string} file - The net log.
  * @param {number} since - A time in ms since 1970.

@@ -304,7 +304,7 @@ The main client class for interacting with Dropgate servers.
 | `server` | `string \| ServerTarget` | Yes | Server URL or `{ host, port?, secure? }` |
 | `fallbackToHttp` | `boolean` | No | Auto-retry with HTTP if HTTPS fails in `connect()` |
 | `chunkSize` | `number` | No | Upload chunk size fallback (default: 5MB). The server's configured chunk size (from `/api/info`) takes precedence when available. |
-| `fetchFn` | `FetchFn` | No | Custom fetch implementation |
+| `fetchFn` | `FetchFn` | No | Custom fetch implementation. Every request is made with `credentials: 'omit'`, so no cookies are sent. |
 | `cryptoObj` | `CryptoAdapter` | No | Custom crypto implementation |
 | `base64` | `Base64Adapter` | No | Custom base64 encoder/decoder |
 
@@ -329,7 +329,7 @@ The main client class for interacting with Dropgate servers.
 | `p2pSend(opts)` | Start a P2P send session |
 | `p2pReceive(opts)` | Start a P2P receive session |
 | `validateUploadInputs(opts)` | Validate file and settings before upload |
-| `resolveShareTarget(value, opts?)` | Resolve a sharing code via the server. `value` is sent to the server as-is, so strip any `#fragment` (the encryption key) from a full link first. |
+| `resolveShareTarget(value, opts?)` | Resolve a sharing code or link via the server. A link is read locally, and only the ID or code in it is sent: never anything after its `#` (the encryption key), which comes back on the end of `target`. A link to another server is refused without a request. |
 
 ### P2P Utility Functions
 

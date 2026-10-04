@@ -12,7 +12,7 @@ Dropgate follows a data-minimisation approach:
 
 - **No user accounts or authentication.** There is no concept of a registered user. No usernames, passwords, email addresses, or tokens are collected.
 - **No tracking or analytics.** Dropgate does not embed analytics scripts, tracking pixels, or third-party telemetry.
-- **No cookies.** Neither the server nor the Web UI sets any cookies.
+- **No cookies.** Neither the server nor the Web UI sets any cookies, and none are ever sent: every request the Web UI, the core library and the Dropgate Client make omits credentials (`credentials: 'omit'`).
 - **No persistent client-side web storage.** The Web UI does not use `localStorage`, `sessionStorage`, or `IndexedDB`. The one thing the browser keeps is the service worker that streamed downloads use (StreamSaver): after the first streamed download, it stays registered for the server's site. It stores no data.
 - **Encryption by default.** When E2EE is enabled (the default), the server stores only ciphertext and has no mechanism to recover plaintext file content or filenames.
 
@@ -128,7 +128,7 @@ Encryption also protects each chunk only on its own. A chunk's position and whet
 1. **Generated** by the client using `crypto.subtle.generateKey`.
 2. **Used** to encrypt all chunks and the filename.
 3. **Exported** to URL-safe Base64 and appended to the download URL as a fragment (`#<keyBase64>`).
-4. **Not transmitted to the server.** URL fragments are not included in HTTP requests. The one exception: pasting a full encrypted link into the Web UI's "enter a sharing code" box sends the whole link, key included, to `POST /api/resolve`. The server only uses the path and doesn't store or log it. See [DGUP §4.5](./DGUP.md#45-key-transmission).
+4. **Not transmitted to the server.** URL fragments are not included in HTTP requests. A whole link pasted into the Web UI's "enter a sharing code" box is read on the device, and only its file or bundle ID is sent to `POST /api/resolve`. See [DGUP §4.5](./DGUP.md#45-key-transmission).
 5. **Not persisted** by the client. The key exists only in the download link. If the link is lost, the file cannot be decrypted.
 
 ### 3.4 Server's Cryptographic Capabilities

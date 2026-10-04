@@ -36,7 +36,8 @@ import type {
   P2PReceiveSession,
 } from '../p2p/types.js';
 import { getDefaultCrypto, getDefaultFetch, getDefaultBase64 } from '../adapters/defaults.js';
-import { makeAbortSignal, fetchJson, sleep, buildBaseUrl, parseServerUrl } from '../utils/network.js';
+import { makeAbortSignal, fetchJson, sleep, buildBaseUrl, parseServerUrl, withoutCredentials } from '../utils/network.js';
+import { parseShareInput } from '../utils/share-link.js';
 import { parseSemverMajorMinor } from '../utils/semver.js';
 import { validatePlainFilename } from '../utils/filename.js';
 import { sha256Hex, generateAesGcmKey, exportKeyBase64, importKeyFromBase64, decryptChunk, decryptFilenameFromBase64 } from '../crypto/index.js';
@@ -81,10 +82,11 @@ export async function getServerInfo(
 ): Promise<{ baseUrl: string; serverInfo: ServerInfo }> {
   const { server, timeoutMs = 5000, signal, fetchFn: customFetch } = opts;
 
-  const fetchFn = customFetch || getDefaultFetch();
-  if (!fetchFn) {
+  const givenFetch = customFetch || getDefaultFetch();
+  if (!givenFetch) {
     throw new DropgateValidationError('No fetch() implementation found.');
   }
+  const fetchFn = withoutCredentials(givenFetch);
 
   const baseUrl = resolveServerToBaseUrl(server);
 
@@ -127,7 +129,7 @@ export class DropgateClient {
   readonly clientVersion: string;
   /** Chunk size in bytes for upload splitting. */
   readonly chunkSize: number;
-  /** Fetch implementation used for HTTP requests. */
+  /** Fetch implementation used for HTTP requests. Every request it makes omits credentials (no cookies). */
   readonly fetchFn: FetchFn;
   /** Crypto implementation for encryption operations. */
   readonly cryptoObj: CryptoAdapter;
@@ -171,7 +173,7 @@ export class DropgateClient {
     if (!fetchFn) {
       throw new DropgateValidationError('No fetch() implementation found.');
     }
-    this.fetchFn = fetchFn;
+    this.fetchFn = withoutCredentials(fetchFn);
 
     const cryptoObj = opts.cryptoObj || getDefaultCrypto();
     if (!cryptoObj) {
@@ -310,8 +312,15 @@ export class DropgateClient {
   }
 
   /**
-   * Resolve a user-entered sharing code or URL via the server.
-   * @param value - The sharing code or URL to resolve.
+   * Resolve a user-entered sharing code or link.
+   *
+   * The input is read locally first. A link is reduced to the ID or code in
+   * its path, and only that is sent to the server, so nothing after a # (an
+   * encrypted upload's key) ever leaves the device. A link to another server
+   * is refused without asking this one. The key comes back on the end of
+   * `target`, ready to open.
+   *
+   * @param value - The sharing code or link to resolve.
    * @param opts - Optional timeout and abort signal.
    * @returns The resolved share target information.
    * @throws {DropgateProtocolError} If the share lookup fails.
@@ -322,6 +331,11 @@ export class DropgateClient {
   ): Promise<ShareTargetResult> {
     const { timeoutMs = 5000, signal } = opts ?? {};
 
+    const input = parseShareInput(value);
+    if (!input) {
+      return { valid: false, reason: 'Unrecognised sharing link.' };
+    }
+
     // Check server compatibility (uses cache)
     const compat = await this.connect(opts);
     if (!compat.compatible) {
@@ -329,6 +343,11 @@ export class DropgateClient {
     }
 
     const { baseUrl } = compat;
+
+    // The scheme may differ behind a TLS proxy, so only the host and port are compared.
+    if (input.linkHost !== undefined && input.linkHost !== new URL(baseUrl).host) {
+      return { valid: false, reason: 'URL must be from this server.' };
+    }
 
     const { res, json } = await fetchJson(
       this.fetchFn,
@@ -341,7 +360,7 @@ export class DropgateClient {
           'Content-Type': 'application/json',
           Accept: 'application/json',
         },
-        body: JSON.stringify({ value }),
+        body: JSON.stringify({ value: input.locator }),
       }
     );
 
@@ -353,7 +372,11 @@ export class DropgateClient {
       throw new DropgateProtocolError(msg, { details: json });
     }
 
-    return (json as ShareTargetResult) || { valid: false, reason: 'Unknown response.' };
+    const result = (json as ShareTargetResult) || { valid: false, reason: 'Unknown response.' };
+    if (result.valid && result.target && input.secret && (result.type === 'file' || result.type === 'bundle')) {
+      return { ...result, target: `${result.target}#${input.secret}` };
+    }
+    return result;
   }
 
   /**

@@ -103,6 +103,16 @@ export function makeAbortSignal(
   };
 }
 
+/**
+ * Wrap a fetch implementation so every request it makes omits credentials.
+ * Dropgate uses no cookies, so none are ever sent, and a browser never has to
+ * load its cookie store before a request goes out (on a new profile that can
+ * take seconds).
+ */
+export function withoutCredentials(fetchFn: FetchFn): FetchFn {
+  return (input, init) => fetchFn(input, { ...init, credentials: 'omit' });
+}
+
 export interface FetchJsonResult {
   res: Response;
   json: unknown;

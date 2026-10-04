@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { DropgateClient } from '../src/index.js';
+import { DropgateClient, getServerInfo } from '../src/index.js';
 import type { FileSource, UploadSession } from '../src/index.js';
 import { onlyFailsWith } from './helpers/known-issue.js';
 
-// Known issues in DropgateClient. Each test states the behaviour the v4 core
-// rework must have, and is marked `it.fails` until then. The client talks to a
-// fake server through its `fetchFn` option: no network.
+// DropgateClient against a fake server, through its `fetchFn` option: no
+// network. A known issue states the behaviour the v4 core rework must have, and
+// is marked `it.fails` until then.
 
 const BASE_URL = 'https://files.example';
 const FILE_ID = '0b7d4c52-5f0e-4d8e-9a57-3c1f2e6b8a90';
@@ -19,6 +19,7 @@ interface RecordedRequest {
   url: string;
   headers: string;
   body: string;
+  credentials: RequestCredentials | undefined;
 }
 
 /**
@@ -43,6 +44,7 @@ function fakeServer() {
       url,
       headers: JSON.stringify(headers),
       body: typeof init.body === 'string' ? init.body : '',
+      credentials: init.credentials,
     });
 
     // Answer on a later turn of the event loop, like a real network.
@@ -77,6 +79,18 @@ function fakeServer() {
         return json(200, { id: FILE_ID });
       case 'POST /upload/cancel':
         return json(200, {});
+      case `GET /api/file/${FILE_ID}/meta`:
+        return json(200, { isEncrypted: false, sizeBytes: CHUNK_SIZE, filename: 'notes.txt' });
+      case `GET /api/file/${FILE_ID}`:
+        return new Response(new Uint8Array(CHUNK_SIZE));
+      case `GET /api/bundle/${BUNDLE_ID}/meta`:
+        return json(200, { isEncrypted: false, files: [{ fileId: FILE_ID, sizeBytes: CHUNK_SIZE, filename: 'notes.txt' }] });
+      case `POST /api/bundle/${BUNDLE_ID}/downloaded`:
+        return json(200, {});
+      case 'POST /upload/init-bundle':
+        return json(200, { bundleUploadId: 'bundle-1', fileUploadIds: ['upload-1', 'upload-2'] });
+      case 'POST /upload/complete-bundle':
+        return json(200, { bundleId: BUNDLE_ID });
       default:
         return json(404, { error: 'Not found.' });
     }
@@ -137,27 +151,96 @@ describe('DropgateClient', () => {
     })
   );
 
-  it.fails(
-    'resolving a link never sends any part of its #fragment to the server (known issue until the v4 core rework)',
-    onlyFailsWith(/part of the link's #fragment reached the server/, async () => {
-      const server = fakeServer();
-      const client = createClient(server.fetchFn);
+  it('resolving a link never sends any part of its #fragment to the server, and keeps the key for the page it opens', async () => {
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
 
-      await client.resolveShareTarget(`${BASE_URL}/${FILE_ID}#${LINK_KEY}`);
-      await client.resolveShareTarget(`${BASE_URL}/b/${BUNDLE_ID}#${LINK_KEY}`);
-      expect(server.paths(), 'both links should be resolved').toEqual([
-        'GET /api/info',
-        'POST /api/resolve',
-        'POST /api/resolve',
-      ]);
+    const file = await client.resolveShareTarget(`${BASE_URL}/${FILE_ID}#${LINK_KEY}`);
+    const bundle = await client.resolveShareTarget(`${BASE_URL}/b/${BUNDLE_ID}#${LINK_KEY}`);
+    expect(server.paths(), 'both links should be resolved').toEqual([
+      'GET /api/info',
+      'POST /api/resolve',
+      'POST /api/resolve',
+    ]);
 
-      // Any 8 characters of the key in a request's URL, headers or body count.
-      const pieces = piecesOf(LINK_KEY, 8);
-      const leaks = server.requests.flatMap((req) => {
-        const sent = [req.url, decodeURIComponent(req.url), req.headers, req.body].join('\n');
-        return pieces.some((piece) => sent.includes(piece)) ? [`${req.method} ${req.url} ${req.body}`] : [];
-      });
-      expect(leaks, "part of the link's #fragment reached the server").toEqual([]);
-    })
-  );
+    // Any 8 characters of the key in a request's URL, headers or body count.
+    const pieces = piecesOf(LINK_KEY, 8);
+    const leaks = server.requests.flatMap((req) => {
+      const sent = [req.url, decodeURIComponent(req.url), req.headers, req.body].join('\n');
+      return pieces.some((piece) => sent.includes(piece)) ? [`${req.method} ${req.url} ${req.body}`] : [];
+    });
+    expect(leaks, "part of the link's #fragment reached the server").toEqual([]);
+
+    // Only the IDs were asked about, never the links.
+    expect(server.requests.slice(1).map((r) => JSON.parse(r.body))).toEqual([{ value: FILE_ID }, { value: BUNDLE_ID }]);
+    expect(file.target, 'where the file link opens').toBe(`/${FILE_ID}#${LINK_KEY}`);
+    expect(bundle.valid).toBe(true);
+    expect(bundle.target?.endsWith(`#${LINK_KEY}`), 'the bundle link keeps its key').toBe(true);
+  });
+
+  it('refuses a link to another server without asking this one about it', async () => {
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
+
+    const result = await client.resolveShareTarget(`https://elsewhere.example/${FILE_ID}#${LINK_KEY}`);
+    expect(result).toEqual({ valid: false, reason: 'URL must be from this server.' });
+    expect(server.paths()).not.toContain('POST /api/resolve');
+  });
+
+  it('refuses a link with no file, bundle or code in it without asking the server', async () => {
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
+
+    const result = await client.resolveShareTarget(`${BASE_URL}/about#${LINK_KEY}`);
+    expect(result.valid).toBe(false);
+    expect(server.requests).toEqual([]);
+  });
+
+  it('sends a typed code or ID as it is, without anything after a #', async () => {
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
+
+    await client.resolveShareTarget(' abcd-1234 ');
+    await client.resolveShareTarget(`${FILE_ID}#${LINK_KEY}`);
+    expect(server.requests.filter((r) => r.url.endsWith('/api/resolve')).map((r) => JSON.parse(r.body)))
+      .toEqual([{ value: 'abcd-1234' }, { value: FILE_ID }]);
+  });
+
+  // Dropgate uses no cookies. A browser reads its cookie store before any
+  // request that may carry them, and a new profile's store only loads from disk
+  // then, which once held the desktop app's first server check for over 5 s.
+  it('omits credentials from every request it makes', async () => {
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
+    const file = (name: string) => new File([new Uint8Array(CHUNK_SIZE)], name) as unknown as FileSource;
+
+    await getServerInfo({ server: BASE_URL, fetchFn: server.fetchFn });
+    await client.connect();
+    await client.resolveShareTarget(`${BASE_URL}/${FILE_ID}#${LINK_KEY}`);
+    await client.getFileMetadata(FILE_ID);
+    await client.getBundleMetadata(BUNDLE_ID);
+    await (await client.uploadFiles({ files: file('one.txt'), lifetimeMs: 60_000, encrypt: false })).result;
+    await (await client.uploadFiles({ files: [file('one.txt'), file('two.txt')], lifetimeMs: 60_000, encrypt: false })).result;
+    await client.downloadFiles({ fileId: FILE_ID });
+    await client.downloadFiles({ bundleId: BUNDLE_ID, asZip: true, onData: () => {} });
+    const cancelled = await client.uploadFiles({ files: file('three.txt'), lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 } });
+    server.onChunk = () => cancelled.cancel();
+    await cancelled.result.catch(() => {});
+    // cancel() tells the server without waiting for it.
+    await expect.poll(() => server.paths()).toContain('POST /upload/cancel');
+
+    const paths = new Set(server.paths());
+    for (const path of [
+      'GET /api/info', 'POST /api/resolve', `GET /api/file/${FILE_ID}/meta`, `GET /api/bundle/${BUNDLE_ID}/meta`,
+      'POST /upload/init', 'POST /upload/chunk', 'POST /upload/complete', 'POST /upload/init-bundle',
+      'POST /upload/complete-bundle', `GET /api/file/${FILE_ID}`, `POST /api/bundle/${BUNDLE_ID}/downloaded`,
+      'POST /upload/cancel',
+    ]) {
+      expect(paths.has(path), `the test should make ${path}`).toBe(true);
+    }
+    expect(
+      server.requests.filter((r) => r.credentials !== 'omit').map((r) => `${r.method} ${new URL(r.url).pathname}: ${r.credentials}`),
+      'requests that could carry cookies'
+    ).toEqual([]);
+  });
 });

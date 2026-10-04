@@ -101,7 +101,7 @@ For each chunk:
 
 The encryption key is appended to the download URL as a fragment identifier (`#<keyBase64>`). URL fragments are not included in HTTP requests and are therefore invisible to the server and any intermediate proxies.
 
-**One exception:** pasting a full encrypted link into the Web UI's "enter a sharing code" box, or passing one to the core library's `resolveShareTarget()`, sends the whole link, including the key, to the server in the body of `POST /api/resolve`. The server only uses the path and does not store or log the value, but it does receive it. To open an encrypted link, paste it into the browser's address bar instead.
+A whole encrypted link pasted into the Web UI's "enter a sharing code" box, or passed to the core library's `resolveShareTarget()`, is read on the device. Only the file or bundle ID in its path is sent to `POST /api/resolve`; the key after the `#` never is, and the download page then opens with the key still on its address. A link to another server is refused without asking this one.
 
 ### 4.6 Secure Context Requirement
 

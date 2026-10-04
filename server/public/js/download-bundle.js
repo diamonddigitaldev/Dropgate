@@ -159,7 +159,7 @@ async function downloadSingleFile(index, dlBtn) {
   // For plaintext without streaming, check file existence first then fall back to direct download
   if (!bundleState.isEncrypted && !canStream) {
     try {
-      const metaRes = await fetch(`/api/file/${fileId}/meta`);
+      const metaRes = await fetch(`/api/file/${fileId}/meta`, { credentials: 'omit' });
       if (!metaRes.ok) {
         if (fileProgressText) {
           fileProgressText.textContent = metaRes.status === 404
@@ -268,6 +268,7 @@ async function downloadAllAsZip() {
     try {
       await fetch(`/api/bundle/${bundleState.bundleId}/downloaded`, {
         method: 'POST',
+        credentials: 'omit',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
       });

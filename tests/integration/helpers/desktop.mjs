@@ -120,19 +120,12 @@ export class DesktopApp {
      * upload runs in), once it has finished setting itself up (window:ready). Until
      * then it may still be filling in its saved settings over what a test types,
      * and its buttons may do nothing.
-     *
-     * It also waits for the app's cookie store to load. Every request reads it
-     * first, and it only starts loading from disk at the first one. With a new
-     * profile on Windows runners that has taken over 5 s, as long as the app waits
-     * for the server when Test is clicked, so Test failed with the request never
-     * sent. Asking the main process for the cookies starts the load, and waits.
      */
     async window() {
         const window = await this.app.firstWindow();
         const id = await (await this.app.browserWindow(window)).evaluate((win) => win.id);
         await expect.poll(() => this.eventsOf('window-ready').some((e) => e.id === id),
             { message: 'whether the window has finished setting itself up', timeout: 15_000 }).toBe(true);
-        await this.app.evaluate(({ session }) => session.defaultSession.cookies.get({}).then(() => {}));
         return window;
     }
 

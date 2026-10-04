@@ -218,6 +218,9 @@ function makeAbortSignal(parentSignal, timeoutMs) {
     }
   };
 }
+function withoutCredentials(fetchFn) {
+  return (input, init) => fetchFn(input, { ...init, credentials: "omit" });
+}
 async function fetchJson(fetchFn, url, opts = {}) {
   const { timeoutMs, signal, ...rest } = opts;
   const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
@@ -949,6 +952,42 @@ var StreamingZipWriter = class {
     await this.pendingWrites;
   }
 };
+
+// src/utils/share-link.ts
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function parseShareInput(value) {
+  const raw = String(value ?? "").trim();
+  const hashAt = raw.indexOf("#");
+  const before = hashAt === -1 ? raw : raw.slice(0, hashAt);
+  const after = hashAt === -1 ? "" : raw.slice(hashAt + 1);
+  const secret = after ? after : void 0;
+  if (!/^https?:\/\//i.test(before)) {
+    const locator2 = before.replace(/\s+/g, "");
+    return locator2 ? { locator: locator2, ...secret ? { secret } : {} } : null;
+  }
+  let url;
+  try {
+    url = new URL(before);
+  } catch {
+    return null;
+  }
+  let path;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    return null;
+  }
+  let locator = null;
+  if (path.startsWith("/p2p/")) {
+    locator = path.slice("/p2p/".length).replace(/\s+/g, "").toUpperCase();
+  } else if (path.startsWith("/b/")) {
+    locator = path.slice("/b/".length);
+  } else {
+    locator = path.slice(1);
+  }
+  if (!locator || !path.startsWith("/p2p/") && !UUID_RE.test(locator)) return null;
+  return { locator, linkHost: url.host, ...secret ? { secret } : {} };
+}
 
 // src/p2p/utils.ts
 function isLocalhostHostname(hostname) {
@@ -2082,10 +2121,11 @@ function estimateTotalUploadSizeBytes(fileSizeBytes, totalChunks, isEncrypted) {
 }
 async function getServerInfo(opts) {
   const { server, timeoutMs = 5e3, signal, fetchFn: customFetch } = opts;
-  const fetchFn = customFetch || getDefaultFetch();
-  if (!fetchFn) {
+  const givenFetch = customFetch || getDefaultFetch();
+  if (!givenFetch) {
     throw new DropgateValidationError("No fetch() implementation found.");
   }
+  const fetchFn = withoutCredentials(givenFetch);
   const baseUrl = resolveServerToBaseUrl(server);
   try {
     const { res, json } = await fetchJson(
@@ -2122,7 +2162,7 @@ var DropgateClient = class {
     __publicField(this, "clientVersion");
     /** Chunk size in bytes for upload splitting. */
     __publicField(this, "chunkSize");
-    /** Fetch implementation used for HTTP requests. */
+    /** Fetch implementation used for HTTP requests. Every request it makes omits credentials (no cookies). */
     __publicField(this, "fetchFn");
     /** Crypto implementation for encryption operations. */
     __publicField(this, "cryptoObj");
@@ -2152,7 +2192,7 @@ var DropgateClient = class {
     if (!fetchFn) {
       throw new DropgateValidationError("No fetch() implementation found.");
     }
-    this.fetchFn = fetchFn;
+    this.fetchFn = withoutCredentials(fetchFn);
     const cryptoObj = opts.cryptoObj || getDefaultCrypto();
     if (!cryptoObj) {
       throw new DropgateValidationError("No crypto implementation found.");
@@ -2264,19 +2304,33 @@ var DropgateClient = class {
     };
   }
   /**
-   * Resolve a user-entered sharing code or URL via the server.
-   * @param value - The sharing code or URL to resolve.
+   * Resolve a user-entered sharing code or link.
+   *
+   * The input is read locally first. A link is reduced to the ID or code in
+   * its path, and only that is sent to the server, so nothing after a # (an
+   * encrypted upload's key) ever leaves the device. A link to another server
+   * is refused without asking this one. The key comes back on the end of
+   * `target`, ready to open.
+   *
+   * @param value - The sharing code or link to resolve.
    * @param opts - Optional timeout and abort signal.
    * @returns The resolved share target information.
    * @throws {DropgateProtocolError} If the share lookup fails.
    */
   async resolveShareTarget(value, opts) {
     const { timeoutMs = 5e3, signal } = opts ?? {};
+    const input = parseShareInput(value);
+    if (!input) {
+      return { valid: false, reason: "Unrecognised sharing link." };
+    }
     const compat = await this.connect(opts);
     if (!compat.compatible) {
       throw new DropgateValidationError(compat.message);
     }
     const { baseUrl } = compat;
+    if (input.linkHost !== void 0 && input.linkHost !== new URL(baseUrl).host) {
+      return { valid: false, reason: "URL must be from this server." };
+    }
     const { res, json } = await fetchJson(
       this.fetchFn,
       `${baseUrl}/api/resolve`,
@@ -2288,14 +2342,18 @@ var DropgateClient = class {
           "Content-Type": "application/json",
           Accept: "application/json"
         },
-        body: JSON.stringify({ value })
+        body: JSON.stringify({ value: input.locator })
       }
     );
     if (!res.ok) {
       const msg = (json && typeof json === "object" && "error" in json ? json.error : null) || `Share lookup failed (status ${res.status}).`;
       throw new DropgateProtocolError(msg, { details: json });
     }
-    return json || { valid: false, reason: "Unknown response." };
+    const result = json || { valid: false, reason: "Unknown response." };
+    if (result.valid && result.target && input.secret && (result.type === "file" || result.type === "bundle")) {
+      return { ...result, target: `${result.target}#${input.secret}` };
+    }
+    return result;
   }
   /**
    * Fetch metadata for a single file from the server.

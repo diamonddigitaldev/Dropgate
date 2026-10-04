@@ -148,7 +148,11 @@ export interface ShareTargetResult {
   valid: boolean;
   /** Type of share target (e.g., 'p2p', 'file'). */
   type?: string;
-  /** Resolved target identifier. */
+  /**
+   * Where to open it, as a path on the server (e.g. '/<id>', '/b/<id>', '/p2p/<code>').
+   * When a pasted link carried a key after its #, the key is on the end of this
+   * path; it was never sent to the server.
+   */
   target?: string;
   /** Reason for invalidity if not valid. */
   reason?: string;
