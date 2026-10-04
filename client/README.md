@@ -45,11 +45,46 @@ It’s built to feel simple: pick a file, choose your options, hit upload, and s
 
 ## Installation
 
-To install Dropgate Client:
+Download the file for your OS from the latest release on the [releases page](https://github.com/diamonddigitaldev/Dropgate/releases), where `<version>` is the release's version. The app updates itself from then on, however it was installed (**Settings**, under **Update**).
 
-1. Download the latest release for your OS from the [releases page](https://github.com/diamonddigitaldev/Dropgate/releases).
-2. Extract or install the app as you would any other desktop app.
-3. Launch the client and connect to your preferred server.
+### Windows
+
+1. Download `Dropgate-Client-Setup-<version>.exe` and run it.
+2. Windows may say **"Windows protected your PC"**, as the installer isn't signed. Choose **More info**, then **Run anyway**.
+3. Choose who it's for: **Only for me** (the default, which needs no administrator), or **Anyone who uses this computer**. If Dropgate Client is already installed for everyone, as every version 3 install was, this is skipped and that copy is upgraded, so there are never two.
+4. Choose whether to add **Share with Dropgate** to the menu a file shows when it's right-clicked (ticked by default). Your choice is kept for updates.
+5. It adds a desktop shortcut, and one in the Start menu's **Diamond Digital Development** folder.
+
+To open files with the app, drop them on its desktop shortcut, or use **Share with Dropgate**. It claims no file type, so it's never any file's default. Uninstalling it (**Settings** > **Apps**) takes away everything the installer added.
+
+### Linux
+
+On Debian or Ubuntu, install the `.deb`:
+
+```bash
+sudo apt install ./Dropgate-Client-<version>.deb
+```
+
+On Fedora, install the `.rpm`:
+
+```bash
+sudo dnf install ./Dropgate-Client-<version>.rpm
+```
+
+Both install it for everyone on the computer, and add it to the applications menu and to the file manager's **Open With** for any file. They update themselves in the app, asking for your password to install each update.
+
+Or run the AppImage, which needs no installing:
+
+```bash
+chmod +x Dropgate-Client-<version>.AppImage
+./Dropgate-Client-<version>.AppImage
+```
+
+It runs for whoever runs it, and adds itself to the menu and **Open With** only through a tool such as AppImageLauncher.
+
+There's no right-click "Share with Dropgate" on Linux: use **Open With**, which adds the files to Upload.
+
+Then launch the client and connect to your server.
 
 
 ## Usage
@@ -62,17 +97,20 @@ To install Dropgate Client:
 4. **Choose your options** (E2EE is auto-applied when available, file lifetime, etc.).
 5. **Hit upload!** When it finishes, the **download link is copied to your clipboard**.
 
-**Protip (Windows):** Right-click a file and choose **"Share with Dropgate"** to upload in the background. E2EE is auto-applied when available; if not, you'll see a warning.
+Files opened with the app (**Open with**, files dropped on its icon, or opened while it's running) are added to **Upload**, every one of them.
+
+**Protip (Windows):** Right-click a file, or several, and choose **"Share with Dropgate"** to upload in the background, several files as one bundle. E2EE is auto-applied when available; if not, you'll see a warning. (On Windows 11, it's under **Show more options**.)
 
 ### Settings and updates
 
 **Settings** is at the bottom of the sidebar, and in the menu (`Ctrl+,`). Its tabs are:
 
 * **Server**: the server your uploads go to, and **Share with Dropgate**'s.
+* **Privacy**: **Keep log on disk for troubleshooting**, off by default. Turned on, the app's log is also kept in `debug.log` in its user data folder, with none of your file names, folders or links in it, to send with a bug report. Turned off, the file is deleted.
 * **Update**: the version you're running, **Check for Updates**, and whether updates download by themselves (on by default; an update downloaded is installed when you close the app). The update channel is **Stable**, **Beta** or **Alpha**: a new install starts on its own version's channel, and your choice is kept from then on. The app never offers an older version than the one you have.
 * **Credits**.
 
-The app checks GitHub for updates a few seconds after it starts, and sends nothing that identifies your installation. Its log is kept in memory, never on disk. What it stores and sends is in [Data Processing](../docs/technical/DATA-PROCESSING.md#25-dropgate-client-electron).
+The app checks GitHub for updates a few seconds after it starts, and sends nothing that identifies your installation. Its log is kept in memory, and on disk only if you turn that on. A link it copies is left out of Windows' clipboard history and cloud clipboard, since it holds the key. What it stores and sends is in [Data Processing](../docs/technical/DATA-PROCESSING.md#25-dropgate-client-electron).
 
 ### Receiving a file
 
@@ -98,7 +136,7 @@ npm ci
 npm start
 ```
 
-The app is built on [electron-kit](https://github.com/diamonddigitaldev/electron-kit), Diamond Digital Development's shared library for its desktop apps: the window and its sidebar, Settings with its Update and Credits tabs, the updater, the menu, prompts and notifications in the window, and the log. Dropgate's own parts are its Upload section, its Server tab and Share with Dropgate.
+The app is built on [electron-kit](https://github.com/diamonddigitaldev/electron-kit), Diamond Digital Development's shared library for its desktop apps: the window and its sidebar, Settings with its Update and Credits tabs, the updater, the menu, prompts and notifications in the window, and the log. Dropgate's own parts are its Upload section, its Server and Privacy tabs, and Share with Dropgate.
 
 It runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`src/dropgate-core.js`](src/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the app runs and packages without building core first. Don't edit it: change core's source and build it again ([Building and Testing](../packages/dropgate-core/README.md#building-and-testing)). GitHub Actions fails if it isn't core's build.
 
@@ -111,9 +149,9 @@ To build the client for your platform:
 npm run build
 ```
 
-Distributable binaries will appear in the `dist` folder: the NSIS installer on Windows, or an AppImage, a `.deb` and a `.rpm` on Linux. The `.rpm` needs `rpmbuild`, from the `rpm` package on Debian and Ubuntu, or `rpm-build` on Fedora.
+The build config is [`electron-builder.cjs`](electron-builder.cjs), made by electron-kit's `config()`: its shared base, the installer that asks who it's for and about the right-click entry, and Linux's desktop entry. Distributable binaries will appear in the `dist` folder: the NSIS installer on Windows, or an AppImage, a `.deb` and a `.rpm` on Linux. The `.rpm` needs `rpmbuild`, from the `rpm` package on Debian and Ubuntu, or `rpm-build` on Fedora.
 
-GitHub Actions builds all four packages ([`client-build.yml`](../.github/workflows/client-build.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the app holds only what `build.files` in `package.json` keeps (the app's `src/`, and only the files of electron-kit, Bootstrap and Material Icons its pages load) and that it carries core's build as it is, and doesn't publish or upload anything. The release workflow builds them the same way, lists the files a release attaches, with the update files, `latest.yml` and `latest-linux.yml`, checked against them, and attaches them to the release from the same build. Every release has the update files, pre-releases too, since the app's Beta and Alpha channels read a pre-release's. They go up last, after every other file of the release; its dry run only lists them ([Releases](../README.md#releases)).
+GitHub Actions builds all four packages ([`client-build.yml`](../.github/workflows/client-build.yml)): the installer on Windows, and the AppImage, `.deb` and `.rpm` on Ubuntu. It lists each file with its size, checks that the app holds only what `files` in [`electron-builder.cjs`](electron-builder.cjs) keeps (the app's `src/`, and only the files of electron-kit, Bootstrap and Material Icons its pages load) and that it carries core's build as it is, and doesn't publish or upload anything. The release workflow builds them the same way, lists the files a release attaches, with the update files, `latest.yml` and `latest-linux.yml`, checked against them, and attaches them to the release from the same build. Every release has the update files, pre-releases too, since the app's Beta and Alpha channels read a pre-release's. They go up last, after every other file of the release; its dry run only lists them ([Releases](../README.md#releases)).
 
 The client shares its version with the server and core, and they're released together ([Releases](../README.md#releases)). Change it in `package.json`, `package-lock.json` and the badge at the top of this README together, or GitHub Actions fails.
 

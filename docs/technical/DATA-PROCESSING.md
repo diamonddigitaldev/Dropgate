@@ -79,9 +79,12 @@ The client's settings are kept by `electron-store` in `config.json` in its user 
 | **Lifetime preference** (value + unit) | Yes | `config.json` | Remembers the user's preferred file lifetime, which **Share with Dropgate** uses too. | On user input. | On user change. Uninstalling leaves it in place. |
 | **Max downloads preference** | Yes | `config.json` | Remembers the user's preferred download limit, which **Share with Dropgate** uses too. | On user input. | On user change. Uninstalling leaves it in place. |
 | **Update preferences** (download automatically, update channel) | Yes | `config.json` | **Settings**, under **Update**. The channel starts as the running build's own (Stable, Beta or Alpha) and is then the user's choice. | On the first launch, and on user change. | On user change. Uninstalling leaves them in place. |
-| **Whether the navigation rail is collapsed**, and whether to keep the log on disk | Yes | `config.json` | Remembers how the window was left, and the log setting (off; see §8.6). | On user change. | On user change. Uninstalling leaves them in place. |
+| **Whether the navigation rail is collapsed**, and whether to keep the log on disk | Yes | `config.json` | Remembers how the window was left, and **Keep log on disk for troubleshooting** (**Settings**, under **Privacy**; off; see §8.6). | On user change. | On user change. Uninstalling leaves them in place. |
 | **Window bounds** (x, y, width, height) | Yes | `config.json` | Restores window position and size between sessions. | On window move/resize. | Never deleted automatically. Uninstalling leaves it in place. |
-| **Log** | In memory | The app's memory | Troubleshooting. The run's last 1,000 lines, redacted before they're kept (see §8.6). Nothing is written to disk. | As the app runs. | When the app quits. A `debug.log` an earlier version wrote is deleted when the app starts. |
+| **Log** | In memory; on disk only if the user turns it on | The app's memory; `debug.log` in the user data directory | Troubleshooting. The run's last 1,000 lines, redacted before they're kept (see §8.6). | As the app runs; the file when the setting is turned on. | When the app quits; the file as soon as the setting is turned off, and at a launch with it off. A `debug.log` an earlier version wrote is deleted when the app starts. |
+| **The download link, on the clipboard** | Until something else is copied | The system clipboard | Every successful upload's link is copied, as is the link when **Copy** is chosen. It holds an encrypted upload's key, so it's copied marked to be left out of Windows' clipboard history and cloud clipboard (and by apps that watch the clipboard), and out of KDE's clipboard history on Linux. | When an upload finishes, or on **Copy**. | When the clipboard is next written to. Other clipboard managers on Linux may still keep it. |
+| **Notifications** | By the OS | The OS's notification history | **Share with Dropgate** says what it's doing in notifications, which say how many files ("Uploading 3 files…"), never which. | During a background upload. | As the OS clears its notifications. |
+| **The installer's choices** (Windows) | Yes | The registry, in the install's own key (`Software\<app's ID>`) | Whether "Share with Dropgate" was added to the right-click menu: one value, so an update keeps the choice. Who it's installed for is the install's location (only for you, or everyone). Nothing about the person. | When the app is installed. | When it's uninstalled, with the right-click entry. |
 | **Update-check ID** | **No** | — | The app sends a fixed value, the same for every installation, in place of an ID, and never makes or keeps one (see [§9.3](#93-github-dropgate-client-update-checks)). An `.updaterId` file written by version 3 is deleted when the app starts, and never read or sent. | — | — |
 | **Spell-check dictionaries** | **No** | — | The app has no spell checking, so it downloads no dictionaries. (On Linux, Electron would otherwise download them from Google as the app starts.) | — | — |
 | **Update downloads** | Yes, until installed | The user's cache folder (`dropgate-client-updater`) | An update the app has downloaded, waiting to be installed when the app closes. | When an update is downloaded. | Replaced by the next update. |
@@ -326,13 +329,18 @@ Dropgate writes logs to stdout/stderr. Whether these logs are persisted, rotated
 
 ### 8.6 Dropgate Client Log
 
-The desktop client keeps its log in memory: the run's last 1,000 lines, which go when it quits. Nothing is written to disk. Every line is redacted before it's kept:
+The desktop client keeps its log in memory: the run's last 1,000 lines, which go when it quits. Nothing is written to disk unless the user turns on **Keep log on disk for troubleshooting** (**Settings**, under **Privacy**; off by default):
+
+- **Turned on,** the run so far is written to `debug.log` in the user data directory, and each line after it is added. It holds at most 2,000 lines after the run's first line, the newest kept. At the next launch, still on, it starts again.
+- **Turned off,** `debug.log` is deleted straight away. At a launch with it off, one an earlier run kept is deleted too.
+
+The client's own lines never name the files it's given or where they are: it logs how many files it was opened with, how an upload finished, and an error's code, never its message. On top of that, every line is redacted before it's kept:
 
 - A file's path keeps only its file name: `C:\Users\you\Documents\report.pdf` becomes `…\report.pdf`, and a Linux path the same.
 - A URL keeps its scheme, host and path, and loses its query, its fragment (where an encrypted upload's key is) and any user name.
 - Errors are kept as their stack traces, redacted the same way.
 
-The log never holds file contents or encryption keys. A `debug.log` an earlier version wrote in the user data directory is deleted when the client starts.
+The log never holds file contents or encryption keys. A `debug.log` an earlier version wrote in the user data directory is deleted when the client starts, unless the setting is on.
 
 ---
 

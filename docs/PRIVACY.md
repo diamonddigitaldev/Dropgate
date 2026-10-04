@@ -88,7 +88,9 @@ File sizes and capacity values may appear in logs because they’re necessary fo
 
 ## 🖥️ The desktop app
 
-The Dropgate Client keeps its log **in memory** and writes nothing to disk. Each line is redacted before it's kept: a file's path keeps only its file name, and a link loses its query and its `#` fragment, where an encrypted upload's key is. The log goes when the app quits, and a `debug.log` an earlier version left behind is deleted when it starts.
+The Dropgate Client keeps its log **in memory** and writes nothing to disk, unless you turn on **Keep log on disk for troubleshooting** (**Settings**, under **Privacy**), to send it with a bug report; turned off, the file is deleted at once. The log never names your files or their folders, and each line is redacted before it's kept besides: a file's path keeps only its file name, and a link loses its query and its `#` fragment, where an encrypted upload's key is. The log goes when the app quits, and a `debug.log` an earlier version left behind is deleted when it starts.
+
+A link it copies to the clipboard is marked to be left out of Windows' clipboard history and cloud clipboard, and out of KDE's history on Linux, since it holds the key. Its notifications say how many files it's uploading, never which. On Windows, the installer keeps one choice (whether you added "Share with Dropgate" to the right-click menu), so updates keep it; uninstalling removes it.
 
 It checks GitHub for updates, and sends nothing that identifies the installation: the update library's install ID is replaced with a fixed value, the same for everyone, no ID is made or kept, and the one version 3 kept is deleted. It downloads no spell-check dictionaries.
 
