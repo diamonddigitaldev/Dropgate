@@ -21,8 +21,12 @@ textarea,
 
 /* ── Upload ──────────────────────────────────────────────────────────────── */
 
+/* Sideways, nothing scrolls: the lifetime and downloads row is a Bootstrap .row,
+   whose negative margins reach past the column once the window is narrow, as
+   Bootstrap's gutters say to clip on the parent. */
 .upload-view {
     overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .upload-column,

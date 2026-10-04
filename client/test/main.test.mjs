@@ -61,6 +61,9 @@ test('a link is copied kept out of the clipboard\'s history and sync, and notifi
     }
     assert.match(main, /clipboard\.write\(\[new ClipboardItem\(item\)\]\)/, 'the link and its formats are written at once');
     assert.match(renderer, /api\.copyLink\(/, 'the page\'s Copy button copies through main');
+    // The window's title, which the taskbar shows, gives the step and the percentage, never the progress text with its file name.
+    assert.doesNotMatch(main, /setTitle\([^;]*progressData\.text/);
+    assert.match(main, /setTitle\(`\$\{APP_NAME\} — \$\{progressData\.step\}`\)/);
     // Each notification's body is a count, never a name.
     for (const [, body] of main.matchAll(/showNotification\('[^']+', ([^)]+)\)/g)) {
         assert.doesNotMatch(body, /basename|\.name\b|filePath/, body);

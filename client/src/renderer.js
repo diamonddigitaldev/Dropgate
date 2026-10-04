@@ -93,6 +93,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         const copyBtn = $('copy-btn');
         const keepLogSwitch = $('keep-log-on-disk');
 
+        // Share with Dropgate is Windows' right-click entry: elsewhere, the Server tab doesn't mention it.
+        if (!navigator.userAgent.includes('Windows')) $('server-help').textContent = 'Uploads go to this server.';
+
         let serverCapabilities = null;
         let selectedFiles = [];
         /** @type {{compatible:boolean, message?:string}} */
@@ -373,10 +376,25 @@ document.addEventListener('DOMContentLoaded', async () => {
                 kit.ui.toast(`Skipped ${kit.format.countOf(skipped, 'empty file')}.`, { type: 'warning' });
             }
 
-            if (valid.length === 0) return;
+            // A file already in the list isn't added twice: by its path, or, picked with
+            // Select Files, by its name, size and date.
+            const keyOf = (f) => (f instanceof LazyFile ? `path:${f.filePath}` : `pick:${f.name}:${f.size}:${f.lastModified}`);
+            const listed = new Set(selectedFiles.map(keyOf));
+            const fresh = valid.filter((f) => {
+                const key = keyOf(f);
+                if (listed.has(key)) return false;
+                listed.add(key);
+                return true;
+            });
+            const repeated = valid.length - fresh.length;
+            if (repeated > 0) {
+                kit.ui.toast(`Skipped ${kit.format.countOf(repeated, 'file')} already in the list.`, { type: 'warning' });
+            }
+
+            if (fresh.length === 0) return;
 
             // Append to existing selection
-            selectedFiles = [...selectedFiles, ...valid];
+            selectedFiles = [...selectedFiles, ...fresh];
             updateFileListUI();
             linkSection.classList.add('d-none');
 
@@ -530,6 +548,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                                 ? `${evt.text} — ${evt.currentFileName}`
                                 : evt.text;
                         }
+                        // The step alone, with no file name, for the window's title.
+                        if (evt?.text) payload.step = evt.text;
                         if (evt?.percent !== undefined) payload.percent = evt.percent;
                         if (Object.keys(payload).length) api.uploadProgress(payload);
                     },

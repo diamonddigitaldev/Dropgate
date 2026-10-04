@@ -80,7 +80,7 @@ chmod +x Dropgate-Client-<version>.AppImage
 ./Dropgate-Client-<version>.AppImage
 ```
 
-It runs for whoever runs it, and adds itself to the menu and **Open With** only through a tool such as AppImageLauncher.
+It runs for whoever runs it, and adds itself to the menu and **Open With**, and shows its own icon in the taskbar or dock, only once a tool such as AppImageLauncher or Gear Lever has integrated it.
 
 There's no right-click "Share with Dropgate" on Linux: use **Open With**, which adds the files to Upload.
 
@@ -97,7 +97,7 @@ Then launch the client and connect to your server.
 4. **Choose your options** (E2EE is auto-applied when available, file lifetime, etc.).
 5. **Hit upload!** When it finishes, the **download link is copied to your clipboard**.
 
-Files opened with the app (**Open with**, files dropped on its icon, or opened while it's running) are added to **Upload**, every one of them.
+Files opened with the app (**Open with**, files dropped on its icon, or opened while it's running) are added to **Upload**, every one of them; a file already in the list isn't added twice. On a Wayland desktop (such as GNOME's), a file opened while the app is running is added, but the desktop may only mark the app's icon as wanting attention instead of bringing its window forward.
 
 **Protip (Windows):** Right-click a file, or several, and choose **"Share with Dropgate"** to upload in the background, several files as one bundle. E2EE is auto-applied when available; if not, you'll see a warning. (On Windows 11, it's under **Show more options**.)
 

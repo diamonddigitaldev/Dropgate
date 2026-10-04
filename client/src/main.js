@@ -228,12 +228,13 @@ kit.ipc.handle(IPC.UPLOAD_PROGRESS, (event, progressData) => {
     if (main) {
         main.webContents.send(IPC.UPLOAD_STATUS, { type: 'progress', data: progressData });
 
-        // Update window title and taskbar progress
+        // Update window title and taskbar progress. The taskbar and window
+        // switchers show the title, so it gives the step, never a file name.
         if (progressData.percent !== undefined) {
             main.setTitle(`${APP_NAME} — Uploading ${progressData.percent.toFixed(0)}%`);
             main.setProgressBar(progressData.percent / 100);
-        } else if (progressData.text) {
-            main.setTitle(`${APP_NAME} — ${progressData.text}`);
+        } else if (progressData.step) {
+            main.setTitle(`${APP_NAME} — ${progressData.step}`);
         }
     }
 });

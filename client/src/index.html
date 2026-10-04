@@ -87,7 +87,8 @@
             <button class="btn btn-outline-secondary" type="button" id="test-connection-btn">Test</button>
         </div>
         <div id="connection-status" class="form-text reserved"></div>
-        <p class="form-text">Uploads go to this server, and so does Share with Dropgate.</p>
+        <!-- renderer.js leaves out Share with Dropgate where there's none (Linux). -->
+        <p class="form-text" id="server-help">Uploads go to this server, and so does Share with Dropgate.</p>
     </div>
 
     <!-- Settings > Privacy, moved into its tab by renderer.js: the kit's keepLogOnDisk, off by default. -->

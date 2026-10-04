@@ -39,6 +39,17 @@ test('a first launch with several files adds them all, and so does a second laun
     await expect(listed(window), 'Upload, after a second launch with two more').toHaveText(['a report.bin', 'ünïcode notes.bin', 'scan 3.bin', 'scan 4.bin', 'scan 5.bin']);
 });
 
+test('a file already in the list isn\'t added again, and the app says so', async ({ desktop, secrets }) => {
+    const [first, second] = filesFor(desktop, secrets, ['Already here.bin', 'New one.bin']);
+    const app = await desktop.launch(first);
+    const window = await app.window();
+    await expect(listed(window)).toHaveText(['Already here.bin']);
+
+    expect(await desktop.launchAgain(first, second)).toBe(0);
+    await expect(listed(window), 'Upload, after the same file and a new one').toHaveText(['Already here.bin', 'New one.bin']);
+    await expect(window.getByText('Skipped 1 file already in the list.'), 'the toast').toBeVisible();
+});
+
 test('opened from Settings, the app shows Upload with the files it was given', async ({ desktop, secrets }) => {
     const [file] = filesFor(desktop, secrets, ['Shown on Upload.bin']);
     const app = await desktop.launch();
