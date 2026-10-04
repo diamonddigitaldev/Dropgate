@@ -81,7 +81,19 @@ If clients see “Too many requests”:
 - Increase `RATE_LIMIT_MAX_REQUESTS` or `RATE_LIMIT_WINDOW_MS`.
 - Or disable rate limiting by setting both to `0`.
 
-## 7) Still stuck?
+## 7) The desktop app
+
+**To send its log with a bug report**
+- Turn on **Keep log on disk for troubleshooting** in **Settings**, under **Privacy**, and do what went wrong again. The log is `debug.log` in the app's user data folder (`%APPDATA%\dropgate-client` on Windows, `~/.config/dropgate-client` on Linux). It holds none of your file names, folders or links. Turn the setting off afterwards, and the file is deleted.
+
+**A `.*` key left in the registry after upgrading from version 3 (Windows)**
+- Version 3, installed for all users, registered an association for a literal `.*` extension, which never did anything, and its uninstaller leaves that key behind. Nothing reads it. To remove it, from a Command Prompt run as administrator:
+
+  ```
+  reg delete "HKLM\Software\Classes\.*" /f
+  ```
+
+## 8) Still stuck?
 
 When asking for help, include:
 - Your `GET /api/info` output
