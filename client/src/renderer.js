@@ -58,6 +58,13 @@ class LazyFile {
 const BUSY_REASON = 'An upload is in progress.';
 
 document.addEventListener('DOMContentLoaded', async () => {
+    // The files the app is opened with (#93): "Open with", files dropped on its
+    // icon, a second launch. The kit can push them while the page is still
+    // setting itself up, so they wait for it.
+    const opened = [];
+    let addOpened = null;
+    kitApi.onFilesOpened((paths) => (addOpened ? addOpened(paths) : opened.push(...paths)));
+
     try {
         // --- DOM Element References ---
         const $ = (id) => document.getElementById(id);
@@ -84,6 +91,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const linkSection = $('link-section');
         const downloadLinkInput = $('download-link');
         const copyBtn = $('copy-btn');
+        const keepLogSwitch = $('keep-log-on-disk');
 
         let serverCapabilities = null;
         let selectedFiles = [];
@@ -98,7 +106,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         const shell = kit.ui.mountShell({
             title: 'Dropgate Client',
             sections: [{ view: 'upload', label: 'Upload', icon: 'upload_file', element: uploadView }],
-            settingsTabs: [{ id: 'server', label: 'Server', render: (pane) => pane.append($('server-settings')) }],
+            settingsTabs: [
+                { id: 'server', label: 'Server', render: (pane) => pane.append($('server-settings')) },
+                { id: 'privacy', label: 'Privacy', render: (pane) => pane.append($('privacy-settings')) },
+            ],
             credits: { logo: 'img/dropgate.png' },
             // Restart Now asks first while an upload runs here, or in a hidden window (Share with Dropgate).
             busy: async () => (uploading || await api.isUploading() ? BUSY_REASON : null),
@@ -159,6 +170,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             fileLifetimeValueInput.value = 0;
         }
         maxDownloadsValue.value = settings.maxDownloads;
+        // The kit's own setting: on, the redacted log is kept in debug.log too; off, that file is deleted.
+        keepLogSwitch.checked = settings.keepLogOnDisk;
+        keepLogSwitch.addEventListener('change', () => kitApi.setSettings({ keepLogOnDisk: keepLogSwitch.checked }));
 
         // Create initial client with loaded server URL
         createClient(serverUrlInput.value.trim());
@@ -250,10 +264,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         });
 
-        copyBtn.addEventListener('click', () => {
-            downloadLinkInput.select();
-            document.execCommand('copy');
-            kit.ui.toast('Link copied.', { type: 'success' });
+        // Copied by main, kept out of the clipboard's history and sync: the link holds the key.
+        copyBtn.addEventListener('click', async () => {
+            try {
+                await api.copyLink(downloadLinkInput.value);
+                kit.ui.toast('Link copied.', { type: 'success' });
+            } catch {
+                kit.ui.toast("Couldn't copy the link.", { type: 'danger' });
+            }
         });
 
         // --- IPC Listeners (Communication from Main Process) ---
@@ -326,6 +344,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         /** Files dropped on Upload, by path: main checks each, and hands over the files. */
         async function addPaths(paths) {
             if (uploading || !uploadsAllowed) return;
+            const { files, folders } = await api.addFiles(paths);
+            if (folders > 0) kit.ui.toast(`Skipped ${kit.format.countOf(folders, 'folder')}: folders can't be uploaded.`, { type: 'warning' });
+            handleFiles(files.map((f) => new LazyFile(f.filePath, f.name, f.size)));
+        }
+
+        /** Files the app was opened with: added to Upload, as Open File's are, and shown there. */
+        async function addOpenedPaths(paths) {
+            if (uploading) {
+                kit.ui.toast(`Couldn't add ${kit.format.countOf(paths.length, 'file')}: an upload is running.`, { type: 'warning' });
+                return;
+            }
+            shell.showView('upload');
             const { files, folders } = await api.addFiles(paths);
             if (folders > 0) kit.ui.toast(`Skipped ${kit.format.countOf(folders, 'folder')}: folders can't be uploaded.`, { type: 'warning' });
             handleFiles(files.map((f) => new LazyFile(f.filePath, f.name, f.size)));
@@ -875,6 +905,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (!uploading) actions.update({ percent: 0 });
             }, 3000);
         }
+
+        // From now on the files the app is opened with go straight in; any that came early, now.
+        addOpened = (paths) => addOpenedPaths(paths);
+        if (opened.length > 0) addOpened(opened.splice(0));
 
         await shell.ready;
         await api.rendererReady();

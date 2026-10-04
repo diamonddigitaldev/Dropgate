@@ -1,7 +1,7 @@
 name: Client build
 
 # The desktop app's build on one platform, as CI and the release workflow run
-# it: the packages from the "build" config in client/package.json, listed and
+# it: the packages from the config in client/electron-builder.cjs, listed and
 # checked. Nothing is published, and nothing is uploaded as a workflow artifact:
 # on a public repository, anyone signed in could download it.
 #
@@ -89,7 +89,7 @@ jobs:
           fi
           rpmbuild --version
 
-      # Builds this platform's targets from the "build" config in package.json.
+      # Builds this platform's targets from electron-builder.cjs (the kit's config()).
       # Nothing is published, and no token is passed to it.
       - name: Build the packages
         run: npx --no-install electron-builder ${{ runner.os == 'Windows' && '--win' || '--linux' }} --publish never
@@ -113,7 +113,30 @@ jobs:
           dpkg-deb --info dist/*.deb
           rpm -qip dist/*.rpm
 
-      # package.json's build.files is an allowlist: the app's own src/, and only
+      # The kit's config() writes the .desktop file: Dropgate is in Open With
+      # for any file (application/octet-stream), gets every file it's opened
+      # with (%F), and its window matches the entry (desktopName, StartupWMClass).
+      - name: Check the .desktop file in the .deb and .rpm
+        if: runner.os == 'Linux'
+        run: |
+          name=com.diamonddigitaldev.dropgateclient
+          entry=usr/share/applications/$name.desktop
+          rpm -qlp dist/*.rpm | grep -x "/$entry"
+          dir=$(mktemp -d)
+          dpkg-deb -x dist/*.deb "$dir"
+          cat "$dir/$entry"
+          grep -x "MimeType=application/octet-stream;" "$dir/$entry"
+          grep -E '^Exec=.* %F$' "$dir/$entry"
+          grep -x "StartupWMClass=$name" "$dir/$entry"
+          grep -x "Categories=Network;" "$dir/$entry"
+          node -e '
+            const asar = require("@electron/asar");
+            const pkg = JSON.parse(asar.extractFile(process.argv[1], "package.json").toString());
+            if (pkg.desktopName !== process.argv[2] + ".desktop") { console.log(`::error::The packed package.json has desktopName ${pkg.desktopName}.`); process.exit(1); }
+          ' "$dir/opt/Dropgate Client/resources/app.asar" "$name"
+          echo "The .desktop file and desktopName match the appId."
+
+      # electron-builder.cjs's files is an allowlist: the app's own src/, and only
       # the files of the kit, Bootstrap and Material Icons the pages load (the
       # other packages are what electron-store and electron-updater need). This
       # lists what the packaged app holds outside node_modules, and those three
@@ -136,7 +159,7 @@ jobs:
           unexpected=$( (grep -vE "$own" "$list"; grep -E '^/node_modules/(@diamonddigitaldev|bootstrap|material-icons)(/|$)' "$list" | grep -vE "$kit|$bootstrap|$icons") || true)
           if [ -n "$unexpected" ]; then
             echo
-            echo "Outside the allowlist in client/package.json:"
+            echo "Outside the allowlist in client/electron-builder.cjs:"
             echo "$unexpected"
             exit 1
           fi

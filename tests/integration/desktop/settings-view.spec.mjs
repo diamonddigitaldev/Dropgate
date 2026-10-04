@@ -1,5 +1,5 @@
 // The desktop app's Settings view, which is electron-kit's: Dropgate's own
-// Server tab, then Update, then Credits last. The Update tab's preferences are
+// Server and Privacy tabs, then Update, then Credits last. The Update tab's preferences are
 // kept across a restart, and Credits shows the app's logo. The updater itself
 // only runs in a packaged app (desktop/updates.spec.mjs).
 //
@@ -22,7 +22,7 @@ test('Settings has Dropgate\'s Server tab, then Update, then Credits, last, with
     let window = await app.window();
 
     const update = await openSettings(window, 'Update');
-    expect(await window.getByRole('tab').allTextContents(), 'the Settings tabs').toEqual(['Server', 'Update', 'Credits']);
+    expect(await window.getByRole('tab').allTextContents(), 'the Settings tabs').toEqual(['Server', 'Privacy', 'Update', 'Credits']);
     const automatic = update.getByRole('switch', { name: 'Download updates automatically' });
     await expect(automatic, 'automatic downloads, on a new profile').toBeChecked();
     // Run from source, a 3.x build is a stable one.
@@ -65,4 +65,41 @@ test('keeps no log on disk by default, through an upload and a restart', async (
     const named = fs.readdirSync(desktop.profile, { recursive: true }).map(String).filter((name) => /debug/i.test(name));
     expect([...top, ...named], 'log files in the profile').toEqual([]);
     expect(fs.existsSync(path.join(desktop.profile, 'debug.log'))).toBe(false);
+});
+
+// 09 6.1, 6.3, 6.6 to 6.8: the debug log's switch, on Dropgate's Privacy tab. It's the kit's keepLogOnDisk.
+test('Keep log on disk for troubleshooting: off and no file by default; on, debug.log holds the run so far and none of its files or links; off, it goes at once', async ({ desktop, secrets }) => {
+    const opened = madeUpFile('Opened at launch.bin', 20_000, 33);
+    // Uploaded with the picked file, unencrypted, so the server may keep its name.
+    secrets.addFiles([opened], { storedByServer: true });
+    const app = await desktop.launch(desktop.addFile(opened));
+    const window = await app.window();
+    await desktop.setUp(window);
+    const picked = madeUpFile('Private diary.bin', 50_000, 32);
+    const link = await desktop.upload(window, [picked], { encrypted: false });
+
+    const privacy = await openSettings(window, 'Privacy');
+    const keep = privacy.getByRole('switch', { name: 'Keep log on disk for troubleshooting' });
+    await expect(keep, 'the switch, on a new profile').not.toBeChecked();
+    await expect(privacy, 'its privacy note').toContainText('none of your file names, folders or links');
+    const log = path.join(desktop.profile, 'debug.log');
+    expect(fs.existsSync(log), 'debug.log before it is turned on').toBe(false);
+
+    await keep.click();
+    await expect.poll(() => fs.existsSync(log), { message: 'whether debug.log was written' }).toBe(true);
+    const text = fs.readFileSync(log, 'utf8');
+    expect(text, "the run's banner").toMatch(/^=== Dropgate Client \S+ started at /);
+    expect(text, 'the run so far').toContain('Opening 1 file.');
+    expect(text).toContain('Upload finished: success');
+    const { hash, pathname } = new URL(link);
+    for (const secret of [opened.name, picked.name, desktop.folder, path.basename(desktop.folder), link, hash.slice(1), pathname.slice(1)].filter(Boolean)) {
+        for (const form of new Set([secret, encodeURIComponent(secret), JSON.stringify(secret).slice(1, -1)])) {
+            expect(text.toLowerCase(), 'debug.log').not.toContain(form.toLowerCase());
+        }
+    }
+    expect(await window.evaluate(() => window.kitAPI.getSettings().then((s) => s.keepLogOnDisk))).toBe(true);
+
+    await keep.click();
+    await expect.poll(() => fs.existsSync(log), { message: 'whether debug.log is still there once turned off' }).toBe(false);
+    expect(await window.evaluate(() => window.kitAPI.getSettings().then((s) => s.keepLogOnDisk))).toBe(false);
 });

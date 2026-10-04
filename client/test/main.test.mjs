@@ -13,6 +13,8 @@ const { assertAccentContrast, assertNoBareAccelerators, assertBuildExtendsKit } 
 const { SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS } = require('../src/constants.js');
 const { menuItems } = require('../src/menu.js');
 const pkg = require('../package.json');
+// The electron-builder config, from the kit's config(), as electron-builder reads it.
+const build = require('../electron-builder.cjs');
 
 const SRC = new URL('../src/', import.meta.url);
 const main = readSource('main.js');
@@ -44,11 +46,29 @@ test('the main process is the kit\'s: its name, settings, memory log, files, cre
     assert.match(options, /version: SETTINGS_SCHEMA_VERSION,/);
     assert.match(options, /obsoleteKeys: V3_STORE_KEYS,/);
     assert.match(options, /log: 'memory',/);
-    assert.match(options, /files: true,/);
+    // #93: the files it's opened with reach the page, bar a Share with Dropgate launch's, which main uploads.
+    assert.match(options, /files: \{ except: \['--upload'\] \},/);
     // As in v3, a launch for Share with Dropgate doesn't check for updates.
     assert.match(options, /updates: wasLaunchedForBackgroundTask \? \{ checkOnLaunch: false \} : \{\},/);
     assert.match(options, /openExternal: \{ allow: \['https:\/\/github\.com\/diamonddigitaldev\/Dropgate\/'\] \}/);
     assert.match(options, /donate: 'https:\/\/buymeacoff\.ee\/willtda'/);
+});
+
+test('a link is copied kept out of the clipboard\'s history and sync, and notifications and the log never name a file (PB-D5, PB-D6)', () => {
+    assert.doesNotMatch(main + renderer, /writeText\(|execCommand\('copy'\)/, 'every copy goes through copyPrivately()');
+    for (const format of ['CanIncludeInClipboardHistory', 'CanUploadToCloudClipboard', 'ExcludeClipboardContentFromMonitorProcessing', 'x-kde-passwordManagerHint']) {
+        assert.ok(main.includes(`'${format}'`), format);
+    }
+    assert.match(main, /clipboard\.write\(\[new ClipboardItem\(item\)\]\)/, 'the link and its formats are written at once');
+    assert.match(renderer, /api\.copyLink\(/, 'the page\'s Copy button copies through main');
+    // Each notification's body is a count, never a name.
+    for (const [, body] of main.matchAll(/showNotification\('[^']+', ([^)]+)\)/g)) {
+        assert.doesNotMatch(body, /basename|\.name\b|filePath/, body);
+    }
+    // A log line gives an error's code, never its message, which can hold a path.
+    for (const [call] of main.matchAll(/kit\.log\.\w+\([^;]*;/g)) {
+        assert.doesNotMatch(call, /, (error|err)\)/, call);
+    }
 });
 
 test('the client keeps no log of its own, and has no updater, update boxes or link opener of its own', () => {
@@ -96,23 +116,37 @@ test('the main window is the kit\'s, and Share with Dropgate\'s hidden window ke
     }
 });
 
-test('the build extends the kit\'s base config, and keeps the client\'s own', () => {
-    assertBuildExtendsKit(pkg);
-    const { build } = pkg;
+test('the build is the kit\'s config(): its base, the asking installer, Open With for any file on Linux, and the client\'s own', () => {
+    assertBuildExtendsKit(build);
+    assert.ok(!Object.hasOwn(pkg, 'build'), 'package.json has no build: electron-builder would read it before electron-builder.cjs');
+    assert.ok(!fs.existsSync(new URL('../installer.nsh', import.meta.url)), 'the right-click entry is the kit\'s contextMenu');
     assert.deepEqual(build.publish, { provider: 'github', owner: 'diamonddigitaldev', repo: 'Dropgate' });
     assert.equal(build.appId, 'com.diamonddigitaldev.dropgateclient');
     // The installer's name is what its update files point at: unchanged from v3. Only it is a Setup.
     assert.equal(build.nsis.artifactName, 'Dropgate-Client-Setup-${version}.${ext}');
     assert.equal(build.artifactName, 'Dropgate-Client-${version}.${ext}');
-    assert.equal(build.nsis.include, 'installer.nsh');
     assert.ok(!build.mac, 'there\'s no macOS build');
+
+    // The kit's installer asks who it's for (only for the person, by default) and keeps an install for everyone.
+    assert.deepEqual([build.nsis.oneClick, build.nsis.perMachine, build.nsis.allowElevation], [false, false, true]);
+    // It claims no file type: v3's ext "*" registered a literal ".*" extension, so it never did anything.
+    assert.equal(JSON.stringify(build).includes('fileAssociations'), false);
+    const installer = fs.readFileSync(build.nsis.include, 'utf8');
+    assert.match(installer, /Share with Dropgate/, 'the installer asks about the right-click entry');
+    assert.match(installer, /--upload/, 'which launches the app with the file, then --upload');
+
+    // Linux: Open With for any file, every file it's opened with, and its window matching its .desktop file.
+    assert.deepEqual(build.linux.mimeTypes, ['application/octet-stream']);
+    assert.deepEqual(build.linux.executableArgs, ['%F']);
+    assert.equal(build.linux.category, 'Network');
+    assert.equal(build.extraMetadata.desktopName, `${build.appId}.desktop`);
     // The Windows app ID is the one the installer's shortcut carries, so notifications show.
     assert.match(main, new RegExp(`\\bappId: '${build.appId.replace(/\./g, '\\.')}',`));
     assert.doesNotMatch(main, /setAppUserModelId/, 'the kit sets it, from start({ appId })');
 });
 
 test('the packaged app holds what it loads: the client\'s src/, and only the kit\'s, Bootstrap\'s and Material Icons\' files the pages use', () => {
-    const { files } = pkg.build;
+    const { files } = build;
     assert.equal(files[0], 'src/**/*', 'an allowlist: the client\'s own files are its src/');
     assert.ok(!files.includes('**/*'));
     for (const out of ['testing', 'builder']) assert.ok(files.some((f) => f.startsWith('!node_modules/@diamonddigitaldev/electron-kit/') && f.includes(out)), `the kit's ${out}/`);

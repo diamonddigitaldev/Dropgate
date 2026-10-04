@@ -6,7 +6,7 @@
 // and the app quitting. Everything goes to the file named in DROPGATE_TEST_EVENTS,
 // one JSON object per line, the moment it happens:
 //   { at, pid, event: 'notification', title, body }
-//   { at, pid, event: 'clipboard', text }             the app copied text
+//   { at, pid, event: 'clipboard', text, types }      the app copied text, with these formats
 //   { at, pid, event: 'clipboard-written' }           the copy finished (or error)
 //   { at, pid, event: 'clipboard-read-back', text }   what the clipboard held after
 //                                                      (or error, if it couldn't be read)
@@ -51,11 +51,30 @@ if (!DICTIONARIES?.startsWith('http://127.0.0.1:')) {
 app.on('session-created', (created) => created.setSpellCheckerDictionaryDownloadURL(DICTIONARIES));
 app.whenReady().then(() => session.defaultSession.setSpellCheckerDictionaryDownloadURL(DICTIONARIES));
 
-const writeText = clipboard.writeText;
-clipboard.writeText = function (text, ...rest) {
-    record({ event: 'clipboard', text });
-    if (!real) return Promise.resolve();
-    const written = Promise.resolve(writeText.call(this, text, ...rest));
+// The app copies with clipboard.write([ClipboardItem]), the link and the
+// formats that keep it out of the clipboard's history in one item. Its text is
+// read back from the item (its own, never the OS clipboard's), which is
+// asynchronous, so the app's quit waits until each copy is written down.
+let reading = 0;
+app.on('will-quit', (event) => {
+    if (reading === 0) return;
+    event.preventDefault();
+    const wait = setInterval(() => {
+        if (reading > 0) return;
+        clearInterval(wait);
+        app.quit();
+    }, 10);
+});
+const write = clipboard.write;
+clipboard.write = function (items, ...rest) {
+    reading++;
+    const item = items?.[0];
+    const types = [...(item?.types ?? [])];
+    const recorded = Promise.resolve(types.includes('text/plain') ? item.getType('text/plain').then((blob) => blob.text()) : null)
+        .then((text) => record({ event: 'clipboard', text, types }), (err) => record({ event: 'clipboard', error: String(err), types }))
+        .finally(() => reading--);
+    if (!real) return recorded;
+    const written = recorded.then(() => write.call(this, items, ...rest));
     written
         .then(
             () => record({ event: 'clipboard-written' }),

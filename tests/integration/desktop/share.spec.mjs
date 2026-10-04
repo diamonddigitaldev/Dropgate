@@ -5,7 +5,7 @@
 // new launch hands the file to it instead.
 import fs from 'node:fs';
 import path from 'node:path';
-import { holdsPlaintext, madeUpFile, summary } from '../helpers/files.mjs';
+import { holdsPlaintext, madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, securityWarning, test, uploadsStarted, uploadStatus } from '../helpers/desktop.mjs';
 import { download } from '../helpers/webui.mjs';
 
@@ -24,7 +24,7 @@ async function setUpAndQuit(desktop) {
  * What a run of the app copied and showed while sharing a file, checked the
  * same way whichever way it was shared, and the link it copied.
  * @param {import('../helpers/desktop.mjs').DesktopApp} app
- * @param {string} file - The shared file's full path.
+ * @param {string | string[]} file - The shared file's full path, or every shared file's.
  */
 function expectLinkCopied(app, file) {
     const copied = app.eventsOf('clipboard');
@@ -36,14 +36,39 @@ function expectLinkCopied(app, file) {
     expect(finished.map(({ status, error }) => ({ status, error })), 'how the upload finished').toEqual([{ status: 'success' }]);
     expect(at, 'when the link was copied, next to when the upload finished').toBeGreaterThanOrEqual(finished[0].at);
 
-    // Notifications may name the file, but never where it is.
+    // The link holds the key, so it's copied marked to stay out of the clipboard's history and sync (PB-D5).
+    expect(copied[0].types, 'the formats the link was copied with').toEqual(expect.arrayContaining(['text/plain', ...PRIVATE_FORMATS]));
+
+    // Notifications say how many files, never which, nor where they are (PB-D6).
     const notifications = app.eventsOf('notification');
     for (const { title, body } of notifications) {
-        for (const where of [file, path.dirname(file)]) {
-            expect(`${title}\n${body}`, 'a notification').not.toContain(where);
+        for (const shared of [].concat(file)) {
+            for (const what of [shared, path.dirname(shared), path.basename(shared)]) {
+                expect(`${title}\n${body}`, 'a notification').not.toContain(what);
+            }
         }
     }
     return { link, notifications };
+}
+
+/** The formats that keep a copied link out of the clipboard's history and sync, on this OS. */
+const PRIVATE_FORMATS = ({
+    win32: ['CanIncludeInClipboardHistory', 'CanUploadToCloudClipboard', 'ExcludeClipboardContentFromMonitorProcessing'],
+    linux: ['x-kde-passwordManagerHint'],
+}[process.platform] ?? []).map((format) => `electron application/osclipboard;format="${format}"`);
+
+/** Open a bundle's link as someone receiving it would, and download all of it as a ZIP. */
+async function receiveBundle(page, desktop, link, files) {
+    await page.goto(desktop.receivingUrl(link));
+    await expect(page.locator('#bundle-file-count')).toHaveText(String(files.length));
+    await expect(page.locator('#bundle-encryption')).toHaveText(/end-to-end encrypted/i);
+    const zip = await download(page, page.locator('#download-all-button'));
+    await expect(page.locator('#status-title')).toHaveText(/download complete/i);
+    const entries = readZip(zip.bytes);
+    expect(entries.map((e) => e.name).sort()).toEqual(files.map((f) => f.name).sort());
+    for (const file of files) {
+        expect(summary(entries.find((e) => e.name === file.name).bytes), `${file.name} in the ZIP`).toEqual(summary(file.buffer));
+    }
 }
 
 /** Open a link as someone receiving it would, and download the one file it gives. */
@@ -113,6 +138,48 @@ test.describe('on a server with HTTPS', () => {
             'the upload the server was asked to start').toEqual([{ isEncrypted: true, lifetime: THIRTY_MINUTES }]);
 
         await receive(page, desktop, link, file, { encrypted: true });
+    });
+
+    // One launch with every file selected, as a file manager's (or a script's) is: a single hand-off,
+    // with no timing in it. Windows' own right-click entry starts one launch per file, which the app
+    // gathers for 500 ms; that part is v3's, and isn't tested on its timing.
+    test('Share with Dropgate on several files at once uploads them as one bundle, copies its one link, and quits', async ({ desktop, server, secrets, page }) => {
+        const files = [madeUpFile('Q3 figures.bin', 40_000, 23), madeUpFile('ünïcode memo.bin', 6_000_000, 24), madeUpFile('notes.bin', 3_000, 25)];
+        secrets.addFiles(files);
+        await setUpAndQuit(desktop);
+
+        const shared = files.map((file) => desktop.addFile(file));
+        const app = await desktop.launch(...shared, '--upload');
+        expect(await app.exited(), "the app's exit code").toBe(0);
+
+        const { link, notifications } = expectLinkCopied(app, shared);
+        secrets.addLink(link);
+        expect(notifications.map((n) => n.body), "the notifications' bodies").toEqual(expect.arrayContaining(['Preparing 3 files…', 'Uploading 3 files…']));
+        expect(app.eventsOf('window'), 'windows the app opened').toHaveLength(1);
+        expect(uploadsStarted(server).map(({ fileCount, isEncrypted }) => ({ fileCount, isEncrypted })),
+            'the uploads the server was asked to start').toEqual([{ fileCount: 3, isEncrypted: true }]);
+
+        await receiveBundle(page, desktop, link, files);
+    });
+
+    test('Share with Dropgate on several files while the app is open hands them all to it as one bundle', async ({ desktop, server, secrets, page }) => {
+        const files = [madeUpFile('first.bin', 30_000, 26), madeUpFile('second.bin', 31_000, 27)];
+        secrets.addFiles(files);
+        const app = await desktop.launch();
+        const window = await app.window();
+        await desktop.setUp(window, { lifetime: { value: 30, unit: 'minutes' } });
+
+        const shared = files.map((file) => desktop.addFile(file));
+        expect(await desktop.launchAgain(...shared, '--upload'), "the second launch's exit code").toBe(0);
+
+        await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });
+        const { link } = expectLinkCopied(app, shared);
+        await expect(window.locator('#download-link'), 'the link the open app shows').toHaveValue(link);
+        secrets.addLink(link);
+        expect(uploadsStarted(server).map(({ fileCount, isEncrypted }) => ({ fileCount, isEncrypted })),
+            'the uploads the server was asked to start').toEqual([{ fileCount: 2, isEncrypted: true }]);
+
+        await receiveBundle(page, desktop, link, files);
     });
 });
 

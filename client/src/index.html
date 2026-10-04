@@ -90,6 +90,15 @@
         <p class="form-text">Uploads go to this server, and so does Share with Dropgate.</p>
     </div>
 
+    <!-- Settings > Privacy, moved into its tab by renderer.js: the kit's keepLogOnDisk, off by default. -->
+    <div id="privacy-settings" class="settings-column">
+        <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" role="switch" id="keep-log-on-disk">
+            <label class="form-check-label" for="keep-log-on-disk">Keep log on disk for troubleshooting</label>
+        </div>
+        <p class="form-text">The app's log is kept in memory, and goes when the app closes. Turned on, it's also kept in a file on this computer, with none of your file names, folders or links in it, so you can send it with a bug report. Turned off, the file is deleted.</p>
+    </div>
+
     <!-- The browse button's picker. Files picked here are uploaded as they are. -->
     <input type="file" id="file-input" hidden multiple>
 

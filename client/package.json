@@ -16,48 +16,6 @@
     "type": "git",
     "url": "https://github.com/diamonddigitaldev/Dropgate"
   },
-  "build": {
-    "extends": "@diamonddigitaldev/electron-kit/builder/base.json",
-    "appId": "com.diamonddigitaldev.dropgateclient",
-    "productName": "Dropgate Client",
-    "artifactName": "Dropgate-Client-${version}.${ext}",
-    "files": [
-      "src/**/*",
-      "!src/img/*.icns",
-      "!node_modules/@diamonddigitaldev/electron-kit/{testing,builder}{,/**/*}",
-      "!node_modules/@diamonddigitaldev/electron-kit/README.md",
-      "!node_modules/bootstrap/{js,scss}{,/**/*}",
-      "!node_modules/bootstrap/dist/js{,/**/*}",
-      "!node_modules/bootstrap/dist/css/!(bootstrap.min.css)",
-      "!node_modules/material-icons/{_data,css}{,/**/*}",
-      "!node_modules/material-icons/iconfont/!(round.css|material-icons-round.woff|material-icons-round.woff2)",
-      "!node_modules/material-icons/index.d.ts"
-    ],
-    "publish": {
-      "provider": "github",
-      "owner": "diamonddigitaldev",
-      "repo": "Dropgate"
-    },
-    "win": {
-      "icon": "src/img/dropgate.ico",
-      "fileAssociations": [
-        {
-          "ext": "*",
-          "name": "All Files",
-          "role": "Viewer"
-        }
-      ]
-    },
-    "nsis": {
-      "artifactName": "Dropgate-Client-Setup-${version}.${ext}",
-      "perMachine": true,
-      "createDesktopShortcut": true,
-      "include": "installer.nsh"
-    },
-    "linux": {
-      "icon": "src/img/dropgate.png"
-    }
-  },
   "keywords": [
     "files",
     "sharing",
@@ -75,7 +33,7 @@
     "electron-builder": "^26.15.3"
   },
   "dependencies": {
-    "@diamonddigitaldev/electron-kit": "0.1.0-beta.5",
+    "@diamonddigitaldev/electron-kit": "0.1.0-beta.7",
     "bootstrap": "^5.3.8",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.8.9",

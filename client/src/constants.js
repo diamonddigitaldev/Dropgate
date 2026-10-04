@@ -25,6 +25,7 @@ const IPC = Object.freeze({
     UPLOAD_FINISHED: 'upload:finished',         // ({ status: 'success', link } | { status: 'error', error })
     UPLOAD_CANCEL: 'upload:cancel',             // () cancel the upload running, in whichever window runs it
     UPLOAD_BUSY: 'upload:busy',                 // () -> whether an upload is running anywhere, for Restart Now
+    LINK_COPY: 'link:copy',                     // (link) copy it, kept out of the clipboard's history and sync
     // Main to page.
     FILE_OPENED: 'file:opened',                 // push: { name, size, filePath }, a file picked with Open File
     FILE_OPEN_ERROR: 'file:open-error',         // push: the message, when the file picked can't be read

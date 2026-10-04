@@ -1,6 +1,7 @@
-const { app, BrowserWindow, dialog, clipboard, Notification } = require('electron');
+const { app, BrowserWindow, dialog, clipboard, ClipboardItem, Notification } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 
 const { APP_NAME, IPC, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS } = require('./constants');
 const { menuItems } = require('./menu');
@@ -24,9 +25,17 @@ const { menuItems } = require('./menu');
 //   shortcut carries, so Share with Dropgate's notifications show.
 // - Links open in the browser only on Dropgate's own pages, beside the ones
 //   the kit shows (Credits, its donate link, the repository).
+// - The files the app is opened with ("Open with", files dropped on its icon,
+//   a second launch) reach Upload as the kit's files:opened (#93), every one
+//   of them, bar a Share with Dropgate launch's, which are main's own.
+// - A link is copied to the clipboard marked to stay out of Windows'
+//   clipboard history and cloud clipboard, and out of KDE's: it holds the key
+//   (PB-D5). Notifications say how many files, never which (PB-D6).
 // Share with Dropgate (Windows' context menu) launches the app with a file's
 // path and --upload: it uploads the file in a hidden window, without opening
-// the main one, and quits once it's done.
+// the main one, and quits once it's done. Windows starts one launch per file
+// selected, so the files of every launch reaching the app within 500 ms of the
+// last are uploaded together, as one bundle; one launch can carry several.
 const wasLaunchedForBackgroundTask = process.argv.includes('--upload');
 
 const kit = require('@diamonddigitaldev/electron-kit/main').start({
@@ -39,7 +48,8 @@ const kit = require('@diamonddigitaldev/electron-kit/main').start({
         obsoleteKeys: V3_STORE_KEYS,
     },
     log: 'memory',
-    files: true,
+    // A Share with Dropgate launch's files are main's to upload (handleArgs()), not Upload's to add.
+    files: { except: ['--upload'] },
     credits: {
         lines: [
             ['Created and maintained by ', { text: 'Diamond Digital Development', href: 'https://diamonddigital.dev' }, '.'],
@@ -75,6 +85,9 @@ const authorizedFilePaths = new Set();
 // Windows launches one process per selected file; we debounce them into a single bundle.
 let batchFiles = [];
 let batchTimer = null;
+// The batch is gathered from once the app is ready, with its own launch's files
+// in it: the other launches can arrive while it's still starting.
+let readyForShares = false;
 
 // Background uploads waiting for their window's page to be ready, by window id.
 const pendingBackgroundUploads = new Map();
@@ -126,7 +139,10 @@ if (kit.primary) {
 
     kit.ready.then(() => {
         if (!wasLaunchedForBackgroundTask) createWindow();
+        readyForShares = true;
         handleArgs(process.argv);
+        // A share that reached the app while it started, from another launch.
+        scheduleBatch();
     });
 }
 
@@ -138,32 +154,39 @@ function processUploadQueue() {
     triggerBackgroundUpload(filePaths);
 }
 
-function handleArgs(argv) {
-    if (!argv.includes('--upload')) return;
-
-    // The first file in argv: past the executable, not a switch, and a file.
+/** Every file in a launch's argv: past the executable, not a switch, and a file. */
+function filesInArgs(argv) {
     const executablePath = process.execPath.toLowerCase();
-    const filePath = argv.find((arg, index) => {
+    return [...new Set(argv.filter((arg, index) => {
         if (index === 0 || arg.toLowerCase() === executablePath || arg.startsWith('-')) return false;
         try {
-            return fs.existsSync(arg) && fs.lstatSync(arg).isFile();
+            return fs.lstatSync(arg).isFile();
         } catch {
             return false;
         }
-    });
-    if (!filePath) {
+    }))];
+}
+
+function handleArgs(argv) {
+    if (!argv.includes('--upload')) return;
+
+    // Every file in it, bar one already pending or queued, so none is uploaded twice.
+    const filePaths = filesInArgs(argv).filter((filePath) =>
+        !batchFiles.includes(filePath) && !uploadQueue.some((item) => item.filePaths.includes(filePath)));
+    if (filePaths.length === 0 && batchFiles.length === 0) {
         kit.log.info('Share with Dropgate: no file to upload in the arguments.');
         return;
     }
 
-    // Check if this file is already pending or queued to prevent duplicates
-    const alreadyBatched = batchFiles.includes(filePath);
-    const alreadyQueued = uploadQueue.some(item => item.filePaths.includes(filePath));
-    if (alreadyBatched || alreadyQueued) return;
-
     // Collect files and debounce — Windows launches one process per selected
     // file, so multi-select arrivals are spaced milliseconds apart.
-    batchFiles.push(filePath);
+    batchFiles.push(...filePaths);
+    scheduleBatch();
+}
+
+/** Upload what's gathered 500 ms after the last arrival, once the app is ready. */
+function scheduleBatch() {
+    if (!readyForShares || batchFiles.length === 0) return;
     if (batchTimer) clearTimeout(batchTimer);
     batchTimer = setTimeout(() => {
         const filePaths = [...batchFiles];
@@ -174,6 +197,28 @@ function handleArgs(argv) {
             processUploadQueue();
         }
     }, BATCH_DEBOUNCE_MS);
+}
+
+/**
+ * Copy a link, marked so the clipboard's history and sync leave it out: it
+ * holds the key. Windows' clipboard history and cloud clipboard, and the apps
+ * that watch the clipboard, skip what carries these formats (Microsoft's
+ * "Cloud Clipboard and Clipboard History Formats"); KDE's Klipper skips what
+ * carries its password manager hint. It's all written at once.
+ * @param {string} link
+ */
+function copyPrivately(link) {
+    const raw = (format) => `electron application/osclipboard;format="${format}"`;
+    const item = { 'text/plain': link };
+    if (process.platform === 'win32') {
+        const no = new Blob([new Uint8Array(4)]); // a DWORD of 0
+        item[raw('CanIncludeInClipboardHistory')] = no;
+        item[raw('CanUploadToCloudClipboard')] = no;
+        item[raw('ExcludeClipboardContentFromMonitorProcessing')] = new Blob([new Uint8Array(1)]);
+    } else if (process.platform === 'linux') {
+        item[raw('x-kde-passwordManagerHint')] = new Blob(['secret']);
+    }
+    return clipboard.write([new ClipboardItem(item)]);
 }
 
 kit.ipc.handle(IPC.UPLOAD_PROGRESS, (event, progressData) => {
@@ -218,7 +263,7 @@ kit.ipc.handle(IPC.UPLOAD_FINISHED, (event, result) => {
     const isFocused = main?.isFocused() ?? false;
 
     if (result.status === 'success') {
-        clipboard.writeText(result.link).catch(err => kit.log.warn('Failed to copy link to clipboard:', err));
+        copyPrivately(result.link).catch((err) => kit.log.warn(`Couldn't copy the link to the clipboard (${err?.name ?? 'error'}).`));
         if (main) main.webContents.send(IPC.UPLOAD_STATUS, { type: 'success', data: result });
         // Show notification if main window doesn't exist or isn't focused
         if (!main || !isFocused) showNotification('Upload Successful', 'Link copied to clipboard.');
@@ -259,6 +304,12 @@ kit.ipc.handle(IPC.UPLOAD_CANCEL, () => {
     for (const win of BrowserWindow.getAllWindows()) {
         if (!win.isDestroyed()) win.webContents.send(IPC.UPLOAD_CANCEL_REQUESTED);
     }
+});
+
+// The page's Copy button: the same copy as an upload's.
+kit.ipc.handle(IPC.LINK_COPY, (_event, link) => {
+    if (typeof link !== 'string' || !/^https?:\/\//.test(link)) throw new Error('Expected a link.');
+    return copyPrivately(link);
 });
 
 // Restart Now asks first while any window, the main one or a hidden one, uploads.
@@ -325,13 +376,10 @@ kit.ipc.handle(IPC.WINDOW_READY, (event) => {
     pendingBackgroundUploads.delete(windowId);
     try {
         const files = filePaths.map(handOver);
-        const notifBody = files.length === 1
-            ? `Uploading ${files[0].name}...`
-            : `Uploading ${files.length} files...`;
-        activeUploadNotification = showNotification('Upload Started', notifBody);
+        activeUploadNotification = showNotification('Upload Started', `Uploading ${countOf(files.length, 'file')}…`);
         senderWindow.webContents.send(IPC.UPLOAD_BACKGROUND_START, { files });
     } catch (error) {
-        kit.log.error('Failed to read file for background upload:', error);
+        kit.log.error(`Couldn't read a file to share (${error?.code ?? 'error'}).`);
         showNotification('Upload Failed', 'Could not read the selected file.');
         if (!senderWindow.isDestroyed()) senderWindow.destroy();
         isUploading = false;
@@ -359,7 +407,7 @@ async function handleOpenDialog() {
     try {
         win.webContents.send(IPC.FILE_OPENED, handOver(filePath));
     } catch (error) {
-        kit.log.warn('Failed to read the selected file:', error);
+        kit.log.warn(`Couldn't read the file picked with Open File (${error?.code ?? 'error'}).`);
         win.webContents.send(IPC.FILE_OPEN_ERROR, `Could not read ${path.basename(filePath)}.`);
     }
 }
@@ -412,10 +460,7 @@ function triggerBackgroundUpload(filePaths) {
         }
     });
 
-    const notifBody = validPaths.length === 1
-        ? `Preparing ${path.basename(validPaths[0])}...`
-        : `Preparing ${validPaths.length} files...`;
-    activeUploadNotification = showNotification('Initialising Upload', notifBody);
+    activeUploadNotification = showNotification('Initialising Upload', `Preparing ${countOf(validPaths.length, 'file')}…`);
 
     backgroundWindow.loadFile(path.join(__dirname, 'index.html'));
 }
