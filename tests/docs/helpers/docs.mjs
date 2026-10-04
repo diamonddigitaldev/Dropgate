@@ -55,7 +55,7 @@ export function envMentions() {
 
 /**
  * The error codes the docs list: names in inline code in a table column headed
- * "Code" (or `code`), such as the core README's error classes.
+ * "Code" (or `code`), such as core's error classes in docs/core/errors.md.
  * @returns {{ name: string, at: string }[]}
  */
 export function errorCodeTableEntries() {

@@ -107,6 +107,6 @@ test('every error code the server, the client and core give has a row in an erro
     const listed = new Set(errorCodeTableEntries().map(({ name }) => name));
     expectNone(
         [...productErrorCodes].filter(([code]) => !listed.has(code)).map(([code, givenBy]) => `${code}, given by ${givenBy.join(', ')}`),
-        'These need a row in a table with a column headed "Code", such as the core README\'s error classes:',
+        'These need a row in a table with a column headed "Code", such as core\'s error classes in docs/core/errors.md:',
     );
 });

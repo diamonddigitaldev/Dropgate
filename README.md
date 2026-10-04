@@ -109,7 +109,7 @@ See the [server README](./server/README.md) for configuration, Docker setup, and
 
 ### Core Library
 
-See the [core README](./packages/dropgate-core/README.md) for API documentation and usage examples.
+See [core's documentation](./docs/core/README.md) for its API and usage examples.
 
 
 ## Privacy and Security Philosophy

@@ -112,7 +112,7 @@ The server shares its version with the client and core, and they're released tog
 
 ## The Web UI's Core Library
 
-The Web UI runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`public/js/dropgate-core.js`](public/js/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the server and its Docker image don't need core built first. Don't edit it: change core's source and build it again ([Building and Testing](../packages/dropgate-core/README.md#building-and-testing)). GitHub Actions fails if it isn't core's build, or if the Docker image doesn't carry it as it is.
+The Web UI runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`public/js/dropgate-core.js`](public/js/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the server and its Docker image don't need core built first. Don't edit it: change core's source and build it again ([Building and Testing](../docs/core/building-and-testing.md)). GitHub Actions fails if it isn't core's build, or if the Docker image doesn't carry it as it is.
 
 
 ## Running with Docker

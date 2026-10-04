@@ -1,0 +1,27 @@
+# P2P Consumer Responsibilities
+
+The P2P methods are **headless**. The consumer is responsible for:
+
+1. **Loading PeerJS**: Provide the `Peer` constructor to `p2pSend`/`p2pReceive`
+2. **File Writing**: Handle received chunks via `onData` callback (e.g., using streamSaver)
+3. **UI Updates**: React to callbacks (`onProgress`, `onStatus`, etc.)
+
+This design allows the library to work in any environment (browser, Electron, Node.js with WebRTC).
+
+Behaviour to account for in the current version:
+
+- **`onCancel` also fires when the connection drops.** If the data channel closes mid-transfer, the receiver gets `cancelledBy: 'sender'` and the sender gets `cancelledBy: 'receiver'`, even if nobody cancelled. Word your UI accordingly.
+- **The sender is told the transfer succeeded before `onComplete` runs.** The receiver acknowledges completion first, then calls `onComplete` without waiting for it. If closing or finalising your output fails there, the sender still reports success, so handle that error yourself.
+- **Flow control only works if `onData` waits for the write.** The receiver acknowledges a chunk when `onData` resolves. `StreamingZipWriter.writeChunk()` returns immediately and queues its output internally, so with a slow destination that queue can grow without limit.
+- **Resume is not implemented.** `onResumeRequest` is never called; an interrupted transfer has to be restarted.
+- **Security:** see [DGDTP §18](../technical/DGDTP.md#18-security-considerations) for what the P2P code and DTLS do and don't protect against.
+
+## Large File Support
+
+The P2P implementation is designed for **unlimited file sizes** with constant memory usage:
+
+- **Stream-through architecture**: Chunks flow immediately to `onData`, no buffering
+- **Flow control**: Sender pauses when receiver's write queue backs up
+- **WebRTC reliability**: SCTP provides reliable, ordered, checksum-verified delivery
+
+> **Note**: For large files, always use the `onData` callback approach rather than buffering in memory.

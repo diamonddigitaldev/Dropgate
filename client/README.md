@@ -138,7 +138,7 @@ npm start
 
 The app is built on [electron-kit](https://github.com/diamonddigitaldev/electron-kit), Diamond Digital Development's shared library for its desktop apps: the window and its sidebar, Settings with its Update and Credits tabs, the updater, the menu, prompts and notifications in the window, and the log. Dropgate's own parts are its Upload section, its Server and Privacy tabs, and Share with Dropgate.
 
-It runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`src/dropgate-core.js`](src/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the app runs and packages without building core first. Don't edit it: change core's source and build it again ([Building and Testing](../packages/dropgate-core/README.md#building-and-testing)). GitHub Actions fails if it isn't core's build.
+It runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`src/dropgate-core.js`](src/dropgate-core.js). That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the app runs and packages without building core first. Don't edit it: change core's source and build it again ([Building and Testing](../docs/core/building-and-testing.md)). GitHub Actions fails if it isn't core's build.
 
 
 ## Building
