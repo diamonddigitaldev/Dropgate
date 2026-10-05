@@ -1,6 +1,12 @@
 // Client
 export { DropgateClient } from './client/DropgateClient.js';
-export type { HostedApi, DirectApi, LinksApi, ServerApi, ServerConnection } from './client/DropgateClient.js';
+export type {
+  HostedApi, DirectApi, LinksApi, ServerApi, ServerConnection, ServerInfoResult, InsecureTransportEvent,
+} from './client/DropgateClient.js';
+
+// Versions, and how the server is reached
+export type { ProtocolName, ProtocolVersion, Protocols } from './version.js';
+export type { Transport } from './transport.js';
 
 // Standalone helpers, by what they're for
 export { sources, lifetime, sizes, filenames, codes, hosts, zip } from './helpers.js';
@@ -31,6 +37,8 @@ export type {
   ServerInfo,
   BaseProgressEvent,
   CompatibilityResult,
+  ProtocolCompatibility,
+  AppInfo,
   ShareTargetResult,
   CryptoAdapter,
   FetchFn,

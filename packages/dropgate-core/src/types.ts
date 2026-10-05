@@ -2,6 +2,8 @@ import type { Outcome } from './outcome.js';
 import type { OperationHandle } from './operation.js';
 import type { UploadSource } from './source.js';
 import type { DownloadSinkOption } from './sink.js';
+import type { Transport } from './transport.js';
+import type { ProtocolName, ProtocolVersion } from './version.js';
 
 /**
  * Server upload capabilities returned from the server info endpoint.
@@ -59,8 +61,13 @@ export interface ServerCapabilities {
 export interface ServerInfo {
   /** Display name of the server. */
   name?: string;
-  /** Server version string. */
+  /** The server's own version, for display: compatibility depends on `protocols`, never on this. */
   version: string;
+  /**
+   * The protocol versions the server speaks. A server without them is older
+   * than Dropgate 4, and works with no v4 client.
+   */
+  protocols?: Partial<Record<ProtocolName, ProtocolVersion>>;
   /** Server capabilities. */
   capabilities?: ServerCapabilities;
 }
@@ -109,6 +116,8 @@ export interface UploadSnapshot {
   chunkIndex?: number;
   /** How many chunks the current file has. */
   totalChunks?: number;
+  /** How the client reaches its server. */
+  transport: Transport;
 }
 
 /**
@@ -129,6 +138,8 @@ export interface UploadResult {
   keyB64?: string;
   /** Per-file results (only present for multi-file uploads). */
   files?: Array<{ fileId: string; name: string; size: number }>;
+  /** How the client reached its server. */
+  transport: Transport;
 }
 
 /** How an upload ended: `completed` with its UploadResult, `cancelled`, or `failed`. */
@@ -144,16 +155,36 @@ export type UploadStatus = 'initializing' | 'uploading' | 'completing' | Outcome
 export type UploadHandle = OperationHandle<UploadResult, UploadSnapshot>;
 
 /**
- * Result of a client/server compatibility check.
+ * Whether this client and the server speak one protocol's versions that work
+ * together: the same major. A different minor still works, with only what the
+ * older of the two has.
+ */
+export interface ProtocolCompatibility {
+  /** Whether they work together. */
+  compatible: boolean;
+  /** The version this client speaks. */
+  client: ProtocolVersion;
+  /** The version the server speaks, or null if it doesn't say (it's older than Dropgate 4). */
+  server: ProtocolVersion | null;
+  /**
+   * Which side needs updating, when they don't work together: `server` if
+   * the server is the older, `client` if this client is.
+   */
+  update?: 'client' | 'server';
+  /** What it means, for people: "Update required" worded for the side that needs it, or that it's fine. */
+  message: string;
+}
+
+/**
+ * Result of a client/server compatibility check: each protocol on its own,
+ * because a server can work for hosted transfers and not for direct ones.
  */
 export interface CompatibilityResult {
-  /** Whether the client and server versions are compatible. */
-  compatible: boolean;
-  /** Human-readable compatibility message. */
-  message: string;
-  /** Client version string. */
-  clientVersion: string;
-  /** Server version string. */
+  /** Hosted transfers (DGUP): uploads, downloads, metadata and links. */
+  dgup: ProtocolCompatibility;
+  /** Direct transfers (DGDTP). */
+  dgdtp: ProtocolCompatibility;
+  /** The server's own version, for display only. */
   serverVersion: string;
 }
 
@@ -173,6 +204,8 @@ export interface ShareTargetResult {
   target?: string;
   /** Reason for invalidity if not valid. */
   reason?: string;
+  /** How the client reached its server. */
+  transport: Transport;
 }
 
 /**
@@ -212,12 +245,30 @@ export interface Base64Adapter {
  * Options for constructing a DropgateClient instance.
  */
 export interface DropgateClientOptions {
-  /** Client version string for compatibility checking with the server. */
-  clientVersion: string;
-  /** Server URL string (e.g. 'https://dropgate.link') or ServerTarget object. Required. */
+  /**
+   * Server URL string (e.g. 'https://dropgate.link') or ServerTarget object.
+   * Required. An address without a scheme is `https://`. A plain `http://`
+   * one is only used as it is: it's never tried over HTTPS, and an
+   * `https://` one is never retried over HTTP.
+   */
   server: string | ServerTarget;
-  /** If true, automatically retry with HTTP when HTTPS connection fails in connect(). Default: false. */
-  fallbackToHttp?: boolean;
+  /**
+   * Allows a server on plain `http://` on another machine, which isn't secure:
+   * anyone on the network between can read and change what's sent. Without
+   * it, such a server is refused with INSECURE_TRANSPORT_NOT_ALLOWED before
+   * any request is made. `http://` to this machine (`localhost`, `127.0.0.1`,
+   * `[::1]`) is secure, and needs no opt-in. Default: false. With it, every
+   * snapshot, result and error says `transport.secure: false`, and
+   * `client.server.on('insecure-transport')` fires on connecting: tell the
+   * people using it.
+   */
+  allowInsecure?: boolean;
+  /**
+   * The app using core, such as `{ name: 'Dropgate Client', version: '4.0.0' }`.
+   * For display and local logs only: it's never sent anywhere, and
+   * compatibility never depends on it.
+   */
+  appInfo?: AppInfo;
   /** Upload chunk size in bytes (default: 5MB). */
   chunkSize?: number;
   /** Custom fetch implementation (uses global fetch by default). */
@@ -226,6 +277,14 @@ export interface DropgateClientOptions {
   cryptoObj?: CryptoAdapter;
   /** Custom base64 encoder/decoder. */
   base64?: Base64Adapter;
+}
+
+/** The app using core, for display and local logs. */
+export interface AppInfo {
+  /** The app's name. */
+  name: string;
+  /** The app's version. */
+  version?: string;
 }
 
 /**
@@ -331,6 +390,8 @@ export interface FileMetadata extends HostedFileInfo {
   kind: 'file';
   /** Whether the file is end-to-end encrypted. */
   isEncrypted: boolean;
+  /** How the client reached its server. */
+  transport: Transport;
 }
 
 /** What `client.hosted.metadata()` gives for a bundle. */
@@ -348,6 +409,8 @@ export interface BundleMetadata {
   fileCount: number;
   /** The files' sizes added up, in bytes. */
   totalSizeBytes: number;
+  /** How the client reached its server. */
+  transport: Transport;
 }
 
 /** What `client.hosted.metadata()` gives. */
@@ -382,6 +445,8 @@ export interface DownloadSnapshot {
   fileIndex?: number;
   /** How many files, for a bundle. */
   totalFiles?: number;
+  /** How the client reaches its server. */
+  transport: Transport;
 }
 
 /**
@@ -421,6 +486,8 @@ export interface DownloadResult {
   receivedBytes: number;
   /** Whether the file(s) were encrypted. */
   wasEncrypted: boolean;
+  /** How the client reached its server. */
+  transport: Transport;
 }
 
 /** How a download ended: `completed` with its DownloadResult, `cancelled`, or `failed`. */

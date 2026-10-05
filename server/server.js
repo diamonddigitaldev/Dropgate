@@ -31,6 +31,14 @@ log('info', 'Dropgate Server is starting...');
 log('info', `Log level: ${LOG_LEVEL}`);
 
 const { version } = require('./package.json');
+
+// The protocol versions this server speaks, each on its own, which clients
+// check before anything else: the same major works together, and a minor
+// only adds to it. `version` is for display only.
+const PROTOCOLS = Object.freeze({
+    dgup: Object.freeze({ major: 4, minor: 0 }),
+    dgdtp: Object.freeze({ major: 4, minor: 0 }),
+});
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -1202,6 +1210,7 @@ apiRouter.get('/info', limiter, (req, res) => {
     res.status(200).json({
         name: serverName,
         version: version,
+        protocols: PROTOCOLS,
         logLevel: LOG_LEVEL,
         capabilities: {
             upload: uploadCapabilities,

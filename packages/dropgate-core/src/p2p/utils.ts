@@ -2,11 +2,12 @@ import type { CryptoAdapter } from '../types.js';
 import { getDefaultCrypto } from '../adapters/defaults.js';
 
 /**
- * Check if a hostname is localhost
+ * Whether a hostname is this machine: `localhost`, `127.0.0.1` or `::1`
+ * (`[::1]` too, as a URL's hostname gives it).
  */
 export function isLocalhostHostname(hostname: string): boolean {
   const host = String(hostname || '').toLowerCase();
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
 }
 
 /**

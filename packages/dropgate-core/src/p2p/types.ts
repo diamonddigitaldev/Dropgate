@@ -1,5 +1,12 @@
 import type { ServerInfo, CryptoAdapter, BaseProgressEvent } from '../types.js';
 import type { BlobLike } from '../source.js';
+import type { Transport } from '../transport.js';
+
+/** What `client.direct` adds to its sessions and to every event it gives a listener. */
+export interface ViaClient {
+  /** How the client reaches its server. Set by `client.direct`; a session started without a client has none. */
+  transport?: Transport;
+}
 
 /** A file a direct transfer sends: a browser `File`, or anything shaped like one. */
 export type P2PFile = BlobLike & { readonly name: string };
@@ -141,19 +148,19 @@ export interface P2PServerConfig {
 // ============================================================================
 
 /** Status event for P2P operations. */
-export interface P2PStatusEvent {
+export interface P2PStatusEvent extends ViaClient {
   phase: string;
   message: string;
 }
 
 /** Progress event for P2P send operations. */
-export interface P2PSendProgressEvent extends BaseProgressEvent { }
+export interface P2PSendProgressEvent extends BaseProgressEvent, ViaClient { }
 
 /** Progress event for P2P receive operations. */
-export interface P2PReceiveProgressEvent extends BaseProgressEvent { }
+export interface P2PReceiveProgressEvent extends BaseProgressEvent, ViaClient { }
 
 /** Metadata event when receiving a file. */
-export interface P2PMetadataEvent {
+export interface P2PMetadataEvent extends ViaClient {
   name: string;
   total: number;
   /** Call this to signal the sender to begin transfer (when autoReady is false). */
@@ -167,13 +174,13 @@ export interface P2PMetadataEvent {
 }
 
 /** Completion event for P2P receive operations. */
-export interface P2PReceiveCompleteEvent {
+export interface P2PReceiveCompleteEvent extends ViaClient {
   received: number;
   total: number;
 }
 
 /** Cancellation event for P2P operations. */
-export interface P2PCancellationEvent {
+export interface P2PCancellationEvent extends ViaClient {
   /** Who cancelled the transfer ('sender' or 'receiver'). */
   cancelledBy: 'sender' | 'receiver';
   /** Optional cancellation message. */
@@ -181,7 +188,7 @@ export interface P2PCancellationEvent {
 }
 
 /** Connection health event for monitoring. */
-export interface P2PConnectionHealthEvent {
+export interface P2PConnectionHealthEvent extends ViaClient {
   /** ICE connection state. */
   iceConnectionState: 'connected' | 'disconnected' | 'failed' | 'checking' | 'new' | 'closed';
   /** Estimated round-trip time in milliseconds. */
@@ -193,7 +200,7 @@ export interface P2PConnectionHealthEvent {
 }
 
 /** Resumable transfer info. */
-export interface P2PResumeInfo {
+export interface P2PResumeInfo extends ViaClient {
   /** Session ID to resume. */
   sessionId: string;
   /** Bytes already received in previous session. */
@@ -263,7 +270,7 @@ export interface P2PSendOptions extends P2PServerConfig {
 /**
  * Return value from startP2PSend containing session control.
  */
-export interface P2PSendSession {
+export interface P2PSendSession extends ViaClient {
   /** The PeerJS peer instance. */
   peer: PeerInstance;
   /** The generated sharing code. */
@@ -335,7 +342,7 @@ export interface P2PReceiveOptions extends P2PServerConfig {
 /**
  * Return value from startP2PReceive containing session control.
  */
-export interface P2PReceiveSession {
+export interface P2PReceiveSession extends ViaClient {
   /** The PeerJS peer instance. */
   peer: PeerInstance;
   /** Stop the session and clean up resources. */

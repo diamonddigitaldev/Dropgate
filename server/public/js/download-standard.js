@@ -1,4 +1,5 @@
-import { DropgateClient, DropgateError } from './dropgate-core.js';
+import { DropgateError } from './dropgate-core.js';
+import { pageClient } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
 const statusTitle = document.getElementById('status-title');
@@ -17,7 +18,7 @@ const card = document.getElementById('status-card');
 const trustStatement = document.getElementById('trust-statement');
 const encryptionStatement = document.getElementById('encryption-statement');
 
-const client = new DropgateClient({ clientVersion: '3.0.13', server: location.origin });
+const client = pageClient();
 
 const downloadState = {
   fileId: null,

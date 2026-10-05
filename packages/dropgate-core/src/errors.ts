@@ -1,3 +1,5 @@
+import type { Transport } from './transport.js';
+
 /**
  * Where an error came from: this device, the server, the network between, or
  * the other device in a direct transfer.
@@ -34,6 +36,8 @@ export const ERROR_CODES = {
   LIFETIME_NOT_ALLOWED: { origin: 'server', retryable: false, message: "The server doesn't allow that file lifetime." },
   CAPABILITY_UNSUPPORTED: { origin: 'server', retryable: false, message: "The server doesn't support this." },
   VERSION_UNSUPPORTED: { origin: 'server', retryable: false, message: "This version of Dropgate can't work with the server." },
+  INSECURE_TRANSPORT_NOT_ALLOWED: { origin: 'local', retryable: false, message: 'The server is on plain HTTP, which is not secure, and insecure servers are not allowed.' },
+  REDIRECT_NOT_FOLLOWED: { origin: 'server', retryable: false, message: 'The server redirected the request elsewhere. Dropgate never follows a redirect: use the address it redirects to.' },
   NOT_FOUND: { origin: 'server', retryable: false, message: "The upload wasn't found. It may have expired." },
   REQUEST_REJECTED: { origin: 'server', retryable: false, message: 'The server refused the request.' },
   RATE_LIMITED: { origin: 'server', retryable: true, message: 'Too many requests. Try again later.' },
@@ -61,6 +65,8 @@ export interface DropgateErrorOptions {
   status?: number;
   details?: Record<string, unknown>;
   cause?: unknown;
+  /** How the client that gave the error reaches its server. */
+  transport?: Transport;
 }
 
 /**
@@ -74,6 +80,12 @@ export class DropgateError extends Error {
   readonly retryable: boolean;
   readonly status?: number;
   readonly details?: Record<string, unknown>;
+  /**
+   * How the client that gave the error reaches its server. Every error a
+   * client gives has it, so an error shown to someone can say the connection
+   * wasn't secure.
+   */
+  readonly transport?: Transport;
 
   constructor(opts: DropgateErrorOptions) {
     const info: ErrorCodeInfo = ERROR_CODES[opts.code] ?? ERROR_CODES.UNEXPECTED_ERROR;
@@ -84,6 +96,7 @@ export class DropgateError extends Error {
     this.retryable = opts.retryable ?? info.retryable;
     if (opts.status !== undefined) this.status = opts.status;
     if (opts.details !== undefined) this.details = opts.details;
+    if (opts.transport !== undefined) this.transport = Object.freeze({ secure: opts.transport.secure });
   }
 
   /** Whether `err` is a DropgateError, with `code` if one is given. */
@@ -101,8 +114,22 @@ export class DropgateError extends Error {
       retryable: this.retryable,
       ...(this.status !== undefined ? { status: this.status } : {}),
       ...(this.details !== undefined ? { details: this.details } : {}),
+      ...(this.transport !== undefined ? { transport: this.transport } : {}),
     };
   }
+}
+
+/**
+ * The error as a DropgateError that carries `transport`: `err` itself if it
+ * already has one (a DropgateError is only given a transport once, by the
+ * client it came from), or its DropgateError with it set.
+ */
+export function withTransport(err: unknown, transport: Transport): DropgateError {
+  const error = toDropgateError(err);
+  if (error.transport === undefined) {
+    Object.defineProperty(error, 'transport', { value: Object.freeze({ secure: transport.secure }), enumerable: true });
+  }
+  return error;
 }
 
 /**

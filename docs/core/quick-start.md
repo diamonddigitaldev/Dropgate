@@ -8,23 +8,26 @@ Everything goes through one `DropgateClient` for a server, given its address onc
 import { DropgateClient } from '@dropgate/core';
 
 const client = new DropgateClient({
-  clientVersion: '3.0.13',
   server: 'https://dropgate.link', // URL string or { host, port?, secure? }
-  fallbackToHttp: true,             // retry over plain HTTP if HTTPS fails (optional; see Constructor Options)
+  appInfo: { name: 'My App', version: '1.2.0' }, // optional: for your own display and logs, never sent
 });
 ```
+
+There's no version to give: core knows its own, and works out with the server whether they work together. A server on plain `http://` on another machine also needs `allowInsecure: true`, which is never automatic ([Insecure Servers](api-reference.md#insecure-servers)).
 
 Its calls are grouped by feature: `client.hosted` uploads and downloads through the server, `client.direct` transfers from one device to another, `client.links` resolves sharing codes and links, `client.server` is the server, and `client.operations` is what's running.
 
 ## Connecting to the Server
 
-`client.server.connect()` asks for the server's info, checks this client can work with it, and keeps the answer. Every other call connects first, so calling it yourself is only needed to check a server, such as for a "Test Connection" button.
+`client.server.connect()` asks for the server's info, checks this client can work with it, protocol by protocol, and keeps the answer. Every other call connects first, so calling it yourself is only needed to check a server, such as for a "Test Connection" button.
 
 ```javascript
-const { serverInfo, compatible, message } = await client.server.connect({ timeoutMs: 5000 });
+const { serverInfo, dgup, dgdtp, transport } = await client.server.connect({ timeoutMs: 5000 });
 
-console.log('Server version:', serverInfo.version);
-console.log('Compatible:', compatible);
+console.log('Server version:', serverInfo.version); // for display only
+if (!dgup.compatible) console.log(dgup.message);    // "Update required: ..." for whichever side needs it
+console.log('Direct transfers work:', dgdtp.compatible);
+console.log('Secure connection:', transport.secure);
 console.log('Upload enabled:', serverInfo.capabilities?.upload?.enabled);
 console.log('P2P enabled:', serverInfo.capabilities?.p2p?.enabled);
 ```

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { CancelScope } from '../src/cancel.js';
 import type { Cancellation } from '../src/cancel.js';
-import { settle } from '../src/outcome.js';
+import { settle as settleWith } from '../src/outcome.js';
 import type { Outcome } from '../src/outcome.js';
 import { DropgateError } from '../src/errors.js';
 
@@ -106,14 +106,18 @@ describe('CancelScope', () => {
 });
 
 describe('settle', () => {
+  // How the operation's client reaches its server, which every outcome carries.
+  const transport = { secure: true };
+  const settle = <T>(scope: CancelScope, work: () => Promise<T>) => settleWith(scope, work, transport);
+
   it('gives completed with the value the work returns', async () => {
     const node = new CancelScope('upload');
-    expect(await settle(node, async () => 'link')).toEqual({ status: 'completed', value: 'link' });
+    expect(await settle(node, async () => 'link')).toEqual({ status: 'completed', value: 'link', transport });
   });
 
   it('gives failed with a DropgateError, typing any other error as UNEXPECTED_ERROR', async () => {
     const typed = new DropgateError({ code: 'NOT_FOUND' });
-    expect(await settle(new CancelScope('download'), async () => { throw typed; })).toEqual({ status: 'failed', error: typed });
+    expect(await settle(new CancelScope('download'), async () => { throw typed; })).toEqual({ status: 'failed', error: typed, transport });
 
     const outcome = await settle(new CancelScope('download'), async () => { throw new RangeError('oops'); });
     expect(outcome.status).toBe('failed');
@@ -128,7 +132,7 @@ describe('settle', () => {
       throw new DropgateError({ code: 'CONNECTION_LOST' });
     });
     node.cancel();
-    expect(await outcome).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'upload' } });
+    expect(await outcome).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'upload' }, transport });
   });
 
   it('gives completed when the work finished before a cancel could stop it', async () => {
@@ -137,7 +141,7 @@ describe('settle', () => {
       node.cancel();
       return 'committed';
     });
-    expect(await outcome).toEqual({ status: 'completed', value: 'committed' });
+    expect(await outcome).toEqual({ status: 'completed', value: 'committed', transport });
   });
 
   it('gives cancelled by signal when a signal fed into the node is aborted, and the work, using only its node, stops', async () => {
@@ -145,7 +149,7 @@ describe('settle', () => {
     const node = new CancelScope('upload', { signal: external.signal });
     const outcome = settle(node, () => untilAborted(node.signal));
     external.abort(new DOMException('Stop.', 'AbortError'));
-    expect(await outcome).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'upload' } });
+    expect(await outcome).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'upload' }, transport });
   });
 
   it('cancelling the parent gives every operation under it one cancelled outcome, and takes each out of the tree', async () => {
@@ -162,7 +166,7 @@ describe('settle', () => {
     client.cancel();
     await Promise.all(outcomes);
     for (const [i, node] of nodes.entries()) {
-      expect(settledWith[i], `operation ${i}`).toEqual([{ status: 'cancelled', cancellation: { by: 'parent', source: 'client' } }]);
+      expect(settledWith[i], `operation ${i}`).toEqual([{ status: 'cancelled', cancellation: { by: 'parent', source: 'client' }, transport }]);
       expect(node.cancel(), `operation ${i} has left the tree`).toBe(false);
     }
   });

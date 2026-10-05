@@ -3,7 +3,6 @@
 // check none of them reaches the server's output or storage.
 import fs from 'node:fs';
 import path from 'node:path';
-import { serverVersion } from './harness.mjs';
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
@@ -55,7 +54,7 @@ export function completed(outcome) {
 /** A client on the web UI's own copy of dropgate-core, plus an upload helper. */
 export async function createClient(server, recorder) {
     const { DropgateClient } = await server.loadCore();
-    const client = new DropgateClient({ clientVersion: serverVersion, server: server.baseUrl, fetchFn: recorder.fetch });
+    const client = new DropgateClient({ server: server.baseUrl, fetchFn: recorder.fetch });
     const upload = async (files, encrypt) => {
         for (const f of [files].flat()) recorder.note(f.name);
         const handle = client.hosted.upload({ files, encrypt, lifetimeMs: 60 * 60 * 1000, maxDownloads: 1 });

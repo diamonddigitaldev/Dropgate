@@ -51,7 +51,7 @@ export const codes = Object.freeze({
 
 /** Where a page or app is running. */
 export const hosts = Object.freeze({
-  /** Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`). */
+  /** Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`, also as `[::1]`). */
   isLocalhost: isLocalhostHostname,
   /** Whether a direct transfer can run here: a secure context, or this machine. */
   isSecureForDirect: isSecureContextForP2P,

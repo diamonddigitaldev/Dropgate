@@ -1,8 +1,8 @@
 # DGDTP — Dropgate Direct Transfer Protocol
 
-**Protocol Version:** 3
-**Status:** Stable
-**Last Updated:** September 2026
+**Protocol Version:** 4.0, in development. Until it's finished, the messages below are version 3's, with `hello` carrying 4
+**Status:** In development
+**Last Updated:** October 2026
 
 ---
 
@@ -155,20 +155,22 @@ The sender waits because its channel can open before the receiver's, and a messa
 ```json
 {
   "t": "hello",
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "sessionId": "<uuid>"
 }
 ```
 
 ### 6.2 Version Compatibility
 
-Protocol versions MUST match exactly. There is no backwards-compatibility negotiation. If a version mismatch is detected, the connection is terminated with an error:
+`protocolVersion` is the DGDTP major. Protocol versions MUST match exactly. There is no backwards-compatibility negotiation, so a peer older than Dropgate 4 is refused. If a version mismatch is detected, the connection is terminated with an error:
 
 ```
-Protocol version mismatch: sender v3, receiver v2
+Protocol version mismatch: sender v4, receiver v3
 ```
 
 In the current implementation only the sender performs this check. The receiver sends its version but does not compare it with the sender's.
+
+Before either peer starts, its client checks the server's `protocols.dgdtp` from `/api/info` ([DGUP §3.3](./DGUP.md#33-compatibility)): a server whose major differs, or that gives none, is not used for direct transfers.
 
 ### 6.3 Timeout
 
@@ -726,7 +728,7 @@ The code is the only credential needed to connect, so treat a live code like a p
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `P2P_PROTOCOL_VERSION` | 3 | Current protocol version. |
+| `P2P_PROTOCOL_VERSION` | 4 | The DGDTP major, as `@dropgate/core` gives it in `DropgateClient.protocols.dgdtp`. |
 | `P2P_CHUNK_SIZE` | 65,536 | Default chunk size (bytes). |
 | `P2P_MAX_UNACKED_CHUNKS` | 64 | Flow control threshold. |
 | `P2P_END_ACK_TIMEOUT_MS` | 15,000 | End-ack base timeout. |
@@ -798,9 +800,9 @@ Sender                                      Receiver
   │◄═════════════════════════════════════════►│
   │                                           │
   │◄──────────────────────────────────────────│
-  │  hello { v3, sessionId }                  │
+  │  hello { v4, sessionId }                  │
   │                                           │
-  │  hello { v3, sessionId }                  │
+  │  hello { v4, sessionId }                  │
   │──────────────────────────────────────────►│
   │                                           │
   │  meta { name, size, mime }                │

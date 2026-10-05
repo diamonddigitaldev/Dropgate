@@ -13,8 +13,11 @@
  * - Sequential file-by-file transfer within a single session
  */
 
-// Protocol version for forward compatibility
-export const P2P_PROTOCOL_VERSION = 3;
+import { PROTOCOLS } from '../version.js';
+
+// The DGDTP major both peers' hellos carry, which must match: core's own, so a
+// peer older than Dropgate 4 is refused.
+export const P2P_PROTOCOL_VERSION = PROTOCOLS.dgdtp.major;
 
 /**
  * All possible P2P message types.

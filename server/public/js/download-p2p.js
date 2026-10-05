@@ -1,4 +1,5 @@
-import { DropgateClient, hosts, zip } from './dropgate-core.js';
+import { hosts, zip } from './dropgate-core.js';
+import { pageClient } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard, clearStatusBorder } from './status-card.js';
 
 const elTitle = document.getElementById('title');
@@ -131,7 +132,7 @@ const showError = (title, message) => {
   elBar.parentElement.hidden = true;
 };
 
-const client = new DropgateClient({ clientVersion: '3.0.13', server: location.origin });
+const client = pageClient();
 
 async function loadPeerJS() {
   if (globalThis.Peer) return globalThis.Peer;

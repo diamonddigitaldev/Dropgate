@@ -39,7 +39,7 @@ Upload a file, encrypted, and get its link:
 ```javascript
 import { DropgateClient } from '@dropgate/core';
 
-const client = new DropgateClient({ clientVersion: '3.0.13', server: 'https://files.example.com' });
+const client = new DropgateClient({ server: 'https://files.example.com' });
 
 const upload = client.hosted.upload({ files: myFile, lifetimeMs: 60 * 60 * 1000, encrypt: true });
 const outcome = await upload.result;

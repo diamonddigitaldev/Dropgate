@@ -1,4 +1,5 @@
 import { defineConfig } from 'tsup';
+import { versionDefine } from './scripts/version-define.mjs';
 
 export default defineConfig([
   // Main entry - ESM and CJS
@@ -13,6 +14,7 @@ export default defineConfig([
     external: ['peerjs'],
     noExternal: ['fflate'],
     platform: 'browser',
+    define: versionDefine,
   },
   // P2P submodule - ESM and CJS
   {
@@ -25,6 +27,7 @@ export default defineConfig([
     external: ['peerjs'],
     noExternal: ['fflate'],
     platform: 'browser',
+    define: versionDefine,
   },
   // Browser bundle (IIFE)
   {
@@ -34,6 +37,7 @@ export default defineConfig([
     outDir: 'dist',
     outExtension: () => ({ js: '.browser.js' }),
     minify: true,
+    define: versionDefine,
     sourcemap: true,
     target: 'es2020',
     external: ['peerjs'],

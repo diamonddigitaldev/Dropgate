@@ -1,6 +1,7 @@
 import { CancelScope } from './cancel.js';
 import { settle } from './outcome.js';
 import type { Outcome } from './outcome.js';
+import type { Transport } from './transport.js';
 
 /** What kind of operation a handle is for. */
 export type OperationKind = 'hosted.upload' | 'hosted.download';
@@ -63,18 +64,20 @@ export function newOperationId(): string {
  * `finalSnapshot` gives the last snapshot, from the outcome. `onEnd` runs as
  * the operation ends, before its outcome or its last snapshot reaches anyone.
  */
-export function startOperation<T, S extends object>(opts: {
+export function startOperation<T, S extends { transport: Transport }>(opts: {
   kind: OperationKind;
   parent: CancelScope;
   signal?: AbortSignal;
-  initial: S;
+  /** How the client reaches its server: in every snapshot, and on the outcome. */
+  transport: Transport;
+  initial: Omit<S, 'transport'>;
   work: (ctx: OperationContext<S>) => Promise<T>;
   finalSnapshot: (outcome: Outcome<T>, last: S) => S;
   onEnd?: (handle: OperationHandle<T, S>) => void;
 }): OperationHandle<T, S> {
   const scope = new CancelScope(opts.kind, { parent: opts.parent, signal: opts.signal });
   const listeners = new Set<(snapshot: S) => void>();
-  let snapshot: S = Object.freeze({ ...opts.initial });
+  let snapshot: S = Object.freeze({ ...opts.initial, transport: opts.transport } as S);
   let ended = false;
 
   const publish = (next: S): void => {
@@ -87,7 +90,8 @@ export function startOperation<T, S extends object>(opts: {
   const ctx: OperationContext<S> = {
     scope,
     signal: scope.signal,
-    update: (patch) => { if (!ended) publish({ ...snapshot, ...patch }); },
+    // A patch can't change the transport.
+    update: (patch) => { if (!ended) publish({ ...snapshot, ...patch, transport: opts.transport }); },
   };
 
   // The work starts on a later turn, so a caller can subscribe first, and not
@@ -97,10 +101,10 @@ export function startOperation<T, S extends object>(opts: {
     scope.throwIfCancelled();
     return opts.work(ctx);
   };
-  const result = settle(scope, run).then((outcome) => {
+  const result = settle(scope, run, opts.transport).then((outcome) => {
     ended = true;
     try { opts.onEnd?.(handle); } catch { /* Ending can't fail the outcome. */ }
-    publish(opts.finalSnapshot(outcome, snapshot));
+    publish({ ...opts.finalSnapshot(outcome, snapshot), transport: opts.transport });
     listeners.clear();
     return outcome;
   });

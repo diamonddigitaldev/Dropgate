@@ -8,9 +8,9 @@ An upload or a download doesn't throw when it goes wrong: it ends with a `failed
 import { DropgateError } from '@dropgate/core';
 
 try {
-  await client.server.connect();
+  const file = await client.hosted.metadata({ fileId, keyB64 });
 } catch (err) {
-  if (DropgateError.is(err, 'VERSION_UNSUPPORTED')) showUpdateRequired();
+  if (DropgateError.is(err, 'VERSION_UNSUPPORTED')) showUpdateRequired(err.message, err.details.update);
   else if (DropgateError.is(err) && err.retryable) showTryAgain(err.message);
   else throw err;
 }
@@ -26,7 +26,8 @@ try {
 | `origin` | `'local' \| 'server' \| 'network' \| 'peer'` | Where it went wrong: this device, the server, the network between, or the other device in a direct transfer |
 | `retryable` | `boolean` | Whether the same request could succeed if made again later |
 | `status` | `number` | The HTTP status, when the server answered with an error |
-| `details` | `object` | More about it, for some codes: `capability` for `CAPABILITY_UNSUPPORTED` (`upload`, `e2ee` or `p2p`), `index` for a file's problem, `cancellation` for `OPERATION_CANCELLED` |
+| `details` | `object` | More about it, for some codes: `capability` for `CAPABILITY_UNSUPPORTED` (`upload`, `e2ee` or `p2p`), `component` (`dgup` or `dgdtp`) and `update` (`server` or `client`, the side that needs it) for `VERSION_UNSUPPORTED`, `index` for a file's problem, `cancellation` for `OPERATION_CANCELLED` |
+| `transport` | `{ secure }` | How the client reached its server: every error a client gives has it, `secure: false` for an [insecure server](api-reference.md#insecure-servers). `JSON.stringify()` keeps it |
 | `cause` | `unknown` | The error underneath, when there was one. Core didn't write it, so it may hold anything: `JSON.stringify()` leaves it out |
 
 When the server answers with an error, the message is the server's own, if it sent a short one.
@@ -37,7 +38,7 @@ When the server answers with an error, the message is the server's own, if it se
 
 | Code | Origin | Retryable | When |
 | --- | --- | --- | --- |
-| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, no files, no `fileId` or `bundleId`, a download without a sink that fits it, or a lifetime that isn't a whole number of milliseconds |
+| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, an `appInfo` that isn't `{ name, version? }`, no files, no `fileId` or `bundleId`, a download without a sink that fits it, or a lifetime that isn't a whole number of milliseconds |
 | `RUNTIME_UNSUPPORTED` | local | No | There's no `fetch()` or Web Crypto, or encryption was asked for where the browser gives no `crypto.subtle` (a page not served over HTTPS or from `localhost`) |
 | `OPERATION_CANCELLED` | local | No | A call was given an `AbortSignal`, and it was aborted. An upload or download that's cancelled ends with a `cancelled` outcome instead |
 | `SOURCE_UNAVAILABLE` | local | No | A file being uploaded couldn't be read |
@@ -53,7 +54,9 @@ When the server answers with an error, the message is the server's own, if it se
 | `FILE_TOO_LARGE` | server | No | The upload is larger than the server's limit (`details.index` says which file, when core finds it before asking the server) |
 | `LIFETIME_NOT_ALLOWED` | server | No | The server doesn't allow that file lifetime: too long, or unlimited |
 | `CAPABILITY_UNSUPPORTED` | server | No | The server has uploads, end-to-end encryption or direct transfer turned off (`details.capability`) |
-| `VERSION_UNSUPPORTED` | server | No | This version of core can't work with the server's, or a direct transfer's other device uses another protocol version (origin `peer`) |
+| `VERSION_UNSUPPORTED` | server | No | The server speaks another major version of the protocol the call needs (DGUP for hosted calls, DGDTP for direct ones), or none (it's older than Dropgate 4); or a direct transfer's other device uses another protocol version (origin `peer`). The message says "Update required" and which side needs it |
+| `INSECURE_TRANSPORT_NOT_ALLOWED` | local | No | The server is on plain `http://` on another machine, and the client wasn't made with `allowInsecure: true`. Thrown by the constructor, before any request |
+| `REDIRECT_NOT_FOLLOWED` | server | No | The server answered with a redirect, which core never follows: use the address it redirects to. `status` is the redirect's, where the runtime gives it (a browser doesn't) |
 | `NOT_FOUND` | server | No | The upload isn't on the server: it never was, it expired, or it was downloaded as many times as it could be (HTTP 404 or 410) |
 | `REQUEST_REJECTED` | server | No | The server refused the request for another reason (any other 4xx status), and says why |
 | `RATE_LIMITED` | server | Yes | The server has had too many requests (HTTP 429) |

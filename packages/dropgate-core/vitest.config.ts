@@ -1,6 +1,8 @@
 import { defineConfig } from 'vitest/config';
+import { versionDefine } from './scripts/version-define.mjs';
 
 export default defineConfig({
+  define: versionDefine,
   test: {
     // Plain Node, with no browser environment. The web UI and the desktop app are
     // tested in real browsers and Electron by the integration tests.

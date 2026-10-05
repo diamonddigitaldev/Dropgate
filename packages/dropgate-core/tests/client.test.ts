@@ -19,6 +19,8 @@ const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 // An AES-256 key in base64, as it appears after the # in an encrypted link.
 const LINK_KEY = 'q3Rk8vXo2LmN5pT7wYc9ZbHd4sFj6gKa1eUi0rQnVxM=';
 const CHUNK_SIZE = 4;
+// How a client reaches the fake server, on https://: every snapshot, result and error carries it.
+const transport = { secure: true };
 
 interface RecordedRequest {
   method: string;
@@ -77,7 +79,8 @@ function fakeServer() {
       case 'GET /api/info':
         return json(200, {
           name: 'Test server',
-          version: '3.0.13',
+          version: '4.0.0',
+          protocols: { dgup: { major: 4, minor: 0 }, dgdtp: { major: 4, minor: 0 } },
           capabilities: {
             upload: { enabled: true, maxSizeMB: 0, maxLifetimeHours: 0, e2ee: true, chunkSize: CHUNK_SIZE },
           },
@@ -142,7 +145,7 @@ const fileNamed = (name: string, chunks = 1) => new File([new Uint8Array(CHUNK_S
 const nullSink = (): DownloadSink => ({ write: () => {}, close: () => {} });
 
 function createClient(fetchFn: typeof fetch): DropgateClient {
-  return new DropgateClient({ clientVersion: '3.0.13', server: BASE_URL, fetchFn });
+  return new DropgateClient({ server: BASE_URL, fetchFn });
 }
 
 /** Every run of `length` characters in `text`. */
@@ -183,7 +186,7 @@ describe('DropgateClient', () => {
       { chunks: server.chunkIndexes, completed: server.paths().includes('POST /upload/complete'), status: upload.snapshot.status },
       'the upload kept going after cancel()'
     ).toEqual({ chunks: [0], completed: false, status: 'cancelled' });
-    expect(outcome).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'hosted.upload' } });
+    expect(outcome).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'hosted.upload' }, transport });
     // The signal passed in is the caller's: cancel() never aborts it.
     expect(external.signal.aborted).toBe(false);
   });
@@ -196,7 +199,7 @@ describe('DropgateClient', () => {
       files: fileNamed('notes.txt', 3), lifetimeMs: 60_000, encrypt: false, signal: external.signal, retry: { retries: 0 },
     });
 
-    expect(await upload.result).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'hosted.upload' } });
+    expect(await upload.result).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'hosted.upload' }, transport });
     expect(server.chunkIndexes).toEqual([0]);
     expect(server.paths()).not.toContain('POST /upload/complete');
     await expect.poll(() => server.paths()).toContain('POST /upload/cancel');
@@ -207,7 +210,7 @@ describe('DropgateClient', () => {
     const upload = createClient(server.fetchFn).hosted.upload({
       files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false, signal: AbortSignal.abort(),
     });
-    expect(await upload.result).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'hosted.upload' } });
+    expect(await upload.result).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'hosted.upload' }, transport });
     expect(server.requests).toEqual([]);
   });
 
@@ -243,7 +246,7 @@ describe('DropgateClient', () => {
     const client = createClient(server.fetchFn);
 
     const result = await client.links.resolve(`https://elsewhere.example/${FILE_ID}#${LINK_KEY}`);
-    expect(result).toEqual({ valid: false, reason: 'URL must be from this server.' });
+    expect(result).toEqual({ valid: false, reason: 'URL must be from this server.', transport });
     expect(server.paths()).not.toContain('POST /api/resolve');
   });
 
@@ -316,7 +319,7 @@ describe('Outcomes', () => {
     const server = fakeServer();
     const upload = createClient(server.fetchFn).hosted.upload({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false });
     const outcome = await upload.result;
-    expect(outcome).toEqual({ status: 'completed', value: expect.objectContaining({ downloadUrl: `${BASE_URL}/${FILE_ID}`, fileId: FILE_ID }) });
+    expect(outcome).toEqual({ status: 'completed', value: expect.objectContaining({ downloadUrl: `${BASE_URL}/${FILE_ID}`, fileId: FILE_ID, transport }), transport });
     expect(upload.snapshot.status).toBe('completed');
   });
 
@@ -327,7 +330,7 @@ describe('Outcomes', () => {
     });
     server.onChunk = (index) => { if (index === 0) upload.cancel(); };
 
-    expect(await upload.result).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'hosted.upload' } });
+    expect(await upload.result).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'hosted.upload' }, transport });
     expect(upload.snapshot.status).toBe('cancelled');
     expect(server.chunkIndexes).toEqual([0]);
     expect(server.paths()).not.toContain('POST /upload/complete');
@@ -352,7 +355,7 @@ describe('Outcomes', () => {
     await expect.poll(() => server.paths()).toEqual(expect.arrayContaining([`GET /api/file/${FILE_ID}`, 'POST /upload/chunk']));
 
     client.operations.cancelAll();
-    const byClient = { status: 'cancelled', cancellation: { by: 'parent', source: 'client' } };
+    const byClient = { status: 'cancelled', cancellation: { by: 'parent', source: 'client' }, transport };
     expect(await download).toEqual(byClient);
     expect(await upload).toEqual(byClient);
     expect(settled.sort()).toEqual(['download', 'upload']);
@@ -376,7 +379,7 @@ describe('Outcomes', () => {
     const download = createClient(server.fetchFn).hosted.download({ fileId: FILE_ID, sink: nullSink(), signal: controller.signal }).result;
     await expect.poll(() => server.paths()).toContain(`GET /api/file/${FILE_ID}`);
     controller.abort();
-    expect(await download).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'hosted.download' } });
+    expect(await download).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'hosted.download' }, transport });
   });
 
   it('a failure ends as failed, with the code for what went wrong', async () => {
@@ -503,7 +506,7 @@ describe('The upload handle', () => {
       files: [fileNamed('one.txt', 2), fileNamed('two.txt', 1)], lifetimeMs: 60_000, encrypt: false,
     });
     expect(upload.snapshot).toEqual({
-      status: 'initializing', phase: 'server-info', text: 'Checking server...', percent: 0, processedBytes: 0, totalBytes: CHUNK_SIZE * 3,
+      status: 'initializing', phase: 'server-info', text: 'Checking server...', percent: 0, processedBytes: 0, totalBytes: CHUNK_SIZE * 3, transport,
     });
 
     const seen: UploadSnapshot[] = [];
@@ -725,7 +728,7 @@ describe('client.operations', () => {
     await expect.poll(() => server.paths()).toEqual(expect.arrayContaining(['POST /upload/chunk', `GET /api/file/${FILE_ID}`]));
 
     client.operations.cancelAll();
-    const byClient = { status: 'cancelled', cancellation: { by: 'parent', source: 'client' } };
+    const byClient = { status: 'cancelled', cancellation: { by: 'parent', source: 'client' }, transport };
     expect([await upload.result, await download.result]).toEqual([byClient, byClient]);
     expect(client.operations.list()).toEqual([]);
 
@@ -785,7 +788,7 @@ describe('Hosted download into a sink', () => {
     expect({ ended, status: download.snapshot.status }, 'not complete until the sink has closed').toEqual({ ended: false, status: 'completing' });
 
     closing.open();
-    expect(await download.result).toEqual({ status: 'completed', value: { filename: 'notes.txt', receivedBytes: 8, wasEncrypted: false } });
+    expect(await download.result).toEqual({ status: 'completed', value: { filename: 'notes.txt', receivedBytes: 8, wasEncrypted: false, transport }, transport });
     expect(writes.map((w) => w.chunk)).toEqual([[1, 2, 3, 4], [5, 6, 7, 8]]);
     expect(download.snapshot).toMatchObject({ status: 'completed', phase: 'done', percent: 100, processedBytes: 8, totalBytes: 8 });
   });
@@ -812,7 +815,7 @@ describe('Hosted download into a sink', () => {
     const download = createClient(server.fetchFn).hosted.download({ fileId: FILE_ID, sink });
     await expect.poll(() => log).toContain('sink write 4');
     download.cancel();
-    expect(await download.result).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'hosted.download' } });
+    expect(await download.result).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'hosted.download' }, transport });
     expect(log).toEqual(['sink write 4', 'sink abort OPERATION_CANCELLED']);
 
     const lost = fakeServer();
@@ -846,7 +849,7 @@ describe('Hosted download into a sink', () => {
     }).result;
     expect(asked).toEqual([{ name: 'a.txt', size: 4, index: 0 }, { name: 'b.txt', size: 2, index: 1 }]);
     expect(log).toEqual(['a.txt write 4', 'a.txt close', 'b.txt write 2', 'b.txt close']);
-    expect(separate).toEqual({ status: 'completed', value: { filenames: ['a.txt', 'b.txt'], receivedBytes: 6, wasEncrypted: false } });
+    expect(separate).toEqual({ status: 'completed', value: { filenames: ['a.txt', 'b.txt'], receivedBytes: 6, wasEncrypted: false, transport }, transport });
 
     log.length = 0;
     const archive = recordingSink(log, 'zip');
@@ -895,7 +898,7 @@ describe('Hosted download into a sink', () => {
       fileId: FILE_ID, keyB64: upload.keyB64, sink: (file) => { asked.push(file); return opened.sink; },
     });
     download.subscribe((snapshot) => snapshots.push(snapshot));
-    expect(await download.result).toEqual({ status: 'completed', value: { filename: name, receivedBytes: plaintext.length, wasEncrypted: true } });
+    expect(await download.result).toEqual({ status: 'completed', value: { filename: name, receivedBytes: plaintext.length, wasEncrypted: true, transport }, transport });
     expect(asked).toEqual([{ name, size: plaintext.length, index: 0 }]);
     expect([...opened.bytes()]).toEqual([...plaintext]);
 
@@ -915,11 +918,11 @@ describe('client.hosted.metadata()', () => {
     const upload = await sealedUpload(name, new Uint8Array(CHUNK_SIZE * 2 + 1));
     const server = fakeServer();
     const client = createClient(server.fetchFn);
-    expect(await client.hosted.metadata({ fileId: FILE_ID })).toEqual({ kind: 'file', fileId: FILE_ID, isEncrypted: false, name: 'notes.txt', sizeBytes: CHUNK_SIZE });
+    expect(await client.hosted.metadata({ fileId: FILE_ID })).toEqual({ kind: 'file', fileId: FILE_ID, isEncrypted: false, name: 'notes.txt', sizeBytes: CHUNK_SIZE, transport });
 
     server.answer(`GET /api/file/${FILE_ID}/meta`, () => server.json(200, { isEncrypted: true, sizeBytes: upload.stored.length, encryptedFilename: upload.encryptedFilename }));
     expect(await client.hosted.metadata({ fileId: FILE_ID, keyB64: upload.keyB64 }))
-      .toEqual({ kind: 'file', fileId: FILE_ID, isEncrypted: true, name, sizeBytes: CHUNK_SIZE * 2 + 1 });
+      .toEqual({ kind: 'file', fileId: FILE_ID, isEncrypted: true, name, sizeBytes: CHUNK_SIZE * 2 + 1, transport });
     await expect(client.hosted.metadata({ fileId: FILE_ID })).rejects.toMatchObject({ code: 'KEY_REQUIRED' });
     await expect(client.hosted.metadata({ fileId: FILE_ID, keyB64: LINK_KEY })).rejects.toMatchObject({ code: 'DECRYPT_FAILED' });
     expect(piecesOf(upload.keyB64, 8).filter((piece) => allSent(server).includes(piece))).toEqual([]);
@@ -936,7 +939,7 @@ describe('client.hosted.metadata()', () => {
     const server = fakeServer();
     server.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => server.json(200, { isEncrypted: true, sealed: true, encryptedManifest }));
     const meta = await createClient(server.fetchFn).hosted.metadata({ bundleId: BUNDLE_ID, keyB64: await exportKeyBase64(crypto, key) });
-    expect(meta).toEqual({ kind: 'bundle', bundleId: BUNDLE_ID, isEncrypted: true, sealed: true, files, fileCount: 2, totalSizeBytes: 12 });
+    expect(meta).toEqual({ kind: 'bundle', bundleId: BUNDLE_ID, isEncrypted: true, sealed: true, files, fileCount: 2, totalSizeBytes: 12, transport });
   });
 
   it('needs a file or a bundle ID, and asks nothing without one', async () => {

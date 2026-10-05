@@ -1,4 +1,5 @@
-import { DropgateClient, hosts, lifetime, sizes } from './dropgate-core.js';
+import { hosts, lifetime, sizes } from './dropgate-core.js';
+import { pageClient } from './page-common.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -127,7 +128,7 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-const coreClient = new DropgateClient({ clientVersion: '3.0.13', server: location.origin });
+const coreClient = pageClient();
 
 function isFile(file) {
   return new Promise((resolve) => {

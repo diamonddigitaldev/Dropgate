@@ -117,9 +117,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         // --- Core client (shared logic for Electron + Web UI) ---
-        const clientVersion = await kitApi.getVersion();
+        // The app's own name and version, for display only: core works out
+        // compatibility with the server itself, and never sends these.
+        const appInfo = { name: 'Dropgate Client', version: await kitApi.getVersion() };
         /** @type {DropgateClient|null} */
         let coreClient = null;
+
+        /** Whether an address is plain HTTP, as typed: one without a scheme is HTTPS. */
+        const isPlainHttp = (serverUrl) => /^http:\/\//i.test(serverUrl);
 
         /**
          * Create or recreate the core client for a given server URL.
@@ -131,10 +136,19 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
             coreClient = new DropgateClient({
-                clientVersion,
                 server: serverUrl,
-                fallbackToHttp: true,
+                // Only an address typed with http:// is used over plain HTTP, and
+                // then as it is: an https:// one is never retried over HTTP.
+                allowInsecure: isPlainHttp(serverUrl),
+                appInfo,
             });
+        }
+
+        /** Why Test couldn't connect, and what to try. */
+        function connectionFailedText(serverUrl, error) {
+            if (error?.code === 'REDIRECT_NOT_FOLLOWED') return error.message;
+            const text = 'Connection failed. Check the URL, and that the server is running.';
+            return isPlainHttp(serverUrl) ? text : `${text} If the server only serves plain HTTP, enter its address starting with http://.`;
         }
 
         // --- Initial Settings Load ---
@@ -213,7 +227,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             connectionStatus.className = 'form-text reserved';
 
             try {
-                // Recreate client with current URL (includes HTTP fallback)
+                // Recreate client with current URL
                 createClient(serverUrl);
                 await coreClient.server.connect({ timeoutMs: 5000 });
 
@@ -225,13 +239,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                     connectionStatus.className = 'form-text reserved text-warning-emphasis';
                 }
 
-                // Update input to reflect resolved URL (may have changed due to HTTP fallback)
+                // The address as the client reads it: https:// added if it had no scheme.
                 serverUrlInput.value = coreClient.server.baseUrl;
                 await saveServer(coreClient.server.baseUrl);
 
                 await checkServerCompatibility();
             } catch (error) {
-                connectionStatus.textContent = 'Connection failed. Check the URL, and that the server is running.';
+                connectionStatus.textContent = connectionFailedText(serverUrl, error);
                 updateUploadabilityState(false);
                 connectionStatus.className = 'form-text reserved text-danger-emphasis';
             } finally {
@@ -643,11 +657,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
 
             try {
-                // Recreate client if URL changed (client handles HTTP fallback internally)
+                // Recreate client if URL changed
                 createClient(inputUrl);
                 const compat = await coreClient.server.connect({ timeoutMs: 5000 });
 
-                // Update input to reflect resolved URL (may have changed due to HTTP fallback or protocol auto-detect)
+                // The address as the client reads it: https:// added if it had no scheme.
                 serverUrlInput.value = coreClient.server.baseUrl;
 
                 const { serverInfo } = compat;
@@ -672,15 +686,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 applyServerLimits();
 
-                if (!compat.compatible) {
-                    lastServerCheck = { compatible: false, message: compat.message };
-                    updateUploadabilityState(false, compat.message);
+                // Uploads need the server's hosted transfer protocol to work with this app's.
+                if (!compat.dgup.compatible) {
+                    lastServerCheck = { compatible: false, message: compat.dgup.message };
+                    updateUploadabilityState(false, compat.dgup.message);
                     return lastServerCheck;
                 }
 
                 // compatible
-                setStatus(compat.message);
-                lastServerCheck = { compatible: true, message: compat.message };
+                const message = `Server: v${compat.serverVersion}${serverInfo.name ? ` (${serverInfo.name})` : ''}, Client: v${appInfo.version}.`;
+                setStatus(message);
+                lastServerCheck = { compatible: true, message };
                 updateUploadButtonState();
 
                 return lastServerCheck;

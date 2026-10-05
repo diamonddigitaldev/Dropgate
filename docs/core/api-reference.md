@@ -10,15 +10,36 @@ The client for one Dropgate server.
 
 | Option | Type | Required | Description |
 | --- | --- | --- | --- |
-| `clientVersion` | `string` | Yes | Client version for compatibility checking |
-| `server` | `string \| ServerTarget` | Yes | Server URL or `{ host, port?, secure? }` |
-| `fallbackToHttp` | `boolean` | No | Auto-retry with HTTP if HTTPS fails in `client.server.connect()` |
+| `server` | `string \| ServerTarget` | Yes | Server URL or `{ host, port?, secure? }`. An address with no scheme is `https://` |
+| `allowInsecure` | `boolean` | No | Allow a server on plain `http://` on another machine ([below](#insecure-servers)). Default: `false` |
+| `appInfo` | `{ name, version? }` | No | Your app's name and version, kept as `client.appInfo` for your own display and logs. Never sent anywhere, and compatibility never depends on it |
 | `chunkSize` | `number` | No | Upload chunk size fallback (default: 5MB). The server's configured chunk size (from `/api/info`) takes precedence when available. |
-| `fetchFn` | `FetchFn` | No | Custom fetch implementation. Every request is made with `credentials: 'omit'`, so no cookies are sent. |
+| `fetchFn` | `FetchFn` | No | Custom fetch implementation. Every request is made with `credentials: 'omit'`, so no cookies are sent, and `redirect: 'manual'`: a redirect is never followed, and fails with `REDIRECT_NOT_FOLLOWED`. |
 | `cryptoObj` | `CryptoAdapter` | No | Custom crypto implementation |
 | `base64` | `Base64Adapter` | No | Custom base64 encoder/decoder |
 
-> **`fallbackToHttp` and security:** when enabled, *any* failure to reach the `https://` URL makes the client retry over plain `http://` and keep using it, including a failure caused by someone on the network blocking HTTPS. Only enable it for servers you knowingly run without TLS (for example on a private LAN), and check `client.server.baseUrl` after `client.server.connect()` so you can tell the user the connection is not secure.
+The constructor throws a [`DropgateError`](errors.md): `INVALID_ARGUMENT` for a missing or invalid `server` or `appInfo`, and `INSECURE_TRANSPORT_NOT_ALLOWED` for an insecure server without `allowInsecure`.
+
+### Versions
+
+Core knows its own version, and the version of each protocol it speaks; nobody types one in.
+
+| Static | Description |
+| --- | --- |
+| `DropgateClient.version` | Core's version, such as `4.0.0`. For display and logs: compatibility never depends on it |
+| `DropgateClient.protocols` | `{ dgup: { major, minor }, dgdtp: { major, minor } }`: the [hosted transfer](../technical/DGUP.md) and [direct transfer](../technical/DGDTP.md) protocols, each versioned on its own |
+
+A server gives its protocol versions in `/api/info`. Each protocol works with the server when both speak the same major; a different minor still works. Hosted calls (`client.hosted`, `client.links`) need DGUP to work, and `client.direct` needs DGDTP, so a server can work for one and not the other. A server that gives no protocol versions is older than Dropgate 4, and works with neither. A call that needs a protocol that doesn't work with the server fails with `VERSION_UNSUPPORTED`, whose `details` say which (`component: 'dgup'` or `'dgdtp'`) and which side needs updating (`update: 'server'` or `'client'`), and whose message says so for people ("Update required: ..."). The server's own `version` is for display only.
+
+### Insecure Servers
+
+A server on plain `http://` on another machine is **insecure**: anyone on the network between can read and change what's sent, the web pages included. Core never makes a connection insecure by itself:
+
+* an address is used as it's given. An `https://` one is never retried over `http://`, and a redirect is never followed, so nothing can move a client onto plain HTTP;
+* an insecure server is refused with `INSECURE_TRANSPORT_NOT_ALLOWED` before any request, unless the client is made with `allowInsecure: true`;
+* `http://localhost`, `http://127.0.0.1` and `http://[::1]` never leave the machine, so they're secure, with no opt-in. Only these names count: another name is another machine, even if it resolves to this one or to a private address.
+
+With `allowInsecure`, every snapshot, result, outcome and error says so, with `transport: { secure: false }` (it's `{ secure: true }` otherwise), and `client.server.on('insecure-transport', listener)` fires as the client connects. Tell the people using it that the connection isn't secure.
 
 ### client.hosted
 
@@ -31,9 +52,9 @@ Uploads to the server, and downloads from it.
 | `metadata(opts)` | What the server holds about a file (`fileId`) or a bundle (`bundleId`): the files' names and sizes, with the names decrypted with `keyB64` if it was encrypted ([below](#metadata)) |
 | `validate(opts)` | Check files and settings against a server's limits (`files`, `lifetimeMs`, `encrypt`, and the `serverInfo` from `client.server.connect()`), as `upload()` does before it starts |
 
-`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for the server's unlimited, where allowed), and optionally `encrypt`, `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs`, `initMs`, `chunkMs`, `completeMs`) and `retry` (`retries`, `backoffMs`, `maxBackoffMs`, for each chunk). Its completed value, an `UploadResult`, holds `downloadUrl` (with the key after its `#` if it was encrypted), `fileId` or `bundleId`, `baseUrl`, `keyB64` if it was encrypted, and, for a bundle, `files`.
+`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for the server's unlimited, where allowed), and optionally `encrypt`, `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs`, `initMs`, `chunkMs`, `completeMs`) and `retry` (`retries`, `backoffMs`, `maxBackoffMs`, for each chunk). Its completed value, an `UploadResult`, holds `downloadUrl` (with the key after its `#` if it was encrypted), `fileId` or `bundleId`, `baseUrl`, `keyB64` if it was encrypted, for a bundle `files`, and `transport`.
 
-`download()` takes `fileId` or `bundleId`, `sink`, and optionally `keyB64`, `asZip` (a bundle as one ZIP archive), `signal`, and `timeoutMs` (for each request, each file's download included; default 60000, and 0 for none). Its completed value, a `DownloadResult`, holds `filename` (a file) or `filenames` (a bundle), `receivedBytes`, and `wasEncrypted`.
+`download()` takes `fileId` or `bundleId`, `sink`, and optionally `keyB64`, `asZip` (a bundle as one ZIP archive), `signal`, and `timeoutMs` (for each request, each file's download included; default 60000, and 0 for none). Its completed value, a `DownloadResult`, holds `filename` (a file) or `filenames` (a bundle), `receivedBytes`, `wasEncrypted` and `transport`.
 
 `upload()` and `download()` throw `INVALID_ARGUMENT` at once, before anything starts, for no files, something that isn't a file, neither a `fileId` nor a `bundleId`, or a sink that doesn't fit. After that, they report how they ended in their [outcome](outcomes.md), and never throw. `metadata()` and `validate()` throw a [`DropgateError`](errors.md).
 
@@ -46,23 +67,25 @@ Direct transfers, from one device to another. See [P2P Consumer Responsibilities
 | `send(opts)` | Start sending, and wait for the receiver to connect with the code it gives |
 | `receive(opts)` | Start receiving from the sender with this code |
 
-They throw a [`DropgateError`](errors.md): `CAPABILITY_UNSUPPORTED` if the server has direct transfer turned off.
+They throw a [`DropgateError`](errors.md): `CAPABILITY_UNSUPPORTED` if the server has direct transfer turned off, and `VERSION_UNSUPPORTED` if its DGDTP doesn't work with this client's. The session each gives, and every event given to its `on...` listeners, carry `transport`, and so does every error given to `onError`.
 
 ### client.links
 
 | Method | Description |
 | --- | --- |
-| `resolve(value, opts?)` | Resolve a sharing code or link someone typed or pasted. A link is read on the device, and only the ID or code in it is sent: never anything after its `#` (the encryption key), which comes back on the end of `target`. A link to another server is refused without a request |
+| `resolve(value, opts?)` | Resolve a sharing code or link someone typed or pasted. A link is read on the device, and only the ID or code in it is sent: never anything after its `#` (the encryption key), which comes back on the end of `target`. A link to another server is refused without a request. The result, valid or not, carries `transport` |
 
 ### client.server
 
 | Member | Description |
 | --- | --- |
-| `baseUrl` | The server's address, such as `https://dropgate.example`. It can change once, on the first connect, if `fallbackToHttp` is on and only HTTP answers |
-| `connect(opts?)` | Ask for the server's info and check this client can work with it. The answer is kept: later calls give it without a request, and calls made together share one. Every other call connects first, so calling it yourself is only needed to check a server, such as for a "Test Connection" button |
+| `baseUrl` | The server's address, such as `https://dropgate.example`. It never changes |
+| `transport` | `{ secure }`: `false` for an [insecure server](#insecure-servers) |
+| `connect(opts?)` | Ask for the server's info and check, for each protocol, that this client can work with it. The answer is kept: later calls give it without a request, and calls made together share one. Every other call connects first, so calling it yourself is only needed to check a server, such as for a "Test Connection" button |
 | `info(opts?)` | Ask the server for its info now, without keeping it or checking compatibility |
+| `on('insecure-transport', listener)` | Calls `listener` with `{ baseUrl, transport }` as the client connects to an [insecure server](#insecure-servers). Returns a function that stops listening |
 
-`connect()` gives `compatible`, `message`, `clientVersion`, `serverVersion`, `serverInfo` and `baseUrl`. Both throw a [`DropgateError`](errors.md) when the server can't be reached or doesn't answer as a Dropgate server does.
+`connect()` gives `dgup` and `dgdtp` (each `compatible`, `client` and `server` versions, `update` when they don't work together, and a `message`), `serverVersion`, `serverInfo`, `baseUrl` and `transport`. A server that doesn't work with this client still connects: the calls that need it fail with `VERSION_UNSUPPORTED` ([Versions](#versions)). `info()` gives the server's info with `transport`. Both throw a [`DropgateError`](errors.md) when the server can't be reached, redirects, or doesn't answer as a Dropgate server does.
 
 The calls that make a request take `opts`: `timeoutMs` (default 5000) and `signal`.
 
@@ -102,6 +125,7 @@ A snapshot never holds a file name or a key. An upload's (`UploadSnapshot`):
 | `processedBytes`, `totalBytes` | Bytes of the files sent so far, and of all the files together |
 | `fileIndex`, `totalFiles` | Which of the files given it's on (from 0), and how many, for an upload of several files |
 | `chunkIndex`, `totalChunks` | Which chunk of the current file it's on (from 0), and how many it has |
+| `transport` | `{ secure }`: `false` for an [insecure server](#insecure-servers) |
 
 A download's (`DownloadSnapshot`):
 
@@ -113,6 +137,7 @@ A download's (`DownloadSnapshot`):
 | `percent` | 0 to 100 |
 | `processedBytes`, `totalBytes` | Bytes written to the sink so far, and of all the files together (0 until the metadata is in) |
 | `fileIndex`, `totalFiles` | Which of a bundle's files it's on (from 0), and how many |
+| `transport` | `{ secure }`, as an upload's |
 
 ## Download Sinks
 
@@ -134,7 +159,7 @@ A bundle downloaded as a ZIP is reported to the server as downloaded only once i
 
 ## Metadata
 
-`client.hosted.metadata({ fileId })` gives a `FileMetadata`: `kind: 'file'`, `fileId`, `isEncrypted`, `name` and `sizeBytes`. `client.hosted.metadata({ bundleId })` gives a `BundleMetadata`: `kind: 'bundle'`, `bundleId`, `isEncrypted`, `sealed`, `files` (each `fileId`, `name` and `sizeBytes`), `fileCount` and `totalSizeBytes`.
+`client.hosted.metadata({ fileId })` gives a `FileMetadata`: `kind: 'file'`, `fileId`, `isEncrypted`, `name`, `sizeBytes` and `transport`. `client.hosted.metadata({ bundleId })` gives a `BundleMetadata`: `kind: 'bundle'`, `bundleId`, `isEncrypted`, `sealed`, `files` (each `fileId`, `name` and `sizeBytes`), `fileCount`, `totalSizeBytes` and `transport`.
 
 Names are decrypted, and sizes are the files' as they'll be downloaded, so neither needs any crypto of your own. An encrypted upload needs `keyB64`: without it, `metadata()` throws `KEY_REQUIRED`, and with one that doesn't open it, `DECRYPT_FAILED`. Where there's no Web Crypto (a page served over plain HTTP from another machine), it throws `RUNTIME_UNSUPPORTED`. A sealed bundle's list of files is encrypted too, so only the key's holder can read which files belong to it.
 
@@ -163,7 +188,7 @@ An upload reads each file one chunk at a time through a `FileSource`: `name`, `s
 | `filenames.validate(name)` | Throws `INVALID_FILENAME` for a name that's empty, too long or has a path in it, as an unencrypted upload's name is checked |
 | `codes.generate()` | A new random direct transfer code, such as `ABCD-1234` |
 | `codes.isLike(value)` | Whether a value is shaped like a direct transfer code |
-| `hosts.isLocalhost(hostname)` | Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`) |
+| `hosts.isLocalhost(hostname)` | Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`, also as `[::1]`) |
 | `hosts.isSecureForDirect(hostname, isSecureContext)` | Whether a direct transfer can run here: a secure context, or this machine |
 | `zip.writer(onData)` | A streaming ZIP writer (below) |
 

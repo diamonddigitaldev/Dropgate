@@ -29,6 +29,8 @@ var ERROR_CODES = {
   LIFETIME_NOT_ALLOWED: { origin: "server", retryable: false, message: "The server doesn't allow that file lifetime." },
   CAPABILITY_UNSUPPORTED: { origin: "server", retryable: false, message: "The server doesn't support this." },
   VERSION_UNSUPPORTED: { origin: "server", retryable: false, message: "This version of Dropgate can't work with the server." },
+  INSECURE_TRANSPORT_NOT_ALLOWED: { origin: "local", retryable: false, message: "The server is on plain HTTP, which is not secure, and insecure servers are not allowed." },
+  REDIRECT_NOT_FOLLOWED: { origin: "server", retryable: false, message: "The server redirected the request elsewhere. Dropgate never follows a redirect: use the address it redirects to." },
   NOT_FOUND: { origin: "server", retryable: false, message: "The upload wasn't found. It may have expired." },
   REQUEST_REJECTED: { origin: "server", retryable: false, message: "The server refused the request." },
   RATE_LIMITED: { origin: "server", retryable: true, message: "Too many requests. Try again later." },
@@ -51,12 +53,19 @@ var DropgateError = class _DropgateError extends Error {
     __publicField(this, "retryable");
     __publicField(this, "status");
     __publicField(this, "details");
+    /**
+     * How the client that gave the error reaches its server. Every error a
+     * client gives has it, so an error shown to someone can say the connection
+     * wasn't secure.
+     */
+    __publicField(this, "transport");
     this.name = "DropgateError";
     this.code = opts.code in ERROR_CODES ? opts.code : "UNEXPECTED_ERROR";
     this.origin = opts.origin ?? info.origin;
     this.retryable = opts.retryable ?? info.retryable;
     if (opts.status !== void 0) this.status = opts.status;
     if (opts.details !== void 0) this.details = opts.details;
+    if (opts.transport !== void 0) this.transport = Object.freeze({ secure: opts.transport.secure });
   }
   /** Whether `err` is a DropgateError, with `code` if one is given. */
   static is(err2, code) {
@@ -71,10 +80,18 @@ var DropgateError = class _DropgateError extends Error {
       origin: this.origin,
       retryable: this.retryable,
       ...this.status !== void 0 ? { status: this.status } : {},
-      ...this.details !== void 0 ? { details: this.details } : {}
+      ...this.details !== void 0 ? { details: this.details } : {},
+      ...this.transport !== void 0 ? { transport: this.transport } : {}
     };
   }
 };
+function withTransport(err2, transport) {
+  const error = toDropgateError(err2);
+  if (error.transport === void 0) {
+    Object.defineProperty(error, "transport", { value: Object.freeze({ secure: transport.secure }), enumerable: true });
+  }
+  return error;
+}
 function errorFromStatus(status, json, fallback) {
   const said = json && typeof json === "object" && "error" in json ? json.error : void 0;
   const serverMessage = typeof said === "string" && said.trim() && said.length <= 200 ? said.trim() : void 0;
@@ -95,6 +112,111 @@ function toDropgateError(err2, fallback = "UNEXPECTED_ERROR", message) {
   if (name === "AbortError") return new DropgateError({ code: "OPERATION_CANCELLED", cause: err2 });
   return new DropgateError({ code: fallback, cause: err2, ...message ? { message } : {} });
 }
+
+// src/adapters/defaults.ts
+function getDefaultBase64() {
+  if (typeof Buffer !== "undefined" && typeof Buffer.from === "function") {
+    return {
+      encode(bytes) {
+        return Buffer.from(bytes).toString("base64");
+      },
+      decode(b64) {
+        return new Uint8Array(Buffer.from(b64, "base64"));
+      }
+    };
+  }
+  if (typeof btoa === "function" && typeof atob === "function") {
+    return {
+      encode(bytes) {
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+      },
+      decode(b64) {
+        const binary = atob(b64);
+        const out = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          out[i] = binary.charCodeAt(i);
+        }
+        return out;
+      }
+    };
+  }
+  throw new Error(
+    "No Base64 implementation available. Provide a Base64Adapter via options."
+  );
+}
+function getDefaultCrypto() {
+  return globalThis.crypto;
+}
+function getDefaultFetch() {
+  return globalThis.fetch?.bind(globalThis);
+}
+
+// src/p2p/utils.ts
+function isLocalhostHostname(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+}
+function isSecureContextForP2P(hostname, isSecureContext) {
+  return Boolean(isSecureContext) || isLocalhostHostname(hostname || "");
+}
+function generateP2PCode(cryptoObj) {
+  const crypto2 = cryptoObj || getDefaultCrypto();
+  const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+  if (crypto2) {
+    const randomBytes = new Uint8Array(8);
+    crypto2.getRandomValues(randomBytes);
+    let letterPart = "";
+    for (let i = 0; i < 4; i++) {
+      letterPart += letters[randomBytes[i] % letters.length];
+    }
+    let numberPart = "";
+    for (let i = 4; i < 8; i++) {
+      numberPart += (randomBytes[i] % 10).toString();
+    }
+    return `${letterPart}-${numberPart}`;
+  }
+  let a = "";
+  for (let i = 0; i < 4; i++) {
+    a += letters[Math.floor(Math.random() * letters.length)];
+  }
+  let b = "";
+  for (let i = 0; i < 4; i++) {
+    b += Math.floor(Math.random() * 10);
+  }
+  return `${a}-${b}`;
+}
+function isP2PCodeLike(code) {
+  return /^[A-Z]{4}-\d{4}$/.test(String(code || "").trim());
+}
+
+// src/transport.ts
+function isSecureServerUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  return url.protocol === "https:" || isLocalhostHostname(url.hostname);
+}
+function insecureTransportNotAllowed() {
+  return new DropgateError({ code: "INSECURE_TRANSPORT_NOT_ALLOWED", transport: { secure: false } });
+}
+function guardedFetch(fetchFn) {
+  return async (input, init) => {
+    const res = await fetchFn(input, { ...init, credentials: "omit", redirect: "manual" });
+    if (res.type === "opaqueredirect" || res.status >= 300 && res.status < 400 && res.headers.has("location")) {
+      throw new DropgateError({ code: "REDIRECT_NOT_FOLLOWED", status: res.status || void 0 });
+    }
+    return res;
+  };
+}
+
+// src/version.ts
+var CORE_VERSION = true ? "3.0.13" : "0.0.0-dev";
+var PROTOCOLS = Object.freeze({
+  dgup: Object.freeze({ major: 4, minor: 0 }),
+  dgdtp: Object.freeze({ major: 4, minor: 0 })
+});
 
 // src/cancel.ts
 var CancelScope = class _CancelScope {
@@ -195,14 +317,14 @@ var CancelScope = class _CancelScope {
 };
 
 // src/outcome.ts
-async function settle(scope, work) {
+async function settle(scope, work, transport) {
   try {
     const value = await work();
-    return { status: "completed", value };
+    return { status: "completed", value, transport };
   } catch (err2) {
     const cancellation = scope.cancellation;
-    if (cancellation) return { status: "cancelled", cancellation };
-    return { status: "failed", error: toDropgateError(err2) };
+    if (cancellation) return { status: "cancelled", cancellation, transport };
+    return { status: "failed", error: withTransport(err2, transport), transport };
   } finally {
     scope.finish();
   }
@@ -221,7 +343,7 @@ function newOperationId() {
 function startOperation(opts) {
   const scope = new CancelScope(opts.kind, { parent: opts.parent, signal: opts.signal });
   const listeners = /* @__PURE__ */ new Set();
-  let snapshot = Object.freeze({ ...opts.initial });
+  let snapshot = Object.freeze({ ...opts.initial, transport: opts.transport });
   let ended = false;
   const publish = (next) => {
     snapshot = Object.freeze(next);
@@ -235,8 +357,9 @@ function startOperation(opts) {
   const ctx = {
     scope,
     signal: scope.signal,
+    // A patch can't change the transport.
     update: (patch) => {
-      if (!ended) publish({ ...snapshot, ...patch });
+      if (!ended) publish({ ...snapshot, ...patch, transport: opts.transport });
     }
   };
   const run = async () => {
@@ -244,13 +367,13 @@ function startOperation(opts) {
     scope.throwIfCancelled();
     return opts.work(ctx);
   };
-  const result = settle(scope, run).then((outcome) => {
+  const result = settle(scope, run, opts.transport).then((outcome) => {
     ended = true;
     try {
       opts.onEnd?.(handle);
     } catch {
     }
-    publish(opts.finalSnapshot(outcome, snapshot));
+    publish({ ...opts.finalSnapshot(outcome, snapshot), transport: opts.transport });
     listeners.clear();
     return outcome;
   });
@@ -411,48 +534,6 @@ async function readRange(source, start, end) {
   return view.buffer instanceof ArrayBuffer ? view : new Uint8Array(view);
 }
 
-// src/adapters/defaults.ts
-function getDefaultBase64() {
-  if (typeof Buffer !== "undefined" && typeof Buffer.from === "function") {
-    return {
-      encode(bytes) {
-        return Buffer.from(bytes).toString("base64");
-      },
-      decode(b64) {
-        return new Uint8Array(Buffer.from(b64, "base64"));
-      }
-    };
-  }
-  if (typeof btoa === "function" && typeof atob === "function") {
-    return {
-      encode(bytes) {
-        let binary = "";
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        return btoa(binary);
-      },
-      decode(b64) {
-        const binary = atob(b64);
-        const out = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          out[i] = binary.charCodeAt(i);
-        }
-        return out;
-      }
-    };
-  }
-  throw new Error(
-    "No Base64 implementation available. Provide a Base64Adapter via options."
-  );
-}
-function getDefaultCrypto() {
-  return globalThis.crypto;
-}
-function getDefaultFetch() {
-  return globalThis.fetch?.bind(globalThis);
-}
-
 // src/utils/network.ts
 function parseServerUrl(urlStr) {
   let normalized = String(urlStr ?? "").trim();
@@ -527,9 +608,6 @@ function makeAbortSignal(parentSignal, timeoutMs) {
     }
   };
 }
-function withoutCredentials(fetchFn) {
-  return (input, init) => fetchFn(input, { ...init, credentials: "omit" });
-}
 async function fetchJson(fetchFn, url, opts = {}) {
   const { timeoutMs, signal, ...rest } = opts;
   const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
@@ -591,14 +669,6 @@ function parseShareInput(value) {
   }
   if (!locator || !path.startsWith("/p2p/") && !UUID_RE.test(locator)) return null;
   return { locator, linkHost: url.host, ...secret ? { secret } : {} };
-}
-
-// src/utils/semver.ts
-function parseSemverMajorMinor(version) {
-  const parts = String(version || "").split(".").map((p) => Number(p));
-  const major = Number.isFinite(parts[0]) ? parts[0] : 0;
-  const minor = Number.isFinite(parts[1]) ? parts[1] : 0;
-  return { major, minor };
 }
 
 // src/utils/filename.ts
@@ -852,44 +922,6 @@ async function encryptFilenameToBase64(cryptoObj, filename, key) {
   return arrayBufferToBase64(buf);
 }
 
-// src/p2p/utils.ts
-function isLocalhostHostname(hostname) {
-  const host = String(hostname || "").toLowerCase();
-  return host === "localhost" || host === "127.0.0.1" || host === "::1";
-}
-function isSecureContextForP2P(hostname, isSecureContext) {
-  return Boolean(isSecureContext) || isLocalhostHostname(hostname || "");
-}
-function generateP2PCode(cryptoObj) {
-  const crypto2 = cryptoObj || getDefaultCrypto();
-  const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
-  if (crypto2) {
-    const randomBytes = new Uint8Array(8);
-    crypto2.getRandomValues(randomBytes);
-    let letterPart = "";
-    for (let i = 0; i < 4; i++) {
-      letterPart += letters[randomBytes[i] % letters.length];
-    }
-    let numberPart = "";
-    for (let i = 4; i < 8; i++) {
-      numberPart += (randomBytes[i] % 10).toString();
-    }
-    return `${letterPart}-${numberPart}`;
-  }
-  let a = "";
-  for (let i = 0; i < 4; i++) {
-    a += letters[Math.floor(Math.random() * letters.length)];
-  }
-  let b = "";
-  for (let i = 0; i < 4; i++) {
-    b += Math.floor(Math.random() * 10);
-  }
-  return `${a}-${b}`;
-}
-function isP2PCodeLike(code) {
-  return /^[A-Z]{4}-\d{4}$/.test(String(code || "").trim());
-}
-
 // src/p2p/helpers.ts
 function resolvePeerConfig(userConfig, serverCaps) {
   return {
@@ -940,7 +972,7 @@ async function createPeerWithRetries(opts) {
 }
 
 // src/p2p/protocol.ts
-var P2P_PROTOCOL_VERSION = 3;
+var P2P_PROTOCOL_VERSION = PROTOCOLS.dgdtp.major;
 function isP2PMessage(value) {
   if (!value || typeof value !== "object") return false;
   const msg = value;
@@ -2519,19 +2551,62 @@ function serverChunkSize(serverInfo, fallback) {
   const size = serverInfo?.capabilities?.upload?.chunkSize;
   return Number.isFinite(size) && size > 0 ? size : fallback;
 }
+var DIRECT_EVENTS = [
+  "onStatus",
+  "onProgress",
+  "onMeta",
+  "onComplete",
+  "onCancel",
+  "onConnectionHealth",
+  "onFileStart",
+  "onFileEnd",
+  "onResumeRequest"
+];
+function protocolVersion(value) {
+  if (!value || typeof value !== "object") return null;
+  const { major, minor } = value;
+  if (!Number.isInteger(major) || !Number.isInteger(minor) || major < 0 || minor < 0) return null;
+  return Object.freeze({ major, minor });
+}
+function checkProtocol(client, given) {
+  const server = protocolVersion(given);
+  if (!server || server.major < client.major) {
+    return {
+      compatible: false,
+      client,
+      server,
+      update: "server",
+      message: "Update required: this server runs an older version of Dropgate. Its operator needs to update it."
+    };
+  }
+  if (server.major > client.major) {
+    return {
+      compatible: false,
+      client,
+      server,
+      update: "client",
+      message: "Update required: this server runs a newer version of Dropgate. Update this app to use it."
+    };
+  }
+  return { compatible: true, client, server, message: "This server works with this version of Dropgate." };
+}
 var DropgateClient = class {
   /**
    * Create a new DropgateClient instance.
    * @param opts - Client configuration options including server URL.
-   * @throws {DropgateError} INVALID_ARGUMENT if clientVersion or server is missing or invalid;
-   * RUNTIME_UNSUPPORTED if there's no fetch() or crypto.
+   * @throws {DropgateError} INVALID_ARGUMENT if server is missing or invalid, or appInfo isn't
+   * `{ name, version? }` strings; INSECURE_TRANSPORT_NOT_ALLOWED for a server on plain `http://`
+   * on another machine without `allowInsecure`; RUNTIME_UNSUPPORTED if there's no fetch() or crypto.
    */
   constructor(opts) {
-    /** Client version string for compatibility checking. */
-    __publicField(this, "clientVersion");
+    /** The app using core, as given to the constructor, for display and local logs. Never sent anywhere. */
+    __publicField(this, "appInfo");
     /** Chunk size in bytes for upload splitting. */
     __publicField(this, "chunkSize");
-    /** Fetch implementation used for HTTP requests. Every request it makes omits credentials (no cookies). */
+    /**
+     * Fetch implementation used for HTTP requests. Every request it makes omits
+     * credentials (no cookies), and follows no redirect.
+     */
     __publicField(this, "fetchFn");
     /** Crypto implementation for encryption operations. */
     __publicField(this, "cryptoObj");
@@ -2547,74 +2622,105 @@ var DropgateClient = class {
     __publicField(this, "server");
     /** What's running on the client, by each operation's ID. */
     __publicField(this, "operations");
-    /** Resolved base URL (e.g. 'https://dropgate.link'). May change during HTTP fallback. */
+    /** The server's base URL (e.g. 'https://dropgate.link'). */
     __publicField(this, "baseUrl");
-    /** Whether to automatically retry with HTTP when HTTPS fails. */
-    __publicField(this, "_fallbackToHttp");
+    /** How the server is reached: on every snapshot, result and error the client gives. */
+    __publicField(this, "transport");
+    /** Who hears `insecure-transport`. */
+    __publicField(this, "_insecureListeners", /* @__PURE__ */ new Set());
     /** Cached compatibility result (null until the first connect). */
     __publicField(this, "_compat", null);
     /** In-flight connect promise to deduplicate concurrent calls. */
     __publicField(this, "_connectPromise", null);
     /** The running operations, and the root of the cancellation tree. */
     __publicField(this, "_registry", new OperationRegistry());
-    if (!opts || typeof opts.clientVersion !== "string") {
-      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "DropgateClient requires clientVersion (string)." });
-    }
-    if (!opts.server) {
+    if (!opts?.server) {
       throw new DropgateError({
         code: "INVALID_ARGUMENT",
         message: "DropgateClient requires server (URL string or ServerTarget object)."
       });
     }
-    this.clientVersion = opts.clientVersion;
+    const { appInfo } = opts;
+    if (appInfo !== void 0) {
+      const valid = appInfo !== null && typeof appInfo === "object" && typeof appInfo.name === "string" && appInfo.name.trim() !== "" && (appInfo.version === void 0 || typeof appInfo.version === "string");
+      if (!valid) {
+        throw new DropgateError({ code: "INVALID_ARGUMENT", message: "appInfo must be { name, version? }, as strings." });
+      }
+      this.appInfo = Object.freeze({ name: appInfo.name, ...appInfo.version !== void 0 ? { version: appInfo.version } : {} });
+    }
+    this.baseUrl = resolveServerToBaseUrl(opts.server);
+    this.transport = Object.freeze({ secure: isSecureServerUrl(this.baseUrl) });
+    if (!this.transport.secure && opts.allowInsecure !== true) throw insecureTransportNotAllowed();
     this.chunkSize = Number.isFinite(opts.chunkSize) ? opts.chunkSize : DEFAULT_CHUNK_SIZE;
     const fetchFn = opts.fetchFn || getDefaultFetch();
     if (!fetchFn) {
-      throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "No fetch() implementation found." });
+      throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "No fetch() implementation found.", transport: this.transport });
     }
-    this.fetchFn = withoutCredentials(fetchFn);
+    this.fetchFn = guardedFetch(fetchFn);
     const cryptoObj = opts.cryptoObj || getDefaultCrypto();
     if (!cryptoObj) {
-      throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "No crypto implementation found." });
+      throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "No crypto implementation found.", transport: this.transport });
     }
     this.cryptoObj = cryptoObj;
     this.base64 = opts.base64 || getDefaultBase64();
-    this._fallbackToHttp = Boolean(opts.fallbackToHttp);
-    this.baseUrl = resolveServerToBaseUrl(opts.server);
+    const transport = this.transport;
+    const stamped = (fn) => (...args) => {
+      let out;
+      try {
+        out = fn(...args);
+      } catch (err2) {
+        throw withTransport(err2, transport);
+      }
+      if (out instanceof Promise) return out.catch((err2) => {
+        throw withTransport(err2, transport);
+      });
+      return out;
+    };
     const client = this;
     this.server = Object.freeze({
       get baseUrl() {
         return client.baseUrl;
       },
-      connect: (o) => this._connect(o),
-      info: (o) => this._fetchInfo(this.baseUrl, o).then(({ serverInfo }) => serverInfo)
+      transport,
+      connect: stamped((o) => this._connect(o)),
+      info: stamped((o) => this._fetchInfo(o).then((serverInfo) => ({ ...serverInfo, transport }))),
+      on: stamped((event, listener) => this._on(event, listener))
     });
     this.hosted = Object.freeze({
-      upload: (o) => this._upload(o),
-      download: (o) => this._download(o),
-      metadata: (o) => this._metadata(o),
-      validate: (o) => this._validate(o)
+      upload: stamped((o) => this._upload(o)),
+      download: stamped((o) => this._download(o)),
+      metadata: stamped((o) => this._metadata(o)),
+      validate: stamped((o) => this._validate(o))
     });
     this.direct = Object.freeze({
-      send: (o) => this._directSend(o),
-      receive: (o) => this._directReceive(o)
+      send: stamped((o) => this._directSend(o)),
+      receive: stamped((o) => this._directReceive(o))
     });
     this.links = Object.freeze({
-      resolve: (value, o) => this._resolve(value, o)
+      resolve: stamped((value, o) => this._resolve(value, o))
     });
     this.operations = this._registry.api;
   }
-  /** Asks a server for its info. */
-  async _fetchInfo(baseUrl, opts) {
+  _on(event, listener) {
+    if (event !== "insecure-transport" || typeof listener !== "function") {
+      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "client.server.on() takes 'insecure-transport' and a listener." });
+    }
+    this._insecureListeners.add(listener);
+    return () => {
+      this._insecureListeners.delete(listener);
+    };
+  }
+  /** Asks the server for its info. */
+  async _fetchInfo(opts) {
     const { timeoutMs = 5e3, signal } = opts ?? {};
-    const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/info`, {
+    const { res, json } = await fetchJson(this.fetchFn, `${this.baseUrl}/api/info`, {
       method: "GET",
       timeoutMs,
       signal,
       headers: { Accept: "application/json" }
     });
     if (res.ok && json && typeof json === "object" && "version" in json) {
-      return { baseUrl, serverInfo: json };
+      return json;
     }
     if (res.status === 429 || res.status >= 500) throw errorFromStatus(res.status, json);
     throw new DropgateError({
@@ -2633,82 +2739,58 @@ var DropgateClient = class {
     return this._connectPromise;
   }
   async _fetchAndCheckCompat(opts) {
-    let baseUrl = this.baseUrl;
     let serverInfo;
     try {
-      const result = await this._fetchInfo(baseUrl, opts);
-      baseUrl = result.baseUrl;
-      serverInfo = result.serverInfo;
+      serverInfo = await this._fetchInfo(opts);
     } catch (err2) {
-      if (this._fallbackToHttp && this.baseUrl.startsWith("https://")) {
-        const httpBaseUrl = this.baseUrl.replace("https://", "http://");
-        try {
-          const result = await this._fetchInfo(httpBaseUrl, opts);
-          this.baseUrl = httpBaseUrl;
-          baseUrl = result.baseUrl;
-          serverInfo = result.serverInfo;
-        } catch {
-          throw toDropgateError(err2, "SERVER_UNREACHABLE");
-        }
-      } else {
-        throw toDropgateError(err2, "SERVER_UNREACHABLE");
-      }
+      throw toDropgateError(err2, "SERVER_UNREACHABLE");
     }
     const compat = this._checkVersionCompat(serverInfo);
-    this._compat = { ...compat, serverInfo, baseUrl };
+    this._compat = Object.freeze({ ...compat, serverInfo, baseUrl: this.baseUrl, transport: this.transport });
+    if (!this.transport.secure) {
+      const event = Object.freeze({ baseUrl: this.baseUrl, transport: this.transport });
+      for (const listener of [...this._insecureListeners]) {
+        try {
+          listener(event);
+        } catch {
+        }
+      }
+    }
     return this._compat;
   }
-  /** Throws VERSION_UNSUPPORTED if the server's and this client's versions don't work together. */
-  _requireCompatible(compat) {
-    if (compat.compatible) return;
+  /** Throws VERSION_UNSUPPORTED if this client and the server can't work together over `protocol`. */
+  _requireCompatible(compat, protocol) {
+    const check = compat[protocol];
+    if (check.compatible) return;
     throw new DropgateError({
       code: "VERSION_UNSUPPORTED",
-      message: compat.message,
-      details: { clientVersion: compat.clientVersion, serverVersion: compat.serverVersion }
+      message: check.message,
+      details: { component: protocol, update: check.update, client: check.client, server: check.server }
     });
   }
   /**
-   * Pure version compatibility check (no network calls).
+   * Whether this client works with the server, for each protocol on its own
+   * (no network calls). The server's own version is for display only.
    */
   _checkVersionCompat(serverInfo) {
-    const serverVersion = String(serverInfo?.version || "0.0.0");
-    const clientVersion = String(this.clientVersion || "0.0.0");
-    const c = parseSemverMajorMinor(clientVersion);
-    const s = parseSemverMajorMinor(serverVersion);
-    if (c.major !== s.major) {
-      return {
-        compatible: false,
-        clientVersion,
-        serverVersion,
-        message: `Incompatible versions. Client v${clientVersion}, Server v${serverVersion}${serverInfo?.name ? ` (${serverInfo.name})` : ""}.`
-      };
-    }
-    if (c.minor > s.minor) {
-      return {
-        compatible: true,
-        clientVersion,
-        serverVersion,
-        message: `Client (v${clientVersion}) is newer than Server (v${serverVersion})${serverInfo?.name ? ` (${serverInfo.name})` : ""}. Some features may not work.`
-      };
-    }
+    const serverVersion = typeof serverInfo?.version === "string" ? serverInfo.version : "";
     return {
-      compatible: true,
-      clientVersion,
-      serverVersion,
-      message: `Server: v${serverVersion}, Client: v${clientVersion}${serverInfo?.name ? ` (${serverInfo.name})` : ""}.`
+      dgup: checkProtocol(PROTOCOLS.dgup, serverInfo?.protocols?.dgup),
+      dgdtp: checkProtocol(PROTOCOLS.dgdtp, serverInfo?.protocols?.dgdtp),
+      serverVersion
     };
   }
   async _resolve(value, opts) {
     const { timeoutMs = 5e3, signal } = opts ?? {};
     const input = parseShareInput(value);
     if (!input) {
-      return { valid: false, reason: "Unrecognised sharing link." };
+      return { valid: false, reason: "Unrecognised sharing link.", transport: this.transport };
     }
     const compat = await this._connect(opts);
-    this._requireCompatible(compat);
+    this._requireCompatible(compat, "dgup");
     const { baseUrl } = compat;
     if (input.linkHost !== void 0 && input.linkHost !== new URL(baseUrl).host) {
-      return { valid: false, reason: "URL must be from this server." };
+      return { valid: false, reason: "URL must be from this server.", transport: this.transport };
     }
     const { res, json } = await fetchJson(
       this.fetchFn,
@@ -2725,7 +2807,8 @@ var DropgateClient = class {
       }
     );
     if (!res.ok) throw errorFromStatus(res.status, json, "Share lookup failed.");
-    const result = json || { valid: false, reason: "Unknown response." };
+    const answered = json || { valid: false, reason: "Unknown response." };
+    const result = { ...answered, transport: this.transport };
     if (result.valid && result.target && input.secret && (result.type === "file" || result.type === "bundle")) {
       return { ...result, target: `${result.target}#${input.secret}` };
     }
@@ -2737,7 +2820,7 @@ var DropgateClient = class {
       throw new DropgateError({ code: "INVALID_ARGUMENT", message: "Either fileId or bundleId is required." });
     }
     const compat = await this._connect(opts);
-    this._requireCompatible(compat);
+    this._requireCompatible(compat, "dgup");
     return (await this._readMetadata(opts, compat)).meta;
   }
   /**
@@ -2780,6 +2863,7 @@ var DropgateClient = class {
       return {
         meta: {
           kind: "file",
+          transport: this.transport,
           fileId,
           isEncrypted,
           name: isEncrypted ? await decryptName(raw.encryptedFilename) : raw.filename || "file",
@@ -2815,6 +2899,7 @@ var DropgateClient = class {
     return {
       meta: {
         kind: "bundle",
+        transport: this.transport,
         bundleId,
         isEncrypted,
         sealed,
@@ -2932,8 +3017,8 @@ var DropgateClient = class {
         signal: effectiveSignal
       });
       const { baseUrl, serverInfo } = compat;
-      progress({ phase: "server-compat", text: compat.message });
-      this._requireCompatible(compat);
+      progress({ phase: "server-compat", text: compat.dgup.message });
+      this._requireCompatible(compat, "dgup");
       const filenames2 = files.map((f, i) => filenameOverrides?.[i] ?? f.name ?? "file");
       const serverSupportsE2EE = Boolean(serverInfo?.capabilities?.upload?.e2ee);
       const effectiveEncrypt = encrypt ?? serverSupportsE2EE;
@@ -3034,6 +3119,7 @@ var DropgateClient = class {
           fileId,
           uploadId,
           baseUrl,
+          transport: this.transport,
           ...effectiveEncrypt && keyB64 ? { keyB64 } : {}
         };
       }
@@ -3157,12 +3243,14 @@ var DropgateClient = class {
         bundleId,
         baseUrl,
         files: fileResults,
+        transport: this.transport,
         ...effectiveEncrypt && keyB64 ? { keyB64 } : {}
       };
     };
     return this._registry.add(startOperation({
       kind: "hosted.upload",
       parent: this._registry.scope,
+      transport: this.transport,
       signal,
       initial: {
         status: "initializing",
@@ -3208,8 +3296,8 @@ var DropgateClient = class {
       let open = null;
       try {
         const compat = await this._connect({ timeoutMs, signal: downloadSignal });
-        progress({ phase: "server-compat", text: compat.message });
-        this._requireCompatible(compat);
+        progress({ phase: "server-compat", text: compat.dgup.message });
+        this._requireCompatible(compat, "dgup");
         const { baseUrl } = compat;
         progress({ phase: "metadata", text: fileId ? "Fetching file info..." : "Fetching bundle info..." });
         const target = fileId ? { fileId } : { bundleId };
@@ -3292,7 +3380,8 @@ var DropgateClient = class {
         return {
           ...meta.kind === "file" ? { filename: meta.name } : { filenames: meta.files.map((f) => f.name) },
           receivedBytes: written,
-          wasEncrypted: meta.isEncrypted
+          wasEncrypted: meta.isEncrypted,
+          transport: this.transport
         };
       } catch (err2) {
         await open?.abort(downloadSignal.aborted ? downloadSignal.reason : err2);
@@ -3302,6 +3391,7 @@ var DropgateClient = class {
     return this._registry.add(startOperation({
       kind: "hosted.download",
       parent: this._registry.scope,
+      transport: this.transport,
       signal,
       initial: { status: "initializing", phase: "server-info", text: "Checking server...", percent: 0, processedBytes: 0, totalBytes: 0 },
       work,
@@ -3423,14 +3513,14 @@ var DropgateClient = class {
   }
   async _directSend(opts) {
     const compat = await this._connect();
-    this._requireCompatible(compat);
+    this._requireCompatible(compat, "dgdtp");
     const { serverInfo } = compat;
     const p2pCaps = serverInfo?.capabilities?.p2p;
     if (!p2pCaps?.enabled) throw directTransferDisabled();
     const { host, port, secure } = parseServerUrl(this.baseUrl);
     const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
-    return startP2PSend({
-      ...opts,
+    const session = await startP2PSend({
+      ...this._directEvents(opts),
       host,
       port,
       secure,
@@ -3439,17 +3529,18 @@ var DropgateClient = class {
       serverInfo,
       cryptoObj: this.cryptoObj
     });
+    return Object.assign(session, { transport: this.transport });
   }
   async _directReceive(opts) {
     const compat = await this._connect();
-    this._requireCompatible(compat);
+    this._requireCompatible(compat, "dgdtp");
     const { serverInfo } = compat;
     const p2pCaps = serverInfo?.capabilities?.p2p;
     if (!p2pCaps?.enabled) throw directTransferDisabled();
     const { host, port, secure } = parseServerUrl(this.baseUrl);
     const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
-    return startP2PReceive({
-      ...opts,
+    const session = await startP2PReceive({
+      ...this._directEvents(opts),
       host,
       port,
       secure,
@@ -3457,6 +3548,24 @@ var DropgateClient = class {
       iceServers,
       serverInfo
     });
+    return Object.assign(session, { transport: this.transport });
+  }
+  /**
+   * A direct transfer's options, with each event its listeners are given
+   * carrying `transport`, and each error carrying it too, as every snapshot,
+   * result and error a client gives does.
+   */
+  _directEvents(opts) {
+    const transport = this.transport;
+    const out = { ...opts };
+    for (const name of DIRECT_EVENTS) {
+      const listener = out[name];
+      if (typeof listener !== "function") continue;
+      out[name] = (evt) => listener(evt && typeof evt === "object" ? { ...evt, transport } : evt);
+    }
+    const onError = out.onError;
+    if (typeof onError === "function") out.onError = (err2) => onError(withTransport(err2, transport));
+    return out;
   }
   /**
    * Upload a single file's chunks to the server. Used by hosted.upload().
@@ -3577,6 +3686,14 @@ var DropgateClient = class {
     }
   }
 };
+/** Core's own version, such as `4.0.0`. For display and logs: compatibility never depends on it. */
+__publicField(DropgateClient, "version", CORE_VERSION);
+/**
+ * The protocol versions core speaks, each on its own: `dgup` for hosted
+ * transfers and `dgdtp` for direct ones. A server works with this client
+ * for a protocol when it speaks the same major.
+ */
+__publicField(DropgateClient, "protocols", PROTOCOLS);
 
 // src/utils/lifetime.ts
 var MULTIPLIERS = {
@@ -3627,7 +3744,7 @@ var codes = Object.freeze({
   isLike: isP2PCodeLike
 });
 var hosts = Object.freeze({
-  /** Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`). */
+  /** Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`, also as `[::1]`). */
   isLocalhost: isLocalhostHostname,
   /** Whether a direct transfer can run here: a secure context, or this machine. */
   isSecureForDirect: isSecureContextForP2P

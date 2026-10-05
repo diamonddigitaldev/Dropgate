@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import { lifetime, filenames, hosts, codes } from '../src/index.js';
-import { parseSemverMajorMinor } from '../src/utils/semver.js';
 import { bytesToBase64, base64ToBytes, arrayBufferToBase64 } from '../src/utils/base64.js';
 import { parseServerUrl, buildBaseUrl } from '../src/utils/network.js';
 
@@ -47,20 +46,6 @@ describe('lifetime.toMs', () => {
     expect(lifetimeToMs(-1, 'hours')).toBe(0);
     expect(lifetimeToMs(NaN, 'hours')).toBe(0);
     expect(lifetimeToMs(1, 'invalid')).toBe(0);
-  });
-});
-
-describe('parseSemverMajorMinor', () => {
-  it('parses valid semver strings', () => {
-    expect(parseSemverMajorMinor('2.0.0')).toEqual({ major: 2, minor: 0 });
-    expect(parseSemverMajorMinor('1.5.3')).toEqual({ major: 1, minor: 5 });
-  });
-
-  it('handles missing parts', () => {
-    expect(parseSemverMajorMinor('2')).toEqual({ major: 2, minor: 0 });
-    expect(parseSemverMajorMinor('')).toEqual({ major: 0, minor: 0 });
-    expect(parseSemverMajorMinor(null)).toEqual({ major: 0, minor: 0 });
-    expect(parseSemverMajorMinor(undefined)).toEqual({ major: 0, minor: 0 });
   });
 });
 

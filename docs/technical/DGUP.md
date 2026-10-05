@@ -1,8 +1,8 @@
 # DGUP — Dropgate Upload Protocol
 
-**Protocol Version:** 3
-**Status:** Stable
-**Last Updated:** September 2026
+**Protocol Version:** 4.0, in development. Until it's finished, the requests below are version 3's, with `/api/info` giving `protocols`
+**Status:** In development
+**Last Updated:** October 2026
 
 ---
 
@@ -54,7 +54,9 @@ A JSON object containing (at minimum):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `version` | `string` | Server version (semver). |
+| `version` | `string` | Server version (semver). For display only: compatibility never depends on it. |
+| `protocols.dgup` | `{ major, minor }` | The version of DGUP (this protocol) the server speaks. |
+| `protocols.dgdtp` | `{ major, minor }` | The version of [DGDTP](./DGDTP.md) the server's direct transfers use. |
 | `capabilities.upload.enabled` | `boolean` | Whether DGUP is available. |
 | `capabilities.upload.e2ee` | `boolean` | Whether E2EE is supported. |
 | `capabilities.upload.maxSizeMB` | `number` | Maximum file size in megabytes (0 = unlimited). |
@@ -65,7 +67,23 @@ A JSON object containing (at minimum):
 
 ### 3.3 Compatibility
 
-The client SHOULD compare its own version against the server version. Major version mismatches SHOULD be treated as incompatible. The client SHOULD respect `chunkSize` and all declared limits.
+Each protocol is versioned on its own, apart from either app's version, and the client checks each before it uses it. This document describes DGUP version **4.0**.
+
+- The client MUST NOT use a server for hosted transfers unless `protocols.dgup.major` is the major it speaks. A different minor works: a minor only adds to its major.
+- The same goes for direct transfers and `protocols.dgdtp`. A server can work with a client for one protocol and not the other.
+- A server that gives no `protocols` is older than Dropgate 4, and the client MUST treat it as working with neither. There is no backwards compatibility.
+- When they don't work together, the client tells its user that an update is required, and on which side: the server, if its major is older (or it gives none), or the client, if the server's is newer. `@dropgate/core` fails the call with `VERSION_UNSUPPORTED`, whose `details` give `component` and `update`.
+- The client MUST NOT send its own version, or its app's name or version, to the server.
+
+The client SHOULD respect `chunkSize` and all declared limits.
+
+### 3.4 Transport
+
+The client uses the server's address as it was given.
+
+- It MUST NOT retry an `https://` address over plain `http://`, and MUST NOT follow a redirect, so nothing on the network can move it onto plain HTTP.
+- A server on plain `http://` on another machine is insecure: everything sent, the metadata, the web pages and their scripts included, can be read and changed on the way. The client MUST NOT use one unless its user or integrator chose to, explicitly. `@dropgate/core` refuses one with `INSECURE_TRANSPORT_NOT_ALLOWED` unless the client is made with `allowInsecure: true`, and then marks every result `transport.secure: false`.
+- `http://localhost`, `http://127.0.0.1` and `http://[::1]` never leave the machine, and are secure. Only these names count.
 
 ---
 

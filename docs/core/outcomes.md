@@ -10,6 +10,8 @@ An upload and a download each end with exactly one **outcome**, which says how i
 | `cancelled` | `cancellation`: who cancelled it (below) | It was cancelled before it finished |
 | `failed` | `error`: a [`DropgateError`](errors.md) | It stopped on an error |
 
+Every outcome also holds `transport`, `{ secure }`: `false` when the client reached an [insecure server](api-reference.md#insecure-servers), so even a cancelled operation can say so.
+
 ```javascript
 const upload = client.hosted.upload({ files: myFile, lifetimeMs: 3600000 });
 const outcome = await upload.result;
