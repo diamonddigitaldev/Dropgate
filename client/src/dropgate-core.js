@@ -97,6 +97,62 @@ function toDropgateError(err2, fallback = "UNEXPECTED_ERROR", message) {
   return new DropgateError({ code: fallback, cause: err2, ...message ? { message } : {} });
 }
 
+// src/source.ts
+function blobSource(blob, name) {
+  return {
+    name: name ?? blob.name ?? "file",
+    size: blob.size,
+    ...blob.type ? { type: blob.type } : {},
+    async read(start, end) {
+      return new Uint8Array(await blob.slice(start, end).arrayBuffer());
+    }
+  };
+}
+async function fileHandleSource(handle, opts) {
+  const { size } = await handle.stat();
+  return {
+    name: opts.name,
+    size,
+    ...opts.type ? { type: opts.type } : {},
+    async read(start, end) {
+      const buffer = new Uint8Array(end - start);
+      let filled = 0;
+      while (filled < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, start + filled);
+        if (bytesRead === 0) break;
+        filled += bytesRead;
+      }
+      return filled === buffer.length ? buffer : buffer.subarray(0, filled);
+    }
+  };
+}
+var isFileSource = (value) => typeof value === "object" && value !== null && typeof value.read === "function" && typeof value.name === "string" && Number.isFinite(value.size);
+var isBlobLike = (value) => typeof value === "object" && value !== null && typeof value.slice === "function" && Number.isFinite(value.size);
+function toFileSources(input) {
+  const list = Array.isArray(input) ? input : [input];
+  return list.map((item, index) => {
+    if (isFileSource(item)) return item;
+    if (isBlobLike(item)) return blobSource(item);
+    throw new DropgateError({ code: "INVALID_ARGUMENT", message: `File at index ${index} is missing or invalid.`, details: { index } });
+  });
+}
+async function readRange(source, start, end) {
+  let bytes;
+  try {
+    bytes = await source.read(start, end);
+  } catch (err2) {
+    throw new DropgateError({ code: "SOURCE_UNAVAILABLE", cause: err2 });
+  }
+  if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== end - start) {
+    throw new DropgateError({
+      code: "SOURCE_UNAVAILABLE",
+      message: "A file gave a different number of bytes than asked for. It may have changed while it was read."
+    });
+  }
+  const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return view.buffer instanceof ArrayBuffer ? view : new Uint8Array(view);
+}
+
 // src/adapters/defaults.ts
 function getDefaultBase64() {
   if (typeof Buffer !== "undefined" && typeof Buffer.from === "function") {
@@ -1110,17 +1166,69 @@ var CancelScope = class _CancelScope {
 };
 
 // src/outcome.ts
-async function settle(scope, work, signal) {
+async function settle(scope, work) {
   try {
     const value = await work();
     return { status: "completed", value };
   } catch (err2) {
-    const cancellation = scope.cancellation ?? (signal?.aborted ? { by: "signal", source: scope.label } : null);
+    const cancellation = scope.cancellation;
     if (cancellation) return { status: "cancelled", cancellation };
     return { status: "failed", error: toDropgateError(err2) };
   } finally {
     scope.finish();
   }
+}
+
+// src/operation.ts
+function startOperation(opts) {
+  const scope = new CancelScope(opts.label, { parent: opts.parent, signal: opts.signal });
+  const listeners = /* @__PURE__ */ new Set();
+  let snapshot = Object.freeze({ ...opts.initial });
+  let ended = false;
+  const publish = (next) => {
+    snapshot = Object.freeze(next);
+    for (const listener of [...listeners]) {
+      try {
+        listener(snapshot);
+      } catch {
+      }
+    }
+  };
+  const ctx = {
+    scope,
+    signal: scope.signal,
+    update: (patch) => {
+      if (!ended) publish({ ...snapshot, ...patch });
+    }
+  };
+  const run = async () => {
+    await Promise.resolve();
+    scope.throwIfCancelled();
+    return opts.work(ctx);
+  };
+  const result = settle(scope, run).then((outcome) => {
+    ended = true;
+    publish(opts.finalSnapshot(outcome, snapshot));
+    listeners.clear();
+    return outcome;
+  });
+  return {
+    result,
+    get snapshot() {
+      return snapshot;
+    },
+    subscribe(listener) {
+      if (ended) return () => {
+      };
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    cancel() {
+      scope.cancel();
+    }
+  };
 }
 
 // src/utils/share-link.ts
@@ -2663,7 +2771,7 @@ var DropgateClient = class {
         details: { capability: "upload" }
       });
     }
-    const files = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
+    const files = toFileSources(rawFiles);
     if (files.length === 0) {
       throw new DropgateError({ code: "INVALID_ARGUMENT", message: "At least one file is required." });
     }
@@ -2729,33 +2837,32 @@ var DropgateClient = class {
    * Single files use the standard upload protocol.
    * Multiple files use the bundle protocol, grouping files under a single download link.
    *
-   * The session's `result` is the upload's one outcome: `completed` with the
-   * link, `cancelled` with who cancelled it, or `failed` with a DropgateError.
-   * It never rejects.
+   * Gives the upload's handle at once. Its `result` is the upload's one
+   * outcome: `completed` with the link, `cancelled` with who cancelled it, or
+   * `failed` with a DropgateError. It never rejects. `snapshot` and
+   * `subscribe()` say where it is, and `cancel()` cancels it. The upload runs
+   * under the client's node of the cancellation tree, and `signal`, if given,
+   * feeds into the upload's own node.
    *
    * @param opts - Upload options including file(s) and settings.
-   * @returns Upload session with its outcome and cancellation support.
-   * @throws {DropgateError} INVALID_ARGUMENT if there are no files, before an upload starts.
+   * @returns The upload's handle.
+   * @throws {DropgateError} INVALID_ARGUMENT if there are no files, or one isn't a file, before an upload starts.
    */
-  async uploadFiles(opts) {
+  uploadFiles(opts) {
     const {
       files: rawFiles,
       lifetimeMs,
       encrypt,
       maxDownloads,
       filenameOverrides,
-      onProgress,
       signal,
       timeouts = {},
       retry = {}
     } = opts;
-    const files = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
+    const files = toFileSources(rawFiles);
     if (files.length === 0) {
       throw new DropgateError({ code: "INVALID_ARGUMENT", message: "At least one file is required." });
     }
-    const scope = this._scope.child("upload");
-    const effectiveSignal = signal || scope.signal;
-    let uploadState = "initializing";
     const currentUploadIds = [];
     const totalSizeBytes = files.reduce((sum, f) => sum + f.size, 0);
     const callCancelEndpoint = async (uploadId) => {
@@ -2769,26 +2876,15 @@ var DropgateClient = class {
       } catch {
       }
     };
-    scope.onCancel(() => {
-      for (const id of currentUploadIds) {
-        callCancelEndpoint(id).catch(() => {
-        });
-      }
-    });
-    const work = async () => {
-      const progress = (evt) => {
-        try {
-          if (onProgress) onProgress(evt);
-        } catch {
-        }
-      };
-      progress({ phase: "server-info", text: "Checking server...", percent: 0, processedBytes: 0, totalBytes: totalSizeBytes });
+    const work = async (ctx) => {
+      const effectiveSignal = ctx.signal;
+      const progress = ctx.update;
       const compat = await this.connect({
         timeoutMs: timeouts.serverInfoMs ?? 5e3,
         signal: effectiveSignal
       });
       const { baseUrl, serverInfo } = compat;
-      progress({ phase: "server-compat", text: compat.message, percent: 0, processedBytes: 0, totalBytes: totalSizeBytes });
+      progress({ phase: "server-compat", text: compat.message });
       this._requireCompatible(compat);
       const filenames = files.map((f, i) => filenameOverrides?.[i] ?? f.name ?? "file");
       const serverSupportsE2EE = Boolean(serverInfo?.capabilities?.upload?.e2ee);
@@ -2807,7 +2903,7 @@ var DropgateClient = class {
             message: "Web Crypto API not available (crypto.subtle). Encryption requires a secure context (HTTPS or localhost)."
           });
         }
-        progress({ phase: "crypto", text: "Generating encryption key...", percent: 0, processedBytes: 0, totalBytes: totalSizeBytes });
+        progress({ phase: "crypto", text: "Generating encryption key..." });
         try {
           cryptoKey = await generateAesGcmKey(this.cryptoObj);
           keyB64 = await exportKeyBase64(this.cryptoObj, cryptoKey);
@@ -2831,7 +2927,7 @@ var DropgateClient = class {
         const file = files[0];
         const totalChunks = Math.ceil(file.size / effectiveChunkSize);
         const totalUploadSize = estimateTotalUploadSizeBytes(file.size, totalChunks, effectiveEncrypt);
-        progress({ phase: "init", text: "Reserving server storage...", percent: 0, processedBytes: 0, totalBytes: file.size });
+        progress({ phase: "init", text: "Reserving server storage..." });
         const initRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/init`, {
           method: "POST",
           timeoutMs: timeouts.initMs ?? 15e3,
@@ -2852,7 +2948,7 @@ var DropgateClient = class {
         const uploadId = initRes.json?.uploadId;
         if (!uploadId) throw new DropgateError({ code: "INVALID_RESPONSE", message: "Server did not return a valid uploadId." });
         currentUploadIds.push(uploadId);
-        uploadState = "uploading";
+        progress({ status: "uploading" });
         await this._uploadFileChunks({
           file,
           uploadId,
@@ -2870,8 +2966,7 @@ var DropgateClient = class {
           maxBackoffMs,
           chunkTimeoutMs: timeouts.chunkMs ?? 6e4
         });
-        progress({ phase: "complete", text: "Finalising upload...", percent: 100, processedBytes: file.size, totalBytes: file.size });
-        uploadState = "completing";
+        progress({ status: "completing", phase: "complete", text: "Finalising upload...", percent: 100, processedBytes: file.size });
         const completeRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/complete`, {
           method: "POST",
           timeoutMs: timeouts.completeMs ?? 3e4,
@@ -2886,7 +2981,6 @@ var DropgateClient = class {
         if (!fileId) throw new DropgateError({ code: "INVALID_RESPONSE", message: "Server did not return a valid file id." });
         let downloadUrl2 = `${baseUrl}/${fileId}`;
         if (effectiveEncrypt && keyB64) downloadUrl2 += `#${keyB64}`;
-        progress({ phase: "done", text: "Upload successful!", percent: 100, processedBytes: file.size, totalBytes: file.size });
         return {
           downloadUrl: downloadUrl2,
           fileId,
@@ -2900,7 +2994,7 @@ var DropgateClient = class {
         const totalUploadSize = estimateTotalUploadSizeBytes(f.size, totalChunks, effectiveEncrypt);
         return { filename: transmittedFilenames[i], totalSize: totalUploadSize, totalChunks };
       });
-      progress({ phase: "init", text: `Reserving server storage for ${files.length} files...`, percent: 0, processedBytes: 0, totalBytes: totalSizeBytes, totalFiles: files.length });
+      progress({ phase: "init", text: `Reserving server storage for ${files.length} files...`, totalFiles: files.length });
       const initBundleRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/init-bundle`, {
         method: "POST",
         timeoutMs: timeouts.initMs ?? 15e3,
@@ -2924,7 +3018,7 @@ var DropgateClient = class {
         throw new DropgateError({ code: "INVALID_RESPONSE", message: "Server did not return valid bundle upload IDs." });
       }
       currentUploadIds.push(...fileUploadIds);
-      uploadState = "uploading";
+      progress({ status: "uploading" });
       const fileResults = [];
       let cumulativeBytes = 0;
       for (let fi = 0; fi < files.length; fi++) {
@@ -2934,13 +3028,11 @@ var DropgateClient = class {
         const totalUploadSize = fileManifest[fi].totalSize;
         progress({
           phase: "file-start",
-          text: `Uploading file ${fi + 1} of ${files.length}: ${filenames[fi]}`,
+          text: `Uploading file ${fi + 1} of ${files.length}...`,
           percent: totalSizeBytes > 0 ? cumulativeBytes / totalSizeBytes * 100 : 0,
           processedBytes: cumulativeBytes,
-          totalBytes: totalSizeBytes,
           fileIndex: fi,
-          totalFiles: files.length,
-          currentFileName: filenames[fi]
+          totalFiles: files.length
         });
         await this._uploadFileChunks({
           file,
@@ -2957,10 +3049,7 @@ var DropgateClient = class {
           retries,
           backoffMs: baseBackoffMs,
           maxBackoffMs,
-          chunkTimeoutMs: timeouts.chunkMs ?? 6e4,
-          fileIndex: fi,
-          totalFiles: files.length,
-          currentFileName: filenames[fi]
+          chunkTimeoutMs: timeouts.chunkMs ?? 6e4
         });
         const completeRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/complete`, {
           method: "POST",
@@ -2980,15 +3069,10 @@ var DropgateClient = class {
           phase: "file-complete",
           text: `File ${fi + 1} of ${files.length} uploaded.`,
           percent: totalSizeBytes > 0 ? cumulativeBytes / totalSizeBytes * 100 : 0,
-          processedBytes: cumulativeBytes,
-          totalBytes: totalSizeBytes,
-          fileIndex: fi,
-          totalFiles: files.length,
-          currentFileName: filenames[fi]
+          processedBytes: cumulativeBytes
         });
       }
-      progress({ phase: "complete", text: "Finalising bundle...", percent: 100, processedBytes: totalSizeBytes, totalBytes: totalSizeBytes });
-      uploadState = "completing";
+      progress({ status: "completing", phase: "complete", text: "Finalising bundle...", percent: 100, processedBytes: totalSizeBytes });
       let encryptedManifestB64;
       if (effectiveEncrypt && cryptoKey) {
         const manifest = JSON.stringify({
@@ -3020,7 +3104,6 @@ var DropgateClient = class {
       if (!bundleId) throw new DropgateError({ code: "INVALID_RESPONSE", message: "Server did not return a valid bundle id." });
       let downloadUrl = `${baseUrl}/b/${bundleId}`;
       if (effectiveEncrypt && keyB64) downloadUrl += `#${keyB64}`;
-      progress({ phase: "done", text: "Upload successful!", percent: 100, processedBytes: totalSizeBytes, totalBytes: totalSizeBytes });
       return {
         downloadUrl,
         bundleId,
@@ -3029,17 +3112,33 @@ var DropgateClient = class {
         ...effectiveEncrypt && keyB64 ? { keyB64 } : {}
       };
     };
-    const result = settle(scope, work, signal).then((outcome) => {
-      uploadState = outcome.status;
-      return outcome;
-    });
-    return {
-      result,
-      cancel: () => {
-        scope.cancel();
+    return startOperation({
+      label: "upload",
+      parent: this._scope,
+      signal,
+      initial: {
+        status: "initializing",
+        phase: "server-info",
+        text: "Checking server...",
+        percent: 0,
+        processedBytes: 0,
+        totalBytes: totalSizeBytes
       },
-      getStatus: () => uploadState
-    };
+      work: (ctx) => {
+        ctx.scope.onCancel(() => {
+          for (const id of currentUploadIds) callCancelEndpoint(id).catch(() => {
+          });
+        });
+        return work(ctx);
+      },
+      finalSnapshot: (outcome, last) => {
+        if (outcome.status === "completed") {
+          return { ...last, status: "completed", phase: "done", text: "Upload successful!", percent: 100, processedBytes: totalSizeBytes };
+        }
+        if (outcome.status === "cancelled") return { ...last, status: "cancelled", text: "Upload cancelled." };
+        return { ...last, status: "failed", text: outcome.error.message };
+      }
+    });
   }
   /**
    * Upload a single file's chunks to the server. Used internally by uploadFiles().
@@ -3059,18 +3158,14 @@ var DropgateClient = class {
       retries,
       backoffMs,
       maxBackoffMs,
-      chunkTimeoutMs,
-      fileIndex,
-      totalFiles,
-      currentFileName
+      chunkTimeoutMs
     } = params;
     for (let i = 0; i < totalChunks; i++) {
-      if (signal?.aborted) {
+      if (signal.aborted) {
         throw signal.reason || new DropgateError({ code: "OPERATION_CANCELLED" });
       }
       const start = i * effectiveChunkSize;
       const end = Math.min(start + effectiveChunkSize, file.size);
-      const chunkSlice = file.slice(start, end);
       const processedBytes = baseOffset + start;
       const percent = totalBytesAllFiles > 0 ? processedBytes / totalBytesAllFiles * 100 : 0;
       progress({
@@ -3078,26 +3173,19 @@ var DropgateClient = class {
         text: `Uploading chunk ${i + 1} of ${totalChunks}...`,
         percent,
         processedBytes,
-        totalBytes: totalBytesAllFiles,
         chunkIndex: i,
-        totalChunks,
-        ...fileIndex !== void 0 ? { fileIndex, totalFiles, currentFileName } : {}
+        totalChunks
       });
-      let chunkBuffer;
-      try {
-        chunkBuffer = await chunkSlice.arrayBuffer();
-      } catch (err2) {
-        throw new DropgateError({ code: "SOURCE_UNAVAILABLE", cause: err2 });
-      }
+      const chunkBytes = await readRange(file, start, end);
       let uploadBlob;
       if (cryptoKey) {
         try {
-          uploadBlob = await encryptToBlob(this.cryptoObj, chunkBuffer, cryptoKey);
+          uploadBlob = await encryptToBlob(this.cryptoObj, chunkBytes, cryptoKey);
         } catch (err2) {
           throw new DropgateError({ code: "ENCRYPT_FAILED", cause: err2 });
         }
       } else {
-        uploadBlob = new Blob([chunkBuffer]);
+        uploadBlob = new Blob([chunkBytes]);
       }
       if (uploadBlob.size > effectiveChunkSize + 1024) {
         throw new DropgateError({ code: "INVALID_ARGUMENT", message: "Chunk too large (client-side). Check chunk size settings." });
@@ -3107,7 +3195,7 @@ var DropgateClient = class {
       await this._attemptChunkUpload(
         `${baseUrl}/upload/chunk`,
         { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Upload-ID": uploadId, "X-Chunk-Index": String(i), "X-Chunk-Hash": hashHex }, body: uploadBlob },
-        { retries, backoffMs, maxBackoffMs, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i, totalChunks, chunkSize: effectiveChunkSize, fileSizeBytes: totalBytesAllFiles }
+        { retries, backoffMs, maxBackoffMs, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i }
       );
     }
   }
@@ -3581,10 +3669,7 @@ var DropgateClient = class {
       timeoutMs,
       signal,
       progress,
-      chunkIndex,
-      totalChunks,
-      chunkSize,
-      fileSizeBytes
+      chunkIndex
     } = opts;
     let attemptsLeft = retries;
     let currentBackoff = backoffMs;
@@ -3612,32 +3697,20 @@ var DropgateClient = class {
         if (DropgateError.is(err2, "OPERATION_CANCELLED")) throw err2;
         if (attemptsLeft <= 0) throw toDropgateError(err2, "SERVER_UNREACHABLE");
         const attemptNumber = maxRetries - attemptsLeft + 1;
-        const processedBytes = chunkIndex * chunkSize;
-        const percent = chunkIndex / totalChunks * 100;
         let remaining = currentBackoff;
         const tick = 100;
         while (remaining > 0) {
           const secondsLeft = (remaining / 1e3).toFixed(1);
           progress({
             phase: "retry-wait",
-            text: `Chunk upload failed. Retrying in ${secondsLeft}s... (${attemptNumber}/${maxRetries})`,
-            percent,
-            processedBytes,
-            totalBytes: fileSizeBytes,
-            chunkIndex,
-            totalChunks
+            text: `Chunk upload failed. Retrying in ${secondsLeft}s... (${attemptNumber}/${maxRetries})`
           });
           await sleep(Math.min(tick, remaining), signal);
           remaining -= tick;
         }
         progress({
           phase: "retry",
-          text: `Chunk upload failed. Retrying now... (${attemptNumber}/${maxRetries})`,
-          percent,
-          processedBytes,
-          totalBytes: fileSizeBytes,
-          chunkIndex,
-          totalChunks
+          text: `Chunk upload failed. Retrying now... (${attemptNumber}/${maxRetries})`
         });
         attemptsLeft -= 1;
         currentBackoff = Math.min(currentBackoff * 2, maxBackoffMs);
@@ -3659,6 +3732,7 @@ export {
   StreamingZipWriter,
   arrayBufferToBase64,
   base64ToBytes,
+  blobSource,
   buildBaseUrl,
   bytesToBase64,
   decryptChunk,
@@ -3668,6 +3742,7 @@ export {
   estimateTotalUploadSizeBytes,
   exportKeyBase64,
   fetchJson,
+  fileHandleSource,
   generateAesGcmKey,
   generateP2PCode,
   getDefaultBase64,

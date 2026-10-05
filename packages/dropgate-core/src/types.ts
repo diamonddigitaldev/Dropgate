@@ -1,4 +1,6 @@
 import type { Outcome } from './outcome.js';
+import type { OperationHandle } from './operation.js';
+import type { UploadSource } from './source.js';
 
 /**
  * Server upload capabilities returned from the server info endpoint.
@@ -75,23 +77,36 @@ export interface BaseProgressEvent {
   totalBytes: number;
 }
 
+/** The step an upload is on. */
+export type UploadPhase =
+  | 'server-info' | 'server-compat' | 'crypto' | 'init' | 'file-start' | 'chunk'
+  | 'file-complete' | 'complete' | 'retry-wait' | 'retry' | 'done';
+
 /**
- * Progress event emitted during upload operations.
+ * Where an upload is: what `handle.snapshot` holds and `subscribe()` gives.
+ * It never holds a file name or a key; `fileIndex` says which of the files
+ * given it's on.
  */
-export interface UploadProgressEvent extends BaseProgressEvent {
-  /** Current phase of the operation. */
-  phase: 'server-info' | 'server-compat' | 'crypto' | 'init' | 'file-start' | 'chunk' | 'file-complete' | 'complete' | 'done' | 'retry-wait' | 'retry';
-  /** Human-readable status text. */
-  text?: string;
-  /** Index of the current file being uploaded (0-based). Only present for multi-file uploads. */
+export interface UploadSnapshot {
+  /** One of the steps while it runs, then its outcome's status. */
+  status: UploadStatus;
+  /** The step it's on. `done` once it has completed; a cancelled or failed upload keeps the step it stopped at. */
+  phase: UploadPhase;
+  /** What it's doing, for people (such as "Uploading chunk 2 of 5..."). Never a file name. */
+  text: string;
+  /** Completion percentage (0-100). */
+  percent: number;
+  /** Bytes of the files sent and accepted so far. */
+  processedBytes: number;
+  /** Bytes of all the files together. */
+  totalBytes: number;
+  /** Which file it's on (0-based), for an upload of several files. */
   fileIndex?: number;
-  /** Total number of files being uploaded. Only present for multi-file uploads. */
+  /** How many files, for an upload of several files. */
   totalFiles?: number;
-  /** Name of the current file being uploaded. Only present for multi-file uploads. */
-  currentFileName?: string;
-  /** Current chunk index (0-based). */
+  /** Which chunk of the current file it's on (0-based). */
   chunkIndex?: number;
-  /** Total number of chunks. */
+  /** How many chunks the current file has. */
   totalChunks?: number;
 }
 
@@ -122,17 +137,10 @@ export type UploadOutcome = Outcome<UploadResult>;
 export type UploadStatus = 'initializing' | 'uploading' | 'completing' | Outcome<unknown>['status'];
 
 /**
- * Upload session with cancellation support.
- * Returned by uploadFiles() to allow cancelling uploads in progress.
+ * The handle `uploadFiles()` gives: the upload's one outcome as `result`,
+ * where it is as `snapshot` and through `subscribe()`, and `cancel()`.
  */
-export interface UploadSession {
-  /** The upload's one outcome. It never rejects. */
-  result: Promise<UploadOutcome>;
-  /** Cancel the upload: its outcome is then `cancelled`, `by: 'self'`. Does nothing once it has ended. */
-  cancel: () => void;
-  /** Get current upload status. */
-  getStatus: () => UploadStatus;
-}
+export type UploadHandle = OperationHandle<UploadResult, UploadSnapshot>;
 
 /**
  * Result of a client/server compatibility check.
@@ -200,23 +208,6 @@ export interface Base64Adapter {
 }
 
 /**
- * File source abstraction for cross-environment compatibility.
- * Works with browser File/Blob and can be implemented for Node.js streams.
- */
-export interface FileSource {
-  /** File name. */
-  readonly name: string;
-  /** File size in bytes. */
-  readonly size: number;
-  /** MIME type of the file. */
-  readonly type?: string;
-  /** Extract a slice of the file. */
-  slice(start: number, end: number): FileSource;
-  /** Read the entire file as an ArrayBuffer. */
-  arrayBuffer(): Promise<ArrayBuffer>;
-}
-
-/**
  * Options for constructing a DropgateClient instance.
  */
 export interface DropgateClientOptions {
@@ -254,19 +245,20 @@ export interface ServerTarget {
  * Server connection is configured once in the DropgateClient constructor.
  */
 export interface UploadFilesOptions {
-  /** File(s) to upload. A single FileSource or an array of FileSources. */
-  files: FileSource | FileSource[];
+  /** File(s) to upload: FileSources, or browser `File`s or `Blob`s, one or an array. */
+  files: UploadSource | UploadSource[];
   /** File lifetime in milliseconds (0 = server default). */
   lifetimeMs: number;
   /** Whether to encrypt the file(s) with E2EE. Defaults to true if server supports E2EE. */
   encrypt?: boolean;
   /** Override filenames sent to the server, keyed by file index. */
   filenameOverrides?: Record<number, string>;
-  /** Callback for progress updates. */
-  onProgress?: (evt: UploadProgressEvent) => void;
   /** Max downloads before file/bundle is deleted (0 = unlimited). */
   maxDownloads?: number;
-  /** AbortSignal to cancel the upload. */
+  /**
+   * An AbortSignal that also cancels the upload. Aborting it cancels the upload
+   * as its handle's cancel() would, with the outcome `cancelled`, `by: 'signal'`.
+   */
   signal?: AbortSignal;
   /** Timeout settings for various upload phases. */
   timeouts?: {
@@ -319,7 +311,7 @@ export interface ConnectOptions {
  */
 export interface ValidateUploadOptions {
   /** File(s) to validate. */
-  files: FileSource | FileSource[];
+  files: UploadSource | UploadSource[];
   /** Requested file lifetime in milliseconds. */
   lifetimeMs: number;
   /** Whether encryption will be used. Defaults to true if server supports E2EE. */

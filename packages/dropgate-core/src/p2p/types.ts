@@ -1,4 +1,8 @@
-import type { FileSource, ServerInfo, CryptoAdapter, BaseProgressEvent } from '../types.js';
+import type { ServerInfo, CryptoAdapter, BaseProgressEvent } from '../types.js';
+import type { BlobLike } from '../source.js';
+
+/** A file a direct transfer sends: a browser `File`, or anything shaped like one. */
+export type P2PFile = BlobLike & { readonly name: string };
 
 // ============================================================================
 // Session State Machine Types
@@ -209,7 +213,7 @@ export interface P2PResumeInfo {
  */
 export interface P2PSendOptions extends P2PServerConfig {
   /** File(s) to send. A single file or an array for multi-file transfers. */
-  file: FileSource | FileSource[];
+  file: P2PFile | P2PFile[];
   /** PeerJS Peer constructor - REQUIRED. */
   Peer: PeerConstructor;
   /** Server info (optional, for capability checking). */
@@ -358,7 +362,7 @@ export interface P2PReceiveSession {
  */
 export interface P2PSendFileOptions {
   /** File(s) to send. A single file or an array for multi-file transfers. */
-  file: FileSource | FileSource[];
+  file: P2PFile | P2PFile[];
   /** PeerJS Peer constructor - REQUIRED. */
   Peer: PeerConstructor;
   /** Custom code generator function. */

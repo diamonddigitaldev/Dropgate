@@ -101,7 +101,7 @@ const state = {
   iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }],
   p2pSession: null,
   p2pSecureOk: true,
-  uploadSession: null,
+  upload: null,
 };
 
 // Title progress tracking
@@ -813,7 +813,7 @@ async function startStandardUpload() {
   showProgress({ title: 'Uploading', sub: 'Preparing...', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'cloud_upload', iconColor: 'text-primary' });
 
   try {
-    const session = await coreClient.uploadFiles({
+    const upload = coreClient.uploadFiles({
       files,
       encrypt,
       lifetimeMs,
@@ -821,53 +821,58 @@ async function startStandardUpload() {
         const val = parseInt(els.maxDownloadsValue.value, 10);
         return (Number.isInteger(val) && val >= 0) ? val : 1;
       })(),
-      onProgress: ({ phase, text, percent, currentFileName }) => {
-        const p = (typeof percent === 'number') ? percent : 0;
-        const sub = currentFileName ? `${text || phase} — ${currentFileName}` : (text || phase);
-
-        // Update title and store progress for visibility handler
-        updateTitleProgress(p);
-        currentTransferProgress = {
-          percent: p,
-          doneBytes: Math.floor((p / 100) * totalSize),
-          totalBytes: totalSize,
-          showProgress: (pct, done, total) => {
-            showProgress({
-              title: 'Uploading',
-              sub,
-              percent: pct,
-              doneBytes: done,
-              totalBytes: total,
-              icon: 'cloud_upload',
-              iconColor: 'text-primary',
-            });
-          }
-        };
-
-        showProgress({
-          title: 'Uploading',
-          sub,
-          percent: p,
-          doneBytes: Math.floor((p / 100) * totalSize),
-          totalBytes: totalSize,
-          icon: 'cloud_upload',
-          iconColor: 'text-primary',
-        });
-      },
     });
 
-    // Store session and show cancel button
-    state.uploadSession = session;
+    // Where the upload is. Core's snapshots never name a file, so the name of
+    // the one a bundle is on comes from this page's own list.
+    upload.subscribe(({ phase, text, percent, fileIndex }) => {
+      const p = (typeof percent === 'number') ? percent : 0;
+      const onFile = files.length > 1 && ['file-start', 'chunk', 'file-complete'].includes(phase);
+      const currentFileName = onFile ? files[fileIndex]?.name : null;
+      const sub = currentFileName ? `${text || phase} — ${currentFileName}` : (text || phase);
+
+      // Update title and store progress for visibility handler
+      updateTitleProgress(p);
+      currentTransferProgress = {
+        percent: p,
+        doneBytes: Math.floor((p / 100) * totalSize),
+        totalBytes: totalSize,
+        showProgress: (pct, done, total) => {
+          showProgress({
+            title: 'Uploading',
+            sub,
+            percent: pct,
+            doneBytes: done,
+            totalBytes: total,
+            icon: 'cloud_upload',
+            iconColor: 'text-primary',
+          });
+        }
+      };
+
+      showProgress({
+        title: 'Uploading',
+        sub,
+        percent: p,
+        doneBytes: Math.floor((p / 100) * totalSize),
+        totalBytes: totalSize,
+        icon: 'cloud_upload',
+        iconColor: 'text-primary',
+      });
+    });
+
+    // Store the upload and show cancel button
+    state.upload = upload;
     els.cancelStandardUpload.style.display = 'inline-block';
 
     // Wire up cancel button
-    els.cancelStandardUpload.onclick = () => session.cancel();
+    els.cancelStandardUpload.onclick = () => upload.cancel();
 
     // The upload's one outcome: completed, cancelled or failed.
-    const outcome = await session.result;
+    const outcome = await upload.result;
 
     els.cancelStandardUpload.style.display = 'none';
-    state.uploadSession = null;
+    state.upload = null;
     resetTitleProgress();
 
     if (outcome.status === 'completed') {
@@ -882,7 +887,7 @@ async function startStandardUpload() {
   } catch (err) {
     // Only an upload that never started gets here, such as one with no files.
     els.cancelStandardUpload.style.display = 'none';
-    state.uploadSession = null;
+    state.upload = null;
     resetTitleProgress();
     showUploadFailed(err, totalSize);
   }

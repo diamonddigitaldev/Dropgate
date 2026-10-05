@@ -14,6 +14,13 @@ export type { DropgateErrorOptions, DropgateErrorCode, ErrorOrigin } from './err
 export type { Outcome, CompletedOutcome, CancelledOutcome, FailedOutcome } from './outcome.js';
 export type { Cancellation, CancelledBy } from './cancel.js';
 
+// Operation handles
+export type { OperationHandle } from './operation.js';
+
+// File sources
+export { blobSource, fileHandleSource } from './source.js';
+export type { FileSource, BlobLike, UploadSource, FileHandleLike } from './source.js';
+
 // Types
 export type {
   UploadCapabilities,
@@ -22,14 +29,12 @@ export type {
   ServerCapabilities,
   ServerInfo,
   BaseProgressEvent,
-  UploadProgressEvent,
   UploadResult,
   CompatibilityResult,
   ShareTargetResult,
   CryptoAdapter,
   FetchFn,
   Base64Adapter,
-  FileSource,
   DropgateClientOptions,
   ServerTarget,
   UploadFilesOptions,
@@ -43,8 +48,8 @@ export type {
   BundleMetadata,
 } from './types.js';
 
-// Upload session and outcome types
-export type { UploadSession, UploadStatus, UploadOutcome, DownloadOutcome } from './types.js';
+// Upload handle and outcome types
+export type { UploadHandle, UploadSnapshot, UploadPhase, UploadStatus, UploadOutcome, DownloadOutcome } from './types.js';
 
 // Utils - Base64
 export { bytesToBase64, arrayBufferToBase64, base64ToBytes } from './utils/base64.js';
@@ -113,6 +118,7 @@ export type {
   P2PResumeInfo,
   P2PCancellationEvent,
   // Client P2P options and sessions
+  P2PFile,
   P2PSendFileOptions,
   P2PReceiveFileOptions,
   P2PSendSession,

@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { DropgateClient, DropgateError, getServerInfo } from '../src/index.js';
-import type { DownloadOutcome, FileSource, Outcome, UploadSession } from '../src/index.js';
-import { onlyFailsWith } from './helpers/known-issue.js';
+import { open, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DropgateClient, DropgateError, getServerInfo, fileHandleSource } from '../src/index.js';
+import type { DownloadOutcome, FileSource, Outcome, UploadHandle, UploadSnapshot } from '../src/index.js';
 
 // DropgateClient against a fake server, through its `fetchFn` option: no
-// network. A known issue states the behaviour the v4 core rework must have, and
-// is marked `it.fails` until then.
+// network.
 
 const BASE_URL = 'https://files.example';
 const FILE_ID = '0b7d4c52-5f0e-4d8e-9a57-3c1f2e6b8a90';
@@ -30,6 +31,7 @@ interface RecordedRequest {
 function fakeServer() {
   const requests: RecordedRequest[] = [];
   const chunkIndexes: number[] = [];
+  const chunkBodies: Uint8Array[] = [];
   let onChunk: (index: number) => void = () => {};
   // Answers that replace the usual one, by `METHOD /path`. One that throws is a network failure.
   const answers = new Map<string, (init: RequestInit) => Response | Promise<Response>>();
@@ -56,6 +58,7 @@ function fakeServer() {
     if (method === 'POST' && path === '/upload/chunk') {
       const index = Number(headers['X-Chunk-Index']);
       chunkIndexes.push(index);
+      if (init.body instanceof Blob) chunkBodies.push(new Uint8Array(await init.body.arrayBuffer()));
       onChunk(index);
     }
     if (init.signal?.aborted) {
@@ -105,6 +108,7 @@ function fakeServer() {
     fetchFn,
     requests,
     chunkIndexes,
+    chunkBodies,
     paths: () => requests.map((r) => `${r.method} ${new URL(r.url).pathname}`),
     set onChunk(callback: (index: number) => void) { onChunk = callback; },
     answer: (route: string, respond: ((init: RequestInit) => Response | Promise<Response>) | null) => {
@@ -127,7 +131,7 @@ function noAnswer(init: RequestInit): Promise<never> {
   });
 }
 
-const fileNamed = (name: string, chunks = 1) => new File([new Uint8Array(CHUNK_SIZE * chunks)], name) as unknown as FileSource;
+const fileNamed = (name: string, chunks = 1) => new File([new Uint8Array(CHUNK_SIZE * chunks)], name);
 
 function createClient(fetchFn: typeof fetch): DropgateClient {
   return new DropgateClient({ clientVersion: '3.0.13', server: BASE_URL, fetchFn });
@@ -141,39 +145,63 @@ function piecesOf(text: string, length: number): string[] {
 }
 
 describe('DropgateClient', () => {
-  it.fails(
-    'cancel() stops an upload that was given an external AbortSignal (known issue until the v4 core rework)',
-    onlyFailsWith(/the upload kept going after cancel\(\)/, async () => {
-      const server = fakeServer();
-      const client = createClient(server.fetchFn);
-      const external = new AbortController();
-      let session: UploadSession | undefined;
-      let cancelPressed = false;
-      server.onChunk = (index) => {
-        if (index === 0 && session) {
-          session.cancel();
-          cancelPressed = true;
-        }
-      };
+  // v3's bug: with a signal passed in, the upload used that signal instead of
+  // its own, so cancel() told the server but the chunks kept going.
+  it('cancel() stops an upload that was given an external AbortSignal', async () => {
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
+    const external = new AbortController();
+    let upload: UploadHandle | undefined;
+    let cancelPressed = false;
+    server.onChunk = (index) => {
+      if (index === 0 && upload) {
+        upload.cancel();
+        cancelPressed = true;
+      }
+    };
 
-      // Two chunks, with cancel() pressed while the first is uploading.
-      session = await client.uploadFiles({
-        files: new File([new Uint8Array(CHUNK_SIZE * 2)], 'notes.txt', { type: 'text/plain' }) as unknown as FileSource,
-        lifetimeMs: 60_000,
-        encrypt: false,
-        signal: external.signal,
-        retry: { retries: 0 },
-      });
-      const outcome = await session.result;
-      expect(cancelPressed, 'cancel() should be pressed during the first chunk').toBe(true);
+    // Two chunks, with cancel() pressed while the first is uploading.
+    upload = client.uploadFiles({
+      files: new File([new Uint8Array(CHUNK_SIZE * 2)], 'notes.txt', { type: 'text/plain' }),
+      lifetimeMs: 60_000,
+      encrypt: false,
+      signal: external.signal,
+      retry: { retries: 0 },
+    });
+    const outcome = await upload.result;
+    expect(cancelPressed, 'cancel() should be pressed during the first chunk').toBe(true);
 
-      expect(
-        { chunks: server.chunkIndexes, completed: server.paths().includes('POST /upload/complete'), status: session.getStatus() },
-        'the upload kept going after cancel()'
-      ).toEqual({ chunks: [0], completed: false, status: 'cancelled' });
-      expect(outcome).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'upload' } });
-    })
-  );
+    expect(
+      { chunks: server.chunkIndexes, completed: server.paths().includes('POST /upload/complete'), status: upload.snapshot.status },
+      'the upload kept going after cancel()'
+    ).toEqual({ chunks: [0], completed: false, status: 'cancelled' });
+    expect(outcome).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'upload' } });
+    // The signal passed in is the caller's: cancel() never aborts it.
+    expect(external.signal.aborted).toBe(false);
+  });
+
+  it('aborting the AbortSignal passed in cancels the upload by signal, as its own cancel() would', async () => {
+    const server = fakeServer();
+    const external = new AbortController();
+    server.onChunk = (index) => { if (index === 0) external.abort(); };
+    const upload = createClient(server.fetchFn).uploadFiles({
+      files: fileNamed('notes.txt', 3), lifetimeMs: 60_000, encrypt: false, signal: external.signal, retry: { retries: 0 },
+    });
+
+    expect(await upload.result).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'upload' } });
+    expect(server.chunkIndexes).toEqual([0]);
+    expect(server.paths()).not.toContain('POST /upload/complete');
+    await expect.poll(() => server.paths()).toContain('POST /upload/cancel');
+  });
+
+  it('an upload given an AbortSignal that is already aborted is cancelled before it asks the server anything', async () => {
+    const server = fakeServer();
+    const upload = createClient(server.fetchFn).uploadFiles({
+      files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false, signal: AbortSignal.abort(),
+    });
+    expect(await upload.result).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'upload' } });
+    expect(server.requests).toEqual([]);
+  });
 
   it('resolving a link never sends any part of its #fragment to the server, and keeps the key for the page it opens', async () => {
     const server = fakeServer();
@@ -236,7 +264,7 @@ describe('DropgateClient', () => {
   it('omits credentials from every request it makes', async () => {
     const server = fakeServer();
     const client = createClient(server.fetchFn);
-    const file = (name: string) => new File([new Uint8Array(CHUNK_SIZE)], name) as unknown as FileSource;
+    const file = (name: string) => new File([new Uint8Array(CHUNK_SIZE)], name);
 
     await getServerInfo({ server: BASE_URL, fetchFn: server.fetchFn });
     await client.connect();
@@ -244,13 +272,13 @@ describe('DropgateClient', () => {
     await client.getFileMetadata(FILE_ID);
     await client.getBundleMetadata(BUNDLE_ID);
     const completed = [
-      await (await client.uploadFiles({ files: file('one.txt'), lifetimeMs: 60_000, encrypt: false })).result,
-      await (await client.uploadFiles({ files: [file('one.txt'), file('two.txt')], lifetimeMs: 60_000, encrypt: false })).result,
+      await client.uploadFiles({ files: file('one.txt'), lifetimeMs: 60_000, encrypt: false }).result,
+      await client.uploadFiles({ files: [file('one.txt'), file('two.txt')], lifetimeMs: 60_000, encrypt: false }).result,
       await client.downloadFiles({ fileId: FILE_ID }),
       await client.downloadFiles({ bundleId: BUNDLE_ID, asZip: true, onData: () => {} }),
     ];
     expect(completed.map((outcome) => outcome.status)).toEqual(['completed', 'completed', 'completed', 'completed']);
-    const cancelled = await client.uploadFiles({ files: file('three.txt'), lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 } });
+    const cancelled = client.uploadFiles({ files: file('three.txt'), lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 } });
     server.onChunk = () => cancelled.cancel();
     expect((await cancelled.result).status).toBe('cancelled');
     // cancel() tells the server without waiting for it.
@@ -278,29 +306,29 @@ const codeOf = (outcome: Outcome<unknown>): string => (outcome.status === 'faile
 describe('Outcomes', () => {
   it('an upload ends with one completed outcome, with its link', async () => {
     const server = fakeServer();
-    const session = await createClient(server.fetchFn).uploadFiles({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false });
-    const outcome = await session.result;
+    const upload = createClient(server.fetchFn).uploadFiles({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false });
+    const outcome = await upload.result;
     expect(outcome).toEqual({ status: 'completed', value: expect.objectContaining({ downloadUrl: `${BASE_URL}/${FILE_ID}`, fileId: FILE_ID }) });
-    expect(session.getStatus()).toBe('completed');
+    expect(upload.snapshot.status).toBe('completed');
   });
 
   it('cancel() ends an upload as cancelled by itself: no more chunks are sent, and the server is told', async () => {
     const server = fakeServer();
-    const session = await createClient(server.fetchFn).uploadFiles({
+    const upload = createClient(server.fetchFn).uploadFiles({
       files: fileNamed('notes.txt', 3), lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 },
     });
-    server.onChunk = (index) => { if (index === 0) session.cancel(); };
+    server.onChunk = (index) => { if (index === 0) upload.cancel(); };
 
-    expect(await session.result).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'upload' } });
-    expect(session.getStatus()).toBe('cancelled');
+    expect(await upload.result).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'upload' } });
+    expect(upload.snapshot.status).toBe('cancelled');
     expect(server.chunkIndexes).toEqual([0]);
     expect(server.paths()).not.toContain('POST /upload/complete');
     await expect.poll(() => server.requests.filter((r) => r.url.endsWith('/upload/cancel')).map((r) => JSON.parse(r.body)))
       .toEqual([{ uploadId: 'upload-1' }]);
 
     // Once it has ended, cancel() does nothing.
-    session.cancel();
-    expect(session.getStatus()).toBe('cancelled');
+    upload.cancel();
+    expect(upload.snapshot.status).toBe('cancelled');
   });
 
   it('cancelAll() cancels every upload and download running, each by its parent, once, and the client keeps working', async () => {
@@ -311,8 +339,8 @@ describe('Outcomes', () => {
 
     const settled: string[] = [];
     const download = client.downloadFiles({ fileId: FILE_ID, onData: () => {} }).then((o) => { settled.push('download'); return o; });
-    const session = await client.uploadFiles({ files: [fileNamed('one.txt'), fileNamed('two.txt')], lifetimeMs: 60_000, encrypt: false });
-    const upload = session.result.then((o) => { settled.push('upload'); return o; });
+    const handle = client.uploadFiles({ files: [fileNamed('one.txt'), fileNamed('two.txt')], lifetimeMs: 60_000, encrypt: false });
+    const upload = handle.result.then((o) => { settled.push('upload'); return o; });
     await expect.poll(() => server.paths()).toEqual(expect.arrayContaining([`GET /api/file/${FILE_ID}`, 'POST /upload/chunk']));
 
     client.cancelAll();
@@ -327,7 +355,7 @@ describe('Outcomes', () => {
     client.cancelAll();
     server.answer('POST /upload/chunk', null);
     server.answer(`GET /api/file/${FILE_ID}`, null);
-    const next = await client.uploadFiles({ files: fileNamed('three.txt'), lifetimeMs: 60_000, encrypt: false });
+    const next = client.uploadFiles({ files: fileNamed('three.txt'), lifetimeMs: 60_000, encrypt: false });
     expect((await next.result).status).toBe('completed');
     expect((await client.downloadFiles({ fileId: FILE_ID })).status).toBe('completed');
     expect(settled.sort()).toEqual(['download', 'upload']);
@@ -349,8 +377,8 @@ describe('Outcomes', () => {
       setUp(server);
       return codeOf(await operation(createClient(server.fetchFn)));
     };
-    const upload = (files: FileSource | FileSource[] = fileNamed('notes.txt')) => async (client: DropgateClient) =>
-      (await client.uploadFiles({ files, lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 } })).result;
+    const upload = (files: File | File[] = fileNamed('notes.txt')) => (client: DropgateClient) =>
+      client.uploadFiles({ files, lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 } }).result;
     const download = (opts: { keyB64?: string; onData?: () => void } = {}) => (client: DropgateClient): Promise<DownloadOutcome> =>
       client.downloadFiles({ fileId: FILE_ID, ...opts });
     const encryptedMeta = (s: ReturnType<typeof fakeServer>) => s.answer(`GET /api/file/${FILE_ID}/meta`, () =>
@@ -363,7 +391,7 @@ describe('Outcomes', () => {
       chunkServerError: await run((s) => s.answer('POST /upload/chunk', () => new Response('Write failed.', { status: 500 })), upload()),
       unreachable: await run((s) => s.answer('POST /upload/init', () => { throw new TypeError('fetch failed'); }), upload()),
       noFileId: await run((s) => s.answer('POST /upload/complete', () => s.json(200, {})), upload()),
-      empty: await run(() => {}, upload(new File([], 'empty.txt') as unknown as FileSource)),
+      empty: await run(() => {}, upload(new File([], 'empty.txt'))),
       unsupported: await run((s) => s.answer('GET /api/info', () => s.json(200, { version: '2.0.0', capabilities: {} })), upload()),
       notFound: await run((s) => s.answer(`GET /api/file/${FILE_ID}/meta`, () => s.json(404, { error: 'File not found.' })), download()),
       writeFailed: await run(() => {}, download({ onData: () => { throw new Error('Disk full.'); } })),
@@ -380,14 +408,18 @@ describe('Outcomes', () => {
   it('keeps the server\'s own message and status on a failure it answered', async () => {
     const server = fakeServer();
     server.answer('POST /upload/init', () => server.json(413, { error: 'File exceeds limit of 1 MB.' }));
-    const outcome = await (await createClient(server.fetchFn).uploadFiles({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false })).result;
+    const outcome = await createClient(server.fetchFn).uploadFiles({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false }).result;
     expect(outcome.status === 'failed' && outcome.error).toMatchObject({ code: 'FILE_TOO_LARGE', status: 413, message: 'File exceeds limit of 1 MB.', origin: 'server', retryable: false });
   });
 
-  it('throws INVALID_ARGUMENT for an upload with no files or a download with nothing to download, before one starts', async () => {
+  it('throws INVALID_ARGUMENT for an upload with no files or something that isn\'t a file, or a download with nothing to download, before one starts', async () => {
     const server = fakeServer();
     const client = createClient(server.fetchFn);
-    await expect(client.uploadFiles({ files: [], lifetimeMs: 60_000 })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(() => client.uploadFiles({ files: [], lifetimeMs: 60_000 })).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    // A Node.js file handle goes through fileHandleSource() first.
+    const handle = { fd: 3, read: async () => ({ bytesRead: 0 }), stat: async () => ({ size: 4 }) };
+    expect(() => client.uploadFiles({ files: handle as unknown as FileSource, lifetimeMs: 60_000 }))
+      .toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT', message: 'File at index 0 is missing or invalid.' }));
     await expect(client.downloadFiles({})).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect(server.requests).toEqual([]);
   });
@@ -421,11 +453,15 @@ describe('Outcomes', () => {
     // An encrypted upload the server fails at the end, and one that's cancelled.
     const failing = fakeServer();
     failing.answer('POST /upload/complete', () => failing.json(500, { error: 'Server error during file validation.' }));
-    reported.push(await (await createClient(failing.fetchFn).uploadFiles({ files: fileNamed(name), lifetimeMs: 60_000, encrypt: true })).result);
+    const snapshots: UploadSnapshot[] = [];
+    const failingUpload = createClient(failing.fetchFn).uploadFiles({ files: [fileNamed(name), fileNamed(`Copy of ${name}`)], lifetimeMs: 60_000, encrypt: true });
+    failingUpload.subscribe((snapshot) => snapshots.push(snapshot));
+    reported.push(await failingUpload.result);
     const cancelling = fakeServer();
-    const session = await createClient(cancelling.fetchFn).uploadFiles({ files: fileNamed(name, 2), lifetimeMs: 60_000, encrypt: true });
-    cancelling.onChunk = () => session.cancel();
-    reported.push(await session.result);
+    const cancelled = createClient(cancelling.fetchFn).uploadFiles({ files: fileNamed(name, 2), lifetimeMs: 60_000, encrypt: true });
+    cancelled.subscribe((snapshot) => snapshots.push(snapshot));
+    cancelling.onChunk = () => cancelled.cancel();
+    reported.push(await cancelled.result);
 
     // A download with the wrong key, and one whose output fails with an error naming the file.
     const wrongKey = fakeServer();
@@ -441,6 +477,141 @@ describe('Outcomes', () => {
     for (const outcome of reported) {
       const shown = [JSON.stringify(outcome), (outcome as { error?: Error }).error?.message ?? ''].join('\n');
       expect(secrets.filter((piece) => shown.includes(piece)), shown).toEqual([]);
+    }
+    // Nor does any snapshot an upload gives along the way, the bundle's per-file steps included.
+    expect(snapshots.some((snapshot) => snapshot.phase === 'file-start')).toBe(true);
+    for (const snapshot of snapshots) {
+      const shown = JSON.stringify(snapshot);
+      expect(secrets.filter((piece) => shown.includes(piece)), shown).toEqual([]);
+    }
+  });
+});
+
+describe('The upload handle', () => {
+  it('gives where the upload is as snapshots, each new and frozen, to every subscriber, ending with its outcome\'s status', async () => {
+    const server = fakeServer();
+    const upload = createClient(server.fetchFn).uploadFiles({
+      files: [fileNamed('one.txt', 2), fileNamed('two.txt', 1)], lifetimeMs: 60_000, encrypt: false,
+    });
+    expect(upload.snapshot).toEqual({
+      status: 'initializing', phase: 'server-info', text: 'Checking server...', percent: 0, processedBytes: 0, totalBytes: CHUNK_SIZE * 3,
+    });
+
+    const seen: UploadSnapshot[] = [];
+    const alsoSeen: UploadSnapshot[] = [];
+    upload.subscribe((snapshot) => seen.push(snapshot));
+    const unsubscribe = upload.subscribe((snapshot) => alsoSeen.push(snapshot));
+    upload.subscribe(() => { throw new Error('A subscriber that throws.'); });
+
+    const outcome = await upload.result;
+    expect(outcome.status).toBe('completed');
+    unsubscribe();
+
+    expect(seen.length).toBeGreaterThan(5);
+    expect(alsoSeen).toEqual(seen);
+    expect(new Set(seen).size, 'a new object each time').toBe(seen.length);
+    expect(seen.every((snapshot) => Object.isFrozen(snapshot))).toBe(true);
+    expect(seen.at(-1)).toBe(upload.snapshot);
+    expect(upload.snapshot).toMatchObject({ status: 'completed', phase: 'done', percent: 100, processedBytes: CHUNK_SIZE * 3, totalBytes: CHUNK_SIZE * 3 });
+
+    // The steps in order, each status once it's reached.
+    const steps = seen.map((snapshot) => `${snapshot.status}:${snapshot.phase}`).filter((step, i, all) => step !== all[i - 1]);
+    expect(steps).toEqual([
+      'initializing:server-compat', 'initializing:init', 'uploading:init',
+      'uploading:file-start', 'uploading:chunk', 'uploading:file-complete',
+      'uploading:file-start', 'uploading:chunk', 'uploading:file-complete',
+      'completing:complete', 'completed:done',
+    ]);
+    // Bytes only ever go up, and each file's chunks are counted on the bundle's whole.
+    const bytes = seen.map((snapshot) => snapshot.processedBytes);
+    expect(bytes).toEqual([...bytes].sort((x, y) => x - y));
+    expect(seen.filter((snapshot) => snapshot.phase === 'chunk').map((s) => [s.fileIndex, s.chunkIndex, s.processedBytes]))
+      .toEqual([[0, 0, 0], [0, 1, CHUNK_SIZE], [1, 0, CHUNK_SIZE * 2]]);
+
+    // Once it has ended, subscribe() adds nothing, and nothing more is given.
+    const late: UploadSnapshot[] = [];
+    upload.subscribe((snapshot) => late.push(snapshot));
+    upload.cancel();
+    expect(late).toEqual([]);
+    expect(upload.snapshot.status).toBe('completed');
+  });
+
+  it('a failed upload\'s last snapshot keeps the step it stopped at, with the error\'s message', async () => {
+    const server = fakeServer();
+    server.answer('POST /upload/complete', () => server.json(500, { error: 'Disk error.' }));
+    const upload = createClient(server.fetchFn).uploadFiles({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false });
+    expect((await upload.result).status).toBe('failed');
+    expect(upload.snapshot).toMatchObject({ status: 'failed', phase: 'complete', text: 'Disk error.' });
+  });
+
+  it('while a chunk waits to be retried, the snapshot says so and keeps its place', async () => {
+    const server = fakeServer();
+    let failures = 1;
+    server.answer('POST /upload/chunk', () => (failures-- > 0 ? new Response('Busy.', { status: 503 }) : server.json(200, {})));
+    const upload = createClient(server.fetchFn).uploadFiles({
+      files: fileNamed('notes.txt', 2), lifetimeMs: 60_000, encrypt: false, retry: { retries: 1, backoffMs: 100 },
+    });
+    const seen: UploadSnapshot[] = [];
+    upload.subscribe((snapshot) => seen.push(snapshot));
+    expect((await upload.result).status).toBe('completed');
+
+    const waiting = seen.find((snapshot) => snapshot.phase === 'retry-wait');
+    expect(waiting).toMatchObject({ status: 'uploading', chunkIndex: 0, processedBytes: 0, totalBytes: CHUNK_SIZE * 2 });
+    expect(waiting?.text).toMatch(/^Chunk upload failed\. Retrying in 0\.1s\.\.\. \(1\/1\)$/);
+  });
+});
+
+describe('File sources', () => {
+  it('a FileSource is read in bounded ranges, one chunk at a time, and what it gives is what is sent', async () => {
+    const server = fakeServer();
+    const bytes = Uint8Array.from({ length: CHUNK_SIZE * 2 + 1 }, (_, i) => i + 1);
+    const reads: Array<[number, number]> = [];
+    const source: FileSource = {
+      name: 'readings.bin',
+      size: bytes.length,
+      async read(start, end) {
+        reads.push([start, end]);
+        return bytes.slice(start, end);
+      },
+    };
+
+    const outcome = await createClient(server.fetchFn).uploadFiles({ files: source, lifetimeMs: 60_000, encrypt: false }).result;
+    expect(outcome.status).toBe('completed');
+    expect(reads).toEqual([[0, CHUNK_SIZE], [CHUNK_SIZE, CHUNK_SIZE * 2], [CHUNK_SIZE * 2, CHUNK_SIZE * 2 + 1]]);
+    expect(server.chunkBodies.map((body) => [...body])).toEqual([[1, 2, 3, 4], [5, 6, 7, 8], [9]]);
+    expect(JSON.parse(server.requests.find((r) => r.url.endsWith('/upload/init'))!.body)).toMatchObject({ filename: 'readings.bin', totalSize: 9, totalChunks: 3 });
+  });
+
+  it('a Node.js file handle is a source through fileHandleSource()', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dropgate-core-'));
+    const path = join(dir, 'on-disk.bin');
+    await writeFile(path, Uint8Array.from([9, 8, 7, 6, 5, 4]));
+    const handle = await open(path, 'r');
+    try {
+      const source = await fileHandleSource(handle, { name: 'on-disk.bin' });
+      expect({ name: source.name, size: source.size }).toEqual({ name: 'on-disk.bin', size: 6 });
+      expect([...await source.read(2, 5)]).toEqual([7, 6, 5]);
+
+      const server = fakeServer();
+      const outcome = await createClient(server.fetchFn).uploadFiles({ files: source, lifetimeMs: 60_000, encrypt: true }).result;
+      expect(outcome.status).toBe('completed');
+      // Encrypted: each chunk is its 12-byte IV, the ciphertext and a 16-byte tag.
+      expect(server.chunkBodies.map((body) => body.length)).toEqual([12 + CHUNK_SIZE + 16, 12 + 2 + 16]);
+    } finally {
+      await handle.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a source that fails to read, or gives other than the bytes asked for, fails the upload as SOURCE_UNAVAILABLE', async () => {
+    const short: FileSource = { name: 'shrunk.bin', size: CHUNK_SIZE * 2, read: async (start, end) => new Uint8Array(Math.max(0, end - start - 1)) };
+    const broken: FileSource = { name: 'gone.bin', size: CHUNK_SIZE, read: async () => { throw new Error('ENOENT: gone.bin'); } };
+    for (const source of [short, broken]) {
+      const server = fakeServer();
+      const outcome = await createClient(server.fetchFn).uploadFiles({ files: source, lifetimeMs: 60_000, encrypt: false }).result;
+      expect(codeOf(outcome)).toBe('SOURCE_UNAVAILABLE');
+      expect(server.chunkIndexes).toEqual([]);
+      expect(JSON.stringify(outcome)).not.toContain(source.name);
     }
   });
 });

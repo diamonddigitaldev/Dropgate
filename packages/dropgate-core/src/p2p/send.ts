@@ -9,7 +9,7 @@ import type {
 } from './types.js';
 import { generateP2PCode } from './utils.js';
 import { buildPeerOptions, createPeerWithRetries, resolvePeerConfig } from './helpers.js';
-import type { FileSource } from '../types.js';
+import type { P2PFile } from './types.js';
 import {
   P2P_PROTOCOL_VERSION,
   P2P_CHUNK_SIZE,
@@ -113,7 +113,7 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
   } = opts;
 
   // Normalize to files array
-  const files: FileSource[] = Array.isArray(file) ? file : [file];
+  const files: P2PFile[] = Array.isArray(file) ? file : [file];
   const isMultiFile = files.length > 1;
   const totalSize = files.reduce((sum, f) => sum + f.size, 0);
 

@@ -31,16 +31,13 @@ export type Outcome<T> = CompletedOutcome<T> | CancelledOutcome | FailedOutcome;
  * its one outcome. Work that ends after a cancel, however it ends, was
  * cancelled; work that returns finished, even if a cancel came too late to
  * stop it. The node leaves the tree once the outcome is known.
- *
- * `signal` is an AbortSignal the work uses instead of the node's own; an abort
- * of it counts as a cancel by `signal`.
  */
-export async function settle<T>(scope: CancelScope, work: () => Promise<T>, signal?: AbortSignal): Promise<Outcome<T>> {
+export async function settle<T>(scope: CancelScope, work: () => Promise<T>): Promise<Outcome<T>> {
   try {
     const value = await work();
     return { status: 'completed', value };
   } catch (err) {
-    const cancellation = scope.cancellation ?? (signal?.aborted ? { by: 'signal' as const, source: scope.label } : null);
+    const cancellation: Cancellation | null = scope.cancellation;
     if (cancellation) return { status: 'cancelled', cancellation };
     return { status: 'failed', error: toDropgateError(err) };
   } finally {

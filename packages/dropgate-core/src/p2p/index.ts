@@ -64,6 +64,7 @@ export type {
   P2PSendSession,
   P2PReceiveSession,
   // Client P2P options (used by DropgateClient.p2pSend/p2pReceive)
+  P2PFile,
   P2PSendFileOptions,
   P2PReceiveFileOptions,
 } from './types.js';

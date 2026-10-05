@@ -8,7 +8,7 @@ import { arrayBufferToBase64 } from '../utils/base64.js';
  */
 export async function encryptToBlob(
   cryptoObj: CryptoAdapter,
-  dataBuffer: ArrayBuffer,
+  dataBuffer: ArrayBuffer | Uint8Array<ArrayBuffer>,
   key: CryptoKey
 ): Promise<Blob> {
   const iv = cryptoObj.getRandomValues(new Uint8Array(AES_GCM_IV_BYTES));

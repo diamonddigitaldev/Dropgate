@@ -11,46 +11,20 @@ const api = window.electronAPI;
 const kitApi = window.kitAPI;
 
 /**
- * A Blob-like object that reads a byte range from a file on disk via IPC,
- * only when the data is actually needed (i.e. when arrayBuffer() is called).
- */
-class LazyBlob {
-    constructor(filePath, start, end) {
-        this.filePath = filePath;
-        this.start = start;
-        this.end = end;
-        this.size = end - start;
-    }
-
-    async arrayBuffer() {
-        const buffer = await api.readFileRange(this.filePath, this.start, this.end);
-        // IPC returns a Node.js Buffer (Uint8Array); convert to ArrayBuffer
-        if (buffer instanceof ArrayBuffer) return buffer;
-        return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-    }
-
-    slice(start, end) {
-        const s = this.start + (start || 0);
-        const e = this.start + (end !== undefined ? end : this.size);
-        return new LazyBlob(this.filePath, s, e);
-    }
-}
-
-/**
- * A File-like object backed by a file path on disk.
- * Implements the subset of the File/Blob API that dropgate-core needs:
- * .name, .size, .type, .slice(start, end)
+ * A file on disk, as one of core's file sources: core asks for one range of
+ * bytes at a time (read()), and main reads just that range, for a file it has
+ * handed this page.
  */
 class LazyFile {
     constructor(filePath, name, size) {
         this.filePath = filePath;
         this.name = name;
         this.size = size;
-        this.type = '';
     }
 
-    slice(start, end) {
-        return new LazyBlob(this.filePath, start || 0, end !== undefined ? end : this.size);
+    async read(start, end) {
+        // IPC gives a Uint8Array (main's Buffer); core checks it has every byte asked for.
+        return api.readFileRange(this.filePath, start, end);
     }
 }
 
@@ -100,7 +74,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         let selectedFiles = [];
         /** @type {{compatible:boolean, message?:string}} */
         let lastServerCheck = { compatible: false, message: '' };
-        let activeUploadSession = null;
+        let activeUpload = null;
         // Whether this window shows an upload running: its own, or one main tells it about.
         let uploading = false;
         let uploadsAllowed = false;
@@ -325,9 +299,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Cancel the upload this window runs (main passes on a Cancel from any window).
         api.onCancelUpload(() => {
-            if (activeUploadSession) {
-                activeUploadSession.cancel();
-                activeUploadSession = null;
+            if (activeUpload) {
+                activeUpload.cancel();
+                activeUpload = null;
             }
         });
 
@@ -541,37 +515,43 @@ document.addEventListener('DOMContentLoaded', async () => {
             };
 
             try {
-                const session = await coreClient.uploadFiles({
-                    files: selectedFiles.length === 1 ? selectedFiles[0] : selectedFiles,
+                const files = [...selectedFiles];
+                const upload = coreClient.uploadFiles({
+                    files: files.length === 1 ? files[0] : files,
                     lifetimeMs,
                     maxDownloads: (() => {
                         const val = parseInt(maxDownloadsValue.value, 10);
                         return (Number.isInteger(val) && val >= 0) ? val : 1;
                     })(),
                     encrypt: encrypt,
-                    onProgress: (evt) => {
-                        const payload = {};
-                        if (evt?.text) {
-                            payload.text = evt.currentFileName
-                                ? `${evt.text} — ${evt.currentFileName}`
-                                : evt.text;
-                        }
-                        // The step alone, with no file name, for the window's title.
-                        if (evt?.text) payload.step = evt.text;
-                        if (evt?.percent !== undefined) payload.percent = evt.percent;
-                        if (Object.keys(payload).length) api.uploadProgress(payload);
-                    },
                 });
 
-                activeUploadSession = session;
+                // Where the upload is, while it runs. Core's snapshots never
+                // name a file, so the name of the one a bundle is on comes from
+                // this page's own list.
+                const report = (snapshot) => {
+                    if (!['initializing', 'uploading', 'completing'].includes(snapshot.status)) return;
+                    const onFile = files.length > 1 && ['file-start', 'chunk', 'file-complete'].includes(snapshot.phase);
+                    const fileName = onFile ? files[snapshot.fileIndex]?.name : null;
+                    api.uploadProgress({
+                        text: fileName ? `${snapshot.text} — ${fileName}` : snapshot.text,
+                        // The step alone, with no file name, for the window's title.
+                        step: snapshot.text,
+                        percent: snapshot.percent,
+                    });
+                };
+                report(upload.snapshot);
+                upload.subscribe(report);
+
+                activeUpload = upload;
                 uploading = true;
                 actions.update({ running: true });
                 setUploadingState(true);
 
                 // The upload's one outcome: completed, cancelled or failed.
-                const outcome = await session.result;
+                const outcome = await upload.result;
 
-                activeUploadSession = null;
+                activeUpload = null;
                 setUploadingState(false);
                 revokeAllLazyFiles();
 
@@ -588,7 +568,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             } catch (error) {
                 // Only an upload that never started gets here.
-                activeUploadSession = null;
+                activeUpload = null;
                 uploading = false;
                 actions.update({ running: false });
                 setUploadingState(false);

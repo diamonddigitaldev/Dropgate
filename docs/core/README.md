@@ -13,8 +13,8 @@ This package is **headless** and **environment-agnostic** — it contains no DOM
 
 ## Contents
 
-* [Quick Start](quick-start.md): configuring a client, connecting, uploading, downloading, metadata, and P2P transfers.
-* [API Reference](api-reference.md): the client's options, properties and methods, and every exported function, constant and class.
+* [Quick Start](quick-start.md): configuring a client, connecting, uploading (and file sources), downloading, metadata, and P2P transfers.
+* [API Reference](api-reference.md): the client's options, properties and methods, the upload handle, file sources, and every exported function, constant and class.
 * [Outcomes and Cancellation](outcomes.md): how an upload or a download ends, and the cancellation tree that cancels it.
 * [Errors](errors.md): the one error class, and the codes it carries.
 * [Browser Usage](browser-usage.md): loading core with a `<script>` tag or as an ES module.

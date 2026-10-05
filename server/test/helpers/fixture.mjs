@@ -58,8 +58,8 @@ export async function createClient(server, recorder) {
     const client = new DropgateClient({ clientVersion: serverVersion, server: server.baseUrl, fetchFn: recorder.fetch });
     const upload = async (files, encrypt) => {
         for (const f of [files].flat()) recorder.note(f.name);
-        const session = await client.uploadFiles({ files, encrypt, lifetimeMs: 60 * 60 * 1000, maxDownloads: 1 });
-        const result = completed(await session.result);
+        const handle = client.uploadFiles({ files, encrypt, lifetimeMs: 60 * 60 * 1000, maxDownloads: 1 });
+        const result = completed(await handle.result);
         for (const value of [result.fileId, result.bundleId, result.uploadId, result.keyB64, result.downloadUrl]) recorder.note(value);
         for (const f of result.files || []) recorder.note(f.fileId);
         return result;

@@ -32,7 +32,7 @@ The main client class for interacting with Dropgate servers.
 | `connect(opts?)` | Fetch server info, check compatibility, cache result |
 | `getFileMetadata(fileId, opts?)` | Fetch metadata for a single file |
 | `getBundleMetadata(bundleId, keyB64?, opts?)` | Fetch bundle metadata with automatic manifest decryption and field derivation |
-| `uploadFiles(opts)` | Upload one or more files with optional encryption. Gives a session: `result`, the upload's one [outcome](outcomes.md); `cancel()`; and `getStatus()`, which is `initializing`, `uploading` or `completing` while it runs, then the outcome's status |
+| `uploadFiles(opts)` | Upload one or more files with optional encryption. Gives the upload's [handle](#the-upload-handle) at once; pass `signal` to cancel it with your own `AbortSignal` too |
 | `downloadFiles(opts)` | Download a file or a bundle with optional decryption. Gives the download's one [outcome](outcomes.md); pass `signal` to cancel it |
 | `cancelAll()` | Cancel every upload and download running on the client. Each ends as `cancelled`, `by: 'parent'`; the client stays usable |
 | `p2pSend(opts)` | Start a P2P send session |
@@ -41,6 +41,38 @@ The main client class for interacting with Dropgate servers.
 | `resolveShareTarget(value, opts?)` | Resolve a sharing code or link via the server. A link is read locally, and only the ID or code in it is sent: never anything after its `#` (the encryption key), which comes back on the end of `target`. A link to another server is refused without a request. |
 
 An upload or a download reports how it ended in its outcome, and never throws once it has started. The other methods throw a [`DropgateError`](errors.md).
+
+### The Upload Handle
+
+`uploadFiles()` gives a handle, the same shape later versions give for every operation:
+
+| Member | Description |
+| --- | --- |
+| `result` | A promise of the upload's one [outcome](outcomes.md). It never rejects |
+| `snapshot` | Where the upload is now (below). A new, frozen object each time it changes |
+| `subscribe(listener)` | Calls `listener` with each new snapshot until the upload has ended, the last with its outcome's status. Returns a function that unsubscribes. A listener that throws doesn't stop the upload or the others |
+| `cancel()` | Cancels the upload: its outcome is then `cancelled`, `by: 'self'`. Does nothing once it has ended |
+
+An upload's snapshot (`UploadSnapshot`) never holds a file name or a key:
+
+| Field | Description |
+| --- | --- |
+| `status` | `initializing`, `uploading` or `completing` while it runs, then its outcome's status: `completed`, `cancelled` or `failed` |
+| `phase` | The step it's on: `server-info`, `server-compat`, `crypto`, `init`, `file-start`, `chunk`, `file-complete`, `retry-wait`, `retry`, `complete`, then `done` once it has completed. A cancelled or failed upload keeps the step it stopped at |
+| `text` | What it's doing, for people, such as `Uploading chunk 2 of 5...`. A failed upload's is its error's message |
+| `percent` | 0 to 100 |
+| `processedBytes`, `totalBytes` | Bytes of the files sent so far, and of all the files together |
+| `fileIndex`, `totalFiles` | Which of the files given it's on (from 0), and how many, for an upload of several files |
+| `chunkIndex`, `totalChunks` | Which chunk of the current file it's on (from 0), and how many it has |
+
+## File Sources
+
+An upload reads each file one chunk at a time through a `FileSource`: `name`, `size`, an optional `type`, and `read(start, end)`, a promise of a `Uint8Array` of exactly `end - start` bytes. `uploadFiles()` takes FileSources, browser `File`s and `Blob`s (a `Blob` with no name is called `file`), and throws `INVALID_ARGUMENT` for anything else, before the upload starts.
+
+| Export | Description |
+| --- | --- |
+| `fileHandleSource(handle, { name, type? })` | A promise of a FileSource reading a Node.js `FileHandle` (from `fs/promises`' `open()`). Its size is the file's when called. Closing the handle once the upload has ended is yours to do |
+| `blobSource(blob, name?)` | A FileSource reading a browser `File` or `Blob`. `uploadFiles()` does this itself |
 
 ## Errors
 

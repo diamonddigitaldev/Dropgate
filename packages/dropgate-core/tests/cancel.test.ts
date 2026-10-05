@@ -140,10 +140,10 @@ describe('settle', () => {
     expect(await outcome).toEqual({ status: 'completed', value: 'committed' });
   });
 
-  it('counts an abort of a signal the work used instead of its node as a cancel by signal', async () => {
-    const node = new CancelScope('upload');
+  it('gives cancelled by signal when a signal fed into the node is aborted, and the work, using only its node, stops', async () => {
     const external = new AbortController();
-    const outcome = settle(node, () => untilAborted(external.signal), external.signal);
+    const node = new CancelScope('upload', { signal: external.signal });
+    const outcome = settle(node, () => untilAborted(node.signal));
     external.abort(new DOMException('Stop.', 'AbortError'));
     expect(await outcome).toEqual({ status: 'cancelled', cancellation: { by: 'signal', source: 'upload' } });
   });

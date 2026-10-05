@@ -11,8 +11,8 @@ An upload and a download each end with exactly one **outcome**, which says how i
 | `failed` | `error`: a [`DropgateError`](errors.md) | It stopped on an error |
 
 ```javascript
-const session = await client.uploadFiles({ files: myFile, lifetimeMs: 3600000 });
-const outcome = await session.result;
+const upload = client.uploadFiles({ files: myFile, lifetimeMs: 3600000 });
+const outcome = await upload.result;
 
 switch (outcome.status) {
   case 'completed':
@@ -41,21 +41,23 @@ There are three ways to cancel an operation, and its `cancelled` outcome says wh
 
 | `cancellation.by` | `cancellation.source` | How |
 | --- | --- | --- |
-| `self` | `upload` | The upload's own `session.cancel()` |
+| `self` | `upload` | The upload's own `upload.cancel()` |
 | `parent` | `client` | The client's `cancelAll()`, which cancels everything running on it |
-| `signal` | `download` | An `AbortSignal` passed in as `signal` was aborted |
+| `signal` | `upload` or `download` | An `AbortSignal` passed in as `signal` was aborted |
 
 `source` names what was cancelled first: the operation itself, or the one it runs under.
 
+A signal you pass in feeds into the operation's own node: aborting it cancels the operation as its own `cancel()` would. It doesn't replace that node, so `upload.cancel()` and `cancelAll()` still stop an upload that was given a signal. Cancelling never aborts your signal: it's yours.
+
 ```javascript
 // Cancel one upload:
-session.cancel();
+upload.cancel();
 
 // Cancel every upload and download running on the client, such as when the app closes.
 // Each ends as { status: 'cancelled', cancellation: { by: 'parent', source: 'client' } }.
 client.cancelAll();
 
-// Cancel a download with your own signal:
+// Cancel an upload or a download with your own signal:
 const controller = new AbortController();
 const download = client.downloadFiles({ fileId, onData, signal: controller.signal });
 controller.abort();
@@ -64,6 +66,4 @@ controller.abort();
 
 The client stays usable after `cancelAll()`: operations started afterwards run as normal. Once an operation has ended, cancelling it does nothing.
 
-When an upload is cancelled, however that happens, core tells the server to discard what it has, without waiting for it.
-
-> **Known issue: an upload given its own `signal`.** The upload uses that signal for its requests instead of its own node of the tree, so `session.cancel()` and `cancelAll()` tell the server to discard the upload but don't stop the client sending chunks, and the upload's outcome then depends on what the server does with them. Aborting the signal itself does stop it, with `by: 'signal'`. Until this is fixed, call `session.cancel()` first, so the server is told, and then abort your signal.
+When an upload is cancelled, however that happens, core stops sending chunks and tells the server to discard what it has, without waiting for it. An operation given a signal that's already aborted is cancelled before it asks the server anything.

@@ -29,19 +29,24 @@ console.log('P2P enabled:', serverInfo.capabilities?.p2p?.enabled);
 
 ## Uploading Files
 
+`uploadFiles()` starts the upload and gives its **handle** straight away: `result`, `snapshot`, `subscribe()` and `cancel()`.
+
 ```javascript
-const session = await client.uploadFiles({
-  files: myFile, // File or Blob (implements FileSource), or an array of them
+const upload = client.uploadFiles({
+  files: myFile, // a browser File or Blob, or a FileSource (below), or an array of them
   lifetimeMs: 3600000, // 1 hour
   maxDownloads: 5,
   encrypt: true,
-  onProgress: ({ phase, text, percent }) => {
-    console.log(`${phase}: ${text} (${percent ?? 0}%)`);
-  },
+});
+
+// Where it is, each time that changes. A snapshot never names a file: for an
+// upload of several, fileIndex says which of yours it's on.
+upload.subscribe(({ status, phase, text, percent }) => {
+  console.log(`${status} ${phase}: ${text} (${percent.toFixed(0)}%)`);
 });
 
 // The upload's one outcome: completed, cancelled or failed. It never rejects.
-const outcome = await session.result;
+const outcome = await upload.result;
 if (outcome.status === 'completed') {
   console.log('Download URL:', outcome.value.downloadUrl);
 } else if (outcome.status === 'failed') {
@@ -49,21 +54,39 @@ if (outcome.status === 'completed') {
 }
 
 // Cancel an in-progress upload (its outcome is then 'cancelled'):
-// session.cancel();
+// upload.cancel();
 ```
 
-[Outcomes and Cancellation](outcomes.md) has the rest, including cancelling everything at once with `client.cancelAll()`.
+`upload.snapshot` is where it is now, as a new, frozen object each time it changes. The [API Reference](api-reference.md#the-upload-handle) lists its fields, and [Outcomes and Cancellation](outcomes.md) has the rest, including cancelling with your own `AbortSignal`, and everything at once with `client.cancelAll()`.
 
-> **If you pass your own `signal`, `session.cancel()` doesn't stop the upload.** It tells the server to discard the upload, but the client keeps sending chunks. To cancel straight away, call `session.cancel()` first, so the server is told, and then abort your own signal:
->
-> ```javascript
-> const controller = new AbortController();
-> const session = await client.uploadFiles({ files: myFile, lifetimeMs: 3600000, signal: controller.signal });
->
-> // To cancel:
-> session.cancel();
-> controller.abort();
-> ```
+### File Sources
+
+Core reads a file one chunk at a time, through a **file source**: a `name`, a `size`, and `read(start, end)`, which gives exactly those bytes. A browser `File` or `Blob` is used as it is. For a file on disk in Node.js, open it and pass `fileHandleSource()`:
+
+```javascript
+import { open } from 'node:fs/promises';
+import { fileHandleSource } from '@dropgate/core';
+
+const handle = await open('/files/report.pdf', 'r');
+try {
+  const source = await fileHandleSource(handle, { name: 'report.pdf' });
+  const outcome = await client.uploadFiles({ files: source, lifetimeMs: 3600000 }).result;
+} finally {
+  await handle.close();
+}
+```
+
+Anything else that can read a range of bytes on request, such as a file another process holds, implements `read()` itself:
+
+```javascript
+const source = {
+  name: 'report.pdf',
+  size: 1048576,
+  read: (start, end) => readBytesSomehow(start, end), // a Promise of a Uint8Array of end - start bytes
+};
+```
+
+A source must be able to read any range, more than once: a stream that can only be read once isn't a source. If a read fails, or gives a different number of bytes (the file changed while it was read), the upload fails with `SOURCE_UNAVAILABLE`.
 
 ## Fetching File/Bundle Metadata
 
