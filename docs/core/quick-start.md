@@ -134,15 +134,22 @@ else if (outcome.status === 'failed') console.error('Download failed:', outcome.
 
 In Node.js, so is a file opened for writing. To name the file after the one being downloaded, pass a function: it's given each file's name and size as its download starts, and returns the sink.
 
+Core has already refused a name that's empty, too long, or has a control character or path in it. Before using one as a path, give it to `filenames.sanitize()` for a name that's safe on every OS, and `filenames.unique()` so it doesn't replace a file already there (see [File Names](#file-names)).
+
 ```javascript
 import { open, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { filenames } from '@dropgate/core';
 
 let path;
 const download = client.hosted.download({
   fileId: 'abc123',
   keyB64: 'key-from-the-link',
-  sink: async ({ name }) => open((path = join('/downloads', name)), 'w'), // check the name before using it as a path
+  sink: async ({ name }) => {
+    const safe = filenames.unique(filenames.sanitize(name), (n) => existsSync(join('/downloads', n)));
+    return open((path = join('/downloads', safe)), 'wx');
+  },
 });
 const outcome = await download.result;
 if (outcome.status !== 'completed' && path) await rm(path, { force: true }); // a FileHandle has no abort()
@@ -154,6 +161,28 @@ A bundle downloads as one ZIP archive into one sink with `asZip: true`, or as it
 const zipped = client.hosted.download({ bundleId, keyB64, asZip: true, sink: zipWriter });
 const separate = client.hosted.download({ bundleId, keyB64, sink: ({ name }) => sinkFor(name) });
 ```
+
+## File Names
+
+Core has one file name rule, for hosted uploads and direct transfers alike.
+
+**Sent or received, a name is refused** with `INVALID_FILENAME` only if it's empty, longer than 255 bytes in UTF-8, or has a control character (NUL included) or a `/` or `\` in it. Core checks every name it sends, encrypted or not, before anything goes out, and every name it receives. The error never holds the name.
+
+**Where a name is written out**, `filenames.sanitize()` gives the name to save it under. It gives the same name on every OS, using Windows' rules everywhere, so a file saved anywhere can be copied anywhere:
+
+| Received | Saved as | Why |
+| --- | --- | --- |
+| `u` + combining `¨` + `.txt` | `ü.txt` | Normalised to NFC |
+| `photo` + U+202E + `gnp.exe` | `photo[U+202E]gnp.exe` | Bidi controls and zero-width characters are shown, so a name can't pass for another |
+| `CON.txt` | `_CON.txt` | A Windows reserved name |
+| `report.pdf. ` | `report.pdf` | Trailing dots and spaces |
+| `a:b` | `a_b` | `:` (a Windows `name:stream`) and `< > " \| ? *` |
+
+`filenames.unique(name, taken)` gives `name (1).ext`, `name (2).ext` and so on when a name is taken; `taken` is a list of names, compared without regard to case, or a function. A bundle downloaded as a ZIP has its members named this way already.
+
+## Sizes
+
+Every conversion between bytes and KB, MB or GB is in 1024s, labelled KB, MB and GB: a server's `maxSizeMB` of 100 allows 104,857,600 bytes.
 
 ## What's Running
 

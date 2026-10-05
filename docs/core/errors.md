@@ -48,7 +48,7 @@ When the server answers with an error, the message is the server's own, if it se
 | `DECRYPT_FAILED` | local | No | A file name or a bundle's manifest couldn't be decrypted: usually the wrong key |
 | `INTEGRITY_FAILED` | server | No | Downloaded data didn't decrypt, or a direct transfer's sender sent data that didn't match what it declared (origin `peer`) |
 | `INVALID_MANIFEST` | peer | No | A direct transfer's list of files didn't add up |
-| `INVALID_FILENAME` | local | No | A file name sent unencrypted is empty, longer than 255 characters, or has a path in it |
+| `INVALID_FILENAME` | local, or `server` or `peer` for a name received | No | A file name sent or received, encrypted or not, is empty, longer than 255 bytes in UTF-8, or has a control character or path separator in it ([File Names](quick-start.md#file-names)) |
 | `INVALID_CODE` | local | No | A direct transfer code isn't the shape of one |
 | `FILE_EMPTY` | local | No | A file to upload is empty (0 bytes) |
 | `FILE_TOO_LARGE` | server | No | The upload is larger than the server's limit (`details.index` says which file, when core finds it before asking the server) |

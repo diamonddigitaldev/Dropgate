@@ -1,5 +1,6 @@
 import { DropgateError, directTransferDisabled } from '../errors.js';
 import { sleep } from '../utils/network.js';
+import { validateFilename } from '../utils/filename.js';
 import type {
   P2PSendOptions,
   P2PSendSession,
@@ -121,6 +122,7 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
   if (!files.length) {
     throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'At least one file is required.' });
   }
+  files.forEach((f, index) => validateFilename(f.name, { index }));
 
   if (!Peer) {
     throw new DropgateError({

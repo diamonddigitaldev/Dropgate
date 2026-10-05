@@ -22,7 +22,7 @@ var ERROR_CODES = {
   DECRYPT_FAILED: { origin: "local", retryable: false, message: "This upload couldn't be decrypted. The key may be wrong." },
   INTEGRITY_FAILED: { origin: "server", retryable: false, message: "Received data didn't pass its integrity check." },
   INVALID_MANIFEST: { origin: "peer", retryable: false, message: "The list of files sent didn't add up." },
-  INVALID_FILENAME: { origin: "local", retryable: false, message: "A file name is empty, too long, or has a path in it." },
+  INVALID_FILENAME: { origin: "local", retryable: false, message: "A file name is empty, too long, or has a control character or path in it." },
   INVALID_CODE: { origin: "local", retryable: false, message: "That isn't a valid sharing code." },
   FILE_EMPTY: { origin: "local", retryable: false, message: "Empty files (0 bytes) cannot be uploaded." },
   FILE_TOO_LARGE: { origin: "server", retryable: false, message: "The upload is larger than the server's limit." },
@@ -672,16 +672,85 @@ function parseShareInput(value) {
 }
 
 // src/utils/filename.ts
-function validatePlainFilename(filename) {
+var MAX_FILENAME_BYTES = 255;
+var encoder = new TextEncoder();
+var utf8Length = (s) => encoder.encode(s).length;
+var CONTROL = /\p{Cc}/u;
+var CONTROL_ALL = /\p{Cc}/gu;
+var INVISIBLE = /[؜᠎​-‏‪-‮⁠-⁤⁦-⁩﻿]/gu;
+var WINDOWS_ILLEGAL = /[<>:"/\\|?*]/g;
+var RESERVED = /^(CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])(\s*)(\..*)?$/i;
+var TRAILING_DOTS_AND_SPACES = /[. ]+$/;
+function validateFilename(filename, where = {}) {
+  const invalid = (message) => new DropgateError({
+    code: "INVALID_FILENAME",
+    message,
+    ...where.origin ? { origin: where.origin } : {},
+    ...where.index === void 0 ? {} : { details: { index: where.index } }
+  });
   if (typeof filename !== "string" || filename.trim().length === 0) {
-    throw new DropgateError({ code: "INVALID_FILENAME", message: "Invalid filename. Must be a non-empty string." });
+    throw invalid("A file name is empty.");
   }
-  if (filename.length > 255 || /[\/\\]/.test(filename)) {
-    throw new DropgateError({ code: "INVALID_FILENAME", message: "Invalid filename. Contains illegal characters or is too long." });
+  if (utf8Length(filename) > MAX_FILENAME_BYTES) {
+    throw invalid(`A file name is longer than ${MAX_FILENAME_BYTES} bytes.`);
+  }
+  if (CONTROL.test(filename)) {
+    throw invalid("A file name has a control character in it.");
+  }
+  if (/[/\\]/.test(filename)) {
+    throw invalid("A file name has a path in it.");
+  }
+}
+function splitExtension(name) {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+}
+function truncateBytes(s, budget) {
+  let used = 0;
+  let kept = "";
+  for (const ch of s) {
+    const size = utf8Length(ch);
+    if (used + size > budget) break;
+    used += size;
+    kept += ch;
+  }
+  return kept;
+}
+function joinWithinLimit(stem, suffix, ext) {
+  const whole = stem + suffix + ext;
+  if (utf8Length(whole) <= MAX_FILENAME_BYTES) return whole;
+  if (utf8Length(suffix + ext) > MAX_FILENAME_BYTES / 2) {
+    return truncateBytes(stem + ext, MAX_FILENAME_BYTES - utf8Length(suffix)) + suffix;
+  }
+  return truncateBytes(stem, MAX_FILENAME_BYTES - utf8Length(suffix + ext)) + suffix + ext;
+}
+function sanitizeFilename(filename) {
+  let name = String(filename ?? "").normalize("NFC");
+  name = name.replace(INVISIBLE, (ch) => `[U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}]`);
+  name = name.replace(CONTROL_ALL, "_").replace(WINDOWS_ILLEGAL, "_");
+  name = name.replace(TRAILING_DOTS_AND_SPACES, "");
+  if (RESERVED.test(name)) name = `_${name}`;
+  const [stem, ext] = splitExtension(name);
+  name = joinWithinLimit(stem, "", ext).replace(TRAILING_DOTS_AND_SPACES, "");
+  return name || "_";
+}
+function uniqueFilename(filename, taken) {
+  const isTaken = typeof taken === "function" ? taken : /* @__PURE__ */ ((set) => (name) => set.has(name.toLowerCase()))(
+    new Set(Array.from(taken, (n) => String(n).toLowerCase()))
+  );
+  if (!isTaken(filename)) return filename;
+  const [stem, ext] = splitExtension(filename);
+  for (let n = 1; ; n++) {
+    const candidate = joinWithinLimit(stem, ` (${n})`, ext);
+    if (!isTaken(candidate)) return candidate;
   }
 }
 
 // src/utils/size.ts
+var BYTES_PER = Object.freeze({ KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 });
+function mbToBytes(mb) {
+  return mb * BYTES_PER.MB;
+}
 function estimateUploadBytes(sizeBytes, opts) {
   const base = Number(sizeBytes) || 0;
   if (!opts.encrypted || base <= 0) return base;
@@ -1054,6 +1123,7 @@ async function startP2PSend(opts) {
   if (!files.length) {
     throw new DropgateError({ code: "INVALID_ARGUMENT", message: "At least one file is required." });
   }
+  files.forEach((f, index) => validateFilename(f.name, { index }));
   if (!Peer) {
     throw new DropgateError({
       code: "INVALID_ARGUMENT",
@@ -1841,6 +1911,7 @@ async function startP2PReceive(opts) {
                 message: `File list size mismatch: declared ${fileListMsg.totalSize}, actual sum ${sumSize}`
               });
             }
+            fileListMsg.files.forEach((f, index) => validateFilename(f.name, { index, origin: "peer" }));
             fileList = fileListMsg;
             total = fileListMsg.totalSize;
             break;
@@ -1862,6 +1933,7 @@ async function startP2PReceive(opts) {
             const name = String(msg.name || "file");
             const fileSize = Number(msg.size) || 0;
             const fi = msg.fileIndex;
+            validateFilename(name, { origin: "peer", ...typeof fi === "number" ? { index: fi } : {} });
             if (fileList && typeof fi === "number" && fi > 0) {
               currentFileReceived = 0;
               onFileStart?.({ fileIndex: fi, name, size: fileSize });
@@ -2858,6 +2930,10 @@ var DropgateClient = class {
       }
     };
     const decryptName = (encrypted) => decrypt((key) => decryptFilenameFromBase64(this.cryptoObj, String(encrypted ?? ""), key, this.base64));
+    const received = (name, index) => {
+      validateFilename(name, { origin: "server", ...index === void 0 ? {} : { index } });
+      return name;
+    };
     if (fileId) {
       const stored = Number(raw.sizeBytes) || 0;
       return {
@@ -2866,7 +2942,7 @@ var DropgateClient = class {
           transport: this.transport,
           fileId,
           isEncrypted,
-          name: isEncrypted ? await decryptName(raw.encryptedFilename) : raw.filename || "file",
+          name: received(isEncrypted ? await decryptName(raw.encryptedFilename) : raw.filename || "file"),
           sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored
         },
         cryptoKey
@@ -2881,14 +2957,14 @@ var DropgateClient = class {
         if (!Array.isArray(parsed?.files)) throw new TypeError("The manifest has no files.");
         return parsed.files;
       });
-      files = manifest.map((f) => ({ fileId: f.fileId, name: f.name || "file", sizeBytes: Number(f.sizeBytes) || 0 }));
+      files = manifest.map((f, i) => ({ fileId: f.fileId, name: received(f.name || "file", i), sizeBytes: Number(f.sizeBytes) || 0 }));
     } else if (Array.isArray(raw.files)) {
       files = [];
       for (const f of raw.files) {
         const stored = Number(f.sizeBytes) || 0;
         files.push({
           fileId: f.fileId,
-          name: isEncrypted ? await decryptName(f.encryptedFilename) : f.filename || "file",
+          name: received(isEncrypted ? await decryptName(f.encryptedFilename) : f.filename || "file", files.length),
           // An unsealed encrypted bundle's sizes are what the server stored, ciphertext.
           sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored
         });
@@ -2935,7 +3011,7 @@ var DropgateClient = class {
       }
       const maxMB = Number(caps.maxSizeMB);
       if (Number.isFinite(maxMB) && maxMB > 0) {
-        const limitBytes = maxMB * 1e3 * 1e3;
+        const limitBytes = mbToBytes(maxMB);
         const validationChunkSize = serverChunkSize(serverInfo, this.chunkSize);
         const totalChunks = Math.ceil(fileSize / validationChunkSize);
         const estimatedBytes = estimateTotalUploadSizeBytes(
@@ -3012,6 +3088,8 @@ var DropgateClient = class {
     const work = async (ctx) => {
       const effectiveSignal = ctx.signal;
       const progress = ctx.update;
+      const filenames2 = files.map((f, i) => filenameOverrides?.[i] ?? f.name ?? "file");
+      filenames2.forEach((name, index) => validateFilename(name, { index }));
       const compat = await this._connect({
         timeoutMs: timeouts.serverInfoMs ?? 5e3,
         signal: effectiveSignal
@@ -3019,12 +3097,8 @@ var DropgateClient = class {
       const { baseUrl, serverInfo } = compat;
       progress({ phase: "server-compat", text: compat.dgup.message });
       this._requireCompatible(compat, "dgup");
-      const filenames2 = files.map((f, i) => filenameOverrides?.[i] ?? f.name ?? "file");
       const serverSupportsE2EE = Boolean(serverInfo?.capabilities?.upload?.e2ee);
       const effectiveEncrypt = encrypt ?? serverSupportsE2EE;
-      if (!effectiveEncrypt) {
-        for (const name of filenames2) validatePlainFilename(name);
-      }
       this._validate({ files, lifetimeMs, encrypt: effectiveEncrypt, serverInfo });
       let cryptoKey = null;
       let keyB64 = null;
@@ -3337,9 +3411,12 @@ var DropgateClient = class {
               throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
             }
           };
+          const members = [];
           for (let fi = 0; fi < files.length; fi++) {
             fileStarts(fi);
-            zip2.startFile(files[fi].name);
+            const member = uniqueFilename(sanitizeFilename(files[fi].name), members);
+            members.push(member);
+            zip2.startFile(member);
             const done = written;
             written += await this._streamFile(files[fi].fileId, streamOpts, async (chunk) => {
               zip2.writeChunk(chunk);
@@ -3731,11 +3808,25 @@ var sizes = Object.freeze({
 });
 var filenames = Object.freeze({
   /**
-   * Checks a file name that will be sent to the server as it is (an
-   * unencrypted upload's).
-   * @throws {DropgateError} INVALID_FILENAME if it's empty, too long, or has a path in it.
+   * Checks a file name before it's sent, encrypted or not; core checks every
+   * name it sends and receives this way.
+   * @throws {DropgateError} INVALID_FILENAME if it's empty, over 255 UTF-8
+   * bytes, or has a control character or path separator in it.
    */
-  validate: validatePlainFilename
+  validate: (name) => validateFilename(name),
+  /**
+   * The name to save a received file under, the same on every OS: NFC, bidi
+   * and zero-width characters shown as `[U+XXXX]`, `< > : " / \ | ? *` and
+   * control characters as `_`, no trailing dots or spaces, `_` before a
+   * Windows reserved name (`CON.txt`), within 255 UTF-8 bytes, never empty.
+   */
+  sanitize: sanitizeFilename,
+  /**
+   * The name itself if it isn't taken, or else `name (1).ext`, `name (2).ext`
+   * and so on. `taken` is the names already used (compared without regard to
+   * case) or a function that says whether a name is.
+   */
+  unique: uniqueFilename
 });
 var codes = Object.freeze({
   /** A new random code. */

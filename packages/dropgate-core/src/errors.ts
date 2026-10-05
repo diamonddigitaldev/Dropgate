@@ -29,7 +29,7 @@ export const ERROR_CODES = {
   DECRYPT_FAILED: { origin: 'local', retryable: false, message: "This upload couldn't be decrypted. The key may be wrong." },
   INTEGRITY_FAILED: { origin: 'server', retryable: false, message: "Received data didn't pass its integrity check." },
   INVALID_MANIFEST: { origin: 'peer', retryable: false, message: "The list of files sent didn't add up." },
-  INVALID_FILENAME: { origin: 'local', retryable: false, message: 'A file name is empty, too long, or has a path in it.' },
+  INVALID_FILENAME: { origin: 'local', retryable: false, message: 'A file name is empty, too long, or has a control character or path in it.' },
   INVALID_CODE: { origin: 'local', retryable: false, message: "That isn't a valid sharing code." },
   FILE_EMPTY: { origin: 'local', retryable: false, message: 'Empty files (0 bytes) cannot be uploaded.' },
   FILE_TOO_LARGE: { origin: 'server', retryable: false, message: "The upload is larger than the server's limit." },

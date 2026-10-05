@@ -45,8 +45,8 @@ import type {
 import { getDefaultCrypto, getDefaultFetch, getDefaultBase64 } from '../adapters/defaults.js';
 import { makeAbortSignal, fetchJson, sleep, buildBaseUrl, parseServerUrl } from '../utils/network.js';
 import { parseShareInput } from '../utils/share-link.js';
-import { validatePlainFilename } from '../utils/filename.js';
-import { plaintextBytes } from '../utils/size.js';
+import { validateFilename, sanitizeFilename, uniqueFilename } from '../utils/filename.js';
+import { plaintextBytes, mbToBytes } from '../utils/size.js';
 import { sha256Hex, generateAesGcmKey, exportKeyBase64, importKeyFromBase64, decryptChunk, decryptFilenameFromBase64 } from '../crypto/index.js';
 import { encryptToBlob, encryptFilenameToBase64 } from '../crypto/encrypt.js';
 import { startP2PSend } from '../p2p/send.js';
@@ -584,6 +584,13 @@ export class DropgateClient {
     const decryptName = (encrypted: string | undefined) =>
       decrypt((key) => decryptFilenameFromBase64(this.cryptoObj, String(encrypted ?? ''), key, this.base64));
 
+    // A received name is checked as a sent one is: whoever uploaded it, a name
+    // that's empty, too long or has a path in it never reaches the caller.
+    const received = (name: string, index?: number): string => {
+      validateFilename(name, { origin: 'server', ...(index === undefined ? {} : { index }) });
+      return name;
+    };
+
     if (fileId) {
       const stored = Number(raw.sizeBytes) || 0;
       return {
@@ -592,7 +599,7 @@ export class DropgateClient {
           transport: this.transport,
           fileId,
           isEncrypted,
-          name: isEncrypted ? await decryptName(raw.encryptedFilename) : (raw.filename || 'file'),
+          name: received(isEncrypted ? await decryptName(raw.encryptedFilename) : (raw.filename || 'file')),
           sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored,
         },
         cryptoKey,
@@ -609,14 +616,14 @@ export class DropgateClient {
         if (!Array.isArray(parsed?.files)) throw new TypeError('The manifest has no files.');
         return parsed.files;
       });
-      files = manifest.map((f) => ({ fileId: f.fileId, name: f.name || 'file', sizeBytes: Number(f.sizeBytes) || 0 }));
+      files = manifest.map((f, i) => ({ fileId: f.fileId, name: received(f.name || 'file', i), sizeBytes: Number(f.sizeBytes) || 0 }));
     } else if (Array.isArray(raw.files)) {
       files = [];
       for (const f of raw.files) {
         const stored = Number(f.sizeBytes) || 0;
         files.push({
           fileId: f.fileId,
-          name: isEncrypted ? await decryptName(f.encryptedFilename) : (f.filename || 'file'),
+          name: received(isEncrypted ? await decryptName(f.encryptedFilename) : (f.filename || 'file'), files.length),
           // An unsealed encrypted bundle's sizes are what the server stored, ciphertext.
           sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored,
         });
@@ -671,7 +678,7 @@ export class DropgateClient {
       // maxSizeMB: 0 means unlimited (per-file check)
       const maxMB = Number(caps.maxSizeMB);
       if (Number.isFinite(maxMB) && maxMB > 0) {
-        const limitBytes = maxMB * 1000 * 1000;
+        const limitBytes = mbToBytes(maxMB);
         const validationChunkSize = serverChunkSize(serverInfo, this.chunkSize);
         const totalChunks = Math.ceil(fileSize / validationChunkSize);
         const estimatedBytes = estimateTotalUploadSizeBytes(
@@ -762,6 +769,11 @@ export class DropgateClient {
       const effectiveSignal = ctx.signal;
       const progress = ctx.update;
 
+      // 1) Resolve filenames, and check every one, encrypted or not, before
+      // anything is sent: the one file name rule.
+      const filenames = files.map((f, i) => filenameOverrides?.[i] ?? f.name ?? 'file');
+      filenames.forEach((name, index) => validateFilename(name, { index }));
+
       // 0) Get server info + compat (uses cache)
       const compat = await this._connect({
         timeoutMs: timeouts.serverInfoMs ?? 5000,
@@ -772,16 +784,9 @@ export class DropgateClient {
       progress({ phase: 'server-compat', text: compat.dgup.message });
       this._requireCompatible(compat, 'dgup');
 
-      // 1) Resolve filenames
-      const filenames = files.map((f, i) => filenameOverrides?.[i] ?? f.name ?? 'file');
-
       // Resolve encrypt option: default to true if server supports E2EE
       const serverSupportsE2EE = Boolean(serverInfo?.capabilities?.upload?.e2ee);
       const effectiveEncrypt = encrypt ?? serverSupportsE2EE;
-
-      if (!effectiveEncrypt) {
-        for (const name of filenames) validatePlainFilename(name);
-      }
 
       this._validate({ files, lifetimeMs, encrypt: effectiveEncrypt, serverInfo });
 
@@ -1133,9 +1138,13 @@ export class DropgateClient {
               throw toDropgateError(err, 'OUTPUT_WRITE_FAILED');
             }
           };
+          // Each member is saved under its safe name, and two the same are told apart.
+          const members: string[] = [];
           for (let fi = 0; fi < files.length; fi++) {
             fileStarts(fi);
-            zip.startFile(files[fi].name);
+            const member = uniqueFilename(sanitizeFilename(files[fi].name), members);
+            members.push(member);
+            zip.startFile(member);
             const done = written;
             written += await this._streamFile(files[fi].fileId, streamOpts, async (chunk) => {
               zip.writeChunk(chunk);

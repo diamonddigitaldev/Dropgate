@@ -1,7 +1,7 @@
 import { blobSource, fileHandleSource } from './source.js';
 import { lifetimeToMs } from './utils/lifetime.js';
 import { estimateUploadBytes } from './utils/size.js';
-import { validatePlainFilename } from './utils/filename.js';
+import { validateFilename, sanitizeFilename, uniqueFilename } from './utils/filename.js';
 import { generateP2PCode, isP2PCodeLike, isLocalhostHostname, isSecureContextForP2P } from './p2p/utils.js';
 import { StreamingZipWriter } from './zip/stream-zip.js';
 
@@ -31,14 +31,28 @@ export const sizes = Object.freeze({
   estimateUpload: estimateUploadBytes,
 });
 
-/** File names. */
+/** File names: one rule, for hosted uploads and direct transfers alike. */
 export const filenames = Object.freeze({
   /**
-   * Checks a file name that will be sent to the server as it is (an
-   * unencrypted upload's).
-   * @throws {DropgateError} INVALID_FILENAME if it's empty, too long, or has a path in it.
+   * Checks a file name before it's sent, encrypted or not; core checks every
+   * name it sends and receives this way.
+   * @throws {DropgateError} INVALID_FILENAME if it's empty, over 255 UTF-8
+   * bytes, or has a control character or path separator in it.
    */
-  validate: validatePlainFilename,
+  validate: (name: string): void => validateFilename(name),
+  /**
+   * The name to save a received file under, the same on every OS: NFC, bidi
+   * and zero-width characters shown as `[U+XXXX]`, `< > : " / \ | ? *` and
+   * control characters as `_`, no trailing dots or spaces, `_` before a
+   * Windows reserved name (`CON.txt`), within 255 UTF-8 bytes, never empty.
+   */
+  sanitize: sanitizeFilename,
+  /**
+   * The name itself if it isn't taken, or else `name (1).ext`, `name (2).ext`
+   * and so on. `taken` is the names already used (compared without regard to
+   * case) or a function that says whether a name is.
+   */
+  unique: uniqueFilename,
 });
 
 /** Direct transfer codes, such as `ABCD-1234`. */

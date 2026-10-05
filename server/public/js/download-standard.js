@@ -1,4 +1,4 @@
-import { DropgateError } from './dropgate-core.js';
+import { DropgateError, filenames } from './dropgate-core.js';
 import { pageClient } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
@@ -196,7 +196,8 @@ async function loadMetadata() {
     downloadState.isEncrypted = metadata.isEncrypted;
     downloadState.sizeBytes = metadata.sizeBytes;
     downloadState.keyB64 = metadata.isEncrypted ? hash : null;
-    downloadState.fileName = metadata.name;
+    // Shown and saved under its safe name: the one file name rule.
+    downloadState.fileName = filenames.sanitize(metadata.name);
     fileEncryptionEl.textContent = metadata.isEncrypted ? 'End-to-End Encrypted' : 'None';
     fileSizeEl.textContent = formatBytes(metadata.sizeBytes);
 

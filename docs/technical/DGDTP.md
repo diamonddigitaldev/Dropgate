@@ -201,6 +201,7 @@ For transfers involving multiple files, the sender transmits a file list immedia
 
 - `fileCount` MUST NOT exceed **10,000**.
 - `totalSize` MUST equal the sum of all individual file sizes.
+- Every `name` MUST follow the file name rule DGUP shares: not empty, at most 255 bytes in UTF-8, and no control character, `/` or `\`. A `meta` message's `name` is checked the same way, and the sender checks its names before sending. A name that breaks it ends the transfer with `INVALID_FILENAME`. The receiver saves a file under a name sanitised for every OS ([File Names](../core/quick-start.md#file-names)).
 
 ### 7.2 File Metadata
 

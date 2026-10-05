@@ -185,7 +185,9 @@ An upload reads each file one chunk at a time through a `FileSource`: `name`, `s
 | --- | --- |
 | `lifetime.toMs(value, unit)` | A lifetime in `minutes`, `hours` or `days` in milliseconds; 0 for `unlimited` or anything invalid |
 | `sizes.estimateUpload(sizeBytes, { encrypted, chunkSize? })` | How many bytes an upload of a file sends: its size, plus each chunk's encryption overhead if it's encrypted. `chunkSize` is the server's (default 5 MB) |
-| `filenames.validate(name)` | Throws `INVALID_FILENAME` for a name that's empty, too long or has a path in it, as an unencrypted upload's name is checked |
+| `filenames.validate(name)` | Throws `INVALID_FILENAME` for a name that's empty, over 255 UTF-8 bytes, or has a control character or path separator in it: the check core makes of every name it sends and receives |
+| `filenames.sanitize(name)` | The name to save a received file under, the same on every OS: NFC, bidi and zero-width characters shown as `[U+XXXX]`, control characters and `< > : " / \ \| ? *` as `_`, no trailing dots or spaces, `_` before a Windows reserved name, within 255 UTF-8 bytes, never empty ([File Names](quick-start.md#file-names)) |
+| `filenames.unique(name, taken)` | `name` if it isn't taken, or else `name (1).ext`, `name (2).ext` and so on. `taken` is the names already used, compared without regard to case, or a function that says whether a name is |
 | `codes.generate()` | A new random direct transfer code, such as `ABCD-1234` |
 | `codes.isLike(value)` | Whether a value is shaped like a direct transfer code |
 | `hosts.isLocalhost(hostname)` | Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`, also as `[::1]`) |

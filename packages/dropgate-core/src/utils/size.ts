@@ -1,5 +1,16 @@
 import { DEFAULT_CHUNK_SIZE, ENCRYPTION_OVERHEAD_PER_CHUNK } from '../constants.js';
 
+// One size rule: every conversion between bytes and KB, MB or GB is in 1024s
+// (a KB is 1024 bytes), as the labels KB, MB and GB are shown.
+
+/** Bytes in a KB, MB and GB. */
+export const BYTES_PER = Object.freeze({ KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 });
+
+/** A size in MB, such as a server's `maxSizeMB`, in bytes. */
+export function mbToBytes(mb: number): number {
+  return mb * BYTES_PER.MB;
+}
+
 /**
  * How many bytes an upload of a file sends: its size, plus each chunk's
  * encryption overhead if it's encrypted.

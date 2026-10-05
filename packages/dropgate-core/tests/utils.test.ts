@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { lifetime, filenames, hosts, codes } from '../src/index.js';
+import { lifetime, hosts, codes } from '../src/index.js';
 import { bytesToBase64, base64ToBytes, arrayBufferToBase64 } from '../src/utils/base64.js';
 import { parseServerUrl, buildBaseUrl } from '../src/utils/network.js';
 
 const lifetimeToMs = lifetime.toMs;
-const validatePlainFilename = filenames.validate;
 const isLocalhostHostname = hosts.isLocalhost;
 const isSecureContextForP2P = hosts.isSecureForDirect;
 const generateP2PCode = codes.generate;
@@ -46,30 +45,6 @@ describe('lifetime.toMs', () => {
     expect(lifetimeToMs(-1, 'hours')).toBe(0);
     expect(lifetimeToMs(NaN, 'hours')).toBe(0);
     expect(lifetimeToMs(1, 'invalid')).toBe(0);
-  });
-});
-
-describe('filenames.validate', () => {
-  it('accepts valid filenames', () => {
-    expect(() => validatePlainFilename('test.txt')).not.toThrow();
-    expect(() => validatePlainFilename('my-file.pdf')).not.toThrow();
-    expect(() => validatePlainFilename('document_v2.docx')).not.toThrow();
-  });
-
-  it('rejects empty filenames', () => {
-    expect(codeThrownBy(() => validatePlainFilename(''))).toBe('INVALID_FILENAME');
-    expect(codeThrownBy(() => validatePlainFilename('   '))).toBe('INVALID_FILENAME');
-  });
-
-  it('rejects filenames with path separators', () => {
-    expect(codeThrownBy(() => validatePlainFilename('../test.txt'))).toBe('INVALID_FILENAME');
-    expect(codeThrownBy(() => validatePlainFilename('path/to/file.txt'))).toBe('INVALID_FILENAME');
-    expect(codeThrownBy(() => validatePlainFilename('path\\to\\file.txt'))).toBe('INVALID_FILENAME');
-  });
-
-  it('rejects filenames that are too long', () => {
-    const longName = 'a'.repeat(256);
-    expect(codeThrownBy(() => validatePlainFilename(longName))).toBe('INVALID_FILENAME');
   });
 });
 

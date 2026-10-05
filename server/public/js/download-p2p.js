@@ -1,4 +1,4 @@
-import { hosts, zip } from './dropgate-core.js';
+import { hosts, zip, filenames } from './dropgate-core.js';
 import { pageClient } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard, clearStatusBorder } from './status-card.js';
 
@@ -32,6 +32,7 @@ let received = 0;
 let transferCompleted = false;
 let writer = null;
 let zipWriter = null;
+let zipMembers = [];
 let isMultiFile = false;
 let fileCount = 0;
 let pendingSendReady = null;
@@ -47,8 +48,8 @@ function buildP2PFileList(files) {
     li.className = 'list-group-item d-flex justify-content-between align-items-center py-2';
     const nameSpan = document.createElement('span');
     nameSpan.className = 'text-truncate me-2';
-    nameSpan.textContent = f.name;
-    nameSpan.title = f.name;
+    nameSpan.textContent = filenames.sanitize(f.name);
+    nameSpan.title = nameSpan.textContent;
     const sizeSpan = document.createElement('span');
     sizeSpan.className = 'text-body-secondary small flex-shrink-0';
     sizeSpan.textContent = formatBytes(f.size);
@@ -175,6 +176,7 @@ function startDownload() {
 
     // For multi-file transfers, set up a ZIP writer that pipes ZIP data into the StreamSaver writer
     if (isMultiFile) {
+      zipMembers = [];
       zipWriter = zip.writer(async (chunk) => {
         await writer.write(chunk);
       });
@@ -233,7 +235,8 @@ async function start() {
         received = 0;
         fileCount = metaFileCount || 1;
         isMultiFile = fileCount > 1;
-        fileName = isMultiFile ? `dropgate-bundle-${code}.zip` : name;
+        // Shown and saved under its safe name: the one file name rule.
+        fileName = isMultiFile ? `dropgate-bundle-${code}.zip` : filenames.sanitize(name);
 
         // Store the sendReady function to call when user clicks download
         pendingSendReady = sendReady;
@@ -242,7 +245,7 @@ async function start() {
         elTitle.textContent = 'Ready to Transfer';
         elMsg.textContent = 'Review the file details below, then click Start Transfer.';
 
-        elFileName.textContent = isMultiFile ? fileCount : name;
+        elFileName.textContent = isMultiFile ? fileCount : fileName;
         elFileNameLabel.textContent = isMultiFile ? 'Files' : 'File name';
         elFileSize.textContent = formatBytes(total);
         elFileDetails.style.display = 'block';
@@ -262,7 +265,9 @@ async function start() {
       onFileStart: ({ name }) => {
         // Start a new file entry in the ZIP writer (multi-file only)
         if (zipWriter) {
-          zipWriter.startFile(name);
+          const member = filenames.unique(filenames.sanitize(name), zipMembers);
+          zipMembers.push(member);
+          zipWriter.startFile(member);
         }
       },
       onFileEnd: () => {

@@ -948,3 +948,85 @@ describe('client.hosted.metadata()', () => {
     expect(server.requests).toEqual([]);
   });
 });
+
+/** The member names in a ZIP archive, from its local file headers. */
+function zipMemberNames(bytes: Uint8Array): string[] {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const names: string[] = [];
+  for (let i = 0; i + 30 <= bytes.length; i++) {
+    if (view.getUint32(i, true) !== 0x04034b50) continue;
+    const length = view.getUint16(i + 26, true);
+    names.push(new TextDecoder().decode(bytes.slice(i + 30, i + 30 + length)));
+  }
+  return names;
+}
+
+describe('The file name rule and the size rule in the client', () => {
+  it('refuses a bad name in an upload, encrypted or not, before any request', async () => {
+    for (const encrypt of [true, false]) {
+      const server = fakeServer();
+      const outcome = await createClient(server.fetchFn).hosted.upload({
+        files: [fileNamed('fine.txt'), fileNamed('é'.repeat(200))],
+        lifetimeMs: 60_000,
+        encrypt,
+      }).result;
+      expect(outcome.status === 'failed' && outcome.error, `encrypt: ${encrypt}`).toMatchObject({ code: 'INVALID_FILENAME', origin: 'local', details: { index: 1 } });
+      expect(server.requests).toEqual([]);
+    }
+  });
+
+  it('refuses a name received from the server that is structurally invalid, without naming it', async () => {
+    const server = fakeServer();
+    server.answer(`GET /api/file/${FILE_ID}/meta`, () => server.json(200, { isEncrypted: false, sizeBytes: 4, filename: '../../evil.txt' }));
+    server.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => server.json(200, {
+      isEncrypted: false,
+      files: [{ fileId: FILE_ID, sizeBytes: 4, filename: 'a.txt' }, { fileId: SECOND_FILE_ID, sizeBytes: 4, filename: 'b\u0000.txt' }],
+    }));
+    const client = createClient(server.fetchFn);
+    const error = await client.hosted.metadata({ fileId: FILE_ID }).catch((err: unknown) => err as DropgateError);
+    expect(error).toMatchObject({ code: 'INVALID_FILENAME', origin: 'server' });
+    expect(JSON.stringify(error)).not.toContain('evil');
+    await expect(client.hosted.metadata({ bundleId: BUNDLE_ID })).rejects.toMatchObject({ code: 'INVALID_FILENAME', origin: 'server', details: { index: 1 } });
+    expect(codeOf(await client.hosted.download({ fileId: FILE_ID, sink: nullSink() }).result)).toBe('INVALID_FILENAME');
+  });
+
+  it("saves a ZIP's members under their safe names, and tells two the same apart", async () => {
+    const server = fakeServer();
+    server.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => server.json(200, {
+      isEncrypted: false,
+      files: [
+        { fileId: FILE_ID, sizeBytes: 4, filename: 'photo‮gnp.exe' },
+        { fileId: SECOND_FILE_ID, sizeBytes: 4, filename: 'Notes.txt' },
+        { fileId: FILE_ID, sizeBytes: 4, filename: 'notes.txt' },
+        { fileId: SECOND_FILE_ID, sizeBytes: 4, filename: 'CON.txt' },
+      ],
+    }));
+    server.answer(`GET /api/file/${SECOND_FILE_ID}`, () => new Response(new Uint8Array(4)));
+    const archive = recordingSink();
+    const outcome = await createClient(server.fetchFn).hosted.download({ bundleId: BUNDLE_ID, asZip: true, sink: archive.sink }).result;
+    expect(outcome.status).toBe('completed');
+    expect(zipMemberNames(archive.bytes())).toEqual(['photo[U+202E]gnp.exe', 'Notes.txt', 'notes (1).txt', '_CON.txt']);
+  });
+
+  it("counts a server's maxSizeMB in 1024s: 1 MB allows 1,048,576 bytes, not 1,000,000", async () => {
+    const MB = 1024 * 1024;
+    const run = async (size: number) => {
+      const server = fakeServer();
+      server.answer('GET /api/info', () => server.json(200, {
+        name: 'Test server',
+        version: '4.0.0',
+        protocols: { dgup: { major: 4, minor: 0 }, dgdtp: { major: 4, minor: 0 } },
+        capabilities: { upload: { enabled: true, maxSizeMB: 1, maxLifetimeHours: 0, e2ee: true, chunkSize: MB } },
+      }));
+      const outcome = await createClient(server.fetchFn).hosted.upload({
+        files: new File([new Uint8Array(size)], 'data.bin'),
+        lifetimeMs: 60_000,
+        encrypt: false,
+      }).result;
+      return codeOf(outcome);
+    };
+    expect(await run(1_000_001)).toBe('completed');
+    expect(await run(MB)).toBe('completed');
+    expect(await run(MB + 1)).toBe('FILE_TOO_LARGE');
+  });
+});

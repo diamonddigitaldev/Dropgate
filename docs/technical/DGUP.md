@@ -177,6 +177,8 @@ Content-Type: application/json
 8. `maxDownloads` MUST NOT exceed the server's declared maximum download limit.
 9. Available storage quota is checked atomically under a mutex.
 
+**Client validation:** before anything is sent, the client checks every file name, encrypted or not, by the one file name rule both protocols share: a name is refused if it's empty, longer than 255 bytes in UTF-8, or has a control character or `/` or `\` in it. A client checks the names it receives the same way, and saves a received file under a name sanitised for every OS ([File Names](../core/quick-start.md#file-names)). The server never sees an encrypted upload's name, so it can't check it.
+
 **Response (200):**
 
 ```json

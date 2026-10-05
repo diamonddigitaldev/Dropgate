@@ -1,5 +1,6 @@
 import { DropgateError, directTransferDisabled } from '../errors.js';
 import { sleep } from '../utils/network.js';
+import { validateFilename } from '../utils/filename.js';
 import type { P2PReceiveOptions, P2PReceiveSession, P2PReceiveState, DataConnection } from './types.js';
 import { isP2PCodeLike } from './utils.js';
 import { buildPeerOptions, resolvePeerConfig } from './helpers.js';
@@ -455,6 +456,9 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
               });
             }
 
+            // The one file name rule: a structurally invalid name is refused.
+            fileListMsg.files.forEach((f, index) => validateFilename(f.name, { index, origin: 'peer' }));
+
             fileList = fileListMsg;
             total = fileListMsg.totalSize;
             break;
@@ -484,6 +488,7 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
             const name = String(msg.name || 'file');
             const fileSize = Number(msg.size) || 0;
             const fi = msg.fileIndex;
+            validateFilename(name, { origin: 'peer', ...(typeof fi === 'number' ? { index: fi } : {}) });
 
             // For multi-file subsequent files, reset per-file tracking
             if (fileList && typeof fi === 'number' && fi > 0) {

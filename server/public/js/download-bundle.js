@@ -1,4 +1,4 @@
-import { DropgateError } from './dropgate-core.js';
+import { DropgateError, filenames } from './dropgate-core.js';
 import { pageClient } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
@@ -372,7 +372,8 @@ async function loadMetadata() {
     bundleState.isEncrypted = meta.isEncrypted;
     bundleState.totalSizeBytes = meta.totalSizeBytes;
     bundleState.files = meta.files.map(({ fileId, sizeBytes }) => ({ fileId, sizeBytes }));
-    bundleState.filenames = meta.files.map(({ name }) => name);
+    // Shown and saved under their safe names: the one file name rule.
+    bundleState.filenames = meta.files.map(({ name }) => filenames.sanitize(name));
 
     bundleFileCount.textContent = `${meta.fileCount}`;
     bundleTotalSize.textContent = formatBytes(meta.totalSizeBytes);
