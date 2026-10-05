@@ -54,7 +54,7 @@ Codes follow the pattern `XXXX-0000`:
 
 ### 3.3 Generation
 
-Codes are generated using `crypto.getRandomValues()` when the Web Crypto API is available, falling back to `Math.random()` otherwise. The sender attempts code registration with the signalling server up to **4 times** (configurable), regenerating on collision.
+Codes are generated from secure random numbers (`crypto.getRandomValues()`, which every browser has, even on a page served over plain HTTP), and never from anything weaker: where there are none, no code is made. The sender attempts code registration with the signalling server up to **4 times** (configurable), regenerating on collision.
 
 ### 3.4 Validation
 

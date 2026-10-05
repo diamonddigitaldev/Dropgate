@@ -5,8 +5,11 @@ import { join } from 'node:path';
 import { DropgateClient, DropgateError, sources } from '../src/index.js';
 import type { DownloadOutcome, DownloadSink, DownloadSnapshot, FileSource, Outcome, UploadHandle, UploadSnapshot } from '../src/index.js';
 import { newOperationId } from '../src/operation.js';
-import { exportKeyBase64, generateAesGcmKey } from '../src/crypto/index.js';
-import { encryptFilenameToBase64, encryptToBlob } from '../src/crypto/encrypt.js';
+import { cryptoProvider, encryptName, keyToBase64 } from '../src/crypto/index.js';
+import { getDefaultBase64 } from '../src/adapters/defaults.js';
+
+const provider = cryptoProvider();
+const base64 = getDefaultBase64();
 
 // DropgateClient against a fake server, through its `fetchFn` option: no
 // network.
@@ -648,16 +651,15 @@ function recordingSink(log: string[] = [], label = 'sink') {
 
 /** An encrypted upload as the server keeps it: its key, its name and each chunk sealed, as core uploads them. */
 async function sealedUpload(name: string, plaintext: Uint8Array) {
-  const key = await generateAesGcmKey(crypto);
+  const key = await provider.generateKey();
   const pieces: number[] = [];
   for (let start = 0; start < plaintext.length; start += CHUNK_SIZE) {
-    const blob = await encryptToBlob(crypto, plaintext.slice(start, start + CHUNK_SIZE), key);
-    pieces.push(...new Uint8Array(await blob.arrayBuffer()));
+    pieces.push(...await provider.encrypt(key, plaintext.slice(start, start + CHUNK_SIZE)));
   }
   return {
-    keyB64: await exportKeyBase64(crypto, key),
+    keyB64: await keyToBase64(provider, key, base64),
     stored: Uint8Array.from(pieces),
-    encryptedFilename: await encryptFilenameToBase64(crypto, name, key),
+    encryptedFilename: await encryptName(provider, name, key, base64),
   };
 }
 
@@ -933,12 +935,12 @@ describe('client.hosted.metadata()', () => {
       { fileId: FILE_ID, name: 'tax return.xlsx', sizeBytes: 9 },
       { fileId: SECOND_FILE_ID, name: 'a.txt', sizeBytes: 3 },
     ];
-    const key = await generateAesGcmKey(crypto);
-    const manifest = await encryptToBlob(crypto, new TextEncoder().encode(JSON.stringify({ files })), key);
-    const encryptedManifest = Buffer.from(await manifest.arrayBuffer()).toString('base64');
+    const key = await provider.generateKey();
+    const manifest = await provider.encrypt(key, new TextEncoder().encode(JSON.stringify({ files })));
+    const encryptedManifest = Buffer.from(manifest).toString('base64');
     const server = fakeServer();
     server.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => server.json(200, { isEncrypted: true, sealed: true, encryptedManifest }));
-    const meta = await createClient(server.fetchFn).hosted.metadata({ bundleId: BUNDLE_ID, keyB64: await exportKeyBase64(crypto, key) });
+    const meta = await createClient(server.fetchFn).hosted.metadata({ bundleId: BUNDLE_ID, keyB64: await keyToBase64(provider, key, base64) });
     expect(meta).toEqual({ kind: 'bundle', bundleId: BUNDLE_ID, isEncrypted: true, sealed: true, files, fileCount: 2, totalSizeBytes: 12, transport });
   });
 

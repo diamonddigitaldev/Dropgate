@@ -57,8 +57,11 @@ export const filenames = Object.freeze({
 
 /** Direct transfer codes, such as `ABCD-1234`. */
 export const codes = Object.freeze({
-  /** A new random code. */
-  generate: generateP2PCode,
+  /**
+   * A new random code, from secure random numbers only.
+   * @throws {DropgateError} RUNTIME_UNSUPPORTED if there are none here (no `crypto.getRandomValues()`).
+   */
+  generate: (): string => generateP2PCode(),
   /** Whether a value is shaped like a code. */
   isLike: isP2PCodeLike,
 });

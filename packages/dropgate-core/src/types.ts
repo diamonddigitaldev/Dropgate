@@ -4,6 +4,7 @@ import type { UploadSource } from './source.js';
 import type { DownloadSinkOption } from './sink.js';
 import type { Transport } from './transport.js';
 import type { ProtocolName, ProtocolVersion } from './version.js';
+import type { CredentialProvider } from './credentials.js';
 
 /**
  * Server upload capabilities returned from the server info endpoint.
@@ -21,6 +22,11 @@ export interface UploadCapabilities {
   e2ee?: boolean;
   /** Expected upload chunk size in bytes (server-configured). */
   chunkSize?: number;
+  /**
+   * Whether an upload needs a credential, which the client's `auth` provider
+   * is asked for. A server that doesn't say needs none, and is sent none.
+   */
+  credentialRequired?: boolean;
 }
 
 /**
@@ -209,17 +215,6 @@ export interface ShareTargetResult {
 }
 
 /**
- * Crypto adapter interface compatible with the Web Crypto API.
- * Used for encryption operations and secure random generation.
- */
-export interface CryptoAdapter {
-  /** SubtleCrypto interface for cryptographic operations. */
-  readonly subtle: SubtleCrypto;
-  /** Fill an array with cryptographically secure random values. */
-  getRandomValues<T extends ArrayBufferView | null>(array: T): T;
-}
-
-/**
  * Fetch function type compatible with the standard fetch API.
  * @param input - The URL or Request object to fetch.
  * @param init - Optional fetch configuration.
@@ -273,8 +268,16 @@ export interface DropgateClientOptions {
   chunkSize?: number;
   /** Custom fetch implementation (uses global fetch by default). */
   fetchFn?: FetchFn;
-  /** Custom crypto implementation (uses global crypto by default). */
-  cryptoObj?: CryptoAdapter;
+  /**
+   * Gives a credential for an operation the server says needs one (an upload,
+   * where `/api/info` has `capabilities.upload.credentialRequired`), as
+   * `{ token }` or `null`. It's asked once as each such operation starts, and
+   * once more if the server says the credential has expired; it's never asked
+   * for anything else, and without it nothing is sent. The token goes only to
+   * this client's server, only as `Authorization: Bearer <token>`, and never
+   * appears in a link, snapshot, result, error or URL.
+   */
+  auth?: CredentialProvider;
   /** Custom base64 encoder/decoder. */
   base64?: Base64Adapter;
 }

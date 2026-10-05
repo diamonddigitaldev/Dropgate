@@ -1,4 +1,4 @@
-import type { ServerInfo, CryptoAdapter, BaseProgressEvent } from '../types.js';
+import type { ServerInfo, BaseProgressEvent } from '../types.js';
 import type { BlobLike } from '../source.js';
 import type { Transport } from '../transport.js';
 
@@ -226,9 +226,7 @@ export interface P2PSendOptions extends P2PServerConfig {
   /** Server info (optional, for capability checking). */
   serverInfo?: ServerInfo;
   /** Custom code generator function. */
-  codeGenerator?: (cryptoObj?: CryptoAdapter) => string;
-  /** Crypto object for secure code generation. */
-  cryptoObj?: CryptoAdapter;
+  codeGenerator?: () => string;
   /** Max attempts to register a peer ID. */
   maxAttempts?: number;
   /** Chunk size for data transfer. */
@@ -364,7 +362,7 @@ export interface P2PReceiveSession extends ViaClient {
 
 /**
  * Options for client.direct.send().
- * Server connection, serverInfo, peerjsPath, iceServers, and cryptoObj
+ * Server connection, serverInfo, peerjsPath and iceServers
  * are all provided internally by the client.
  */
 export interface P2PSendFileOptions {
@@ -373,7 +371,7 @@ export interface P2PSendFileOptions {
   /** PeerJS Peer constructor - REQUIRED. */
   Peer: PeerConstructor;
   /** Custom code generator function. */
-  codeGenerator?: (cryptoObj?: CryptoAdapter) => string;
+  codeGenerator?: () => string;
   /** Max attempts to register a peer ID. */
   maxAttempts?: number;
   /** Chunk size for data transfer. */

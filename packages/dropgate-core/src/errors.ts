@@ -38,6 +38,10 @@ export const ERROR_CODES = {
   VERSION_UNSUPPORTED: { origin: 'server', retryable: false, message: "This version of Dropgate can't work with the server." },
   INSECURE_TRANSPORT_NOT_ALLOWED: { origin: 'local', retryable: false, message: 'The server is on plain HTTP, which is not secure, and insecure servers are not allowed.' },
   REDIRECT_NOT_FOLLOWED: { origin: 'server', retryable: false, message: 'The server redirected the request elsewhere. Dropgate never follows a redirect: use the address it redirects to.' },
+  AUTH_REQUIRED: { origin: 'server', retryable: false, message: 'The server needs a credential for this.' },
+  AUTH_EXPIRED: { origin: 'server', retryable: false, message: 'The credential has expired.' },
+  AUTH_DENIED: { origin: 'server', retryable: false, message: "The credential doesn't allow this." },
+  QUOTA_EXCEEDED: { origin: 'server', retryable: false, message: 'This would go over the quota the server allows.' },
   NOT_FOUND: { origin: 'server', retryable: false, message: "The upload wasn't found. It may have expired." },
   REQUEST_REJECTED: { origin: 'server', retryable: false, message: 'The server refused the request.' },
   RATE_LIMITED: { origin: 'server', retryable: true, message: 'Too many requests. Try again later.' },
@@ -132,12 +136,22 @@ export function withTransport(err: unknown, transport: Transport): DropgateError
   return error;
 }
 
+/** The credential codes a server's answer can name, as `{ code }`. */
+const SERVER_CREDENTIAL_CODES = new Set<DropgateErrorCode>(['AUTH_REQUIRED', 'AUTH_EXPIRED', 'AUTH_DENIED', 'QUOTA_EXCEEDED']);
+
 /**
  * The error for a server's error status. The server's own message is kept,
  * because the server writes it for people (it never knows a key, nor an
- * encrypted upload's file names), but only a short one.
+ * encrypted upload's file names), but only a short one. A credential error
+ * (any 401, or a 4xx naming a credential code) keeps core's own message
+ * instead, so nothing the server says about a credential is repeated.
  */
 export function errorFromStatus(status: number, json: unknown, fallback?: string): DropgateError {
+  const named = json && typeof json === 'object' ? (json as { code?: unknown }).code : undefined;
+  if (status >= 400 && status < 500 && typeof named === 'string' && SERVER_CREDENTIAL_CODES.has(named as DropgateErrorCode)) {
+    return new DropgateError({ code: named as DropgateErrorCode, status });
+  }
+  if (status === 401) return new DropgateError({ code: 'AUTH_REQUIRED', status });
   const said = json && typeof json === 'object' && 'error' in json ? (json as { error?: unknown }).error : undefined;
   const serverMessage = typeof said === 'string' && said.trim() && said.length <= 200 ? said.trim() : undefined;
   const code: DropgateErrorCode =
@@ -170,4 +184,9 @@ export function toDropgateError(err: unknown, fallback: DropgateErrorCode = 'UNE
   if (name === 'TimeoutError') return new DropgateError({ code: 'TIMED_OUT', cause: err });
   if (name === 'AbortError') return new DropgateError({ code: 'OPERATION_CANCELLED', cause: err });
   return new DropgateError({ code: fallback, cause: err, ...(message ? { message } : {}) });
+}
+
+/** Whether `err` is about a credential, which is never retried as it is. */
+export function isCredentialError(err: unknown): boolean {
+  return err instanceof DropgateError && SERVER_CREDENTIAL_CODES.has(err.code);
 }

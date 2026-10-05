@@ -1,3 +1,3 @@
-export { getDefaultBase64, getDefaultCrypto, getDefaultFetch } from './defaults.js';
-export type { Base64Adapter, CryptoAdapter, FetchFn } from '../types.js';
+export { getDefaultBase64, getDefaultFetch } from './defaults.js';
+export type { Base64Adapter, FetchFn } from '../types.js';
 export type { FileSource } from '../source.js';

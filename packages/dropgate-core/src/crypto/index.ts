@@ -1,61 +1,36 @@
-import type { CryptoAdapter } from '../types.js';
-import { arrayBufferToBase64 } from '../utils/base64.js';
-import { sha256Fallback } from './sha256-fallback.js';
+import type { Base64Adapter } from '../types.js';
+import type { ContentKey, CryptoProvider } from './provider.js';
 
-/**
- * Convert a raw SHA-256 digest ArrayBuffer to a hex string.
- */
-function digestToHex(hashBuffer: ArrayBuffer): string {
-  const arr = new Uint8Array(hashBuffer);
+// DGUP's content encryption, on the crypto provider: one AES-256-GCM key per
+// upload, carried in the link's # part as base64.
+
+export { ContentKey, cryptoProvider, webCryptoProvider } from './provider.js';
+export type { CryptoProvider, CryptoProviderName } from './provider.js';
+
+/** The SHA-256 digest of `data`, as lowercase hex. */
+export async function sha256Hex(provider: CryptoProvider, data: Uint8Array): Promise<string> {
+  const digest = await provider.sha256(data);
   let hex = '';
-  for (let i = 0; i < arr.length; i++) {
-    hex += arr[i].toString(16).padStart(2, '0');
-  }
+  for (const byte of digest) hex += byte.toString(16).padStart(2, '0');
   return hex;
 }
 
-/**
- * Compute SHA-256 hash of data and return as hex string.
- *
- * Uses crypto.subtle when available. Falls back to a pure-JS
- * implementation for integrity hashing on insecure contexts.
- * The fallback MUST NOT be used for encryption operations.
- */
-export async function sha256Hex(
-  cryptoObj: CryptoAdapter,
-  data: ArrayBuffer
-): Promise<string> {
-  if (cryptoObj?.subtle) {
-    const hashBuffer = await cryptoObj.subtle.digest('SHA-256', data);
-    return digestToHex(hashBuffer);
-  }
-  // Fallback: pure-JS SHA-256 for integrity verification only
-  return digestToHex(sha256Fallback(data));
+/** A key as the link carries it. */
+export async function keyToBase64(provider: CryptoProvider, key: ContentKey, base64: Base64Adapter): Promise<string> {
+  return base64.encode(await provider.exportKey(key));
 }
 
-/**
- * Generate a new AES-GCM 256-bit encryption key.
- */
-export async function generateAesGcmKey(
-  cryptoObj: CryptoAdapter
-): Promise<CryptoKey> {
-  return cryptoObj.subtle.generateKey(
-    { name: 'AES-GCM', length: 256 },
-    true,
-    ['encrypt', 'decrypt']
-  );
+/** A key from the link. */
+export async function keyFromBase64(provider: CryptoProvider, keyB64: string, base64: Base64Adapter): Promise<ContentKey> {
+  return provider.importKey(base64.decode(keyB64));
 }
 
-/**
- * Export a CryptoKey to a base64-encoded raw key.
- */
-export async function exportKeyBase64(
-  cryptoObj: CryptoAdapter,
-  key: CryptoKey
-): Promise<string> {
-  const raw = await cryptoObj.subtle.exportKey('raw', key);
-  return arrayBufferToBase64(raw);
+/** A file name sealed under the key, as base64. */
+export async function encryptName(provider: CryptoProvider, name: string, key: ContentKey, base64: Base64Adapter): Promise<string> {
+  return base64.encode(await provider.encrypt(key, new TextEncoder().encode(String(name))));
 }
 
-// Re-export decryption functions
-export { importKeyFromBase64, decryptChunk, decryptFilenameFromBase64 } from './decrypt.js';
+/** A sealed file name opened. */
+export async function decryptName(provider: CryptoProvider, sealedB64: string, key: ContentKey, base64: Base64Adapter): Promise<string> {
+  return new TextDecoder().decode(await provider.decrypt(key, base64.decode(sealedB64)));
+}

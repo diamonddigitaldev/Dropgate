@@ -15,10 +15,12 @@ The client for one Dropgate server.
 | `appInfo` | `{ name, version? }` | No | Your app's name and version, kept as `client.appInfo` for your own display and logs. Never sent anywhere, and compatibility never depends on it |
 | `chunkSize` | `number` | No | Upload chunk size fallback (default: 5MB). The server's configured chunk size (from `/api/info`) takes precedence when available. |
 | `fetchFn` | `FetchFn` | No | Custom fetch implementation. Every request is made with `credentials: 'omit'`, so no cookies are sent, and `redirect: 'manual'`: a redirect is never followed, and fails with `REDIRECT_NOT_FOLLOWED`. |
-| `cryptoObj` | `CryptoAdapter` | No | Custom crypto implementation |
+| `auth` | `CredentialProvider` | No | Gives a credential, for a server that asks for one ([below](#credentials)). Without it, nothing is sent |
 | `base64` | `Base64Adapter` | No | Custom base64 encoder/decoder |
 
-The constructor throws a [`DropgateError`](errors.md): `INVALID_ARGUMENT` for a missing or invalid `server` or `appInfo`, and `INSECURE_TRANSPORT_NOT_ALLOWED` for an insecure server without `allowInsecure`.
+The constructor throws a [`DropgateError`](errors.md): `INVALID_ARGUMENT` for a missing or invalid `server`, `appInfo` or `auth`, `INSECURE_TRANSPORT_NOT_ALLOWED` for an insecure server without `allowInsecure`, and `RUNTIME_UNSUPPORTED` where there's no `fetch()` or no secure random numbers (`crypto.getRandomValues()`).
+
+Core does its own encryption, with the Web Crypto API: there's no option for it. Where a page has no `crypto.subtle` (one served over plain HTTP from another machine), random numbers and hashing still work, so unencrypted uploads and direct transfer codes do, but encrypting or decrypting fails with `RUNTIME_UNSUPPORTED`.
 
 ### Versions
 
@@ -40,6 +42,27 @@ A server on plain `http://` on another machine is **insecure**: anyone on the ne
 * `http://localhost`, `http://127.0.0.1` and `http://[::1]` never leave the machine, so they're secure, with no opt-in. Only these names count: another name is another machine, even if it resolves to this one or to a private address.
 
 With `allowInsecure`, every snapshot, result, outcome and error says so, with `transport: { secure: false }` (it's `{ secure: true }` otherwise), and `client.server.on('insecure-transport', listener)` fires as the client connects. Tell the people using it that the connection isn't secure.
+
+### Credentials
+
+A server can ask for a credential before it accepts an upload, for accounts or quotas. It says so in `/api/info`, with `capabilities.upload.credentialRequired: true`. Give the client an `auth` function, and core asks it for one:
+
+```javascript
+const client = new DropgateClient({
+  server: 'https://files.example.com',
+  auth: async ({ operation, reason, baseUrl, signal }) => {
+    const token = await myAccount.tokenFor(baseUrl, { refresh: reason === 'expired', signal });
+    return token ? { token } : null;
+  },
+});
+```
+
+* It's asked once as each upload starts (`operation: 'hosted.upload'`, `reason: 'required'`), and once more if the server says the credential has expired (`reason: 'expired'`). The request is then made again with the new one. Core keeps no credential beyond the upload it was given for.
+* It's only asked when the server asks for a credential. A server that doesn't say so is sent none, so it never learns who is uploading. Downloads, metadata, links and codes never need one: whoever holds a link can use it.
+* The token is sent only to the client's own server, only as `Authorization: Bearer <token>`, on each of the upload's requests (its cancel included). It must be [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750#section-2.1)'s token68: letters, digits and `-._~+/`, optionally ending in `=`.
+* It never appears in a link, a snapshot, a result, an error or a URL, and a redirect is never followed, so it can't be taken anywhere else.
+
+An upload whose server asks for a credential fails with `AUTH_REQUIRED` if there's no `auth`, or it gives `null` or throws. What it threw isn't kept, not even as the `cause`, since it could quote the credential. A credential that isn't `{ token }` fails with `INVALID_ARGUMENT`, before anything is sent. The server can answer `AUTH_REQUIRED`, `AUTH_EXPIRED` (a second time), `AUTH_DENIED` or `QUOTA_EXCEEDED` ([Errors](errors.md#codes)); none is retried as it is. Direct transfers can't carry a credential yet.
 
 ### client.hosted
 
@@ -188,7 +211,7 @@ An upload reads each file one chunk at a time through a `FileSource`: `name`, `s
 | `filenames.validate(name)` | Throws `INVALID_FILENAME` for a name that's empty, over 255 UTF-8 bytes, or has a control character or path separator in it: the check core makes of every name it sends and receives |
 | `filenames.sanitize(name)` | The name to save a received file under, the same on every OS: NFC, bidi and zero-width characters shown as `[U+XXXX]`, control characters and `< > : " / \ \| ? *` as `_`, no trailing dots or spaces, `_` before a Windows reserved name, within 255 UTF-8 bytes, never empty ([File Names](quick-start.md#file-names)) |
 | `filenames.unique(name, taken)` | `name` if it isn't taken, or else `name (1).ext`, `name (2).ext` and so on. `taken` is the names already used, compared without regard to case, or a function that says whether a name is |
-| `codes.generate()` | A new random direct transfer code, such as `ABCD-1234` |
+| `codes.generate()` | A new random direct transfer code, such as `ABCD-1234`, from secure random numbers only: it throws `RUNTIME_UNSUPPORTED` where there are none |
 | `codes.isLike(value)` | Whether a value is shaped like a direct transfer code |
 | `hosts.isLocalhost(hostname)` | Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`, also as `[::1]`) |
 | `hosts.isSecureForDirect(hostname, isSecureContext)` | Whether a direct transfer can run here: a secure context, or this machine |

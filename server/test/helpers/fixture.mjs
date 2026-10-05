@@ -12,6 +12,8 @@ export const BODY_MARKER = 'zq7BODY';
 // Sent on every request, as a browser behind a reverse proxy would.
 export const CLIENT_IP = '203.0.113.77';
 export const USER_AGENT = 'DropgateTestAgent/1.0';
+// What the client's auth provider would give, if the server ever asked it for a credential.
+export const CREDENTIAL_TOKEN = 'zq7CREDENTIALtoken';
 
 const mkFile = (name, size, fill) => new File([new Uint8Array(size).fill(fill)], name);
 
@@ -20,12 +22,15 @@ const mkFile = (name, size, fill) => new File([new Uint8Array(size).fill(fill)],
  * the identifiers the server hands out.
  */
 export function createRecorder() {
-    const secrets = new Set([P2P_CODE, CLIENT_IP, USER_AGENT, '127.0.0.1', '::1']);
+    const secrets = new Set([P2P_CODE, CLIENT_IP, USER_AGENT, CREDENTIAL_TOKEN, '127.0.0.1', '::1']);
     const responses = [];
+    // Every request that carried a credential, by URL.
+    const authorized = [];
     const note = (value) => { if (typeof value === 'string' && value.length >= 4) secrets.add(value); };
 
     const recordingFetch = async (url, init = {}) => {
         const headers = new Headers(init.headers);
+        if (headers.has('Authorization')) authorized.push(String(url));
         headers.set('User-Agent', USER_AGENT);
         headers.set('X-Forwarded-For', CLIENT_IP);
         const res = await fetch(url, { ...init, headers });
@@ -42,7 +47,7 @@ export function createRecorder() {
         return res;
     };
 
-    return { fetch: recordingFetch, secrets, responses, note };
+    return { fetch: recordingFetch, secrets, responses, note, authorized };
 }
 
 /** The value of an operation's completed outcome. Any other outcome fails the test, with its error. */
@@ -51,10 +56,19 @@ export function completed(outcome) {
     return outcome.value;
 }
 
-/** A client on the web UI's own copy of dropgate-core, plus an upload helper. */
+/**
+ * A client on the web UI's own copy of dropgate-core, plus an upload helper. It
+ * has an auth provider, as an app with accounts would: the server needs no
+ * credential, so it must never be asked, and nothing must be sent.
+ */
 export async function createClient(server, recorder) {
     const { DropgateClient } = await server.loadCore();
-    const client = new DropgateClient({ server: server.baseUrl, fetchFn: recorder.fetch });
+    const credentialRequests = [];
+    const auth = async (request) => {
+        credentialRequests.push(request.operation);
+        return { token: CREDENTIAL_TOKEN };
+    };
+    const client = new DropgateClient({ server: server.baseUrl, fetchFn: recorder.fetch, auth });
     const upload = async (files, encrypt) => {
         for (const f of [files].flat()) recorder.note(f.name);
         const handle = client.hosted.upload({ files, encrypt, lifetimeMs: 60 * 60 * 1000, maxDownloads: 1 });
@@ -63,7 +77,7 @@ export async function createClient(server, recorder) {
         for (const f of result.files || []) recorder.note(f.fileId);
         return result;
     };
-    return { client, upload };
+    return { client, upload, credentialRequests };
 }
 
 export const fixtureFiles = {
@@ -84,7 +98,7 @@ export const fixtureFiles = {
  */
 export async function runFixture(server, { faults = false } = {}) {
     const recorder = createRecorder();
-    const { client, upload } = await createClient(server, recorder);
+    const { client, upload, credentialRequests } = await createClient(server, recorder);
 
     const encrypted = await upload(fixtureFiles.encrypted(), true);
     const plain = await upload(fixtureFiles.plain(), false);
@@ -117,5 +131,8 @@ export async function runFixture(server, { faults = false } = {}) {
         await (await recorder.fetch(`${server.baseUrl}/api/file/${orphan.fileId}`).catch(() => new Response())).arrayBuffer();
     }
 
-    return { secrets: recorder.secrets, responses: recorder.responses, uploads: { encrypted, plain, bundle }, fetch: recorder.fetch };
+    return {
+        secrets: recorder.secrets, responses: recorder.responses, uploads: { encrypted, plain, bundle }, fetch: recorder.fetch,
+        credentialRequests, authorized: recorder.authorized,
+    };
 }

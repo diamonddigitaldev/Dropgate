@@ -9,6 +9,7 @@ import type {
   P2PConnectionHealthEvent,
 } from './types.js';
 import { generateP2PCode } from './utils.js';
+import { cryptoProvider } from '../crypto/provider.js';
 import { buildPeerOptions, createPeerWithRetries, resolvePeerConfig } from './helpers.js';
 import type { P2PFile } from './types.js';
 import {
@@ -33,7 +34,7 @@ const P2P_UNACKED_CHUNK_TIMEOUT_MS = 60000;
  * Generate a unique session ID for transfer tracking.
  */
 function generateSessionId(): string {
-  return crypto.randomUUID();
+  return cryptoProvider().randomUUID();
 }
 
 /**
@@ -94,7 +95,6 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
     secure = false,
     iceServers,
     codeGenerator,
-    cryptoObj,
     maxAttempts = 4,
     chunkSize = P2P_CHUNK_SIZE,
     endAckTimeoutMs = P2P_END_ACK_TIMEOUT_MS,
@@ -153,7 +153,7 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
   });
 
   // Create the code generator
-  const finalCodeGenerator = codeGenerator || (() => generateP2PCode(cryptoObj));
+  const finalCodeGenerator = codeGenerator || (() => generateP2PCode());
 
   // Create peer with retries
   const buildPeer = (id: string) => new Peer(id, peerOpts);

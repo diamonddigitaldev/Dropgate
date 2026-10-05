@@ -417,7 +417,7 @@ describe('transport.secure on every snapshot, result and error (09 7.1.6)', () =
     // A feature added to the client must be added here, and so to the table.
     const features = Object.entries(client).filter(([key, value]) => !key.startsWith('_') && value && typeof value === 'object'
       && Object.values(value).some((v) => typeof v === 'function')
-      && !['cryptoObj', 'base64'].includes(key)).map(([key]) => key);
+      && key !== 'base64').map(([key]) => key);
     expect(features.sort()).toEqual(['direct', 'hosted', 'links', 'operations', 'server']);
     const unlisted = methods.filter((m) => !(m in OPERATIONS) && !NOT_OPERATIONS.has(m));
     expect(unlisted, 'public methods with no row in the table').toEqual([]);

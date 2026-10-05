@@ -1,5 +1,5 @@
 import { DEFAULT_CHUNK_SIZE, ENCRYPTION_OVERHEAD_PER_CHUNK } from '../constants.js';
-import { DropgateError, directTransferDisabled, errorFromStatus, toDropgateError, withTransport } from '../errors.js';
+import { DropgateError, directTransferDisabled, errorFromStatus, isCredentialError, toDropgateError, withTransport } from '../errors.js';
 import { guardedFetch, insecureTransportNotAllowed, isSecureServerUrl } from '../transport.js';
 import type { Transport } from '../transport.js';
 import { CORE_VERSION, PROTOCOLS } from '../version.js';
@@ -12,7 +12,6 @@ import { SinkWriter, isDownloadSink } from '../sink.js';
 import { readRange, toFileSources } from '../source.js';
 import type { FileSource } from '../source.js';
 import type {
-  CryptoAdapter,
   FetchFn,
   ServerInfo,
   ServerTarget,
@@ -42,13 +41,16 @@ import type {
   P2PSendSession,
   P2PReceiveSession,
 } from '../p2p/types.js';
-import { getDefaultCrypto, getDefaultFetch, getDefaultBase64 } from '../adapters/defaults.js';
+import { getDefaultFetch, getDefaultBase64 } from '../adapters/defaults.js';
 import { makeAbortSignal, fetchJson, sleep, buildBaseUrl, parseServerUrl } from '../utils/network.js';
+import type { FetchJsonOptions, FetchJsonResult } from '../utils/network.js';
 import { parseShareInput } from '../utils/share-link.js';
 import { validateFilename, sanitizeFilename, uniqueFilename } from '../utils/filename.js';
 import { plaintextBytes, mbToBytes } from '../utils/size.js';
-import { sha256Hex, generateAesGcmKey, exportKeyBase64, importKeyFromBase64, decryptChunk, decryptFilenameFromBase64 } from '../crypto/index.js';
-import { encryptToBlob, encryptFilenameToBase64 } from '../crypto/encrypt.js';
+import { cryptoProvider, sha256Hex, keyToBase64, keyFromBase64, encryptName, decryptName } from '../crypto/index.js';
+import type { ContentKey, CryptoProvider } from '../crypto/index.js';
+import { OperationCredentials, credentialExpired } from '../credentials.js';
+import type { CredentialProvider } from '../credentials.js';
 import { startP2PSend } from '../p2p/send.js';
 import { startP2PReceive } from '../p2p/receive.js';
 import { resolvePeerConfig } from '../p2p/helpers.js';
@@ -271,8 +273,6 @@ export class DropgateClient {
    * credentials (no cookies), and follows no redirect.
    */
   readonly fetchFn: FetchFn;
-  /** Crypto implementation for encryption operations. */
-  readonly cryptoObj: CryptoAdapter;
   /** Base64 encoder/decoder for binary data. */
   readonly base64: Base64Adapter;
 
@@ -299,6 +299,10 @@ export class DropgateClient {
   private _connectPromise: Promise<ServerConnection> | null = null;
   /** The running operations, and the root of the cancellation tree. */
   private _registry = new OperationRegistry();
+  /** Every encrypt, decrypt, key, hash and random number the client uses. */
+  private readonly _crypto: CryptoProvider;
+  /** Where a credential comes from, for a server that asks for one: private, so it's never listed or serialised. */
+  readonly #auth?: CredentialProvider;
 
   /**
    * Create a new DropgateClient instance.
@@ -342,11 +346,16 @@ export class DropgateClient {
     }
     this.fetchFn = guardedFetch(fetchFn);
 
-    const cryptoObj = opts.cryptoObj || getDefaultCrypto();
-    if (!cryptoObj) {
-      throw new DropgateError({ code: 'RUNTIME_UNSUPPORTED', message: 'No crypto implementation found.', transport: this.transport });
+    try {
+      this._crypto = cryptoProvider();
+    } catch (err) {
+      throw withTransport(err, this.transport);
     }
-    this.cryptoObj = cryptoObj;
+
+    if (opts.auth !== undefined && typeof opts.auth !== 'function') {
+      throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'auth must be a function giving { token } or null.', transport: this.transport });
+    }
+    this.#auth = opts.auth;
 
     this.base64 = opts.base64 || getDefaultBase64();
 
@@ -536,7 +545,7 @@ export class DropgateClient {
   private async _readMetadata(
     opts: MetadataOptions,
     compat: ServerConnection,
-  ): Promise<{ meta: HostedMetadata; cryptoKey?: CryptoKey }> {
+  ): Promise<{ meta: HostedMetadata; cryptoKey?: ContentKey }> {
     const { fileId, bundleId, keyB64, timeoutMs = 5000, signal } = opts;
     const { baseUrl, serverInfo } = compat;
     const chunkSize = serverChunkSize(serverInfo, this.chunkSize);
@@ -563,26 +572,26 @@ export class DropgateClient {
 
     // The key, for an encrypted upload: a missing one, and no Web Crypto, are
     // both found before anything is decrypted.
-    let cryptoKey: CryptoKey | undefined;
+    let cryptoKey: ContentKey | undefined;
     if (isEncrypted) {
       if (!keyB64) throw new DropgateError({ code: 'KEY_REQUIRED' });
-      if (!this.cryptoObj?.subtle) {
+      if (!this._crypto.canEncrypt) {
         throw new DropgateError({
           code: 'RUNTIME_UNSUPPORTED',
           message: 'Web Crypto API not available for decryption. Encrypted uploads need a secure context (HTTPS or localhost).',
         });
       }
     }
-    const decrypt = async <T>(run: (key: CryptoKey) => Promise<T>): Promise<T> => {
+    const decrypt = async <T>(run: (key: ContentKey) => Promise<T>): Promise<T> => {
       try {
-        cryptoKey ??= await importKeyFromBase64(this.cryptoObj, keyB64!, this.base64);
+        cryptoKey ??= await keyFromBase64(this._crypto, keyB64!, this.base64);
         return await run(cryptoKey);
       } catch (err) {
         throw new DropgateError({ code: 'DECRYPT_FAILED', cause: err });
       }
     };
-    const decryptName = (encrypted: string | undefined) =>
-      decrypt((key) => decryptFilenameFromBase64(this.cryptoObj, String(encrypted ?? ''), key, this.base64));
+    const openName = (encrypted: string | undefined) =>
+      decrypt((key) => decryptName(this._crypto, String(encrypted ?? ''), key, this.base64));
 
     // A received name is checked as a sent one is: whoever uploaded it, a name
     // that's empty, too long or has a path in it never reaches the caller.
@@ -599,7 +608,7 @@ export class DropgateClient {
           transport: this.transport,
           fileId,
           isEncrypted,
-          name: received(isEncrypted ? await decryptName(raw.encryptedFilename) : (raw.filename || 'file')),
+          name: received(isEncrypted ? await openName(raw.encryptedFilename) : (raw.filename || 'file')),
           sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored,
         },
         cryptoKey,
@@ -611,7 +620,7 @@ export class DropgateClient {
     if (sealed) {
       // A sealed bundle's file list is encrypted: only the key holder can read it.
       const manifest = await decrypt(async (key) => {
-        const decrypted = await decryptChunk(this.cryptoObj, this.base64.decode(raw.encryptedManifest!), key);
+        const decrypted = await this._crypto.decrypt(key, this.base64.decode(raw.encryptedManifest!));
         const parsed = JSON.parse(new TextDecoder().decode(decrypted)) as { files?: Array<{ fileId: string; sizeBytes: number; name: string }> };
         if (!Array.isArray(parsed?.files)) throw new TypeError('The manifest has no files.');
         return parsed.files;
@@ -623,7 +632,7 @@ export class DropgateClient {
         const stored = Number(f.sizeBytes) || 0;
         files.push({
           fileId: f.fileId,
-          name: received(isEncrypted ? await decryptName(f.encryptedFilename) : (f.filename || 'file'), files.length),
+          name: received(isEncrypted ? await openName(f.encryptedFilename) : (f.filename || 'file'), files.length),
           // An unsealed encrypted bundle's sizes are what the server stored, ciphertext.
           sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored,
         });
@@ -752,12 +761,15 @@ export class DropgateClient {
 
     const currentUploadIds: string[] = [];
     const totalSizeBytes = files.reduce((sum, f) => sum + f.size, 0);
+    // The upload's credential, only if its server asks for one: every request
+    // the upload makes, its cancel included, carries it, and nothing else does.
+    let credentials = OperationCredentials.none;
 
     const callCancelEndpoint = async (uploadId: string): Promise<void> => {
       try {
         await fetchJson(this.fetchFn, `${this.baseUrl}/upload/cancel`, {
           method: 'POST', timeoutMs: 5000,
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...credentials.headers() },
           body: JSON.stringify({ uploadId }),
         });
       } catch { /* Best effort */ }
@@ -768,6 +780,14 @@ export class DropgateClient {
       // client.operations.cancelAll() and a signal passed in all stop it.
       const effectiveSignal = ctx.signal;
       const progress = ctx.update;
+      // A request with the credential, made once more with a renewed one if
+      // the server says it has expired.
+      const send = async (url: string, init: FetchJsonOptions): Promise<FetchJsonResult> => {
+        const attempt = () => fetchJson(this.fetchFn, url, { ...init, headers: { ...(init.headers as Record<string, string>), ...credentials.headers() } });
+        const out = await attempt();
+        if (credentialExpired(out.res.status, out.json) && await credentials.renew(effectiveSignal)) return attempt();
+        return out;
+      };
 
       // 1) Resolve filenames, and check every one, encrypted or not, before
       // anything is sent: the one file name rule.
@@ -790,26 +810,29 @@ export class DropgateClient {
 
       this._validate({ files, lifetimeMs, encrypt: effectiveEncrypt, serverInfo });
 
+      // The credential, asked for only if the server says an upload needs one.
+      if (serverInfo?.capabilities?.upload?.credentialRequired === true) {
+        credentials = await OperationCredentials.required(this.#auth, 'hosted.upload', baseUrl, effectiveSignal);
+      }
+
       // 2) Encryption prep (single key for all files)
-      let cryptoKey: CryptoKey | null = null;
+      let cryptoKey: ContentKey | null = null;
       let keyB64: string | null = null;
       const transmittedFilenames: string[] = [];
 
       if (effectiveEncrypt) {
-        if (!this.cryptoObj?.subtle) {
+        if (!this._crypto.canEncrypt) {
           throw new DropgateError({
             code: 'RUNTIME_UNSUPPORTED',
-            message: 'Web Crypto API not available (crypto.subtle). Encryption requires a secure context (HTTPS or localhost).',
+            message: 'Web Crypto API not available. Encryption requires a secure context (HTTPS or localhost).',
           });
         }
         progress({ phase: 'crypto', text: 'Generating encryption key...' });
         try {
-          cryptoKey = await generateAesGcmKey(this.cryptoObj);
-          keyB64 = await exportKeyBase64(this.cryptoObj, cryptoKey);
+          cryptoKey = await this._crypto.generateKey();
+          keyB64 = await keyToBase64(this._crypto, cryptoKey, this.base64);
           for (const name of filenames) {
-            transmittedFilenames.push(
-              await encryptFilenameToBase64(this.cryptoObj, name, cryptoKey)
-            );
+            transmittedFilenames.push(await encryptName(this._crypto, name, cryptoKey, this.base64));
           }
         } catch (err) {
           throw new DropgateError({ code: 'ENCRYPT_FAILED', cause: err });
@@ -837,7 +860,7 @@ export class DropgateClient {
         // Init
         progress({ phase: 'init', text: 'Reserving server storage...' });
 
-        const initRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/init`, {
+        const initRes = await send(`${baseUrl}/upload/init`, {
           method: 'POST',
           timeoutMs: timeouts.initMs ?? 15000,
           signal: effectiveSignal,
@@ -868,12 +891,13 @@ export class DropgateClient {
           progress, signal: effectiveSignal, baseUrl,
           retries, backoffMs: baseBackoffMs, maxBackoffMs,
           chunkTimeoutMs: timeouts.chunkMs ?? 60000,
+          credentials,
         });
 
         // Complete
         progress({ status: 'completing', phase: 'complete', text: 'Finalising upload...', percent: 100, processedBytes: file.size });
 
-        const completeRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/complete`, {
+        const completeRes = await send(`${baseUrl}/upload/complete`, {
           method: 'POST',
           timeoutMs: timeouts.completeMs ?? 30000,
           signal: effectiveSignal,
@@ -908,7 +932,7 @@ export class DropgateClient {
       // Init bundle
       progress({ phase: 'init', text: `Reserving server storage for ${files.length} files...`, totalFiles: files.length });
 
-      const initBundleRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/init-bundle`, {
+      const initBundleRes = await send(`${baseUrl}/upload/init-bundle`, {
         method: 'POST',
         timeoutMs: timeouts.initMs ?? 15000,
         signal: effectiveSignal,
@@ -958,10 +982,11 @@ export class DropgateClient {
           progress, signal: effectiveSignal, baseUrl,
           retries, backoffMs: baseBackoffMs, maxBackoffMs,
           chunkTimeoutMs: timeouts.chunkMs ?? 60000,
+          credentials,
         });
 
         // Complete individual file
-        const completeRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/complete`, {
+        const completeRes = await send(`${baseUrl}/upload/complete`, {
           method: 'POST',
           timeoutMs: timeouts.completeMs ?? 30000,
           signal: effectiveSignal,
@@ -1001,12 +1026,10 @@ export class DropgateClient {
           })),
         });
         const manifestBytes = new TextEncoder().encode(manifest);
-        const encryptedBlob = await encryptToBlob(this.cryptoObj, manifestBytes.buffer, cryptoKey);
-        const encryptedBuffer = new Uint8Array(await encryptedBlob.arrayBuffer());
-        encryptedManifestB64 = this.base64.encode(encryptedBuffer);
+        encryptedManifestB64 = this.base64.encode(await this._crypto.encrypt(cryptoKey, manifestBytes));
       }
 
-      const completeBundleRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/complete-bundle`, {
+      const completeBundleRes = await send(`${baseUrl}/upload/complete-bundle`, {
         method: 'POST',
         timeoutMs: timeouts.completeMs ?? 30000,
         signal: effectiveSignal,
@@ -1225,7 +1248,7 @@ export class DropgateClient {
     opts: {
       baseUrl: string;
       isEncrypted: boolean;
-      cryptoKey: CryptoKey | undefined;
+      cryptoKey: ContentKey | undefined;
       compat: ServerConnection;
       signal: AbortSignal;
       timeoutMs: number;
@@ -1272,7 +1295,7 @@ export class DropgateClient {
         if (downloadSignal.aborted) throw downloadSignal.reason;
         return next;
       };
-      const decrypt = (chunk: Uint8Array) => step('INTEGRITY_FAILED', () => decryptChunk(this.cryptoObj, chunk, cryptoKey!));
+      const decrypt = (chunk: Uint8Array) => step('INTEGRITY_FAILED', () => this._crypto.decrypt(cryptoKey!, chunk));
       const deliver = async (chunk: Uint8Array) => {
         await step('OUTPUT_WRITE_FAILED', () => deliverChunk(chunk));
         deliveredBytes += chunk.byteLength;
@@ -1359,7 +1382,6 @@ export class DropgateClient {
       peerjsPath,
       iceServers,
       serverInfo,
-      cryptoObj: this.cryptoObj,
     });
     return Object.assign(session, { transport: this.transport });
   }
@@ -1411,7 +1433,7 @@ export class DropgateClient {
   private async _uploadFileChunks(params: {
     file: FileSource;
     uploadId: string;
-    cryptoKey: CryptoKey | null;
+    cryptoKey: ContentKey | null;
     effectiveChunkSize: number;
     totalChunks: number;
     totalUploadSize: number;
@@ -1424,11 +1446,12 @@ export class DropgateClient {
     backoffMs: number;
     maxBackoffMs: number;
     chunkTimeoutMs: number;
+    credentials: OperationCredentials;
   }): Promise<void> {
     const {
       file, uploadId, cryptoKey, effectiveChunkSize, totalChunks,
       baseOffset, totalBytesAllFiles, progress, signal, baseUrl,
-      retries, backoffMs, maxBackoffMs, chunkTimeoutMs,
+      retries, backoffMs, maxBackoffMs, chunkTimeoutMs, credentials,
     } = params;
 
     for (let i = 0; i < totalChunks; i++) {
@@ -1451,28 +1474,27 @@ export class DropgateClient {
       // One bounded read: the chunk, and no more of the file.
       const chunkBytes = await readRange(file, start, end);
 
-      let uploadBlob: Blob;
+      let uploadBytes: Uint8Array<ArrayBuffer>;
       if (cryptoKey) {
         try {
-          uploadBlob = await encryptToBlob(this.cryptoObj, chunkBytes, cryptoKey);
+          uploadBytes = await this._crypto.encrypt(cryptoKey, chunkBytes);
         } catch (err) {
           throw new DropgateError({ code: 'ENCRYPT_FAILED', cause: err });
         }
       } else {
-        uploadBlob = new Blob([chunkBytes]);
+        uploadBytes = chunkBytes;
       }
 
-      if (uploadBlob.size > effectiveChunkSize + 1024) {
+      if (uploadBytes.byteLength > effectiveChunkSize + 1024) {
         throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'Chunk too large (client-side). Check chunk size settings.' });
       }
 
-      const toHash = await uploadBlob.arrayBuffer();
-      const hashHex = await sha256Hex(this.cryptoObj, toHash);
+      const hashHex = await sha256Hex(this._crypto, uploadBytes);
 
       await this._attemptChunkUpload(
         `${baseUrl}/upload/chunk`,
-        { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Upload-ID': uploadId, 'X-Chunk-Index': String(i), 'X-Chunk-Hash': hashHex }, body: uploadBlob },
-        { retries, backoffMs, maxBackoffMs, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i }
+        { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Upload-ID': uploadId, 'X-Chunk-Index': String(i), 'X-Chunk-Hash': hashHex }, body: new Blob([uploadBytes]) },
+        { retries, backoffMs, maxBackoffMs, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i, credentials }
       );
     }
   }
@@ -1488,6 +1510,7 @@ export class DropgateClient {
       signal: AbortSignal;
       progress: (patch: Partial<UploadSnapshot>) => void;
       chunkIndex: number;
+      credentials: OperationCredentials;
     }
   ): Promise<void> {
     const {
@@ -1498,6 +1521,7 @@ export class DropgateClient {
       signal,
       progress,
       chunkIndex,
+      credentials,
     } = opts;
 
     let attemptsLeft = retries;
@@ -1513,14 +1537,18 @@ export class DropgateClient {
       try {
         let res: Response;
         try {
-          res = await this.fetchFn(url, { ...fetchOptions, signal: s });
+          // The credential is added to each attempt, so a renewed one is used.
+          const headers = { ...(fetchOptions.headers as Record<string, string>), ...credentials.headers() };
+          res = await this.fetchFn(url, { ...fetchOptions, headers, signal: s });
         } catch (err) {
           throw toDropgateError(err, 'SERVER_UNREACHABLE');
         }
         if (res.ok) return;
 
         const text = await res.text().catch(() => '');
-        throw errorFromStatus(res.status, { error: text }, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
+        let said: unknown = { error: text };
+        try { said = JSON.parse(text); } catch { /* A plain-text answer. */ }
+        throw errorFromStatus(res.status, said, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
       } catch (err) {
         cleanup();
 
@@ -1529,6 +1557,10 @@ export class DropgateClient {
           throw signal.reason || new DropgateError({ code: 'OPERATION_CANCELLED' });
         }
         if (DropgateError.is(err, 'OPERATION_CANCELLED')) throw err;
+        // An expired credential is renewed once, and the chunk sent again at
+        // once; any other credential error stands.
+        if (DropgateError.is(err, 'AUTH_EXPIRED') && await credentials.renew(signal)) continue;
+        if (isCredentialError(err)) throw err;
 
         if (attemptsLeft <= 0) throw toDropgateError(err, 'SERVER_UNREACHABLE');
 

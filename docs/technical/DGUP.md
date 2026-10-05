@@ -64,6 +64,7 @@ A JSON object containing (at minimum):
 | `capabilities.upload.maxFileDownloads` | `number` | Server-enforced maximum download limit (0 = unlimited). |
 | `capabilities.upload.chunkSize` | `number` | Server's expected chunk size in bytes. |
 | `capabilities.upload.bundleSizeMode` | `string` | `"total"` or `"per-file"` — how bundle size limits are applied. |
+| `capabilities.upload.credentialRequired` | `boolean` | Whether an upload needs a credential ([§3.5](#35-credentials)). Absent means none. This server doesn't send it yet: it asks for no credential. |
 
 ### 3.3 Compatibility
 
@@ -86,6 +87,15 @@ The client uses the server's address as it was given.
 - `http://localhost`, `http://127.0.0.1` and `http://[::1]` never leave the machine, and are secure. Only these names count.
 
 ---
+
+
+### 3.5 Credentials
+
+A server can ask for a credential before it accepts an upload, for accounts or quotas, with `capabilities.upload.credentialRequired: true`. This server doesn't yet: accounts come later.
+
+- The client MUST NOT send a credential to a server that doesn't ask for one, nor with any request but an upload's (`/upload/init`, `/upload/init-bundle`, `/upload/chunk`, `/upload/complete`, `/upload/complete-bundle` and `/upload/cancel`). Downloads, metadata and `/api/resolve` never need one: a link is its own permission.
+- It sends the credential only in the `Authorization` header, as `Bearer <token>`: never in a URL, a request body, a link or an encrypted manifest, and never to another server (it follows no redirect).
+- A server that refuses an upload's credential answers with an error whose JSON `code` is `AUTH_REQUIRED`, `AUTH_EXPIRED`, `AUTH_DENIED` or `QUOTA_EXCEEDED`. After `AUTH_EXPIRED`, the client may get a new credential once and make the request again; it retries none of the others as they are.
 
 ## 4. Encryption Layer
 

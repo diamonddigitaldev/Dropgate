@@ -11,6 +11,9 @@ export type { Transport } from './transport.js';
 // Standalone helpers, by what they're for
 export { sources, lifetime, sizes, filenames, codes, hosts, zip } from './helpers.js';
 
+// Credentials, for a server that needs one to accept an upload
+export type { CredentialProvider, Credential, CredentialRequest, CredentialOperation } from './credentials.js';
+
 // Errors
 export { DropgateError, ERROR_CODES } from './errors.js';
 export type { DropgateErrorOptions, DropgateErrorCode, ErrorOrigin } from './errors.js';
@@ -40,7 +43,6 @@ export type {
   ProtocolCompatibility,
   AppInfo,
   ShareTargetResult,
-  CryptoAdapter,
   FetchFn,
   Base64Adapter,
   DropgateClientOptions,

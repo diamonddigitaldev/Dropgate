@@ -1,8 +1,16 @@
 // Built from packages/dropgate-core by `npm run build` there. Don't edit this file:
 // change core's source and build it again. CI fails if this doesn't match the build.
 var __defProp = Object.defineProperty;
+var __typeError = (msg) => {
+  throw TypeError(msg);
+};
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+var __accessCheck = (obj, member, msg) => member.has(obj) || __typeError("Cannot " + msg);
+var __privateGet = (obj, member, getter) => (__accessCheck(obj, member, "read from private field"), getter ? getter.call(obj) : member.get(obj));
+var __privateAdd = (obj, member, value) => member.has(obj) ? __typeError("Cannot add the same private member more than once") : member instanceof WeakSet ? member.add(obj) : member.set(obj, value);
+var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "write to private field"), setter ? setter.call(obj, value) : member.set(obj, value), value);
+var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
 // src/constants.ts
 var DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024;
@@ -31,6 +39,10 @@ var ERROR_CODES = {
   VERSION_UNSUPPORTED: { origin: "server", retryable: false, message: "This version of Dropgate can't work with the server." },
   INSECURE_TRANSPORT_NOT_ALLOWED: { origin: "local", retryable: false, message: "The server is on plain HTTP, which is not secure, and insecure servers are not allowed." },
   REDIRECT_NOT_FOLLOWED: { origin: "server", retryable: false, message: "The server redirected the request elsewhere. Dropgate never follows a redirect: use the address it redirects to." },
+  AUTH_REQUIRED: { origin: "server", retryable: false, message: "The server needs a credential for this." },
+  AUTH_EXPIRED: { origin: "server", retryable: false, message: "The credential has expired." },
+  AUTH_DENIED: { origin: "server", retryable: false, message: "The credential doesn't allow this." },
+  QUOTA_EXCEEDED: { origin: "server", retryable: false, message: "This would go over the quota the server allows." },
   NOT_FOUND: { origin: "server", retryable: false, message: "The upload wasn't found. It may have expired." },
   REQUEST_REJECTED: { origin: "server", retryable: false, message: "The server refused the request." },
   RATE_LIMITED: { origin: "server", retryable: true, message: "Too many requests. Try again later." },
@@ -92,7 +104,13 @@ function withTransport(err2, transport) {
   }
   return error;
 }
+var SERVER_CREDENTIAL_CODES = /* @__PURE__ */ new Set(["AUTH_REQUIRED", "AUTH_EXPIRED", "AUTH_DENIED", "QUOTA_EXCEEDED"]);
 function errorFromStatus(status, json, fallback) {
+  const named = json && typeof json === "object" ? json.code : void 0;
+  if (status >= 400 && status < 500 && typeof named === "string" && SERVER_CREDENTIAL_CODES.has(named)) {
+    return new DropgateError({ code: named, status });
+  }
+  if (status === 401) return new DropgateError({ code: "AUTH_REQUIRED", status });
   const said = json && typeof json === "object" && "error" in json ? json.error : void 0;
   const serverMessage = typeof said === "string" && said.trim() && said.length <= 200 ? said.trim() : void 0;
   const code = status === 404 || status === 410 ? "NOT_FOUND" : status === 413 ? "FILE_TOO_LARGE" : status === 429 ? "RATE_LIMITED" : status === 507 ? "SERVER_FULL" : status >= 500 ? "SERVER_ERROR" : "REQUEST_REJECTED";
@@ -112,47 +130,249 @@ function toDropgateError(err2, fallback = "UNEXPECTED_ERROR", message) {
   if (name === "AbortError") return new DropgateError({ code: "OPERATION_CANCELLED", cause: err2 });
   return new DropgateError({ code: fallback, cause: err2, ...message ? { message } : {} });
 }
+function isCredentialError(err2) {
+  return err2 instanceof DropgateError && SERVER_CREDENTIAL_CODES.has(err2.code);
+}
 
-// src/adapters/defaults.ts
-function getDefaultBase64() {
-  if (typeof Buffer !== "undefined" && typeof Buffer.from === "function") {
-    return {
-      encode(bytes) {
-        return Buffer.from(bytes).toString("base64");
-      },
-      decode(b64) {
-        return new Uint8Array(Buffer.from(b64, "base64"));
-      }
-    };
-  }
-  if (typeof btoa === "function" && typeof atob === "function") {
-    return {
-      encode(bytes) {
-        let binary = "";
-        for (let i = 0; i < bytes.length; i++) {
-          binary += String.fromCharCode(bytes[i]);
-        }
-        return btoa(binary);
-      },
-      decode(b64) {
-        const binary = atob(b64);
-        const out = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          out[i] = binary.charCodeAt(i);
-        }
-        return out;
-      }
-    };
-  }
-  throw new Error(
-    "No Base64 implementation available. Provide a Base64Adapter via options."
+// src/crypto/sha256-fallback.ts
+var K = new Uint32Array([
+  1116352408,
+  1899447441,
+  3049323471,
+  3921009573,
+  961987163,
+  1508970993,
+  2453635748,
+  2870763221,
+  3624381080,
+  310598401,
+  607225278,
+  1426881987,
+  1925078388,
+  2162078206,
+  2614888103,
+  3248222580,
+  3835390401,
+  4022224774,
+  264347078,
+  604807628,
+  770255983,
+  1249150122,
+  1555081692,
+  1996064986,
+  2554220882,
+  2821834349,
+  2952996808,
+  3210313671,
+  3336571891,
+  3584528711,
+  113926993,
+  338241895,
+  666307205,
+  773529912,
+  1294757372,
+  1396182291,
+  1695183700,
+  1986661051,
+  2177026350,
+  2456956037,
+  2730485921,
+  2820302411,
+  3259730800,
+  3345764771,
+  3516065817,
+  3600352804,
+  4094571909,
+  275423344,
+  430227734,
+  506948616,
+  659060556,
+  883997877,
+  958139571,
+  1322822218,
+  1537002063,
+  1747873779,
+  1955562222,
+  2024104815,
+  2227730452,
+  2361852424,
+  2428436474,
+  2756734187,
+  3204031479,
+  3329325298
+]);
+function rotr(x, n) {
+  return x >>> n | x << 32 - n;
+}
+function sha256Fallback(data) {
+  const bytes = new Uint8Array(data);
+  const bitLen = bytes.length * 8;
+  const padded = new Uint8Array(
+    Math.ceil((bytes.length + 9) / 64) * 64
   );
+  padded.set(bytes);
+  padded[bytes.length] = 128;
+  const view = new DataView(padded.buffer);
+  view.setUint32(padded.length - 8, bitLen / 4294967296 >>> 0, false);
+  view.setUint32(padded.length - 4, bitLen >>> 0, false);
+  let h0 = 1779033703;
+  let h1 = 3144134277;
+  let h2 = 1013904242;
+  let h3 = 2773480762;
+  let h4 = 1359893119;
+  let h5 = 2600822924;
+  let h6 = 528734635;
+  let h7 = 1541459225;
+  const W = new Uint32Array(64);
+  for (let offset = 0; offset < padded.length; offset += 64) {
+    for (let i = 0; i < 16; i++) {
+      W[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ W[i - 15] >>> 3;
+      const s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ W[i - 2] >>> 10;
+      W[i] = W[i - 16] + s0 + W[i - 7] + s1 | 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = e & f ^ ~e & g;
+      const temp1 = h + S1 + ch + K[i] + W[i] | 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = a & b ^ a & c ^ b & c;
+      const temp2 = S0 + maj | 0;
+      h = g;
+      g = f;
+      f = e;
+      e = d + temp1 | 0;
+      d = c;
+      c = b;
+      b = a;
+      a = temp1 + temp2 | 0;
+    }
+    h0 = h0 + a | 0;
+    h1 = h1 + b | 0;
+    h2 = h2 + c | 0;
+    h3 = h3 + d | 0;
+    h4 = h4 + e | 0;
+    h5 = h5 + f | 0;
+    h6 = h6 + g | 0;
+    h7 = h7 + h | 0;
+  }
+  const result = new ArrayBuffer(32);
+  const out = new DataView(result);
+  out.setUint32(0, h0, false);
+  out.setUint32(4, h1, false);
+  out.setUint32(8, h2, false);
+  out.setUint32(12, h3, false);
+  out.setUint32(16, h4, false);
+  out.setUint32(20, h5, false);
+  out.setUint32(24, h6, false);
+  out.setUint32(28, h7, false);
+  return result;
 }
-function getDefaultCrypto() {
-  return globalThis.crypto;
+
+// src/crypto/provider.ts
+var _provider, _handle;
+var _ContentKey = class _ContentKey {
+  constructor(provider, handle) {
+    __privateAdd(this, _provider);
+    __privateAdd(this, _handle);
+    __privateSet(this, _provider, provider);
+    __privateSet(this, _handle, handle);
+    Object.freeze(this);
+  }
+  /** The provider's own handle, for the provider that made it. */
+  static handle(key, provider) {
+    if (!(key instanceof _ContentKey) || __privateGet(key, _provider) !== provider) {
+      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "That key wasn't made by this crypto provider." });
+    }
+    return __privateGet(key, _handle);
+  }
+  toJSON() {
+    return "[ContentKey]";
+  }
+  toString() {
+    return "[ContentKey]";
+  }
+  [/* @__PURE__ */ Symbol.for("nodejs.util.inspect.custom")]() {
+    return "[ContentKey]";
+  }
+};
+_provider = new WeakMap();
+_handle = new WeakMap();
+var ContentKey = _ContentKey;
+var own = (bytes) => new Uint8Array(bytes);
+var noEncryption = () => new DropgateError({
+  code: "RUNTIME_UNSUPPORTED",
+  message: "Web Crypto API not available (crypto.subtle). Encryption needs a secure context (HTTPS or localhost)."
+});
+function webCryptoProvider(webCrypto) {
+  const subtle = webCrypto.subtle;
+  const name = "webcrypto";
+  const needSubtle = () => {
+    if (!subtle) throw noEncryption();
+    return subtle;
+  };
+  const cryptoKey = (key) => ContentKey.handle(key, name);
+  const randomBytes = (length) => {
+    const out = new Uint8Array(length);
+    for (let i = 0; i < length; i += 65536) webCrypto.getRandomValues(out.subarray(i, Math.min(length, i + 65536)));
+    return out;
+  };
+  const provider = {
+    name,
+    canEncrypt: Boolean(subtle),
+    randomBytes,
+    randomUUID() {
+      if (typeof webCrypto.randomUUID === "function") return webCrypto.randomUUID();
+      const bytes = randomBytes(16);
+      bytes[6] = bytes[6] & 15 | 64;
+      bytes[8] = bytes[8] & 63 | 128;
+      const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    },
+    async generateKey() {
+      const key = await needSubtle().generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+      return new ContentKey(name, key);
+    },
+    async importKey(raw) {
+      if (raw.byteLength !== 32) throw new DropgateError({ code: "INVALID_ARGUMENT", message: "A content key is 32 bytes." });
+      const key = await needSubtle().importKey("raw", own(raw), { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+      return new ContentKey(name, key);
+    },
+    async exportKey(key) {
+      return new Uint8Array(await needSubtle().exportKey("raw", cryptoKey(key)));
+    },
+    async encrypt(key, plaintext) {
+      const iv = randomBytes(AES_GCM_IV_BYTES);
+      const sealed = new Uint8Array(await needSubtle().encrypt({ name: "AES-GCM", iv }, cryptoKey(key), own(plaintext)));
+      const out = new Uint8Array(iv.byteLength + sealed.byteLength);
+      out.set(iv);
+      out.set(sealed, iv.byteLength);
+      return out;
+    },
+    async decrypt(key, sealed) {
+      const iv = sealed.slice(0, AES_GCM_IV_BYTES);
+      const ciphertext = sealed.slice(AES_GCM_IV_BYTES);
+      return new Uint8Array(await needSubtle().decrypt({ name: "AES-GCM", iv }, cryptoKey(key), ciphertext));
+    },
+    async sha256(data) {
+      if (subtle) return new Uint8Array(await subtle.digest("SHA-256", own(data)));
+      return new Uint8Array(sha256Fallback(own(data).buffer));
+    }
+  };
+  return Object.freeze(provider);
 }
-function getDefaultFetch() {
-  return globalThis.fetch?.bind(globalThis);
+function cryptoProvider() {
+  const webCrypto = globalThis.crypto;
+  if (typeof webCrypto?.getRandomValues !== "function") {
+    throw new DropgateError({
+      code: "RUNTIME_UNSUPPORTED",
+      message: "No secure random numbers here (crypto.getRandomValues())."
+    });
+  }
+  return webCryptoProvider(webCrypto);
 }
 
 // src/p2p/utils.ts
@@ -163,31 +383,18 @@ function isLocalhostHostname(hostname) {
 function isSecureContextForP2P(hostname, isSecureContext) {
   return Boolean(isSecureContext) || isLocalhostHostname(hostname || "");
 }
-function generateP2PCode(cryptoObj) {
-  const crypto2 = cryptoObj || getDefaultCrypto();
+function generateP2PCode(provider = cryptoProvider()) {
   const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
-  if (crypto2) {
-    const randomBytes = new Uint8Array(8);
-    crypto2.getRandomValues(randomBytes);
-    let letterPart = "";
-    for (let i = 0; i < 4; i++) {
-      letterPart += letters[randomBytes[i] % letters.length];
-    }
-    let numberPart = "";
-    for (let i = 4; i < 8; i++) {
-      numberPart += (randomBytes[i] % 10).toString();
-    }
-    return `${letterPart}-${numberPart}`;
-  }
-  let a = "";
+  const randomBytes = provider.randomBytes(8);
+  let letterPart = "";
   for (let i = 0; i < 4; i++) {
-    a += letters[Math.floor(Math.random() * letters.length)];
+    letterPart += letters[randomBytes[i] % letters.length];
   }
-  let b = "";
-  for (let i = 0; i < 4; i++) {
-    b += Math.floor(Math.random() * 10);
+  let numberPart = "";
+  for (let i = 4; i < 8; i++) {
+    numberPart += (randomBytes[i] % 10).toString();
   }
-  return `${a}-${b}`;
+  return `${letterPart}-${numberPart}`;
 }
 function isP2PCodeLike(code) {
   return /^[A-Z]{4}-\d{4}$/.test(String(code || "").trim());
@@ -332,13 +539,7 @@ async function settle(scope, work, transport) {
 
 // src/operation.ts
 function newOperationId() {
-  const cryptoObj = globalThis.crypto;
-  if (typeof cryptoObj?.randomUUID === "function") return cryptoObj.randomUUID();
-  const bytes = cryptoObj.getRandomValues(new Uint8Array(16));
-  bytes[6] = bytes[6] & 15 | 64;
-  bytes[8] = bytes[8] & 63 | 128;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return cryptoProvider().randomUUID();
 }
 function startOperation(opts) {
   const scope = new CancelScope(opts.kind, { parent: opts.parent, signal: opts.signal });
@@ -532,6 +733,45 @@ async function readRange(source, start, end) {
   }
   const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   return view.buffer instanceof ArrayBuffer ? view : new Uint8Array(view);
+}
+
+// src/adapters/defaults.ts
+function getDefaultBase64() {
+  if (typeof Buffer !== "undefined" && typeof Buffer.from === "function") {
+    return {
+      encode(bytes) {
+        return Buffer.from(bytes).toString("base64");
+      },
+      decode(b64) {
+        return new Uint8Array(Buffer.from(b64, "base64"));
+      }
+    };
+  }
+  if (typeof btoa === "function" && typeof atob === "function") {
+    return {
+      encode(bytes) {
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+      },
+      decode(b64) {
+        const binary = atob(b64);
+        const out = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          out[i] = binary.charCodeAt(i);
+        }
+        return out;
+      }
+    };
+  }
+  throw new Error(
+    "No Base64 implementation available. Provide a Base64Adapter via options."
+  );
+}
+function getDefaultFetch() {
+  return globalThis.fetch?.bind(globalThis);
 }
 
 // src/utils/network.ts
@@ -763,232 +1003,127 @@ function plaintextBytes(storedBytes, chunkSize) {
   return storedBytes - chunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
 }
 
-// src/utils/base64.ts
-var defaultAdapter = null;
-function getAdapter(adapter) {
-  if (adapter) return adapter;
-  if (!defaultAdapter) {
-    defaultAdapter = getDefaultBase64();
-  }
-  return defaultAdapter;
-}
-function bytesToBase64(bytes, adapter) {
-  return getAdapter(adapter).encode(bytes);
-}
-function arrayBufferToBase64(buf, adapter) {
-  return bytesToBase64(new Uint8Array(buf), adapter);
-}
-
-// src/crypto/sha256-fallback.ts
-var K = new Uint32Array([
-  1116352408,
-  1899447441,
-  3049323471,
-  3921009573,
-  961987163,
-  1508970993,
-  2453635748,
-  2870763221,
-  3624381080,
-  310598401,
-  607225278,
-  1426881987,
-  1925078388,
-  2162078206,
-  2614888103,
-  3248222580,
-  3835390401,
-  4022224774,
-  264347078,
-  604807628,
-  770255983,
-  1249150122,
-  1555081692,
-  1996064986,
-  2554220882,
-  2821834349,
-  2952996808,
-  3210313671,
-  3336571891,
-  3584528711,
-  113926993,
-  338241895,
-  666307205,
-  773529912,
-  1294757372,
-  1396182291,
-  1695183700,
-  1986661051,
-  2177026350,
-  2456956037,
-  2730485921,
-  2820302411,
-  3259730800,
-  3345764771,
-  3516065817,
-  3600352804,
-  4094571909,
-  275423344,
-  430227734,
-  506948616,
-  659060556,
-  883997877,
-  958139571,
-  1322822218,
-  1537002063,
-  1747873779,
-  1955562222,
-  2024104815,
-  2227730452,
-  2361852424,
-  2428436474,
-  2756734187,
-  3204031479,
-  3329325298
-]);
-function rotr(x, n) {
-  return x >>> n | x << 32 - n;
-}
-function sha256Fallback(data) {
-  const bytes = new Uint8Array(data);
-  const bitLen = bytes.length * 8;
-  const padded = new Uint8Array(
-    Math.ceil((bytes.length + 9) / 64) * 64
-  );
-  padded.set(bytes);
-  padded[bytes.length] = 128;
-  const view = new DataView(padded.buffer);
-  view.setUint32(padded.length - 8, bitLen / 4294967296 >>> 0, false);
-  view.setUint32(padded.length - 4, bitLen >>> 0, false);
-  let h0 = 1779033703;
-  let h1 = 3144134277;
-  let h2 = 1013904242;
-  let h3 = 2773480762;
-  let h4 = 1359893119;
-  let h5 = 2600822924;
-  let h6 = 528734635;
-  let h7 = 1541459225;
-  const W = new Uint32Array(64);
-  for (let offset = 0; offset < padded.length; offset += 64) {
-    for (let i = 0; i < 16; i++) {
-      W[i] = view.getUint32(offset + i * 4, false);
-    }
-    for (let i = 16; i < 64; i++) {
-      const s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ W[i - 15] >>> 3;
-      const s1 = rotr(W[i - 2], 17) ^ rotr(W[i - 2], 19) ^ W[i - 2] >>> 10;
-      W[i] = W[i - 16] + s0 + W[i - 7] + s1 | 0;
-    }
-    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
-    for (let i = 0; i < 64; i++) {
-      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-      const ch = e & f ^ ~e & g;
-      const temp1 = h + S1 + ch + K[i] + W[i] | 0;
-      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-      const maj = a & b ^ a & c ^ b & c;
-      const temp2 = S0 + maj | 0;
-      h = g;
-      g = f;
-      f = e;
-      e = d + temp1 | 0;
-      d = c;
-      c = b;
-      b = a;
-      a = temp1 + temp2 | 0;
-    }
-    h0 = h0 + a | 0;
-    h1 = h1 + b | 0;
-    h2 = h2 + c | 0;
-    h3 = h3 + d | 0;
-    h4 = h4 + e | 0;
-    h5 = h5 + f | 0;
-    h6 = h6 + g | 0;
-    h7 = h7 + h | 0;
-  }
-  const result = new ArrayBuffer(32);
-  const out = new DataView(result);
-  out.setUint32(0, h0, false);
-  out.setUint32(4, h1, false);
-  out.setUint32(8, h2, false);
-  out.setUint32(12, h3, false);
-  out.setUint32(16, h4, false);
-  out.setUint32(20, h5, false);
-  out.setUint32(24, h6, false);
-  out.setUint32(28, h7, false);
-  return result;
-}
-
-// src/crypto/decrypt.ts
-async function importKeyFromBase64(cryptoObj, keyB64, base64) {
-  const adapter = base64 || getDefaultBase64();
-  const keyBytes = adapter.decode(keyB64);
-  const keyBuffer = new Uint8Array(keyBytes).buffer;
-  return cryptoObj.subtle.importKey(
-    "raw",
-    keyBuffer,
-    { name: "AES-GCM" },
-    true,
-    ["decrypt"]
-  );
-}
-async function decryptChunk(cryptoObj, encryptedData, key) {
-  const iv = encryptedData.slice(0, AES_GCM_IV_BYTES);
-  const ciphertext = encryptedData.slice(AES_GCM_IV_BYTES);
-  return cryptoObj.subtle.decrypt(
-    { name: "AES-GCM", iv },
-    key,
-    ciphertext
-  );
-}
-async function decryptFilenameFromBase64(cryptoObj, encryptedFilenameB64, key, base64) {
-  const adapter = base64 || getDefaultBase64();
-  const encryptedBytes = adapter.decode(encryptedFilenameB64);
-  const decryptedBuffer = await decryptChunk(cryptoObj, encryptedBytes, key);
-  return new TextDecoder().decode(decryptedBuffer);
-}
-
 // src/crypto/index.ts
-function digestToHex(hashBuffer) {
-  const arr = new Uint8Array(hashBuffer);
+async function sha256Hex(provider, data) {
+  const digest = await provider.sha256(data);
   let hex = "";
-  for (let i = 0; i < arr.length; i++) {
-    hex += arr[i].toString(16).padStart(2, "0");
-  }
+  for (const byte of digest) hex += byte.toString(16).padStart(2, "0");
   return hex;
 }
-async function sha256Hex(cryptoObj, data) {
-  if (cryptoObj?.subtle) {
-    const hashBuffer = await cryptoObj.subtle.digest("SHA-256", data);
-    return digestToHex(hashBuffer);
-  }
-  return digestToHex(sha256Fallback(data));
+async function keyToBase64(provider, key, base64) {
+  return base64.encode(await provider.exportKey(key));
 }
-async function generateAesGcmKey(cryptoObj) {
-  return cryptoObj.subtle.generateKey(
-    { name: "AES-GCM", length: 256 },
-    true,
-    ["encrypt", "decrypt"]
-  );
+async function keyFromBase64(provider, keyB64, base64) {
+  return provider.importKey(base64.decode(keyB64));
 }
-async function exportKeyBase64(cryptoObj, key) {
-  const raw = await cryptoObj.subtle.exportKey("raw", key);
-  return arrayBufferToBase64(raw);
+async function encryptName(provider, name, key, base64) {
+  return base64.encode(await provider.encrypt(key, new TextEncoder().encode(String(name))));
+}
+async function decryptName(provider, sealedB64, key, base64) {
+  return new TextDecoder().decode(await provider.decrypt(key, base64.decode(sealedB64)));
 }
 
-// src/crypto/encrypt.ts
-async function encryptToBlob(cryptoObj, dataBuffer, key) {
-  const iv = cryptoObj.getRandomValues(new Uint8Array(AES_GCM_IV_BYTES));
-  const encrypted = await cryptoObj.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    key,
-    dataBuffer
-  );
-  return new Blob([iv, new Uint8Array(encrypted)]);
-}
-async function encryptFilenameToBase64(cryptoObj, filename, key) {
-  const bytes = new TextEncoder().encode(String(filename));
-  const blob = await encryptToBlob(cryptoObj, bytes.buffer, key);
-  const buf = await blob.arrayBuffer();
-  return arrayBufferToBase64(buf);
+// src/credentials.ts
+var TOKEN68 = /^[A-Za-z0-9\-._~+/]+=*$/;
+var MAX_TOKEN_LENGTH = 8192;
+var _provider2, _operation, _baseUrl, _token, _renewed, _OperationCredentials_instances, ask_fn;
+var _OperationCredentials = class _OperationCredentials {
+  constructor(provider, operation, baseUrl) {
+    __privateAdd(this, _OperationCredentials_instances);
+    __privateAdd(this, _provider2);
+    __privateAdd(this, _operation);
+    __privateAdd(this, _baseUrl);
+    __privateAdd(this, _token, null);
+    __privateAdd(this, _renewed, false);
+    __privateSet(this, _provider2, provider);
+    __privateSet(this, _operation, operation);
+    __privateSet(this, _baseUrl, baseUrl);
+  }
+  /**
+   * The credential for an operation the server says needs one, from the
+   * provider.
+   * @throws {DropgateError} AUTH_REQUIRED if there's no provider, it gives none, or it fails;
+   * INVALID_ARGUMENT if what it gives isn't a credential; OPERATION_CANCELLED.
+   */
+  static async required(provider, operation, baseUrl, signal) {
+    var _a2;
+    if (!provider) {
+      throw new DropgateError({
+        code: "AUTH_REQUIRED",
+        message: "This server needs a credential for this, and the client was given no auth provider."
+      });
+    }
+    const credentials = new _OperationCredentials(provider, operation, baseUrl);
+    __privateSet(credentials, _token, await __privateMethod(_a2 = credentials, _OperationCredentials_instances, ask_fn).call(_a2, "required", signal));
+    return credentials;
+  }
+  /** The headers that carry the credential: none if there isn't one. */
+  headers() {
+    return __privateGet(this, _token) === null ? {} : { Authorization: `Bearer ${__privateGet(this, _token)}` };
+  }
+  /**
+   * After the server said the credential had expired: asks the provider once
+   * more, the first time only. Whether the request may be made again.
+   */
+  async renew(signal) {
+    if (!__privateGet(this, _provider2) || __privateGet(this, _renewed)) return false;
+    __privateSet(this, _renewed, true);
+    __privateSet(this, _token, await __privateMethod(this, _OperationCredentials_instances, ask_fn).call(this, "expired", signal));
+    return true;
+  }
+  toJSON() {
+    return "[Credentials]";
+  }
+  toString() {
+    return "[Credentials]";
+  }
+  [/* @__PURE__ */ Symbol.for("nodejs.util.inspect.custom")]() {
+    return "[Credentials]";
+  }
+};
+_provider2 = new WeakMap();
+_operation = new WeakMap();
+_baseUrl = new WeakMap();
+_token = new WeakMap();
+_renewed = new WeakMap();
+_OperationCredentials_instances = new WeakSet();
+ask_fn = async function(reason, signal) {
+  if (signal.aborted) throw signal.reason;
+  const request = Object.freeze({ operation: __privateGet(this, _operation), reason, baseUrl: __privateGet(this, _baseUrl), signal });
+  let given;
+  let stopWatching = () => {
+  };
+  const cancelled = new Promise((_, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    stopWatching = () => signal.removeEventListener("abort", onAbort);
+  });
+  try {
+    given = await Promise.race([Promise.resolve().then(() => __privateGet(this, _provider2).call(this, request)), cancelled]);
+  } catch {
+    if (signal.aborted) throw signal.reason;
+    throw new DropgateError({ code: "AUTH_REQUIRED", origin: "local", message: "The auth provider couldn't give a credential." });
+  } finally {
+    stopWatching();
+  }
+  if (signal.aborted) throw signal.reason;
+  if (given === null || given === void 0) {
+    throw new DropgateError({ code: "AUTH_REQUIRED", message: "This server needs a credential for this, and the auth provider gave none." });
+  }
+  const token = given?.token;
+  if (typeof token !== "string" || token.length > MAX_TOKEN_LENGTH || !TOKEN68.test(token)) {
+    throw new DropgateError({
+      code: "INVALID_ARGUMENT",
+      message: "The auth provider's credential must be { token }, with a token of letters, digits and -._~+/ (optionally ending in =)."
+    });
+  }
+  return token;
+};
+/** For an operation the server doesn't ask a credential for: nothing is ever sent. */
+__publicField(_OperationCredentials, "none", new _OperationCredentials(null, "hosted.upload", ""));
+var OperationCredentials = _OperationCredentials;
+function credentialExpired(status, json) {
+  return status === 401 && Boolean(json) && typeof json === "object" && json.code === "AUTH_EXPIRED";
 }
 
 // src/p2p/helpers.ts
@@ -1074,7 +1209,7 @@ var P2P_CLOSE_GRACE_PERIOD_MS = 2e3;
 // src/p2p/send.ts
 var P2P_UNACKED_CHUNK_TIMEOUT_MS = 6e4;
 function generateSessionId() {
-  return crypto.randomUUID();
+  return cryptoProvider().randomUUID();
 }
 var ALLOWED_TRANSITIONS = {
   initializing: ["listening", "closed"],
@@ -1099,7 +1234,6 @@ async function startP2PSend(opts) {
     secure = false,
     iceServers,
     codeGenerator,
-    cryptoObj,
     maxAttempts = 4,
     chunkSize = P2P_CHUNK_SIZE,
     endAckTimeoutMs = P2P_END_ACK_TIMEOUT_MS,
@@ -1145,7 +1279,7 @@ async function startP2PSend(opts) {
     secure,
     iceServers: finalIceServers
   });
-  const finalCodeGenerator = codeGenerator || (() => generateP2PCode(cryptoObj));
+  const finalCodeGenerator = codeGenerator || (() => generateP2PCode());
   const buildPeer = (id) => new Peer(id, peerOpts);
   const { peer, code } = await createPeerWithRetries({
     code: null,
@@ -2662,6 +2796,7 @@ function checkProtocol(client, given) {
   }
   return { compatible: true, client, server, message: "This server works with this version of Dropgate." };
 }
+var _auth;
 var DropgateClient = class {
   /**
    * Create a new DropgateClient instance.
@@ -2680,8 +2815,6 @@ var DropgateClient = class {
      * credentials (no cookies), and follows no redirect.
      */
     __publicField(this, "fetchFn");
-    /** Crypto implementation for encryption operations. */
-    __publicField(this, "cryptoObj");
     /** Base64 encoder/decoder for binary data. */
     __publicField(this, "base64");
     /** Uploads to the server, and downloads from it. */
@@ -2706,6 +2839,10 @@ var DropgateClient = class {
     __publicField(this, "_connectPromise", null);
     /** The running operations, and the root of the cancellation tree. */
     __publicField(this, "_registry", new OperationRegistry());
+    /** Every encrypt, decrypt, key, hash and random number the client uses. */
+    __publicField(this, "_crypto");
+    /** Where a credential comes from, for a server that asks for one: private, so it's never listed or serialised. */
+    __privateAdd(this, _auth);
     if (!opts?.server) {
       throw new DropgateError({
         code: "INVALID_ARGUMENT",
@@ -2729,11 +2866,15 @@ var DropgateClient = class {
       throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "No fetch() implementation found.", transport: this.transport });
     }
     this.fetchFn = guardedFetch(fetchFn);
-    const cryptoObj = opts.cryptoObj || getDefaultCrypto();
-    if (!cryptoObj) {
-      throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "No crypto implementation found.", transport: this.transport });
+    try {
+      this._crypto = cryptoProvider();
+    } catch (err2) {
+      throw withTransport(err2, this.transport);
     }
-    this.cryptoObj = cryptoObj;
+    if (opts.auth !== void 0 && typeof opts.auth !== "function") {
+      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "auth must be a function giving { token } or null.", transport: this.transport });
+    }
+    __privateSet(this, _auth, opts.auth);
     this.base64 = opts.base64 || getDefaultBase64();
     const transport = this.transport;
     const stamped = (fn) => (...args) => {
@@ -2914,7 +3055,7 @@ var DropgateClient = class {
     let cryptoKey;
     if (isEncrypted) {
       if (!keyB64) throw new DropgateError({ code: "KEY_REQUIRED" });
-      if (!this.cryptoObj?.subtle) {
+      if (!this._crypto.canEncrypt) {
         throw new DropgateError({
           code: "RUNTIME_UNSUPPORTED",
           message: "Web Crypto API not available for decryption. Encrypted uploads need a secure context (HTTPS or localhost)."
@@ -2923,13 +3064,13 @@ var DropgateClient = class {
     }
     const decrypt = async (run) => {
       try {
-        cryptoKey ?? (cryptoKey = await importKeyFromBase64(this.cryptoObj, keyB64, this.base64));
+        cryptoKey ?? (cryptoKey = await keyFromBase64(this._crypto, keyB64, this.base64));
         return await run(cryptoKey);
       } catch (err2) {
         throw new DropgateError({ code: "DECRYPT_FAILED", cause: err2 });
       }
     };
-    const decryptName = (encrypted) => decrypt((key) => decryptFilenameFromBase64(this.cryptoObj, String(encrypted ?? ""), key, this.base64));
+    const openName = (encrypted) => decrypt((key) => decryptName(this._crypto, String(encrypted ?? ""), key, this.base64));
     const received = (name, index) => {
       validateFilename(name, { origin: "server", ...index === void 0 ? {} : { index } });
       return name;
@@ -2942,7 +3083,7 @@ var DropgateClient = class {
           transport: this.transport,
           fileId,
           isEncrypted,
-          name: received(isEncrypted ? await decryptName(raw.encryptedFilename) : raw.filename || "file"),
+          name: received(isEncrypted ? await openName(raw.encryptedFilename) : raw.filename || "file"),
           sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored
         },
         cryptoKey
@@ -2952,7 +3093,7 @@ var DropgateClient = class {
     const sealed = Boolean(raw.sealed && raw.encryptedManifest);
     if (sealed) {
       const manifest = await decrypt(async (key) => {
-        const decrypted = await decryptChunk(this.cryptoObj, this.base64.decode(raw.encryptedManifest), key);
+        const decrypted = await this._crypto.decrypt(key, this.base64.decode(raw.encryptedManifest));
         const parsed = JSON.parse(new TextDecoder().decode(decrypted));
         if (!Array.isArray(parsed?.files)) throw new TypeError("The manifest has no files.");
         return parsed.files;
@@ -2964,7 +3105,7 @@ var DropgateClient = class {
         const stored = Number(f.sizeBytes) || 0;
         files.push({
           fileId: f.fileId,
-          name: received(isEncrypted ? await decryptName(f.encryptedFilename) : f.filename || "file", files.length),
+          name: received(isEncrypted ? await openName(f.encryptedFilename) : f.filename || "file", files.length),
           // An unsealed encrypted bundle's sizes are what the server stored, ciphertext.
           sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored
         });
@@ -3074,12 +3215,13 @@ var DropgateClient = class {
     }
     const currentUploadIds = [];
     const totalSizeBytes = files.reduce((sum, f) => sum + f.size, 0);
+    let credentials = OperationCredentials.none;
     const callCancelEndpoint = async (uploadId) => {
       try {
         await fetchJson(this.fetchFn, `${this.baseUrl}/upload/cancel`, {
           method: "POST",
           timeoutMs: 5e3,
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          headers: { "Content-Type": "application/json", Accept: "application/json", ...credentials.headers() },
           body: JSON.stringify({ uploadId })
         });
       } catch {
@@ -3088,6 +3230,12 @@ var DropgateClient = class {
     const work = async (ctx) => {
       const effectiveSignal = ctx.signal;
       const progress = ctx.update;
+      const send = async (url, init) => {
+        const attempt = () => fetchJson(this.fetchFn, url, { ...init, headers: { ...init.headers, ...credentials.headers() } });
+        const out = await attempt();
+        if (credentialExpired(out.res.status, out.json) && await credentials.renew(effectiveSignal)) return attempt();
+        return out;
+      };
       const filenames2 = files.map((f, i) => filenameOverrides?.[i] ?? f.name ?? "file");
       filenames2.forEach((name, index) => validateFilename(name, { index }));
       const compat = await this._connect({
@@ -3100,24 +3248,25 @@ var DropgateClient = class {
       const serverSupportsE2EE = Boolean(serverInfo?.capabilities?.upload?.e2ee);
       const effectiveEncrypt = encrypt ?? serverSupportsE2EE;
       this._validate({ files, lifetimeMs, encrypt: effectiveEncrypt, serverInfo });
+      if (serverInfo?.capabilities?.upload?.credentialRequired === true) {
+        credentials = await OperationCredentials.required(__privateGet(this, _auth), "hosted.upload", baseUrl, effectiveSignal);
+      }
       let cryptoKey = null;
       let keyB64 = null;
       const transmittedFilenames = [];
       if (effectiveEncrypt) {
-        if (!this.cryptoObj?.subtle) {
+        if (!this._crypto.canEncrypt) {
           throw new DropgateError({
             code: "RUNTIME_UNSUPPORTED",
-            message: "Web Crypto API not available (crypto.subtle). Encryption requires a secure context (HTTPS or localhost)."
+            message: "Web Crypto API not available. Encryption requires a secure context (HTTPS or localhost)."
           });
         }
         progress({ phase: "crypto", text: "Generating encryption key..." });
         try {
-          cryptoKey = await generateAesGcmKey(this.cryptoObj);
-          keyB64 = await exportKeyBase64(this.cryptoObj, cryptoKey);
+          cryptoKey = await this._crypto.generateKey();
+          keyB64 = await keyToBase64(this._crypto, cryptoKey, this.base64);
           for (const name of filenames2) {
-            transmittedFilenames.push(
-              await encryptFilenameToBase64(this.cryptoObj, name, cryptoKey)
-            );
+            transmittedFilenames.push(await encryptName(this._crypto, name, cryptoKey, this.base64));
           }
         } catch (err2) {
           throw new DropgateError({ code: "ENCRYPT_FAILED", cause: err2 });
@@ -3135,7 +3284,7 @@ var DropgateClient = class {
         const totalChunks = Math.ceil(file.size / effectiveChunkSize);
         const totalUploadSize = estimateTotalUploadSizeBytes(file.size, totalChunks, effectiveEncrypt);
         progress({ phase: "init", text: "Reserving server storage..." });
-        const initRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/init`, {
+        const initRes = await send(`${baseUrl}/upload/init`, {
           method: "POST",
           timeoutMs: timeouts.initMs ?? 15e3,
           signal: effectiveSignal,
@@ -3171,10 +3320,11 @@ var DropgateClient = class {
           retries,
           backoffMs: baseBackoffMs,
           maxBackoffMs,
-          chunkTimeoutMs: timeouts.chunkMs ?? 6e4
+          chunkTimeoutMs: timeouts.chunkMs ?? 6e4,
+          credentials
         });
         progress({ status: "completing", phase: "complete", text: "Finalising upload...", percent: 100, processedBytes: file.size });
-        const completeRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/complete`, {
+        const completeRes = await send(`${baseUrl}/upload/complete`, {
           method: "POST",
           timeoutMs: timeouts.completeMs ?? 3e4,
           signal: effectiveSignal,
@@ -3203,7 +3353,7 @@ var DropgateClient = class {
         return { filename: transmittedFilenames[i], totalSize: totalUploadSize, totalChunks };
       });
       progress({ phase: "init", text: `Reserving server storage for ${files.length} files...`, totalFiles: files.length });
-      const initBundleRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/init-bundle`, {
+      const initBundleRes = await send(`${baseUrl}/upload/init-bundle`, {
         method: "POST",
         timeoutMs: timeouts.initMs ?? 15e3,
         signal: effectiveSignal,
@@ -3257,9 +3407,10 @@ var DropgateClient = class {
           retries,
           backoffMs: baseBackoffMs,
           maxBackoffMs,
-          chunkTimeoutMs: timeouts.chunkMs ?? 6e4
+          chunkTimeoutMs: timeouts.chunkMs ?? 6e4,
+          credentials
         });
-        const completeRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/complete`, {
+        const completeRes = await send(`${baseUrl}/upload/complete`, {
           method: "POST",
           timeoutMs: timeouts.completeMs ?? 3e4,
           signal: effectiveSignal,
@@ -3291,11 +3442,9 @@ var DropgateClient = class {
           }))
         });
         const manifestBytes = new TextEncoder().encode(manifest);
-        const encryptedBlob = await encryptToBlob(this.cryptoObj, manifestBytes.buffer, cryptoKey);
-        const encryptedBuffer = new Uint8Array(await encryptedBlob.arrayBuffer());
-        encryptedManifestB64 = this.base64.encode(encryptedBuffer);
+        encryptedManifestB64 = this.base64.encode(await this._crypto.encrypt(cryptoKey, manifestBytes));
       }
-      const completeBundleRes = await fetchJson(this.fetchFn, `${baseUrl}/upload/complete-bundle`, {
+      const completeBundleRes = await send(`${baseUrl}/upload/complete-bundle`, {
         method: "POST",
         timeoutMs: timeouts.completeMs ?? 3e4,
         signal: effectiveSignal,
@@ -3525,7 +3674,7 @@ var DropgateClient = class {
         if (downloadSignal.aborted) throw downloadSignal.reason;
         return next;
       };
-      const decrypt = (chunk) => step("INTEGRITY_FAILED", () => decryptChunk(this.cryptoObj, chunk, cryptoKey));
+      const decrypt = (chunk) => step("INTEGRITY_FAILED", () => this._crypto.decrypt(cryptoKey, chunk));
       const deliver = async (chunk) => {
         await step("OUTPUT_WRITE_FAILED", () => deliverChunk(chunk));
         deliveredBytes += chunk.byteLength;
@@ -3603,8 +3752,7 @@ var DropgateClient = class {
       secure,
       peerjsPath,
       iceServers,
-      serverInfo,
-      cryptoObj: this.cryptoObj
+      serverInfo
     });
     return Object.assign(session, { transport: this.transport });
   }
@@ -3662,7 +3810,8 @@ var DropgateClient = class {
       retries,
       backoffMs,
       maxBackoffMs,
-      chunkTimeoutMs
+      chunkTimeoutMs,
+      credentials
     } = params;
     for (let i = 0; i < totalChunks; i++) {
       if (signal.aborted) {
@@ -3681,25 +3830,24 @@ var DropgateClient = class {
         totalChunks
       });
       const chunkBytes = await readRange(file, start, end);
-      let uploadBlob;
+      let uploadBytes;
       if (cryptoKey) {
         try {
-          uploadBlob = await encryptToBlob(this.cryptoObj, chunkBytes, cryptoKey);
+          uploadBytes = await this._crypto.encrypt(cryptoKey, chunkBytes);
         } catch (err2) {
           throw new DropgateError({ code: "ENCRYPT_FAILED", cause: err2 });
         }
       } else {
-        uploadBlob = new Blob([chunkBytes]);
+        uploadBytes = chunkBytes;
       }
-      if (uploadBlob.size > effectiveChunkSize + 1024) {
+      if (uploadBytes.byteLength > effectiveChunkSize + 1024) {
         throw new DropgateError({ code: "INVALID_ARGUMENT", message: "Chunk too large (client-side). Check chunk size settings." });
       }
-      const toHash = await uploadBlob.arrayBuffer();
-      const hashHex = await sha256Hex(this.cryptoObj, toHash);
+      const hashHex = await sha256Hex(this._crypto, uploadBytes);
       await this._attemptChunkUpload(
         `${baseUrl}/upload/chunk`,
-        { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Upload-ID": uploadId, "X-Chunk-Index": String(i), "X-Chunk-Hash": hashHex }, body: uploadBlob },
-        { retries, backoffMs, maxBackoffMs, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i }
+        { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Upload-ID": uploadId, "X-Chunk-Index": String(i), "X-Chunk-Hash": hashHex }, body: new Blob([uploadBytes]) },
+        { retries, backoffMs, maxBackoffMs, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i, credentials }
       );
     }
   }
@@ -3711,7 +3859,8 @@ var DropgateClient = class {
       timeoutMs,
       signal,
       progress,
-      chunkIndex
+      chunkIndex,
+      credentials
     } = opts;
     let attemptsLeft = retries;
     let currentBackoff = backoffMs;
@@ -3724,19 +3873,27 @@ var DropgateClient = class {
       try {
         let res;
         try {
-          res = await this.fetchFn(url, { ...fetchOptions, signal: s });
+          const headers = { ...fetchOptions.headers, ...credentials.headers() };
+          res = await this.fetchFn(url, { ...fetchOptions, headers, signal: s });
         } catch (err2) {
           throw toDropgateError(err2, "SERVER_UNREACHABLE");
         }
         if (res.ok) return;
         const text = await res.text().catch(() => "");
-        throw errorFromStatus(res.status, { error: text }, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
+        let said = { error: text };
+        try {
+          said = JSON.parse(text);
+        } catch {
+        }
+        throw errorFromStatus(res.status, said, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
       } catch (err2) {
         cleanup();
         if (signal?.aborted) {
           throw signal.reason || new DropgateError({ code: "OPERATION_CANCELLED" });
         }
         if (DropgateError.is(err2, "OPERATION_CANCELLED")) throw err2;
+        if (DropgateError.is(err2, "AUTH_EXPIRED") && await credentials.renew(signal)) continue;
+        if (isCredentialError(err2)) throw err2;
         if (attemptsLeft <= 0) throw toDropgateError(err2, "SERVER_UNREACHABLE");
         const attemptNumber = maxRetries - attemptsLeft + 1;
         let remaining = currentBackoff;
@@ -3763,6 +3920,7 @@ var DropgateClient = class {
     }
   }
 };
+_auth = new WeakMap();
 /** Core's own version, such as `4.0.0`. For display and logs: compatibility never depends on it. */
 __publicField(DropgateClient, "version", CORE_VERSION);
 /**
@@ -3829,8 +3987,11 @@ var filenames = Object.freeze({
   unique: uniqueFilename
 });
 var codes = Object.freeze({
-  /** A new random code. */
-  generate: generateP2PCode,
+  /**
+   * A new random code, from secure random numbers only.
+   * @throws {DropgateError} RUNTIME_UNSUPPORTED if there are none here (no `crypto.getRandomValues()`).
+   */
+  generate: () => generateP2PCode(),
   /** Whether a value is shaped like a code. */
   isLike: isP2PCodeLike
 });

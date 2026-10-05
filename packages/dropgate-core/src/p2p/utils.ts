@@ -1,5 +1,5 @@
-import type { CryptoAdapter } from '../types.js';
-import { getDefaultCrypto } from '../adapters/defaults.js';
+import { cryptoProvider } from '../crypto/provider.js';
+import type { CryptoProvider } from '../crypto/provider.js';
 
 /**
  * Whether a hostname is this machine: `localhost`, `127.0.0.1` or `::1`
@@ -21,40 +21,25 @@ export function isSecureContextForP2P(
 }
 
 /**
- * Generate a P2P sharing code using cryptographically secure random.
- * Format: XXXX-0000 (4 letters + 4 digits)
+ * Generate a P2P sharing code from the crypto provider's secure random bytes,
+ * never anything weaker. Format: XXXX-0000 (4 letters + 4 digits)
+ * @throws {DropgateError} RUNTIME_UNSUPPORTED if there are no secure random numbers here.
  */
-export function generateP2PCode(cryptoObj?: CryptoAdapter): string {
-  const crypto = cryptoObj || getDefaultCrypto();
+export function generateP2PCode(provider: CryptoProvider = cryptoProvider()): string {
   const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // Excluded I and O to avoid confusion
+  const randomBytes = provider.randomBytes(8);
 
-  if (crypto) {
-    const randomBytes = new Uint8Array(8);
-    crypto.getRandomValues(randomBytes);
-
-    let letterPart = '';
-    for (let i = 0; i < 4; i++) {
-      letterPart += letters[randomBytes[i] % letters.length];
-    }
-
-    let numberPart = '';
-    for (let i = 4; i < 8; i++) {
-      numberPart += (randomBytes[i] % 10).toString();
-    }
-
-    return `${letterPart}-${numberPart}`;
-  }
-
-  // Fallback to Math.random (less secure, but works everywhere)
-  let a = '';
+  let letterPart = '';
   for (let i = 0; i < 4; i++) {
-    a += letters[Math.floor(Math.random() * letters.length)];
+    letterPart += letters[randomBytes[i] % letters.length];
   }
-  let b = '';
-  for (let i = 0; i < 4; i++) {
-    b += Math.floor(Math.random() * 10);
+
+  let numberPart = '';
+  for (let i = 4; i < 8; i++) {
+    numberPart += (randomBytes[i] % 10).toString();
   }
-  return `${a}-${b}`;
+
+  return `${letterPart}-${numberPart}`;
 }
 
 /**
