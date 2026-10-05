@@ -1,11 +1,9 @@
-import { getServerInfo } from './dropgate-core.js';
+import { DropgateClient } from './dropgate-core.js';
 
 (async () => {
   try {
-    const { serverInfo } = await getServerInfo({
-      server: window.location.origin,
-      timeoutMs: 5000,
-    });
+    const client = new DropgateClient({ clientVersion: '3.0.13', server: window.location.origin });
+    const serverInfo = await client.server.info({ timeoutMs: 5000 });
     const v = serverInfo?.version ? `v${serverInfo.version}` : '';
 
     const el1 = document.getElementById('serverVersion');

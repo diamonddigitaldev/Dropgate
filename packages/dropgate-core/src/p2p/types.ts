@@ -351,12 +351,12 @@ export interface P2PReceiveSession {
 }
 
 // ============================================================================
-// Client P2P Options (used by DropgateClient.p2pSend / p2pReceive)
+// Client P2P Options (used by client.direct.send() / receive())
 // Server config and serverInfo are provided by the client internally.
 // ============================================================================
 
 /**
- * Options for DropgateClient.p2pSend().
+ * Options for client.direct.send().
  * Server connection, serverInfo, peerjsPath, iceServers, and cryptoObj
  * are all provided internally by the client.
  */
@@ -406,7 +406,7 @@ export interface P2PSendFileOptions {
 }
 
 /**
- * Options for DropgateClient.p2pReceive().
+ * Options for client.direct.receive().
  * Server connection, serverInfo, peerjsPath, and iceServers
  * are all provided internally by the client.
  */

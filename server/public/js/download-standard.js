@@ -1,4 +1,4 @@
-import { DropgateClient, importKeyFromBase64, decryptFilenameFromBase64, DEFAULT_CHUNK_SIZE, ENCRYPTION_OVERHEAD_PER_CHUNK } from './dropgate-core.js';
+import { DropgateClient, DropgateError } from './dropgate-core.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
 const statusTitle = document.getElementById('status-title');
@@ -106,31 +106,27 @@ async function startDownload() {
     statusTitle.textContent = 'Starting Download...';
     statusMessage.textContent = `Your browser will now ask you where to save "${downloadState.fileName}".`;
 
-    const fileStream = streamSaver.createWriteStream(downloadState.fileName);
-    const writer = fileStream.getWriter();
-
     statusTitle.textContent = downloadState.isEncrypted ? 'Downloading & Decrypting' : 'Downloading';
     statusMessage.textContent = 'Streaming directly to file...';
 
-    const outcome = await client.downloadFiles({
+    // The file's writer is the download's sink: core writes each piece to it,
+    // closes it once the whole file is in, and aborts it if the download fails.
+    const download = client.hosted.download({
       fileId: downloadState.fileId,
       keyB64: downloadState.keyB64,
       timeoutMs: 0, // No timeout for large file downloads
-      onProgress: ({ percent, processedBytes, totalBytes }) => {
-        updateTitleProgress(Math.round(percent));
-        progressBar.style.width = `${percent}%`;
-        progressText.textContent = `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}`;
-        statusMessage.textContent = totalBytes
-          ? `Streaming directly to file... (${Math.round(percent)}%)`
-          : `Streaming directly to file... (${formatBytes(processedBytes)})`;
-      },
-      onData: async (chunk) => {
-        await writer.write(chunk);
-      },
+      sink: streamSaver.createWriteStream(downloadState.fileName).getWriter(),
     });
+    download.subscribe(({ percent, processedBytes, totalBytes }) => {
+      updateTitleProgress(Math.round(percent));
+      progressBar.style.width = `${percent}%`;
+      progressText.textContent = `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}`;
+      statusMessage.textContent = totalBytes
+        ? `Streaming directly to file... (${Math.round(percent)}%)`
+        : `Streaming directly to file... (${formatBytes(processedBytes)})`;
+    });
+    const outcome = await download.result;
     if (outcome.status !== 'completed') throw outcome.error ?? new Error('Download cancelled.');
-
-    await writer.close();
 
     resetTitleProgress();
     progressBar.style.width = '100%';
@@ -174,23 +170,34 @@ async function loadMetadata() {
   fileIdEl.textContent = fileId;
 
   try {
-    // Use core library to fetch file metadata
-    const metadata = await client.getFileMetadata(fileId);
-
-    downloadState.isEncrypted = Boolean(metadata.isEncrypted);
-
-    // For encrypted files, metadata.sizeBytes is the ciphertext size on disk.
-    // Convert to plaintext size by subtracting per-chunk encryption overhead.
-    let displaySize = metadata.sizeBytes;
-    if (metadata.isEncrypted && displaySize > 0) {
-      const encryptedChunkSize = DEFAULT_CHUNK_SIZE + ENCRYPTION_OVERHEAD_PER_CHUNK;
-      const numChunks = Math.ceil(displaySize / encryptedChunkSize);
-      displaySize = displaySize - numChunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
+    // The key is after the #, and never leaves this page. Core decrypts the
+    // file's name with it, and gives the file's size as it will be saved.
+    const hash = window.location.hash.substring(1);
+    let metadata;
+    try {
+      metadata = await client.hosted.metadata({ fileId, keyB64: hash || undefined });
+    } catch (error) {
+      // Only an encrypted file needs the key, and Web Crypto to read it.
+      if (DropgateError.is(error, 'KEY_REQUIRED') || DropgateError.is(error, 'RUNTIME_UNSUPPORTED')) {
+        fileEncryptionEl.textContent = 'End-to-End Encrypted';
+        trustStatement.style.display = 'block';
+        encryptionStatement.style.display = 'block';
+        if (!window.isSecureContext) {
+          showError('Secure Connection Required', 'Encrypted files can only be downloaded over HTTPS.');
+        } else {
+          showError('Missing Decryption Key', 'The decryption key was not found in the URL.');
+        }
+        return;
+      }
+      throw error;
     }
 
-    downloadState.sizeBytes = displaySize;
+    downloadState.isEncrypted = metadata.isEncrypted;
+    downloadState.sizeBytes = metadata.sizeBytes;
+    downloadState.keyB64 = metadata.isEncrypted ? hash : null;
+    downloadState.fileName = metadata.name;
     fileEncryptionEl.textContent = metadata.isEncrypted ? 'End-to-End Encrypted' : 'None';
-    fileSizeEl.textContent = formatBytes(displaySize);
+    fileSizeEl.textContent = formatBytes(metadata.sizeBytes);
 
     trustStatement.style.display = 'block';
 
@@ -201,20 +208,6 @@ async function loadMetadata() {
         showError('Secure Connection Required', 'Encrypted files can only be downloaded over HTTPS.');
         return;
       }
-
-      const hash = window.location.hash.substring(1);
-      if (!hash) {
-        showError('Missing Decryption Key', 'The decryption key was not found in the URL.');
-        return;
-      }
-
-      downloadState.keyB64 = hash;
-
-      // Use dropgate-core to decrypt the filename for display
-      const key = await importKeyFromBase64(crypto, hash);
-      downloadState.fileName = await decryptFilenameFromBase64(crypto, metadata.encryptedFilename, key);
-    } else {
-      downloadState.fileName = metadata.filename;
     }
 
     fileNameEl.textContent = downloadState.fileName || 'Unknown';

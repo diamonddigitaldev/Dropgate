@@ -41,8 +41,8 @@ import { DropgateClient } from '@dropgate/core';
 
 const client = new DropgateClient({ clientVersion: '3.0.13', server: 'https://files.example.com' });
 
-const session = await client.uploadFiles({ files: myFile, lifetimeMs: 60 * 60 * 1000, encrypt: true });
-const outcome = await session.result;
+const upload = client.hosted.upload({ files: myFile, lifetimeMs: 60 * 60 * 1000, encrypt: true });
+const outcome = await upload.result;
 if (outcome.status === 'completed') console.log(outcome.value.downloadUrl);
 ```
 

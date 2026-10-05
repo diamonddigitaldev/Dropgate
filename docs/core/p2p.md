@@ -2,7 +2,7 @@
 
 The P2P methods are **headless**. The consumer is responsible for:
 
-1. **Loading PeerJS**: Provide the `Peer` constructor to `p2pSend`/`p2pReceive`
+1. **Loading PeerJS**: Provide the `Peer` constructor to `client.direct.send()` and `client.direct.receive()`
 2. **File Writing**: Handle received chunks via `onData` callback (e.g., using streamSaver)
 3. **UI Updates**: React to callbacks (`onProgress`, `onStatus`, etc.)
 
@@ -12,7 +12,7 @@ Behaviour to account for in the current version:
 
 - **`onCancel` also fires when the connection drops.** If the data channel closes mid-transfer, the receiver gets `cancelledBy: 'sender'` and the sender gets `cancelledBy: 'receiver'`, even if nobody cancelled. Word your UI accordingly.
 - **The sender is told the transfer succeeded before `onComplete` runs.** The receiver acknowledges completion first, then calls `onComplete` without waiting for it. If closing or finalising your output fails there, the sender still reports success, so handle that error yourself.
-- **Flow control only works if `onData` waits for the write.** The receiver acknowledges a chunk when `onData` resolves. `StreamingZipWriter.writeChunk()` returns immediately and queues its output internally, so with a slow destination that queue can grow without limit.
+- **Flow control only works if `onData` waits for the write.** The receiver acknowledges a chunk when `onData` resolves. `zip.writer()`'s `writeChunk()` returns immediately and queues its output, so with a slow destination, await its `drained()` before acknowledging, or that queue can grow without limit.
 - **Resume is not implemented.** `onResumeRequest` is never called; an interrupted transfer has to be restarted.
 - **Security:** see [DGDTP §18](../technical/DGDTP.md#18-security-considerations) for what the P2P code and DTLS do and don't protect against.
 

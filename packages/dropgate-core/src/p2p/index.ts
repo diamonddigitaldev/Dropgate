@@ -63,7 +63,7 @@ export type {
   // Sessions
   P2PSendSession,
   P2PReceiveSession,
-  // Client P2P options (used by DropgateClient.p2pSend/p2pReceive)
+  // Client P2P options (used by client.direct.send() and receive())
   P2PFile,
   P2PSendFileOptions,
   P2PReceiveFileOptions,

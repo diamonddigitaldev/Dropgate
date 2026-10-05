@@ -1,4 +1,4 @@
-import { DropgateClient, decryptFilenameFromBase64 } from './dropgate-core.js';
+import { DropgateClient, DropgateError } from './dropgate-core.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
 const statusTitle = document.getElementById('status-title');
@@ -192,24 +192,18 @@ async function downloadSingleFile(index, dlBtn) {
 
   // Stream download via dropgate-core (both plaintext and encrypted)
   try {
-    const fileStream = streamSaver.createWriteStream(name, size ? { size } : undefined);
-    const writer = fileStream.getWriter();
-
-    const outcome = await client.downloadFiles({
+    const download = client.hosted.download({
       fileId,
       keyB64: bundleState.keyB64,
       timeoutMs: 0,
-      onProgress: ({ percent, processedBytes, totalBytes }) => {
-        if (fileProgressBar) fileProgressBar.style.width = `${percent}%`;
-        if (fileProgressText) fileProgressText.textContent = `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}`;
-      },
-      onData: async (chunk) => {
-        await writer.write(chunk);
-      },
+      sink: streamSaver.createWriteStream(name, size ? { size } : undefined).getWriter(),
     });
+    download.subscribe(({ percent, processedBytes, totalBytes }) => {
+      if (fileProgressBar) fileProgressBar.style.width = `${percent}%`;
+      if (fileProgressText) fileProgressText.textContent = `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}`;
+    });
+    const outcome = await download.result;
     if (outcome.status !== 'completed') throw outcome.error ?? new Error('Download cancelled.');
-
-    await writer.close();
     if (fileProgressBar) fileProgressBar.style.width = '100%';
     if (fileProgressText) {
       fileProgressText.textContent = 'Download complete!';
@@ -291,28 +285,23 @@ async function downloadAllAsZip() {
     statusTitle.textContent = bundleState.isEncrypted ? 'Downloading & Decrypting' : 'Downloading';
     statusMessage.textContent = `Your browser will ask you where to save "${zipName}".`;
 
-    const fileStream = streamSaver.createWriteStream(zipName);
-    const writer = fileStream.getWriter();
-
-    const outcome = await client.downloadFiles({
+    const download = client.hosted.download({
       bundleId: bundleState.bundleId,
       keyB64: bundleState.keyB64,
       asZip: true,
       timeoutMs: 0,
-      onProgress: (evt) => {
-        progressBar.style.width = `${evt.percent}%`;
-        progressText.textContent = `${formatBytes(evt.processedBytes)} / ${formatBytes(evt.totalBytes)}`;
-        if (evt.currentFileName) {
-          progressFileName.textContent = evt.currentFileName;
-        }
-      },
-      onData: async (chunk) => {
-        await writer.write(chunk);
-      },
+      sink: streamSaver.createWriteStream(zipName).getWriter(),
     });
+    // Core's snapshots never name a file, so the name comes from this page's own list.
+    download.subscribe(({ percent, processedBytes, totalBytes, fileIndex }) => {
+      progressBar.style.width = `${percent}%`;
+      progressText.textContent = `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}`;
+      if (Number.isInteger(fileIndex) && bundleState.filenames[fileIndex] !== undefined) {
+        progressFileName.textContent = bundleState.filenames[fileIndex];
+      }
+    });
+    const outcome = await download.result;
     if (outcome.status !== 'completed') throw outcome.error ?? new Error('Download cancelled.');
-
-    await writer.close();
 
     progressBar.style.width = '100%';
     progressFileName.textContent = '';
@@ -359,11 +348,30 @@ async function loadMetadata() {
     const hash = window.location.hash.substring(1);
     bundleState.keyB64 = hash || null;
 
-    // Use core library to fetch and process bundle metadata
-    const meta = await client.getBundleMetadata(bundleId, bundleState.keyB64);
+    // Core reads the bundle's files, decrypting their names (and a sealed
+    // bundle's list of files) with the key, which never leaves this page.
+    let meta;
+    try {
+      meta = await client.hosted.metadata({ bundleId, keyB64: bundleState.keyB64 || undefined });
+    } catch (error) {
+      // Only an encrypted bundle needs the key, and Web Crypto to read it.
+      if (DropgateError.is(error, 'KEY_REQUIRED') || DropgateError.is(error, 'RUNTIME_UNSUPPORTED')) {
+        bundleEncryption.textContent = 'End-to-End Encrypted';
+        encryptionStatement.style.display = 'block';
+        if (!window.isSecureContext) {
+          showError('Secure Connection Required', 'Encrypted bundles can only be downloaded over HTTPS.');
+        } else {
+          showError('Missing Decryption Key', 'The decryption key was not found in the URL.');
+        }
+        return;
+      }
+      throw error;
+    }
 
-    bundleState.isEncrypted = Boolean(meta.isEncrypted);
+    bundleState.isEncrypted = meta.isEncrypted;
     bundleState.totalSizeBytes = meta.totalSizeBytes;
+    bundleState.files = meta.files.map(({ fileId, sizeBytes }) => ({ fileId, sizeBytes }));
+    bundleState.filenames = meta.files.map(({ name }) => name);
 
     bundleFileCount.textContent = `${meta.fileCount}`;
     bundleTotalSize.textContent = formatBytes(meta.totalSizeBytes);
@@ -375,32 +383,6 @@ async function loadMetadata() {
       if (!window.isSecureContext) {
         showError('Secure Connection Required', 'Encrypted bundles can only be downloaded over HTTPS.');
         return;
-      }
-
-      if (!bundleState.keyB64) {
-        showError('Missing Decryption Key', 'The decryption key was not found in the URL.');
-        return;
-      }
-
-      // For sealed bundles, filenames are already decrypted by the core library
-      // For unsealed bundles, decrypt individual filenames
-      if (meta.sealed) {
-        bundleState.files = meta.files.map(f => ({
-          fileId: f.fileId,
-          sizeBytes: f.sizeBytes,
-        }));
-        // Core library maps decrypted manifest 'name' to 'filename' for consistency
-        bundleState.filenames = meta.files.map(f => f.filename || 'file');
-      } else {
-        bundleState.files = meta.files;
-        for (const f of meta.files) {
-          bundleState.filenames.push(await decryptFilenameFromBase64(crypto, f.encryptedFilename, bundleState.keyB64));
-        }
-      }
-    } else {
-      bundleState.files = meta.files;
-      for (const f of meta.files) {
-        bundleState.filenames.push(f.filename || 'file');
       }
     }
 

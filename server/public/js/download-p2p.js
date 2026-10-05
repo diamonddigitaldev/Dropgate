@@ -1,4 +1,4 @@
-import { DropgateClient, isSecureContextForP2P, StreamingZipWriter } from './dropgate-core.js';
+import { DropgateClient, hosts, zip } from './dropgate-core.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard, clearStatusBorder } from './status-card.js';
 
 const elTitle = document.getElementById('title');
@@ -172,9 +172,9 @@ function startDownload() {
     const stream = window.streamSaver.createWriteStream(fileName, isMultiFile ? undefined : (total ? { size: total } : undefined));
     writer = stream.getWriter();
 
-    // For multi-file transfers, set up a StreamingZipWriter that pipes ZIP data into the StreamSaver writer
+    // For multi-file transfers, set up a ZIP writer that pipes ZIP data into the StreamSaver writer
     if (isMultiFile) {
-      zipWriter = new StreamingZipWriter(async (chunk) => {
+      zipWriter = zip.writer(async (chunk) => {
         await writer.write(chunk);
       });
     }
@@ -200,7 +200,7 @@ async function start() {
     return;
   }
 
-  if (!isSecureContextForP2P(location.hostname, window.isSecureContext)) {
+  if (!hosts.isSecureForDirect(location.hostname, window.isSecureContext)) {
     showError('Secure connection required', 'P2P transfers require HTTPS in most browsers.');
     return;
   }
@@ -219,7 +219,7 @@ async function start() {
   }
 
   try {
-    p2pSession = await client.p2pReceive({
+    p2pSession = await client.direct.receive({
       code,
       Peer,
       autoReady: false, // We want to show preview before starting transfer

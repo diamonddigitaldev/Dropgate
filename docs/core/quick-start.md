@@ -2,7 +2,7 @@
 
 ## Configure Once, Use Everywhere
 
-All operations go through a single `DropgateClient` instance. Server connection details are specified once in the constructor:
+Everything goes through one `DropgateClient` for a server, given its address once:
 
 ```javascript
 import { DropgateClient } from '@dropgate/core';
@@ -14,12 +14,14 @@ const client = new DropgateClient({
 });
 ```
 
+Its calls are grouped by feature: `client.hosted` uploads and downloads through the server, `client.direct` transfers from one device to another, `client.links` resolves sharing codes and links, `client.server` is the server, and `client.operations` is what's running.
+
 ## Connecting to the Server
 
-`connect()` fetches server info, checks version compatibility, and caches the result. All methods call `connect()` internally, so explicit calls are optional — useful for "Test Connection" buttons or eager validation.
+`client.server.connect()` asks for the server's info, checks this client can work with it, and keeps the answer. Every other call connects first, so calling it yourself is only needed to check a server, such as for a "Test Connection" button.
 
 ```javascript
-const { serverInfo, compatible, message } = await client.connect({ timeoutMs: 5000 });
+const { serverInfo, compatible, message } = await client.server.connect({ timeoutMs: 5000 });
 
 console.log('Server version:', serverInfo.version);
 console.log('Compatible:', compatible);
@@ -27,12 +29,14 @@ console.log('Upload enabled:', serverInfo.capabilities?.upload?.enabled);
 console.log('P2P enabled:', serverInfo.capabilities?.p2p?.enabled);
 ```
 
+`client.server.info()` asks again each time, without keeping the answer or checking compatibility.
+
 ## Uploading Files
 
-`uploadFiles()` starts the upload and gives its **handle** straight away: `result`, `snapshot`, `subscribe()` and `cancel()`.
+`client.hosted.upload()` starts the upload and gives its **handle** straight away: `id`, `result`, `snapshot`, `subscribe()` and `cancel()`.
 
 ```javascript
-const upload = client.uploadFiles({
+const upload = client.hosted.upload({
   files: myFile, // a browser File or Blob, or a FileSource (below), or an array of them
   lifetimeMs: 3600000, // 1 hour
   maxDownloads: 5,
@@ -57,20 +61,20 @@ if (outcome.status === 'completed') {
 // upload.cancel();
 ```
 
-`upload.snapshot` is where it is now, as a new, frozen object each time it changes. The [API Reference](api-reference.md#the-upload-handle) lists its fields, and [Outcomes and Cancellation](outcomes.md) has the rest, including cancelling with your own `AbortSignal`, and everything at once with `client.cancelAll()`.
+`upload.snapshot` is where it is now, as a new, frozen object each time it changes. The [API Reference](api-reference.md#operation-handles) lists its fields, and [Outcomes and Cancellation](outcomes.md) has the rest, including cancelling with your own `AbortSignal`, and everything at once with `client.operations.cancelAll()`.
 
 ### File Sources
 
-Core reads a file one chunk at a time, through a **file source**: a `name`, a `size`, and `read(start, end)`, which gives exactly those bytes. A browser `File` or `Blob` is used as it is. For a file on disk in Node.js, open it and pass `fileHandleSource()`:
+Core reads a file one chunk at a time, through a **file source**: a `name`, a `size`, and `read(start, end)`, which gives exactly those bytes. A browser `File` or `Blob` is used as it is. For a file on disk in Node.js, open it and pass `sources.fileHandle()`:
 
 ```javascript
 import { open } from 'node:fs/promises';
-import { fileHandleSource } from '@dropgate/core';
+import { sources } from '@dropgate/core';
 
 const handle = await open('/files/report.pdf', 'r');
 try {
-  const source = await fileHandleSource(handle, { name: 'report.pdf' });
-  const outcome = await client.uploadFiles({ files: source, lifetimeMs: 3600000 }).result;
+  const source = await sources.fileHandle(handle, { name: 'report.pdf' });
+  const outcome = await client.hosted.upload({ files: source, lifetimeMs: 3600000 }).result;
 } finally {
   await handle.close();
 }
@@ -88,63 +92,96 @@ const source = {
 
 A source must be able to read any range, more than once: a stream that can only be read once isn't a source. If a read fails, or gives a different number of bytes (the file changed while it was read), the upload fails with `SOURCE_UNAVAILABLE`.
 
-## Fetching File/Bundle Metadata
+## Reading Metadata
+
+`client.hosted.metadata()` gives what the server holds about an upload, with the file names decrypted for an encrypted one. The key is the part of the link after its `#`, and it never leaves the device.
 
 ```javascript
-// Fetch file metadata (size, encryption status, filename)
-const fileMeta = await client.getFileMetadata('file-id-123');
-console.log('File size:', fileMeta.sizeBytes);
-console.log('Encrypted:', fileMeta.isEncrypted);
-console.log('Filename:', fileMeta.filename || fileMeta.encryptedFilename);
+const file = await client.hosted.metadata({ fileId: 'file-id-123', keyB64: 'key-from-the-link' });
+console.log(file.name, file.sizeBytes, file.isEncrypted);
 
-// Fetch bundle metadata with automatic derivation
-const bundleMeta = await client.getBundleMetadata(
-  'bundle-id-456',
-  'base64-key-from-url-hash' // Required for encrypted bundles
-);
-
-console.log('Files:', bundleMeta.fileCount);
-console.log('Total size:', bundleMeta.totalSizeBytes);
-console.log('Sealed:', bundleMeta.sealed);
-
-// For sealed bundles, the manifest is automatically decrypted
-// and files array is populated from the decrypted manifest
-bundleMeta.files.forEach(file => {
-  console.log(`- ${file.filename}: ${file.sizeBytes} bytes`);
-});
+const bundle = await client.hosted.metadata({ bundleId: 'bundle-id-456', keyB64: 'key-from-the-link' });
+console.log(`${bundle.fileCount} files, ${bundle.totalSizeBytes} bytes`);
+for (const { name, sizeBytes } of bundle.files) console.log(`- ${name}: ${sizeBytes} bytes`);
 ```
+
+A sealed bundle's list of files is encrypted as well, so only the key's holder can read it. An encrypted upload without its key throws `KEY_REQUIRED`, and a key that doesn't open it, `DECRYPT_FAILED`.
 
 ## Downloading Files
 
+`client.hosted.download()` writes the file into a **sink**, which it needs: anything with `write(chunk)` and `close()`, and ideally `abort()`. Core awaits each write, and the download only completes once the sink has closed; a failed or cancelled download aborts it instead. Like an upload, it gives its handle at once, and ends with one outcome.
+
+In a browser, a `WritableStream`'s writer is a sink, such as [StreamSaver](https://github.com/jimmywarting/StreamSaver.js)'s:
+
 ```javascript
-// Download with streaming (for large files). Like an upload, it ends with one outcome.
-const outcome = await client.downloadFiles({
+const download = client.hosted.download({
   fileId: 'abc123',
-  keyB64: 'base64-key-from-url-hash', // Required for encrypted files
-  onProgress: ({ phase, percent, processedBytes, totalBytes }) => {
-    console.log(`${phase}: ${percent}% (${processedBytes}/${totalBytes})`);
-  },
-  onData: async (chunk) => {
-    await writer.write(chunk);
-  },
+  keyB64: 'key-from-the-link', // for an encrypted file
+  sink: streamSaver.createWriteStream('report.pdf').getWriter(),
 });
 
-if (outcome.status === 'completed') console.log('Downloaded:', outcome.value.filename);
-else if (outcome.status === 'failed') console.error('Download failed:', outcome.error.code);
+download.subscribe(({ percent, processedBytes, totalBytes }) => {
+  console.log(`${percent.toFixed(0)}% (${processedBytes}/${totalBytes})`);
+});
 
-// Or download to memory (for small files — omit onData)
-const inMemory = await client.downloadFiles({ fileId: 'abc123' });
-if (inMemory.status === 'completed') console.log('File size:', inMemory.value.data?.length);
+const outcome = await download.result;
+if (outcome.status === 'completed') console.log('Saved:', outcome.value.filename);
+else if (outcome.status === 'failed') console.error('Download failed:', outcome.error.code);
 ```
 
-A download takes a `signal` too: aborting it ends the download with a `cancelled` outcome.
+In Node.js, so is a file opened for writing. To name the file after the one being downloaded, pass a function: it's given each file's name and size as its download starts, and returns the sink.
+
+```javascript
+import { open, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+
+let path;
+const download = client.hosted.download({
+  fileId: 'abc123',
+  keyB64: 'key-from-the-link',
+  sink: async ({ name }) => open((path = join('/downloads', name)), 'w'), // check the name before using it as a path
+});
+const outcome = await download.result;
+if (outcome.status !== 'completed' && path) await rm(path, { force: true }); // a FileHandle has no abort()
+```
+
+A bundle downloads as one ZIP archive into one sink with `asZip: true`, or as its separate files, with a function giving a sink for each:
+
+```javascript
+const zipped = client.hosted.download({ bundleId, keyB64, asZip: true, sink: zipWriter });
+const separate = client.hosted.download({ bundleId, keyB64, sink: ({ name }) => sinkFor(name) });
+```
+
+## What's Running
+
+Every handle has an `id`, made on the device. `client.operations` finds a running operation by it, lists what's running, and cancels everything:
+
+```javascript
+const { id } = client.hosted.upload({ files: myFile, lifetimeMs: 3600000 });
+
+client.operations.get(id);   // the same handle, while it runs; undefined once it has ended
+client.operations.list();    // [{ id, kind: 'hosted.upload' }, ...]
+client.operations.cancelAll(); // such as when the app closes
+```
+
+An operation leaves the list the moment it ends, and nothing about it is kept, so keep its outcome from `result`.
+
+## Resolving a Code or Link
+
+```javascript
+const result = await client.links.resolve(pastedText);
+if (result.valid) location.href = result.target; // an encrypted link's key is back on the end
+else console.log(result.reason);
+```
+
+The text is read on the device first, and only the ID or code in it is sent to the server: never the key after a link's `#`.
 
 ## P2P File Transfer (Sender)
 
 ```javascript
 const Peer = await loadPeerJS(); // Your loader function
 
-const session = await client.p2pSend({
+const session = await client.direct.send({
   file: myFile,
   Peer,
   onCode: (code) => console.log('Share this code:', code),
@@ -168,7 +205,7 @@ session.stop(); // Cancel
 ```javascript
 const Peer = await loadPeerJS();
 
-const session = await client.p2pReceive({
+const session = await client.direct.receive({
   code: 'ABCD-1234',
   Peer,
   onMeta: ({ name, total, fileCount, files }) => {
@@ -202,7 +239,7 @@ session.stop(); // Cancel
 Use `autoReady: false` to show a file preview before starting the transfer:
 
 ```javascript
-const session = await client.p2pReceive({
+const session = await client.direct.receive({
   code: 'ABCD-1234',
   Peer,
   autoReady: false,
@@ -223,54 +260,4 @@ const session = await client.p2pReceive({
     console.log('Transfer complete!');
   },
 });
-```
-
-## Standalone Server Info
-
-For one-off checks before constructing a client:
-
-```javascript
-import { getServerInfo } from '@dropgate/core';
-
-const { serverInfo } = await getServerInfo({
-  server: 'https://dropgate.link',
-  timeoutMs: 5000,
-});
-
-console.log('Server version:', serverInfo.version);
-```
-
-## Metadata Fetching
-
-The core library provides intelligent metadata fetching methods that handle all the complexity of deriving computed fields from server responses.
-
-### Philosophy
-
-The server stores and sends only **minimal, essential data**:
-- For files: Basic metadata (size, encryption flag, filename)
-- For bundles: File list (for unsealed) or encrypted manifest (for sealed)
-
-The core library **derives all computed fields**:
-- `totalSizeBytes`: Sum of all file sizes
-- `fileCount`: Length of files array
-- Decrypted manifest contents (for sealed bundles)
-
-### Benefits
-
-1. **Single Source of Truth**: All derivation logic lives in one place (the core library)
-2. **Server Efficiency**: Server stores less redundant data
-3. **Client Flexibility**: Clients can compute fields in any format they need
-4. **Future-Proof**: Changes to derivation logic only require library updates
-
-### Usage
-
-```javascript
-// The core library automatically:
-// 1. Fetches raw metadata from the server
-// 2. Decrypts sealed bundle manifests (if keyB64 provided)
-// 3. Derives totalSizeBytes and fileCount from files array
-// 4. Returns a complete BundleMetadata object
-
-const meta = await client.getBundleMetadata('bundle-id', 'optional-key');
-// meta.totalSizeBytes and meta.fileCount are computed client-side
 ```

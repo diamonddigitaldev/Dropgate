@@ -2,11 +2,21 @@ import { CancelScope } from './cancel.js';
 import { settle } from './outcome.js';
 import type { Outcome } from './outcome.js';
 
+/** What kind of operation a handle is for. */
+export type OperationKind = 'hosted.upload' | 'hosted.download';
+
 /**
- * What every operation gives back as it starts: an upload, and in later
- * versions a download, a direct send and a direct receive.
+ * What every operation gives back as it starts: a hosted upload or download,
+ * and in later versions a direct send and a direct receive.
  */
 export interface OperationHandle<T, S> {
+  /**
+   * The operation's ID, made on this device when it starts. It's never sent to
+   * a server; `client.operations.get(id)` gives this handle back while it runs.
+   */
+  readonly id: string;
+  /** What kind of operation it is, such as `hosted.upload`. */
+  readonly kind: OperationKind;
   /** The operation's one outcome. It never rejects. */
   readonly result: Promise<Outcome<T>>;
   /** Where the operation is now. A new object each time it changes, never changed in place. */
@@ -32,20 +42,37 @@ export interface OperationContext<S> {
 }
 
 /**
+ * A new operation ID: a random UUID. `crypto.randomUUID()` is only there in a
+ * secure context, so a page served over plain HTTP gets one made the same way
+ * from `crypto.getRandomValues()`, which is there in every context.
+ */
+export function newOperationId(): string {
+  const cryptoObj = globalThis.crypto;
+  if (typeof cryptoObj?.randomUUID === 'function') return cryptoObj.randomUUID();
+  const bytes = cryptoObj.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
  * Starts an operation under `parent`, with its own node of the cancellation
  * tree. A signal passed in feeds into that node: aborting it cancels the
  * operation, `by: 'signal'`, as the operation's own cancel() would.
- * `finalSnapshot` gives the last snapshot, from the outcome.
+ * `finalSnapshot` gives the last snapshot, from the outcome. `onEnd` runs as
+ * the operation ends, before its outcome or its last snapshot reaches anyone.
  */
 export function startOperation<T, S extends object>(opts: {
-  label: string;
+  kind: OperationKind;
   parent: CancelScope;
   signal?: AbortSignal;
   initial: S;
   work: (ctx: OperationContext<S>) => Promise<T>;
   finalSnapshot: (outcome: Outcome<T>, last: S) => S;
+  onEnd?: (handle: OperationHandle<T, S>) => void;
 }): OperationHandle<T, S> {
-  const scope = new CancelScope(opts.label, { parent: opts.parent, signal: opts.signal });
+  const scope = new CancelScope(opts.kind, { parent: opts.parent, signal: opts.signal });
   const listeners = new Set<(snapshot: S) => void>();
   let snapshot: S = Object.freeze({ ...opts.initial });
   let ended = false;
@@ -72,12 +99,15 @@ export function startOperation<T, S extends object>(opts: {
   };
   const result = settle(scope, run).then((outcome) => {
     ended = true;
+    try { opts.onEnd?.(handle); } catch { /* Ending can't fail the outcome. */ }
     publish(opts.finalSnapshot(outcome, snapshot));
     listeners.clear();
     return outcome;
   });
 
-  return {
+  const handle: OperationHandle<T, S> = {
+    id: newOperationId(),
+    kind: opts.kind,
     result,
     get snapshot() { return snapshot; },
     subscribe(listener) {
@@ -87,4 +117,5 @@ export function startOperation<T, S extends object>(opts: {
     },
     cancel() { scope.cancel(); },
   };
+  return handle;
 }

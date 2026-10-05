@@ -9,7 +9,6 @@ var DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024;
 var AES_GCM_IV_BYTES = 12;
 var AES_GCM_TAG_BYTES = 16;
 var ENCRYPTION_OVERHEAD_PER_CHUNK = AES_GCM_IV_BYTES + AES_GCM_TAG_BYTES;
-var MAX_IN_MEMORY_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
 // src/errors.ts
 var ERROR_CODES = {
@@ -96,6 +95,265 @@ function toDropgateError(err2, fallback = "UNEXPECTED_ERROR", message) {
   if (name === "AbortError") return new DropgateError({ code: "OPERATION_CANCELLED", cause: err2 });
   return new DropgateError({ code: fallback, cause: err2, ...message ? { message } : {} });
 }
+
+// src/cancel.ts
+var CancelScope = class _CancelScope {
+  constructor(label, opts = {}) {
+    __publicField(this, "label");
+    __publicField(this, "controller", new AbortController());
+    __publicField(this, "children", /* @__PURE__ */ new Set());
+    __publicField(this, "listeners", /* @__PURE__ */ new Set());
+    __publicField(this, "parent", null);
+    __publicField(this, "detachSignal", null);
+    __publicField(this, "_cancellation", null);
+    __publicField(this, "done", false);
+    this.label = label;
+    const { parent, signal } = opts;
+    if (parent) {
+      if (parent._cancellation) {
+        this.settle({ by: "parent", source: parent._cancellation.source });
+        return;
+      }
+      this.parent = parent;
+      parent.children.add(this);
+    }
+    if (signal) {
+      if (signal.aborted) {
+        this.settle({ by: "signal", source: label });
+        return;
+      }
+      const onAbort = () => this.settle({ by: "signal", source: label });
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.detachSignal = () => signal.removeEventListener("abort", onAbort);
+    }
+  }
+  /** Aborts when this node is cancelled, with an OPERATION_CANCELLED DropgateError as its reason. */
+  get signal() {
+    return this.controller.signal;
+  }
+  /** How it was cancelled, or null while it hasn't been. */
+  get cancellation() {
+    return this._cancellation;
+  }
+  /** A new node under this one. */
+  child(label) {
+    return new _CancelScope(label, { parent: this });
+  }
+  /** Cancels this node and everything under it. Returns false if it was already cancelled or done. */
+  cancel() {
+    if (this._cancellation || this.done) return false;
+    this.settle({ by: "self", source: this.label });
+    return true;
+  }
+  /** Runs `listener` once, when this node is cancelled. Returns a function that removes it. */
+  onCancel(listener) {
+    if (this._cancellation) {
+      listener(this._cancellation);
+      return () => {
+      };
+    }
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  /** Throws its OPERATION_CANCELLED error if this node has been cancelled. */
+  throwIfCancelled() {
+    if (this._cancellation) throw this.controller.signal.reason;
+  }
+  /**
+   * Takes this node out of the tree, once its operation has ended: a later
+   * cancel above it no longer reaches it, and its own cancel() does nothing.
+   */
+  finish() {
+    if (this.done) return;
+    this.done = true;
+    this.parent?.children.delete(this);
+    this.parent = null;
+    this.detachSignal?.();
+    this.detachSignal = null;
+    this.listeners.clear();
+  }
+  settle(cancellation) {
+    if (this._cancellation || this.done) return;
+    this._cancellation = cancellation;
+    this.detachSignal?.();
+    this.detachSignal = null;
+    this.parent?.children.delete(this);
+    this.parent = null;
+    this.controller.abort(new DropgateError({ code: "OPERATION_CANCELLED", details: { cancellation } }));
+    const listeners = [...this.listeners];
+    this.listeners.clear();
+    for (const listener of listeners) {
+      try {
+        listener(cancellation);
+      } catch {
+      }
+    }
+    const children = [...this.children];
+    this.children.clear();
+    for (const child of children) child.settle({ by: "parent", source: cancellation.source });
+  }
+};
+
+// src/outcome.ts
+async function settle(scope, work) {
+  try {
+    const value = await work();
+    return { status: "completed", value };
+  } catch (err2) {
+    const cancellation = scope.cancellation;
+    if (cancellation) return { status: "cancelled", cancellation };
+    return { status: "failed", error: toDropgateError(err2) };
+  } finally {
+    scope.finish();
+  }
+}
+
+// src/operation.ts
+function newOperationId() {
+  const cryptoObj = globalThis.crypto;
+  if (typeof cryptoObj?.randomUUID === "function") return cryptoObj.randomUUID();
+  const bytes = cryptoObj.getRandomValues(new Uint8Array(16));
+  bytes[6] = bytes[6] & 15 | 64;
+  bytes[8] = bytes[8] & 63 | 128;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function startOperation(opts) {
+  const scope = new CancelScope(opts.kind, { parent: opts.parent, signal: opts.signal });
+  const listeners = /* @__PURE__ */ new Set();
+  let snapshot = Object.freeze({ ...opts.initial });
+  let ended = false;
+  const publish = (next) => {
+    snapshot = Object.freeze(next);
+    for (const listener of [...listeners]) {
+      try {
+        listener(snapshot);
+      } catch {
+      }
+    }
+  };
+  const ctx = {
+    scope,
+    signal: scope.signal,
+    update: (patch) => {
+      if (!ended) publish({ ...snapshot, ...patch });
+    }
+  };
+  const run = async () => {
+    await Promise.resolve();
+    scope.throwIfCancelled();
+    return opts.work(ctx);
+  };
+  const result = settle(scope, run).then((outcome) => {
+    ended = true;
+    try {
+      opts.onEnd?.(handle);
+    } catch {
+    }
+    publish(opts.finalSnapshot(outcome, snapshot));
+    listeners.clear();
+    return outcome;
+  });
+  const handle = {
+    id: newOperationId(),
+    kind: opts.kind,
+    result,
+    get snapshot() {
+      return snapshot;
+    },
+    subscribe(listener) {
+      if (ended) return () => {
+      };
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    cancel() {
+      scope.cancel();
+    }
+  };
+  return handle;
+}
+
+// src/operations.ts
+var OperationRegistry = class {
+  constructor() {
+    __publicField(this, "running", /* @__PURE__ */ new Map());
+    __publicField(this, "root", new CancelScope("client"));
+    /** What `client.operations` is. */
+    __publicField(this, "api", Object.freeze({
+      get: (id) => this.running.get(id),
+      list: () => [...this.running.values()].map(({ id, kind }) => ({ id, kind })),
+      cancelAll: () => {
+        const root = this.root;
+        this.root = new CancelScope("client");
+        root.cancel();
+      }
+    }));
+  }
+  /** The node the client's next operation runs under. */
+  get scope() {
+    return this.root;
+  }
+  /** Adds a handle as its operation starts. */
+  add(handle) {
+    this.running.set(handle.id, handle);
+    return handle;
+  }
+  /** Takes a handle out as its operation ends. */
+  remove(handle) {
+    this.running.delete(handle.id);
+  }
+};
+
+// src/sink.ts
+function isDownloadSink(value) {
+  return typeof value === "object" && value !== null && typeof value.write === "function" && typeof value.close === "function";
+}
+var SinkWriter = class _SinkWriter {
+  constructor(sink) {
+    __publicField(this, "sink", sink);
+    __publicField(this, "done", false);
+  }
+  /** Gets the sink for one file from a function giving one, or fails OUTPUT_WRITE_FAILED. */
+  static async open(option, file) {
+    let sink;
+    try {
+      sink = typeof option === "function" ? await option(file) : option;
+    } catch (err2) {
+      throw new DropgateError({ code: "OUTPUT_WRITE_FAILED", cause: err2 });
+    }
+    if (!isDownloadSink(sink)) {
+      throw new DropgateError({ code: "OUTPUT_WRITE_FAILED", message: "The function giving a sink gave something without write() and close()." });
+    }
+    return new _SinkWriter(sink);
+  }
+  async write(chunk) {
+    try {
+      await this.sink.write(chunk);
+    } catch (err2) {
+      throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
+    }
+  }
+  async close() {
+    this.done = true;
+    try {
+      await this.sink.close();
+    } catch (err2) {
+      throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
+    }
+  }
+  /** Aborts the sink, once, if it wasn't closed. Best effort: an abort that fails is ignored. */
+  async abort(reason) {
+    if (this.done) return;
+    this.done = true;
+    try {
+      await this.sink.abort?.(reason);
+    } catch {
+    }
+  }
+};
 
 // src/source.ts
 function blobSource(blob, name) {
@@ -193,59 +451,6 @@ function getDefaultCrypto() {
 }
 function getDefaultFetch() {
   return globalThis.fetch?.bind(globalThis);
-}
-
-// src/utils/base64.ts
-var defaultAdapter = null;
-function getAdapter(adapter) {
-  if (adapter) return adapter;
-  if (!defaultAdapter) {
-    defaultAdapter = getDefaultBase64();
-  }
-  return defaultAdapter;
-}
-function bytesToBase64(bytes, adapter) {
-  return getAdapter(adapter).encode(bytes);
-}
-function arrayBufferToBase64(buf, adapter) {
-  return bytesToBase64(new Uint8Array(buf), adapter);
-}
-function base64ToBytes(b64, adapter) {
-  return getAdapter(adapter).decode(b64);
-}
-
-// src/utils/lifetime.ts
-var MULTIPLIERS = {
-  minutes: 60 * 1e3,
-  hours: 60 * 60 * 1e3,
-  days: 24 * 60 * 60 * 1e3
-};
-function lifetimeToMs(value, unit) {
-  const u = String(unit || "").toLowerCase();
-  const v = Number(value);
-  if (u === "unlimited") return 0;
-  if (!Number.isFinite(v) || v <= 0) return 0;
-  const m = MULTIPLIERS[u];
-  if (!m) return 0;
-  return Math.round(v * m);
-}
-
-// src/utils/semver.ts
-function parseSemverMajorMinor(version) {
-  const parts = String(version || "").split(".").map((p) => Number(p));
-  const major = Number.isFinite(parts[0]) ? parts[0] : 0;
-  const minor = Number.isFinite(parts[1]) ? parts[1] : 0;
-  return { major, minor };
-}
-
-// src/utils/filename.ts
-function validatePlainFilename(filename) {
-  if (typeof filename !== "string" || filename.trim().length === 0) {
-    throw new DropgateError({ code: "INVALID_FILENAME", message: "Invalid filename. Must be a non-empty string." });
-  }
-  if (filename.length > 255 || /[\/\\]/.test(filename)) {
-    throw new DropgateError({ code: "INVALID_FILENAME", message: "Invalid filename. Contains illegal characters or is too long." });
-  }
 }
 
 // src/utils/network.ts
@@ -350,6 +555,89 @@ async function fetchJson(fetchFn, url, opts = {}) {
   } finally {
     cleanup();
   }
+}
+
+// src/utils/share-link.ts
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function parseShareInput(value) {
+  const raw = String(value ?? "").trim();
+  const hashAt = raw.indexOf("#");
+  const before = hashAt === -1 ? raw : raw.slice(0, hashAt);
+  const after = hashAt === -1 ? "" : raw.slice(hashAt + 1);
+  const secret = after ? after : void 0;
+  if (!/^https?:\/\//i.test(before)) {
+    const locator2 = before.replace(/\s+/g, "");
+    return locator2 ? { locator: locator2, ...secret ? { secret } : {} } : null;
+  }
+  let url;
+  try {
+    url = new URL(before);
+  } catch {
+    return null;
+  }
+  let path;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    return null;
+  }
+  let locator = null;
+  if (path.startsWith("/p2p/")) {
+    locator = path.slice("/p2p/".length).replace(/\s+/g, "").toUpperCase();
+  } else if (path.startsWith("/b/")) {
+    locator = path.slice("/b/".length);
+  } else {
+    locator = path.slice(1);
+  }
+  if (!locator || !path.startsWith("/p2p/") && !UUID_RE.test(locator)) return null;
+  return { locator, linkHost: url.host, ...secret ? { secret } : {} };
+}
+
+// src/utils/semver.ts
+function parseSemverMajorMinor(version) {
+  const parts = String(version || "").split(".").map((p) => Number(p));
+  const major = Number.isFinite(parts[0]) ? parts[0] : 0;
+  const minor = Number.isFinite(parts[1]) ? parts[1] : 0;
+  return { major, minor };
+}
+
+// src/utils/filename.ts
+function validatePlainFilename(filename) {
+  if (typeof filename !== "string" || filename.trim().length === 0) {
+    throw new DropgateError({ code: "INVALID_FILENAME", message: "Invalid filename. Must be a non-empty string." });
+  }
+  if (filename.length > 255 || /[\/\\]/.test(filename)) {
+    throw new DropgateError({ code: "INVALID_FILENAME", message: "Invalid filename. Contains illegal characters or is too long." });
+  }
+}
+
+// src/utils/size.ts
+function estimateUploadBytes(sizeBytes, opts) {
+  const base = Number(sizeBytes) || 0;
+  if (!opts.encrypted || base <= 0) return base;
+  const chunkSize = Number.isFinite(opts.chunkSize) && opts.chunkSize > 0 ? opts.chunkSize : DEFAULT_CHUNK_SIZE;
+  return base + Math.ceil(base / chunkSize) * ENCRYPTION_OVERHEAD_PER_CHUNK;
+}
+function plaintextBytes(storedBytes, chunkSize) {
+  if (!(storedBytes > 0)) return 0;
+  const chunks = Math.ceil(storedBytes / (chunkSize + ENCRYPTION_OVERHEAD_PER_CHUNK));
+  return storedBytes - chunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
+}
+
+// src/utils/base64.ts
+var defaultAdapter = null;
+function getAdapter(adapter) {
+  if (adapter) return adapter;
+  if (!defaultAdapter) {
+    defaultAdapter = getDefaultBase64();
+  }
+  return defaultAdapter;
+}
+function bytesToBase64(bytes, adapter) {
+  return getAdapter(adapter).encode(bytes);
+}
+function arrayBufferToBase64(buf, adapter) {
+  return bytesToBase64(new Uint8Array(buf), adapter);
 }
 
 // src/crypto/sha256-fallback.ts
@@ -562,709 +850,6 @@ async function encryptFilenameToBase64(cryptoObj, filename, key) {
   const blob = await encryptToBlob(cryptoObj, bytes.buffer, key);
   const buf = await blob.arrayBuffer();
   return arrayBufferToBase64(buf);
-}
-
-// node_modules/fflate/esm/browser.js
-var u8 = Uint8Array;
-var u16 = Uint16Array;
-var i32 = Int32Array;
-var fleb = new u8([
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  1,
-  1,
-  1,
-  1,
-  2,
-  2,
-  2,
-  2,
-  3,
-  3,
-  3,
-  3,
-  4,
-  4,
-  4,
-  4,
-  5,
-  5,
-  5,
-  5,
-  0,
-  /* unused */
-  0,
-  0,
-  /* impossible */
-  0
-]);
-var fdeb = new u8([
-  0,
-  0,
-  0,
-  0,
-  1,
-  1,
-  2,
-  2,
-  3,
-  3,
-  4,
-  4,
-  5,
-  5,
-  6,
-  6,
-  7,
-  7,
-  8,
-  8,
-  9,
-  9,
-  10,
-  10,
-  11,
-  11,
-  12,
-  12,
-  13,
-  13,
-  /* unused */
-  0,
-  0
-]);
-var clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
-var freb = function(eb, start) {
-  var b = new u16(31);
-  for (var i = 0; i < 31; ++i) {
-    b[i] = start += 1 << eb[i - 1];
-  }
-  var r = new i32(b[30]);
-  for (var i = 1; i < 30; ++i) {
-    for (var j = b[i]; j < b[i + 1]; ++j) {
-      r[j] = j - b[i] << 5 | i;
-    }
-  }
-  return { b, r };
-};
-var _a = freb(fleb, 2);
-var fl = _a.b;
-var revfl = _a.r;
-fl[28] = 258, revfl[258] = 28;
-var _b = freb(fdeb, 0);
-var fd = _b.b;
-var revfd = _b.r;
-var rev = new u16(32768);
-for (i = 0; i < 32768; ++i) {
-  x = (i & 43690) >> 1 | (i & 21845) << 1;
-  x = (x & 52428) >> 2 | (x & 13107) << 2;
-  x = (x & 61680) >> 4 | (x & 3855) << 4;
-  rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
-}
-var x;
-var i;
-var flt = new u8(288);
-for (i = 0; i < 144; ++i)
-  flt[i] = 8;
-var i;
-for (i = 144; i < 256; ++i)
-  flt[i] = 9;
-var i;
-for (i = 256; i < 280; ++i)
-  flt[i] = 7;
-var i;
-for (i = 280; i < 288; ++i)
-  flt[i] = 8;
-var i;
-var fdt = new u8(32);
-for (i = 0; i < 32; ++i)
-  fdt[i] = 5;
-var i;
-var slc = function(v, s, e) {
-  if (s == null || s < 0)
-    s = 0;
-  if (e == null || e > v.length)
-    e = v.length;
-  return new u8(v.subarray(s, e));
-};
-var ec = [
-  "unexpected EOF",
-  "invalid block type",
-  "invalid length/literal",
-  "invalid distance",
-  "stream finished",
-  "no stream handler",
-  ,
-  // determined by compression function
-  "no callback",
-  "invalid UTF-8 data",
-  "extra field too long",
-  "date not in range 1980-2099",
-  "filename too long",
-  "stream finishing",
-  "invalid zip data"
-  // determined by unknown compression method
-];
-var err = function(ind, msg, nt) {
-  var e = new Error(msg || ec[ind]);
-  e.code = ind;
-  if (Error.captureStackTrace)
-    Error.captureStackTrace(e, err);
-  if (!nt)
-    throw e;
-  return e;
-};
-var et = /* @__PURE__ */ new u8(0);
-var crct = /* @__PURE__ */ (function() {
-  var t = new Int32Array(256);
-  for (var i = 0; i < 256; ++i) {
-    var c = i, k = 9;
-    while (--k)
-      c = (c & 1 && -306674912) ^ c >>> 1;
-    t[i] = c;
-  }
-  return t;
-})();
-var crc = function() {
-  var c = -1;
-  return {
-    p: function(d) {
-      var cr = c;
-      for (var i = 0; i < d.length; ++i)
-        cr = crct[cr & 255 ^ d[i]] ^ cr >>> 8;
-      c = cr;
-    },
-    d: function() {
-      return ~c;
-    }
-  };
-};
-var mrg = function(a, b) {
-  var o = {};
-  for (var k in a)
-    o[k] = a[k];
-  for (var k in b)
-    o[k] = b[k];
-  return o;
-};
-var wbytes = function(d, b, v) {
-  for (; v; ++b)
-    d[b] = v, v >>>= 8;
-};
-var te = typeof TextEncoder != "undefined" && /* @__PURE__ */ new TextEncoder();
-var td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder();
-var tds = 0;
-try {
-  td.decode(et, { stream: true });
-  tds = 1;
-} catch (e) {
-}
-function strToU8(str, latin1) {
-  if (latin1) {
-    var ar_1 = new u8(str.length);
-    for (var i = 0; i < str.length; ++i)
-      ar_1[i] = str.charCodeAt(i);
-    return ar_1;
-  }
-  if (te)
-    return te.encode(str);
-  var l = str.length;
-  var ar = new u8(str.length + (str.length >> 1));
-  var ai = 0;
-  var w = function(v) {
-    ar[ai++] = v;
-  };
-  for (var i = 0; i < l; ++i) {
-    if (ai + 5 > ar.length) {
-      var n = new u8(ai + 8 + (l - i << 1));
-      n.set(ar);
-      ar = n;
-    }
-    var c = str.charCodeAt(i);
-    if (c < 128 || latin1)
-      w(c);
-    else if (c < 2048)
-      w(192 | c >> 6), w(128 | c & 63);
-    else if (c > 55295 && c < 57344)
-      c = 65536 + (c & 1023 << 10) | str.charCodeAt(++i) & 1023, w(240 | c >> 18), w(128 | c >> 12 & 63), w(128 | c >> 6 & 63), w(128 | c & 63);
-    else
-      w(224 | c >> 12), w(128 | c >> 6 & 63), w(128 | c & 63);
-  }
-  return slc(ar, 0, ai);
-}
-var exfl = function(ex) {
-  var le = 0;
-  if (ex) {
-    for (var k in ex) {
-      var l = ex[k].length;
-      if (l > 65535)
-        err(9);
-      le += l + 4;
-    }
-  }
-  return le;
-};
-var wzh = function(d, b, f, fn, u, c, ce, co) {
-  var fl2 = fn.length, ex = f.extra, col = co && co.length;
-  var exl = exfl(ex);
-  wbytes(d, b, ce != null ? 33639248 : 67324752), b += 4;
-  if (ce != null)
-    d[b++] = 20, d[b++] = f.os;
-  d[b] = 20, b += 2;
-  d[b++] = f.flag << 1 | (c < 0 && 8), d[b++] = u && 8;
-  d[b++] = f.compression & 255, d[b++] = f.compression >> 8;
-  var dt = new Date(f.mtime == null ? Date.now() : f.mtime), y = dt.getFullYear() - 1980;
-  if (y < 0 || y > 119)
-    err(10);
-  wbytes(d, b, y << 25 | dt.getMonth() + 1 << 21 | dt.getDate() << 16 | dt.getHours() << 11 | dt.getMinutes() << 5 | dt.getSeconds() >> 1), b += 4;
-  if (c != -1) {
-    wbytes(d, b, f.crc);
-    wbytes(d, b + 4, c < 0 ? -c - 2 : c);
-    wbytes(d, b + 8, f.size);
-  }
-  wbytes(d, b + 12, fl2);
-  wbytes(d, b + 14, exl), b += 16;
-  if (ce != null) {
-    wbytes(d, b, col);
-    wbytes(d, b + 6, f.attrs);
-    wbytes(d, b + 10, ce), b += 14;
-  }
-  d.set(fn, b);
-  b += fl2;
-  if (exl) {
-    for (var k in ex) {
-      var exf = ex[k], l = exf.length;
-      wbytes(d, b, +k);
-      wbytes(d, b + 2, l);
-      d.set(exf, b + 4), b += 4 + l;
-    }
-  }
-  if (col)
-    d.set(co, b), b += col;
-  return b;
-};
-var wzf = function(o, b, c, d, e) {
-  wbytes(o, b, 101010256);
-  wbytes(o, b + 8, c);
-  wbytes(o, b + 10, c);
-  wbytes(o, b + 12, d);
-  wbytes(o, b + 16, e);
-};
-var ZipPassThrough = /* @__PURE__ */ (function() {
-  function ZipPassThrough2(filename) {
-    this.filename = filename;
-    this.c = crc();
-    this.size = 0;
-    this.compression = 0;
-  }
-  ZipPassThrough2.prototype.process = function(chunk, final) {
-    this.ondata(null, chunk, final);
-  };
-  ZipPassThrough2.prototype.push = function(chunk, final) {
-    if (!this.ondata)
-      err(5);
-    this.c.p(chunk);
-    this.size += chunk.length;
-    if (final)
-      this.crc = this.c.d();
-    this.process(chunk, final || false);
-  };
-  return ZipPassThrough2;
-})();
-var Zip = /* @__PURE__ */ (function() {
-  function Zip2(cb) {
-    this.ondata = cb;
-    this.u = [];
-    this.d = 1;
-  }
-  Zip2.prototype.add = function(file) {
-    var _this = this;
-    if (!this.ondata)
-      err(5);
-    if (this.d & 2)
-      this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, false);
-    else {
-      var f = strToU8(file.filename), fl_1 = f.length;
-      var com = file.comment, o = com && strToU8(com);
-      var u = fl_1 != file.filename.length || o && com.length != o.length;
-      var hl_1 = fl_1 + exfl(file.extra) + 30;
-      if (fl_1 > 65535)
-        this.ondata(err(11, 0, 1), null, false);
-      var header = new u8(hl_1);
-      wzh(header, 0, file, f, u, -1);
-      var chks_1 = [header];
-      var pAll_1 = function() {
-        for (var _i = 0, chks_2 = chks_1; _i < chks_2.length; _i++) {
-          var chk = chks_2[_i];
-          _this.ondata(null, chk, false);
-        }
-        chks_1 = [];
-      };
-      var tr_1 = this.d;
-      this.d = 0;
-      var ind_1 = this.u.length;
-      var uf_1 = mrg(file, {
-        f,
-        u,
-        o,
-        t: function() {
-          if (file.terminate)
-            file.terminate();
-        },
-        r: function() {
-          pAll_1();
-          if (tr_1) {
-            var nxt = _this.u[ind_1 + 1];
-            if (nxt)
-              nxt.r();
-            else
-              _this.d = 1;
-          }
-          tr_1 = 1;
-        }
-      });
-      var cl_1 = 0;
-      file.ondata = function(err2, dat, final) {
-        if (err2) {
-          _this.ondata(err2, dat, final);
-          _this.terminate();
-        } else {
-          cl_1 += dat.length;
-          chks_1.push(dat);
-          if (final) {
-            var dd = new u8(16);
-            wbytes(dd, 0, 134695760);
-            wbytes(dd, 4, file.crc);
-            wbytes(dd, 8, cl_1);
-            wbytes(dd, 12, file.size);
-            chks_1.push(dd);
-            uf_1.c = cl_1, uf_1.b = hl_1 + cl_1 + 16, uf_1.crc = file.crc, uf_1.size = file.size;
-            if (tr_1)
-              uf_1.r();
-            tr_1 = 1;
-          } else if (tr_1)
-            pAll_1();
-        }
-      };
-      this.u.push(uf_1);
-    }
-  };
-  Zip2.prototype.end = function() {
-    var _this = this;
-    if (this.d & 2) {
-      this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, true);
-      return;
-    }
-    if (this.d)
-      this.e();
-    else
-      this.u.push({
-        r: function() {
-          if (!(_this.d & 1))
-            return;
-          _this.u.splice(-1, 1);
-          _this.e();
-        },
-        t: function() {
-        }
-      });
-    this.d = 3;
-  };
-  Zip2.prototype.e = function() {
-    var bt = 0, l = 0, tl = 0;
-    for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
-      var f = _a2[_i];
-      tl += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0);
-    }
-    var out = new u8(tl + 22);
-    for (var _b2 = 0, _c = this.u; _b2 < _c.length; _b2++) {
-      var f = _c[_b2];
-      wzh(out, bt, f, f.f, f.u, -f.c - 2, l, f.o);
-      bt += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0), l += f.b;
-    }
-    wzf(out, bt, this.u.length, tl, l);
-    this.ondata(null, out, true);
-    this.d = 2;
-  };
-  Zip2.prototype.terminate = function() {
-    for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
-      var f = _a2[_i];
-      f.t();
-    }
-    this.d = 2;
-  };
-  return Zip2;
-})();
-
-// src/zip/stream-zip.ts
-var StreamingZipWriter = class {
-  constructor(onData) {
-    __publicField(this, "zip");
-    __publicField(this, "currentFile", null);
-    __publicField(this, "onData");
-    __publicField(this, "finalized", false);
-    __publicField(this, "pendingWrites", Promise.resolve());
-    this.onData = onData;
-    this.zip = new Zip((err2, data, _final) => {
-      if (err2) throw err2;
-      this.pendingWrites = this.pendingWrites.then(() => this.onData(data));
-    });
-  }
-  /**
-   * Begin a new file entry in the ZIP.
-   * Must call endFile() before starting another file.
-   * @param name - Filename within the ZIP archive.
-   */
-  startFile(name) {
-    if (this.currentFile) {
-      throw new Error("Must call endFile() before starting a new file.");
-    }
-    if (this.finalized) {
-      throw new Error("ZIP has already been finalized.");
-    }
-    const entry = new ZipPassThrough(name);
-    this.zip.add(entry);
-    this.currentFile = entry;
-  }
-  /**
-   * Write a chunk of data to the current file entry.
-   * @param data - The data chunk to write.
-   */
-  writeChunk(data) {
-    if (!this.currentFile) {
-      throw new Error("No file started. Call startFile() first.");
-    }
-    this.currentFile.push(data, false);
-  }
-  /**
-   * End the current file entry.
-   */
-  endFile() {
-    if (!this.currentFile) {
-      throw new Error("No file to end.");
-    }
-    this.currentFile.push(new Uint8Array(0), true);
-    this.currentFile = null;
-  }
-  /**
-   * Finalize the ZIP archive. Must be called after all files are written.
-   * Waits for all pending async writes to complete before resolving.
-   */
-  async finalize() {
-    if (this.currentFile) {
-      throw new Error("Cannot finalize with an open file. Call endFile() first.");
-    }
-    if (this.finalized) return;
-    this.finalized = true;
-    this.zip.end();
-    await this.pendingWrites;
-  }
-};
-
-// src/cancel.ts
-var CancelScope = class _CancelScope {
-  constructor(label, opts = {}) {
-    __publicField(this, "label");
-    __publicField(this, "controller", new AbortController());
-    __publicField(this, "children", /* @__PURE__ */ new Set());
-    __publicField(this, "listeners", /* @__PURE__ */ new Set());
-    __publicField(this, "parent", null);
-    __publicField(this, "detachSignal", null);
-    __publicField(this, "_cancellation", null);
-    __publicField(this, "done", false);
-    this.label = label;
-    const { parent, signal } = opts;
-    if (parent) {
-      if (parent._cancellation) {
-        this.settle({ by: "parent", source: parent._cancellation.source });
-        return;
-      }
-      this.parent = parent;
-      parent.children.add(this);
-    }
-    if (signal) {
-      if (signal.aborted) {
-        this.settle({ by: "signal", source: label });
-        return;
-      }
-      const onAbort = () => this.settle({ by: "signal", source: label });
-      signal.addEventListener("abort", onAbort, { once: true });
-      this.detachSignal = () => signal.removeEventListener("abort", onAbort);
-    }
-  }
-  /** Aborts when this node is cancelled, with an OPERATION_CANCELLED DropgateError as its reason. */
-  get signal() {
-    return this.controller.signal;
-  }
-  /** How it was cancelled, or null while it hasn't been. */
-  get cancellation() {
-    return this._cancellation;
-  }
-  /** A new node under this one. */
-  child(label) {
-    return new _CancelScope(label, { parent: this });
-  }
-  /** Cancels this node and everything under it. Returns false if it was already cancelled or done. */
-  cancel() {
-    if (this._cancellation || this.done) return false;
-    this.settle({ by: "self", source: this.label });
-    return true;
-  }
-  /** Runs `listener` once, when this node is cancelled. Returns a function that removes it. */
-  onCancel(listener) {
-    if (this._cancellation) {
-      listener(this._cancellation);
-      return () => {
-      };
-    }
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-  /** Throws its OPERATION_CANCELLED error if this node has been cancelled. */
-  throwIfCancelled() {
-    if (this._cancellation) throw this.controller.signal.reason;
-  }
-  /**
-   * Takes this node out of the tree, once its operation has ended: a later
-   * cancel above it no longer reaches it, and its own cancel() does nothing.
-   */
-  finish() {
-    if (this.done) return;
-    this.done = true;
-    this.parent?.children.delete(this);
-    this.parent = null;
-    this.detachSignal?.();
-    this.detachSignal = null;
-    this.listeners.clear();
-  }
-  settle(cancellation) {
-    if (this._cancellation || this.done) return;
-    this._cancellation = cancellation;
-    this.detachSignal?.();
-    this.detachSignal = null;
-    this.parent?.children.delete(this);
-    this.parent = null;
-    this.controller.abort(new DropgateError({ code: "OPERATION_CANCELLED", details: { cancellation } }));
-    const listeners = [...this.listeners];
-    this.listeners.clear();
-    for (const listener of listeners) {
-      try {
-        listener(cancellation);
-      } catch {
-      }
-    }
-    const children = [...this.children];
-    this.children.clear();
-    for (const child of children) child.settle({ by: "parent", source: cancellation.source });
-  }
-};
-
-// src/outcome.ts
-async function settle(scope, work) {
-  try {
-    const value = await work();
-    return { status: "completed", value };
-  } catch (err2) {
-    const cancellation = scope.cancellation;
-    if (cancellation) return { status: "cancelled", cancellation };
-    return { status: "failed", error: toDropgateError(err2) };
-  } finally {
-    scope.finish();
-  }
-}
-
-// src/operation.ts
-function startOperation(opts) {
-  const scope = new CancelScope(opts.label, { parent: opts.parent, signal: opts.signal });
-  const listeners = /* @__PURE__ */ new Set();
-  let snapshot = Object.freeze({ ...opts.initial });
-  let ended = false;
-  const publish = (next) => {
-    snapshot = Object.freeze(next);
-    for (const listener of [...listeners]) {
-      try {
-        listener(snapshot);
-      } catch {
-      }
-    }
-  };
-  const ctx = {
-    scope,
-    signal: scope.signal,
-    update: (patch) => {
-      if (!ended) publish({ ...snapshot, ...patch });
-    }
-  };
-  const run = async () => {
-    await Promise.resolve();
-    scope.throwIfCancelled();
-    return opts.work(ctx);
-  };
-  const result = settle(scope, run).then((outcome) => {
-    ended = true;
-    publish(opts.finalSnapshot(outcome, snapshot));
-    listeners.clear();
-    return outcome;
-  });
-  return {
-    result,
-    get snapshot() {
-      return snapshot;
-    },
-    subscribe(listener) {
-      if (ended) return () => {
-      };
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    cancel() {
-      scope.cancel();
-    }
-  };
-}
-
-// src/utils/share-link.ts
-var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function parseShareInput(value) {
-  const raw = String(value ?? "").trim();
-  const hashAt = raw.indexOf("#");
-  const before = hashAt === -1 ? raw : raw.slice(0, hashAt);
-  const after = hashAt === -1 ? "" : raw.slice(hashAt + 1);
-  const secret = after ? after : void 0;
-  if (!/^https?:\/\//i.test(before)) {
-    const locator2 = before.replace(/\s+/g, "");
-    return locator2 ? { locator: locator2, ...secret ? { secret } : {} } : null;
-  }
-  let url;
-  try {
-    url = new URL(before);
-  } catch {
-    return null;
-  }
-  let path;
-  try {
-    path = decodeURIComponent(url.pathname);
-  } catch {
-    return null;
-  }
-  let locator = null;
-  if (path.startsWith("/p2p/")) {
-    locator = path.slice("/p2p/".length).replace(/\s+/g, "").toUpperCase();
-  } else if (path.startsWith("/b/")) {
-    locator = path.slice("/b/".length);
-  } else {
-    locator = path.slice(1);
-  }
-  if (!locator || !path.startsWith("/p2p/") && !UUID_RE.test(locator)) return null;
-  return { locator, linkHost: url.host, ...secret ? { secret } : {} };
 }
 
 // src/p2p/utils.ts
@@ -2403,6 +1988,521 @@ async function startP2PReceive(opts) {
   };
 }
 
+// node_modules/fflate/esm/browser.js
+var u8 = Uint8Array;
+var u16 = Uint16Array;
+var i32 = Int32Array;
+var fleb = new u8([
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  1,
+  1,
+  1,
+  1,
+  2,
+  2,
+  2,
+  2,
+  3,
+  3,
+  3,
+  3,
+  4,
+  4,
+  4,
+  4,
+  5,
+  5,
+  5,
+  5,
+  0,
+  /* unused */
+  0,
+  0,
+  /* impossible */
+  0
+]);
+var fdeb = new u8([
+  0,
+  0,
+  0,
+  0,
+  1,
+  1,
+  2,
+  2,
+  3,
+  3,
+  4,
+  4,
+  5,
+  5,
+  6,
+  6,
+  7,
+  7,
+  8,
+  8,
+  9,
+  9,
+  10,
+  10,
+  11,
+  11,
+  12,
+  12,
+  13,
+  13,
+  /* unused */
+  0,
+  0
+]);
+var clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
+var freb = function(eb, start) {
+  var b = new u16(31);
+  for (var i = 0; i < 31; ++i) {
+    b[i] = start += 1 << eb[i - 1];
+  }
+  var r = new i32(b[30]);
+  for (var i = 1; i < 30; ++i) {
+    for (var j = b[i]; j < b[i + 1]; ++j) {
+      r[j] = j - b[i] << 5 | i;
+    }
+  }
+  return { b, r };
+};
+var _a = freb(fleb, 2);
+var fl = _a.b;
+var revfl = _a.r;
+fl[28] = 258, revfl[258] = 28;
+var _b = freb(fdeb, 0);
+var fd = _b.b;
+var revfd = _b.r;
+var rev = new u16(32768);
+for (i = 0; i < 32768; ++i) {
+  x = (i & 43690) >> 1 | (i & 21845) << 1;
+  x = (x & 52428) >> 2 | (x & 13107) << 2;
+  x = (x & 61680) >> 4 | (x & 3855) << 4;
+  rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
+}
+var x;
+var i;
+var flt = new u8(288);
+for (i = 0; i < 144; ++i)
+  flt[i] = 8;
+var i;
+for (i = 144; i < 256; ++i)
+  flt[i] = 9;
+var i;
+for (i = 256; i < 280; ++i)
+  flt[i] = 7;
+var i;
+for (i = 280; i < 288; ++i)
+  flt[i] = 8;
+var i;
+var fdt = new u8(32);
+for (i = 0; i < 32; ++i)
+  fdt[i] = 5;
+var i;
+var slc = function(v, s, e) {
+  if (s == null || s < 0)
+    s = 0;
+  if (e == null || e > v.length)
+    e = v.length;
+  return new u8(v.subarray(s, e));
+};
+var ec = [
+  "unexpected EOF",
+  "invalid block type",
+  "invalid length/literal",
+  "invalid distance",
+  "stream finished",
+  "no stream handler",
+  ,
+  // determined by compression function
+  "no callback",
+  "invalid UTF-8 data",
+  "extra field too long",
+  "date not in range 1980-2099",
+  "filename too long",
+  "stream finishing",
+  "invalid zip data"
+  // determined by unknown compression method
+];
+var err = function(ind, msg, nt) {
+  var e = new Error(msg || ec[ind]);
+  e.code = ind;
+  if (Error.captureStackTrace)
+    Error.captureStackTrace(e, err);
+  if (!nt)
+    throw e;
+  return e;
+};
+var et = /* @__PURE__ */ new u8(0);
+var crct = /* @__PURE__ */ (function() {
+  var t = new Int32Array(256);
+  for (var i = 0; i < 256; ++i) {
+    var c = i, k = 9;
+    while (--k)
+      c = (c & 1 && -306674912) ^ c >>> 1;
+    t[i] = c;
+  }
+  return t;
+})();
+var crc = function() {
+  var c = -1;
+  return {
+    p: function(d) {
+      var cr = c;
+      for (var i = 0; i < d.length; ++i)
+        cr = crct[cr & 255 ^ d[i]] ^ cr >>> 8;
+      c = cr;
+    },
+    d: function() {
+      return ~c;
+    }
+  };
+};
+var mrg = function(a, b) {
+  var o = {};
+  for (var k in a)
+    o[k] = a[k];
+  for (var k in b)
+    o[k] = b[k];
+  return o;
+};
+var wbytes = function(d, b, v) {
+  for (; v; ++b)
+    d[b] = v, v >>>= 8;
+};
+var te = typeof TextEncoder != "undefined" && /* @__PURE__ */ new TextEncoder();
+var td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder();
+var tds = 0;
+try {
+  td.decode(et, { stream: true });
+  tds = 1;
+} catch (e) {
+}
+function strToU8(str, latin1) {
+  if (latin1) {
+    var ar_1 = new u8(str.length);
+    for (var i = 0; i < str.length; ++i)
+      ar_1[i] = str.charCodeAt(i);
+    return ar_1;
+  }
+  if (te)
+    return te.encode(str);
+  var l = str.length;
+  var ar = new u8(str.length + (str.length >> 1));
+  var ai = 0;
+  var w = function(v) {
+    ar[ai++] = v;
+  };
+  for (var i = 0; i < l; ++i) {
+    if (ai + 5 > ar.length) {
+      var n = new u8(ai + 8 + (l - i << 1));
+      n.set(ar);
+      ar = n;
+    }
+    var c = str.charCodeAt(i);
+    if (c < 128 || latin1)
+      w(c);
+    else if (c < 2048)
+      w(192 | c >> 6), w(128 | c & 63);
+    else if (c > 55295 && c < 57344)
+      c = 65536 + (c & 1023 << 10) | str.charCodeAt(++i) & 1023, w(240 | c >> 18), w(128 | c >> 12 & 63), w(128 | c >> 6 & 63), w(128 | c & 63);
+    else
+      w(224 | c >> 12), w(128 | c >> 6 & 63), w(128 | c & 63);
+  }
+  return slc(ar, 0, ai);
+}
+var exfl = function(ex) {
+  var le = 0;
+  if (ex) {
+    for (var k in ex) {
+      var l = ex[k].length;
+      if (l > 65535)
+        err(9);
+      le += l + 4;
+    }
+  }
+  return le;
+};
+var wzh = function(d, b, f, fn, u, c, ce, co) {
+  var fl2 = fn.length, ex = f.extra, col = co && co.length;
+  var exl = exfl(ex);
+  wbytes(d, b, ce != null ? 33639248 : 67324752), b += 4;
+  if (ce != null)
+    d[b++] = 20, d[b++] = f.os;
+  d[b] = 20, b += 2;
+  d[b++] = f.flag << 1 | (c < 0 && 8), d[b++] = u && 8;
+  d[b++] = f.compression & 255, d[b++] = f.compression >> 8;
+  var dt = new Date(f.mtime == null ? Date.now() : f.mtime), y = dt.getFullYear() - 1980;
+  if (y < 0 || y > 119)
+    err(10);
+  wbytes(d, b, y << 25 | dt.getMonth() + 1 << 21 | dt.getDate() << 16 | dt.getHours() << 11 | dt.getMinutes() << 5 | dt.getSeconds() >> 1), b += 4;
+  if (c != -1) {
+    wbytes(d, b, f.crc);
+    wbytes(d, b + 4, c < 0 ? -c - 2 : c);
+    wbytes(d, b + 8, f.size);
+  }
+  wbytes(d, b + 12, fl2);
+  wbytes(d, b + 14, exl), b += 16;
+  if (ce != null) {
+    wbytes(d, b, col);
+    wbytes(d, b + 6, f.attrs);
+    wbytes(d, b + 10, ce), b += 14;
+  }
+  d.set(fn, b);
+  b += fl2;
+  if (exl) {
+    for (var k in ex) {
+      var exf = ex[k], l = exf.length;
+      wbytes(d, b, +k);
+      wbytes(d, b + 2, l);
+      d.set(exf, b + 4), b += 4 + l;
+    }
+  }
+  if (col)
+    d.set(co, b), b += col;
+  return b;
+};
+var wzf = function(o, b, c, d, e) {
+  wbytes(o, b, 101010256);
+  wbytes(o, b + 8, c);
+  wbytes(o, b + 10, c);
+  wbytes(o, b + 12, d);
+  wbytes(o, b + 16, e);
+};
+var ZipPassThrough = /* @__PURE__ */ (function() {
+  function ZipPassThrough2(filename) {
+    this.filename = filename;
+    this.c = crc();
+    this.size = 0;
+    this.compression = 0;
+  }
+  ZipPassThrough2.prototype.process = function(chunk, final) {
+    this.ondata(null, chunk, final);
+  };
+  ZipPassThrough2.prototype.push = function(chunk, final) {
+    if (!this.ondata)
+      err(5);
+    this.c.p(chunk);
+    this.size += chunk.length;
+    if (final)
+      this.crc = this.c.d();
+    this.process(chunk, final || false);
+  };
+  return ZipPassThrough2;
+})();
+var Zip = /* @__PURE__ */ (function() {
+  function Zip2(cb) {
+    this.ondata = cb;
+    this.u = [];
+    this.d = 1;
+  }
+  Zip2.prototype.add = function(file) {
+    var _this = this;
+    if (!this.ondata)
+      err(5);
+    if (this.d & 2)
+      this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, false);
+    else {
+      var f = strToU8(file.filename), fl_1 = f.length;
+      var com = file.comment, o = com && strToU8(com);
+      var u = fl_1 != file.filename.length || o && com.length != o.length;
+      var hl_1 = fl_1 + exfl(file.extra) + 30;
+      if (fl_1 > 65535)
+        this.ondata(err(11, 0, 1), null, false);
+      var header = new u8(hl_1);
+      wzh(header, 0, file, f, u, -1);
+      var chks_1 = [header];
+      var pAll_1 = function() {
+        for (var _i = 0, chks_2 = chks_1; _i < chks_2.length; _i++) {
+          var chk = chks_2[_i];
+          _this.ondata(null, chk, false);
+        }
+        chks_1 = [];
+      };
+      var tr_1 = this.d;
+      this.d = 0;
+      var ind_1 = this.u.length;
+      var uf_1 = mrg(file, {
+        f,
+        u,
+        o,
+        t: function() {
+          if (file.terminate)
+            file.terminate();
+        },
+        r: function() {
+          pAll_1();
+          if (tr_1) {
+            var nxt = _this.u[ind_1 + 1];
+            if (nxt)
+              nxt.r();
+            else
+              _this.d = 1;
+          }
+          tr_1 = 1;
+        }
+      });
+      var cl_1 = 0;
+      file.ondata = function(err2, dat, final) {
+        if (err2) {
+          _this.ondata(err2, dat, final);
+          _this.terminate();
+        } else {
+          cl_1 += dat.length;
+          chks_1.push(dat);
+          if (final) {
+            var dd = new u8(16);
+            wbytes(dd, 0, 134695760);
+            wbytes(dd, 4, file.crc);
+            wbytes(dd, 8, cl_1);
+            wbytes(dd, 12, file.size);
+            chks_1.push(dd);
+            uf_1.c = cl_1, uf_1.b = hl_1 + cl_1 + 16, uf_1.crc = file.crc, uf_1.size = file.size;
+            if (tr_1)
+              uf_1.r();
+            tr_1 = 1;
+          } else if (tr_1)
+            pAll_1();
+        }
+      };
+      this.u.push(uf_1);
+    }
+  };
+  Zip2.prototype.end = function() {
+    var _this = this;
+    if (this.d & 2) {
+      this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, true);
+      return;
+    }
+    if (this.d)
+      this.e();
+    else
+      this.u.push({
+        r: function() {
+          if (!(_this.d & 1))
+            return;
+          _this.u.splice(-1, 1);
+          _this.e();
+        },
+        t: function() {
+        }
+      });
+    this.d = 3;
+  };
+  Zip2.prototype.e = function() {
+    var bt = 0, l = 0, tl = 0;
+    for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
+      var f = _a2[_i];
+      tl += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0);
+    }
+    var out = new u8(tl + 22);
+    for (var _b2 = 0, _c = this.u; _b2 < _c.length; _b2++) {
+      var f = _c[_b2];
+      wzh(out, bt, f, f.f, f.u, -f.c - 2, l, f.o);
+      bt += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0), l += f.b;
+    }
+    wzf(out, bt, this.u.length, tl, l);
+    this.ondata(null, out, true);
+    this.d = 2;
+  };
+  Zip2.prototype.terminate = function() {
+    for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
+      var f = _a2[_i];
+      f.t();
+    }
+    this.d = 2;
+  };
+  return Zip2;
+})();
+
+// src/zip/stream-zip.ts
+var StreamingZipWriter = class {
+  constructor(onData) {
+    __publicField(this, "zip");
+    __publicField(this, "currentFile", null);
+    __publicField(this, "onData");
+    __publicField(this, "finalized", false);
+    __publicField(this, "pendingWrites", Promise.resolve());
+    __publicField(this, "failed", null);
+    this.onData = onData;
+    this.zip = new Zip((err2, data) => {
+      if (err2) {
+        this.failed ?? (this.failed = { error: err2 });
+        return;
+      }
+      this.pendingWrites = this.pendingWrites.then(() => this.failed ? void 0 : this.onData(data)).catch((error) => {
+        this.failed ?? (this.failed = { error });
+      });
+    });
+  }
+  /**
+   * Begin a new file entry in the ZIP.
+   * Must call endFile() before starting another file.
+   * @param name - Filename within the ZIP archive.
+   */
+  startFile(name) {
+    if (this.currentFile) {
+      throw new Error("Must call endFile() before starting a new file.");
+    }
+    if (this.finalized) {
+      throw new Error("ZIP has already been finalized.");
+    }
+    const entry = new ZipPassThrough(name);
+    this.zip.add(entry);
+    this.currentFile = entry;
+  }
+  /**
+   * Write a chunk of data to the current file entry.
+   * @param data - The data chunk to write.
+   */
+  writeChunk(data) {
+    if (!this.currentFile) {
+      throw new Error("No file started. Call startFile() first.");
+    }
+    this.currentFile.push(data, false);
+  }
+  /**
+   * End the current file entry.
+   */
+  endFile() {
+    if (!this.currentFile) {
+      throw new Error("No file to end.");
+    }
+    this.currentFile.push(new Uint8Array(0), true);
+    this.currentFile = null;
+  }
+  /** Waits until `onData` has taken everything written so far. Throws its error if it failed. */
+  async drained() {
+    await this.pendingWrites;
+    if (this.failed) throw this.failed.error;
+  }
+  /**
+   * Finalize the ZIP archive. Must be called after all files are written.
+   * Waits for all pending async writes to complete before resolving.
+   */
+  async finalize() {
+    if (this.currentFile) {
+      throw new Error("Cannot finalize with an open file. Call endFile() first.");
+    }
+    if (!this.finalized) {
+      this.finalized = true;
+      this.zip.end();
+    }
+    await this.drained();
+  }
+};
+
 // src/client/DropgateClient.ts
 function resolveServerToBaseUrl(server) {
   if (typeof server === "string") {
@@ -2415,33 +2515,9 @@ function estimateTotalUploadSizeBytes(fileSizeBytes, totalChunks, isEncrypted) {
   if (!isEncrypted) return base;
   return base + (Number(totalChunks) || 0) * ENCRYPTION_OVERHEAD_PER_CHUNK;
 }
-async function getServerInfo(opts) {
-  const { server, timeoutMs = 5e3, signal, fetchFn: customFetch } = opts;
-  const givenFetch = customFetch || getDefaultFetch();
-  if (!givenFetch) {
-    throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "No fetch() implementation found." });
-  }
-  const fetchFn = withoutCredentials(givenFetch);
-  const baseUrl = resolveServerToBaseUrl(server);
-  const { res, json } = await fetchJson(
-    fetchFn,
-    `${baseUrl}/api/info`,
-    {
-      method: "GET",
-      timeoutMs,
-      signal,
-      headers: { Accept: "application/json" }
-    }
-  );
-  if (res.ok && json && typeof json === "object" && "version" in json) {
-    return { baseUrl, serverInfo: json };
-  }
-  if (res.status === 429 || res.status >= 500) throw errorFromStatus(res.status, json);
-  throw new DropgateError({
-    code: "INVALID_RESPONSE",
-    status: res.status,
-    message: "That server didn't answer as a Dropgate server does."
-  });
+function serverChunkSize(serverInfo, fallback) {
+  const size = serverInfo?.capabilities?.upload?.chunkSize;
+  return Number.isFinite(size) && size > 0 ? size : fallback;
 }
 var DropgateClient = class {
   /**
@@ -2461,16 +2537,26 @@ var DropgateClient = class {
     __publicField(this, "cryptoObj");
     /** Base64 encoder/decoder for binary data. */
     __publicField(this, "base64");
+    /** Uploads to the server, and downloads from it. */
+    __publicField(this, "hosted");
+    /** Direct transfers, from one device to another. */
+    __publicField(this, "direct");
+    /** Sharing codes and links. */
+    __publicField(this, "links");
+    /** The server the client was made for. */
+    __publicField(this, "server");
+    /** What's running on the client, by each operation's ID. */
+    __publicField(this, "operations");
     /** Resolved base URL (e.g. 'https://dropgate.link'). May change during HTTP fallback. */
     __publicField(this, "baseUrl");
     /** Whether to automatically retry with HTTP when HTTPS fails. */
     __publicField(this, "_fallbackToHttp");
-    /** Cached compatibility result (null until first connect()). */
+    /** Cached compatibility result (null until the first connect). */
     __publicField(this, "_compat", null);
     /** In-flight connect promise to deduplicate concurrent calls. */
     __publicField(this, "_connectPromise", null);
-    /** The root of the cancellation tree: every operation runs under it. */
-    __publicField(this, "_scope", new CancelScope("client"));
+    /** The running operations, and the root of the cancellation tree. */
+    __publicField(this, "_registry", new OperationRegistry());
     if (!opts || typeof opts.clientVersion !== "string") {
       throw new DropgateError({ code: "INVALID_ARGUMENT", message: "DropgateClient requires clientVersion (string)." });
     }
@@ -2495,39 +2581,49 @@ var DropgateClient = class {
     this.base64 = opts.base64 || getDefaultBase64();
     this._fallbackToHttp = Boolean(opts.fallbackToHttp);
     this.baseUrl = resolveServerToBaseUrl(opts.server);
+    const client = this;
+    this.server = Object.freeze({
+      get baseUrl() {
+        return client.baseUrl;
+      },
+      connect: (o) => this._connect(o),
+      info: (o) => this._fetchInfo(this.baseUrl, o).then(({ serverInfo }) => serverInfo)
+    });
+    this.hosted = Object.freeze({
+      upload: (o) => this._upload(o),
+      download: (o) => this._download(o),
+      metadata: (o) => this._metadata(o),
+      validate: (o) => this._validate(o)
+    });
+    this.direct = Object.freeze({
+      send: (o) => this._directSend(o),
+      receive: (o) => this._directReceive(o)
+    });
+    this.links = Object.freeze({
+      resolve: (value, o) => this._resolve(value, o)
+    });
+    this.operations = this._registry.api;
   }
-  /**
-   * Get the server target (host, port, secure) derived from the current baseUrl.
-   * Useful for passing to standalone functions that still need a ServerTarget.
-   */
-  get serverTarget() {
-    const url = new URL(this.baseUrl);
-    return {
-      host: url.hostname,
-      port: url.port ? Number(url.port) : void 0,
-      secure: url.protocol === "https:"
-    };
+  /** Asks a server for its info. */
+  async _fetchInfo(baseUrl, opts) {
+    const { timeoutMs = 5e3, signal } = opts ?? {};
+    const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/info`, {
+      method: "GET",
+      timeoutMs,
+      signal,
+      headers: { Accept: "application/json" }
+    });
+    if (res.ok && json && typeof json === "object" && "version" in json) {
+      return { baseUrl, serverInfo: json };
+    }
+    if (res.status === 429 || res.status >= 500) throw errorFromStatus(res.status, json);
+    throw new DropgateError({
+      code: "INVALID_RESPONSE",
+      status: res.status,
+      message: "That server didn't answer as a Dropgate server does."
+    });
   }
-  /**
-   * Cancel every upload and download running on this client. Each ends with a
-   * `cancelled` outcome, `by: 'parent'`, `source: 'client'`. The client stays
-   * usable: operations started afterwards run as normal.
-   */
-  cancelAll() {
-    const scope = this._scope;
-    this._scope = new CancelScope("client");
-    scope.cancel();
-  }
-  /**
-   * Connect to the server: fetch server info and check version compatibility.
-   * Results are cached — subsequent calls return instantly without network requests.
-   * Concurrent calls are deduplicated.
-   *
-   * @param opts - Optional timeout and abort signal.
-   * @returns Compatibility result with server info.
-   * @throws {DropgateError} As getServerInfo() does.
-   */
-  async connect(opts) {
+  async _connect(opts) {
     if (this._compat) return this._compat;
     if (!this._connectPromise) {
       this._connectPromise = this._fetchAndCheckCompat(opts).finally(() => {
@@ -2537,28 +2633,17 @@ var DropgateClient = class {
     return this._connectPromise;
   }
   async _fetchAndCheckCompat(opts) {
-    const { timeoutMs = 5e3, signal } = opts ?? {};
     let baseUrl = this.baseUrl;
     let serverInfo;
     try {
-      const result = await getServerInfo({
-        server: baseUrl,
-        timeoutMs,
-        signal,
-        fetchFn: this.fetchFn
-      });
+      const result = await this._fetchInfo(baseUrl, opts);
       baseUrl = result.baseUrl;
       serverInfo = result.serverInfo;
     } catch (err2) {
       if (this._fallbackToHttp && this.baseUrl.startsWith("https://")) {
         const httpBaseUrl = this.baseUrl.replace("https://", "http://");
         try {
-          const result = await getServerInfo({
-            server: httpBaseUrl,
-            timeoutMs,
-            signal,
-            fetchFn: this.fetchFn
-          });
+          const result = await this._fetchInfo(httpBaseUrl, opts);
           this.baseUrl = httpBaseUrl;
           baseUrl = result.baseUrl;
           serverInfo = result.serverInfo;
@@ -2613,27 +2698,13 @@ var DropgateClient = class {
       message: `Server: v${serverVersion}, Client: v${clientVersion}${serverInfo?.name ? ` (${serverInfo.name})` : ""}.`
     };
   }
-  /**
-   * Resolve a user-entered sharing code or link.
-   *
-   * The input is read locally first. A link is reduced to the ID or code in
-   * its path, and only that is sent to the server, so nothing after a # (an
-   * encrypted upload's key) ever leaves the device. A link to another server
-   * is refused without asking this one. The key comes back on the end of
-   * `target`, ready to open.
-   *
-   * @param value - The sharing code or link to resolve.
-   * @param opts - Optional timeout and abort signal.
-   * @returns The resolved share target information.
-   * @throws {DropgateError} VERSION_UNSUPPORTED, or a request's error if the lookup fails.
-   */
-  async resolveShareTarget(value, opts) {
+  async _resolve(value, opts) {
     const { timeoutMs = 5e3, signal } = opts ?? {};
     const input = parseShareInput(value);
     if (!input) {
       return { valid: false, reason: "Unrecognised sharing link." };
     }
-    const compat = await this.connect(opts);
+    const compat = await this._connect(opts);
     this._requireCompatible(compat);
     const { baseUrl } = compat;
     if (input.linkHost !== void 0 && input.linkHost !== new URL(baseUrl).host) {
@@ -2660,108 +2731,101 @@ var DropgateClient = class {
     }
     return result;
   }
-  /**
-   * Fetch metadata for a single file from the server.
-   * @param fileId - The file ID to fetch metadata for.
-   * @param opts - Optional connection options (timeout, signal).
-   * @returns File metadata including size, filename, and encryption status.
-   * @throws {DropgateError} NOT_FOUND if there's no such file, or a request's error.
-   */
-  async getFileMetadata(fileId, opts) {
-    if (!fileId || typeof fileId !== "string") {
-      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "File ID is required." });
+  async _metadata(opts) {
+    const { fileId, bundleId } = opts ?? {};
+    if (!(fileId && typeof fileId === "string") && !(bundleId && typeof bundleId === "string")) {
+      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "Either fileId or bundleId is required." });
     }
-    const { timeoutMs = 5e3, signal } = opts ?? {};
-    const url = `${this.baseUrl}/api/file/${encodeURIComponent(fileId)}/meta`;
-    const { res, json } = await fetchJson(this.fetchFn, url, {
-      method: "GET",
-      timeoutMs,
-      signal
-    });
-    if (!res.ok) throw errorFromStatus(res.status, json, "Failed to fetch file metadata.");
-    if (!json || typeof json !== "object") {
-      throw new DropgateError({ code: "INVALID_RESPONSE", message: "The server sent no file metadata." });
-    }
-    return json;
+    const compat = await this._connect(opts);
+    this._requireCompatible(compat);
+    return (await this._readMetadata(opts, compat)).meta;
   }
   /**
-   * Fetch metadata for a bundle from the server and derive computed fields.
-   * For sealed bundles, decrypts the manifest to extract file list.
-   * Automatically derives totalSizeBytes and fileCount from the files array.
-   * @param bundleId - The bundle ID to fetch metadata for.
-   * @param keyB64 - Base64-encoded decryption key (required for encrypted bundles).
-   * @param opts - Optional connection options (timeout, signal).
-   * @returns Complete bundle metadata with all files and computed fields.
-   * @throws {DropgateError} NOT_FOUND if there's no such bundle; KEY_REQUIRED if it's sealed and
-   * there's no key; DECRYPT_FAILED if its manifest can't be read with the key; or a request's error.
+   * Reads an upload's metadata from the server, decrypting its file names, and
+   * gives the key too, for its download.
    */
-  async getBundleMetadata(bundleId, keyB64, opts) {
-    if (!bundleId || typeof bundleId !== "string") {
-      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "Bundle ID is required." });
-    }
-    const { timeoutMs = 5e3, signal } = opts ?? {};
-    const url = `${this.baseUrl}/api/bundle/${encodeURIComponent(bundleId)}/meta`;
-    const { res, json } = await fetchJson(this.fetchFn, url, {
-      method: "GET",
-      timeoutMs,
-      signal
-    });
-    if (!res.ok) throw errorFromStatus(res.status, json, "Failed to fetch bundle metadata.");
+  async _readMetadata(opts, compat) {
+    const { fileId, bundleId, keyB64, timeoutMs = 5e3, signal } = opts;
+    const { baseUrl, serverInfo } = compat;
+    const chunkSize = serverChunkSize(serverInfo, this.chunkSize);
+    const path = fileId ? `/api/file/${encodeURIComponent(fileId)}/meta` : `/api/bundle/${encodeURIComponent(bundleId)}/meta`;
+    const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}${path}`, { method: "GET", timeoutMs, signal });
+    if (!res.ok) throw errorFromStatus(res.status, json, fileId ? "Failed to fetch file metadata." : "Failed to fetch bundle metadata.");
     if (!json || typeof json !== "object") {
-      throw new DropgateError({ code: "INVALID_RESPONSE", message: "The server sent no bundle metadata." });
+      throw new DropgateError({ code: "INVALID_RESPONSE", message: "The server sent no metadata." });
     }
-    const serverMeta = json;
-    let files = [];
-    if (serverMeta.sealed && serverMeta.encryptedManifest) {
+    const raw = json;
+    const isEncrypted = Boolean(raw.isEncrypted);
+    let cryptoKey;
+    if (isEncrypted) {
       if (!keyB64) throw new DropgateError({ code: "KEY_REQUIRED" });
-      let manifest;
+      if (!this.cryptoObj?.subtle) {
+        throw new DropgateError({
+          code: "RUNTIME_UNSUPPORTED",
+          message: "Web Crypto API not available for decryption. Encrypted uploads need a secure context (HTTPS or localhost)."
+        });
+      }
+    }
+    const decrypt = async (run) => {
       try {
-        const key = await importKeyFromBase64(this.cryptoObj, keyB64);
-        const encryptedBytes = this.base64.decode(serverMeta.encryptedManifest);
-        const decryptedBuffer = await decryptChunk(this.cryptoObj, encryptedBytes, key);
-        manifest = JSON.parse(new TextDecoder().decode(decryptedBuffer));
-        if (!Array.isArray(manifest?.files)) throw new TypeError("The manifest has no files.");
+        cryptoKey ?? (cryptoKey = await importKeyFromBase64(this.cryptoObj, keyB64, this.base64));
+        return await run(cryptoKey);
       } catch (err2) {
         throw new DropgateError({ code: "DECRYPT_FAILED", cause: err2 });
       }
-      files = manifest.files.map((f) => ({
-        fileId: f.fileId,
-        sizeBytes: f.sizeBytes,
-        filename: f.name
-      }));
-    } else if (serverMeta.files) {
-      files = serverMeta.files;
-      if (serverMeta.isEncrypted) {
-        const encryptedChunkSize = this.chunkSize + ENCRYPTION_OVERHEAD_PER_CHUNK;
-        for (const f of files) {
-          if (f.sizeBytes > 0) {
-            const numChunks = Math.ceil(f.sizeBytes / encryptedChunkSize);
-            f.sizeBytes = f.sizeBytes - numChunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
-          }
-        }
+    };
+    const decryptName = (encrypted) => decrypt((key) => decryptFilenameFromBase64(this.cryptoObj, String(encrypted ?? ""), key, this.base64));
+    if (fileId) {
+      const stored = Number(raw.sizeBytes) || 0;
+      return {
+        meta: {
+          kind: "file",
+          fileId,
+          isEncrypted,
+          name: isEncrypted ? await decryptName(raw.encryptedFilename) : raw.filename || "file",
+          sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored
+        },
+        cryptoKey
+      };
+    }
+    let files;
+    const sealed = Boolean(raw.sealed && raw.encryptedManifest);
+    if (sealed) {
+      const manifest = await decrypt(async (key) => {
+        const decrypted = await decryptChunk(this.cryptoObj, this.base64.decode(raw.encryptedManifest), key);
+        const parsed = JSON.parse(new TextDecoder().decode(decrypted));
+        if (!Array.isArray(parsed?.files)) throw new TypeError("The manifest has no files.");
+        return parsed.files;
+      });
+      files = manifest.map((f) => ({ fileId: f.fileId, name: f.name || "file", sizeBytes: Number(f.sizeBytes) || 0 }));
+    } else if (Array.isArray(raw.files)) {
+      files = [];
+      for (const f of raw.files) {
+        const stored = Number(f.sizeBytes) || 0;
+        files.push({
+          fileId: f.fileId,
+          name: isEncrypted ? await decryptName(f.encryptedFilename) : f.filename || "file",
+          // An unsealed encrypted bundle's sizes are what the server stored, ciphertext.
+          sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored
+        });
       }
     } else {
       throw new DropgateError({ code: "INVALID_RESPONSE", message: "Invalid bundle metadata: missing files or manifest." });
     }
-    const totalSizeBytes = files.reduce((sum, f) => sum + (f.sizeBytes || 0), 0);
-    const fileCount = files.length;
     return {
-      isEncrypted: serverMeta.isEncrypted,
-      sealed: serverMeta.sealed,
-      encryptedManifest: serverMeta.encryptedManifest,
-      files,
-      totalSizeBytes,
-      fileCount
+      meta: {
+        kind: "bundle",
+        bundleId,
+        isEncrypted,
+        sealed,
+        files,
+        fileCount: files.length,
+        totalSizeBytes: files.reduce((sum, f) => sum + f.sizeBytes, 0)
+      },
+      cryptoKey
     };
   }
-  /**
-   * Validate file and upload settings against server capabilities.
-   * @param opts - Validation options containing file, settings, and server info.
-   * @returns True if validation passes.
-   * @throws {DropgateError} CAPABILITY_UNSUPPORTED, INVALID_ARGUMENT, FILE_EMPTY, FILE_TOO_LARGE
-   * or LIFETIME_NOT_ALLOWED, for the first check that fails.
-   */
-  validateUploadInputs(opts) {
+  _validate(opts) {
     const { files: rawFiles, lifetimeMs, encrypt, serverInfo } = opts;
     const caps = serverInfo?.capabilities?.upload;
     if (!caps || !caps.enabled) {
@@ -2787,7 +2851,7 @@ var DropgateClient = class {
       const maxMB = Number(caps.maxSizeMB);
       if (Number.isFinite(maxMB) && maxMB > 0) {
         const limitBytes = maxMB * 1e3 * 1e3;
-        const validationChunkSize = Number.isFinite(caps.chunkSize) && caps.chunkSize > 0 ? caps.chunkSize : this.chunkSize;
+        const validationChunkSize = serverChunkSize(serverInfo, this.chunkSize);
         const totalChunks = Math.ceil(fileSize / validationChunkSize);
         const estimatedBytes = estimateTotalUploadSizeBytes(
           fileSize,
@@ -2832,23 +2896,7 @@ var DropgateClient = class {
     }
     return true;
   }
-  /**
-   * Upload one or more files to the server with optional encryption.
-   * Single files use the standard upload protocol.
-   * Multiple files use the bundle protocol, grouping files under a single download link.
-   *
-   * Gives the upload's handle at once. Its `result` is the upload's one
-   * outcome: `completed` with the link, `cancelled` with who cancelled it, or
-   * `failed` with a DropgateError. It never rejects. `snapshot` and
-   * `subscribe()` say where it is, and `cancel()` cancels it. The upload runs
-   * under the client's node of the cancellation tree, and `signal`, if given,
-   * feeds into the upload's own node.
-   *
-   * @param opts - Upload options including file(s) and settings.
-   * @returns The upload's handle.
-   * @throws {DropgateError} INVALID_ARGUMENT if there are no files, or one isn't a file, before an upload starts.
-   */
-  uploadFiles(opts) {
+  _upload(opts) {
     const {
       files: rawFiles,
       lifetimeMs,
@@ -2879,20 +2927,20 @@ var DropgateClient = class {
     const work = async (ctx) => {
       const effectiveSignal = ctx.signal;
       const progress = ctx.update;
-      const compat = await this.connect({
+      const compat = await this._connect({
         timeoutMs: timeouts.serverInfoMs ?? 5e3,
         signal: effectiveSignal
       });
       const { baseUrl, serverInfo } = compat;
       progress({ phase: "server-compat", text: compat.message });
       this._requireCompatible(compat);
-      const filenames = files.map((f, i) => filenameOverrides?.[i] ?? f.name ?? "file");
+      const filenames2 = files.map((f, i) => filenameOverrides?.[i] ?? f.name ?? "file");
       const serverSupportsE2EE = Boolean(serverInfo?.capabilities?.upload?.e2ee);
       const effectiveEncrypt = encrypt ?? serverSupportsE2EE;
       if (!effectiveEncrypt) {
-        for (const name of filenames) validatePlainFilename(name);
+        for (const name of filenames2) validatePlainFilename(name);
       }
-      this.validateUploadInputs({ files, lifetimeMs, encrypt: effectiveEncrypt, serverInfo });
+      this._validate({ files, lifetimeMs, encrypt: effectiveEncrypt, serverInfo });
       let cryptoKey = null;
       let keyB64 = null;
       const transmittedFilenames = [];
@@ -2907,7 +2955,7 @@ var DropgateClient = class {
         try {
           cryptoKey = await generateAesGcmKey(this.cryptoObj);
           keyB64 = await exportKeyBase64(this.cryptoObj, cryptoKey);
-          for (const name of filenames) {
+          for (const name of filenames2) {
             transmittedFilenames.push(
               await encryptFilenameToBase64(this.cryptoObj, name, cryptoKey)
             );
@@ -2916,10 +2964,10 @@ var DropgateClient = class {
           throw new DropgateError({ code: "ENCRYPT_FAILED", cause: err2 });
         }
       } else {
-        transmittedFilenames.push(...filenames);
+        transmittedFilenames.push(...filenames2);
       }
-      const serverChunkSize = serverInfo?.capabilities?.upload?.chunkSize;
-      const effectiveChunkSize = Number.isFinite(serverChunkSize) && serverChunkSize > 0 ? serverChunkSize : this.chunkSize;
+      const serverChunkSize2 = serverInfo?.capabilities?.upload?.chunkSize;
+      const effectiveChunkSize = Number.isFinite(serverChunkSize2) && serverChunkSize2 > 0 ? serverChunkSize2 : this.chunkSize;
       const retries = Number.isFinite(retry.retries) ? retry.retries : 5;
       const baseBackoffMs = Number.isFinite(retry.backoffMs) ? retry.backoffMs : 1e3;
       const maxBackoffMs = Number.isFinite(retry.maxBackoffMs) ? retry.maxBackoffMs : 3e4;
@@ -3063,7 +3111,7 @@ var DropgateClient = class {
         }
         const fileId = completeRes.json?.id;
         if (!fileId) throw new DropgateError({ code: "INVALID_RESPONSE", message: `Server did not return a valid file id for file ${fi + 1}.` });
-        fileResults.push({ fileId, name: filenames[fi], size: file.size });
+        fileResults.push({ fileId, name: filenames2[fi], size: file.size });
         cumulativeBytes += file.size;
         progress({
           phase: "file-complete",
@@ -3112,9 +3160,9 @@ var DropgateClient = class {
         ...effectiveEncrypt && keyB64 ? { keyB64 } : {}
       };
     };
-    return startOperation({
-      label: "upload",
-      parent: this._scope,
+    return this._registry.add(startOperation({
+      kind: "hosted.upload",
+      parent: this._registry.scope,
       signal,
       initial: {
         status: "initializing",
@@ -3137,11 +3185,281 @@ var DropgateClient = class {
         }
         if (outcome.status === "cancelled") return { ...last, status: "cancelled", text: "Upload cancelled." };
         return { ...last, status: "failed", text: outcome.error.message };
+      },
+      onEnd: (handle) => this._registry.remove(handle)
+    }));
+  }
+  _download(opts) {
+    const { fileId, bundleId, keyB64, asZip, sink, signal, timeoutMs = 6e4 } = opts ?? {};
+    if (!(fileId && typeof fileId === "string") && !(bundleId && typeof bundleId === "string")) {
+      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "Either fileId or bundleId is required." });
+    }
+    const zipped = Boolean(bundleId && asZip);
+    const sinkFits = typeof sink === "function" ? !zipped : isDownloadSink(sink) && (Boolean(fileId) || zipped);
+    if (!sinkFits) {
+      throw new DropgateError({
+        code: "INVALID_ARGUMENT",
+        message: !sink ? "A download needs a sink, with write() and close(), for its bytes." : zipped ? "A bundle downloaded as a ZIP needs one sink, with write() and close()." : fileId ? "The sink needs write() and close(), or must be a function giving a sink." : "A bundle downloaded as separate files needs a function giving a sink for each file."
+      });
+    }
+    const work = async (ctx) => {
+      const progress = ctx.update;
+      const downloadSignal = ctx.signal;
+      let open = null;
+      try {
+        const compat = await this._connect({ timeoutMs, signal: downloadSignal });
+        progress({ phase: "server-compat", text: compat.message });
+        this._requireCompatible(compat);
+        const { baseUrl } = compat;
+        progress({ phase: "metadata", text: fileId ? "Fetching file info..." : "Fetching bundle info..." });
+        const target = fileId ? { fileId } : { bundleId };
+        const { meta, cryptoKey } = await this._readMetadata({ ...target, keyB64, timeoutMs, signal: downloadSignal }, compat);
+        const files = meta.kind === "file" ? [meta] : meta.files;
+        const totalBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0);
+        const several = meta.kind === "bundle";
+        progress({ status: "downloading", totalBytes, ...several ? { totalFiles: files.length } : {} });
+        const streamOpts = { baseUrl, isEncrypted: meta.isEncrypted, cryptoKey, compat, signal: downloadSignal, timeoutMs };
+        let written = 0;
+        const counted = (fileIndex, done) => (fileBytes) => {
+          const processedBytes = done + fileBytes;
+          progress({
+            phase: "downloading",
+            percent: totalBytes > 0 ? processedBytes / totalBytes * 100 : 0,
+            processedBytes,
+            ...several ? { fileIndex } : {}
+          });
+        };
+        const fileStarts = (fi) => {
+          progress({
+            phase: several ? "file-start" : "downloading",
+            text: several ? `Downloading file ${fi + 1} of ${files.length}...` : "Downloading...",
+            percent: totalBytes > 0 ? written / totalBytes * 100 : 0,
+            processedBytes: written,
+            ...several ? { fileIndex: fi } : {}
+          });
+        };
+        if (zipped) {
+          const out = await SinkWriter.open(sink, { name: "", size: totalBytes, index: 0 });
+          open = out;
+          const zip2 = new StreamingZipWriter((chunk) => out.write(chunk));
+          const drained = async () => {
+            try {
+              await zip2.drained();
+            } catch (err2) {
+              throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
+            }
+          };
+          for (let fi = 0; fi < files.length; fi++) {
+            fileStarts(fi);
+            zip2.startFile(files[fi].name);
+            const done = written;
+            written += await this._streamFile(files[fi].fileId, streamOpts, async (chunk) => {
+              zip2.writeChunk(chunk);
+              await drained();
+            }, counted(fi, done));
+            zip2.endFile();
+          }
+          progress({ status: "completing", phase: "complete", text: "Finishing the download..." });
+          try {
+            await zip2.finalize();
+          } catch (err2) {
+            throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
+          }
+          await out.close();
+          open = null;
+          try {
+            await fetchJson(this.fetchFn, `${baseUrl}/api/bundle/${encodeURIComponent(bundleId)}/downloaded`, {
+              method: "POST",
+              timeoutMs: 5e3,
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: "{}"
+            });
+          } catch {
+          }
+        } else {
+          for (let fi = 0; fi < files.length; fi++) {
+            const file = files[fi];
+            fileStarts(fi);
+            const out = await SinkWriter.open(sink, { name: file.name, size: file.sizeBytes, index: fi });
+            open = out;
+            const done = written;
+            written += await this._streamFile(file.fileId, streamOpts, (chunk) => out.write(chunk), counted(fi, done));
+            if (fi === files.length - 1) progress({ status: "completing", phase: "complete", text: "Finishing the download..." });
+            await out.close();
+            open = null;
+          }
+        }
+        return {
+          ...meta.kind === "file" ? { filename: meta.name } : { filenames: meta.files.map((f) => f.name) },
+          receivedBytes: written,
+          wasEncrypted: meta.isEncrypted
+        };
+      } catch (err2) {
+        await open?.abort(downloadSignal.aborted ? downloadSignal.reason : err2);
+        throw err2;
       }
+    };
+    return this._registry.add(startOperation({
+      kind: "hosted.download",
+      parent: this._registry.scope,
+      signal,
+      initial: { status: "initializing", phase: "server-info", text: "Checking server...", percent: 0, processedBytes: 0, totalBytes: 0 },
+      work,
+      finalSnapshot: (outcome, last) => {
+        if (outcome.status === "completed") {
+          return { ...last, status: "completed", phase: "done", text: "Download complete!", percent: 100, processedBytes: outcome.value.receivedBytes };
+        }
+        if (outcome.status === "cancelled") return { ...last, status: "cancelled", text: "Download cancelled." };
+        return { ...last, status: "failed", text: outcome.error.message };
+      },
+      onEnd: (handle) => this._registry.remove(handle)
+    }));
+  }
+  /**
+   * Streams one file's bytes from the server into `deliver`, decrypting them
+   * if it's encrypted, awaiting each delivery before reading on. Returns how
+   * many bytes were delivered.
+   */
+  async _streamFile(fileId, opts, deliverChunk, onBytesDelivered) {
+    const { baseUrl, isEncrypted, cryptoKey, compat, signal, timeoutMs } = opts;
+    const { signal: downloadSignal, cleanup: downloadCleanup } = makeAbortSignal(signal, timeoutMs);
+    let deliveredBytes = 0;
+    let stopWatching = () => {
+    };
+    const step = async (code, run) => {
+      try {
+        return await run();
+      } catch (err2) {
+        if (downloadSignal.aborted) throw downloadSignal.reason;
+        throw toDropgateError(err2, code);
+      }
+    };
+    try {
+      let downloadRes;
+      try {
+        downloadRes = await this.fetchFn(`${baseUrl}/api/file/${encodeURIComponent(fileId)}`, {
+          method: "GET",
+          signal: downloadSignal
+        });
+      } catch (err2) {
+        throw toDropgateError(err2, "SERVER_UNREACHABLE");
+      }
+      if (!downloadRes.ok) throw errorFromStatus(downloadRes.status, null, "Download failed.");
+      if (!downloadRes.body) throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "Streaming response not available." });
+      const reader = downloadRes.body.getReader();
+      const cancelRead = () => {
+        reader.cancel(downloadSignal.reason).catch(() => {
+        });
+      };
+      downloadSignal.addEventListener("abort", cancelRead, { once: true });
+      stopWatching = () => downloadSignal.removeEventListener("abort", cancelRead);
+      const read = async () => {
+        const next = await step("CONNECTION_LOST", () => reader.read());
+        if (downloadSignal.aborted) throw downloadSignal.reason;
+        return next;
+      };
+      const decrypt = (chunk) => step("INTEGRITY_FAILED", () => decryptChunk(this.cryptoObj, chunk, cryptoKey));
+      const deliver = async (chunk) => {
+        await step("OUTPUT_WRITE_FAILED", () => deliverChunk(chunk));
+        deliveredBytes += chunk.byteLength;
+        onBytesDelivered(deliveredBytes);
+      };
+      if (isEncrypted && cryptoKey) {
+        const ENCRYPTED_CHUNK_SIZE = serverChunkSize(compat.serverInfo, this.chunkSize) + ENCRYPTION_OVERHEAD_PER_CHUNK;
+        const pendingChunks = [];
+        let pendingLength = 0;
+        const flushPending = () => {
+          if (pendingChunks.length === 0) return new Uint8Array(0);
+          if (pendingChunks.length === 1) {
+            const result2 = pendingChunks[0];
+            pendingChunks.length = 0;
+            pendingLength = 0;
+            return result2;
+          }
+          const result = new Uint8Array(pendingLength);
+          let offset = 0;
+          for (const chunk of pendingChunks) {
+            result.set(chunk, offset);
+            offset += chunk.length;
+          }
+          pendingChunks.length = 0;
+          pendingLength = 0;
+          return result;
+        };
+        while (true) {
+          if (downloadSignal.aborted) throw downloadSignal.reason;
+          const { done, value } = await read();
+          if (done) break;
+          pendingChunks.push(value);
+          pendingLength += value.length;
+          while (pendingLength >= ENCRYPTED_CHUNK_SIZE) {
+            const buffer = flushPending();
+            const encryptedChunk = buffer.subarray(0, ENCRYPTED_CHUNK_SIZE);
+            if (buffer.length > ENCRYPTED_CHUNK_SIZE) {
+              pendingChunks.push(buffer.subarray(ENCRYPTED_CHUNK_SIZE));
+              pendingLength = buffer.length - ENCRYPTED_CHUNK_SIZE;
+            }
+            await deliver(new Uint8Array(await decrypt(encryptedChunk)));
+          }
+        }
+        if (pendingLength > 0) {
+          await deliver(new Uint8Array(await decrypt(flushPending())));
+        }
+      } else {
+        while (true) {
+          if (downloadSignal.aborted) throw downloadSignal.reason;
+          const { done, value } = await read();
+          if (done) break;
+          await deliver(value);
+        }
+      }
+    } catch (err2) {
+      throw toDropgateError(err2, "CONNECTION_LOST");
+    } finally {
+      stopWatching();
+      downloadCleanup();
+    }
+    return deliveredBytes;
+  }
+  async _directSend(opts) {
+    const compat = await this._connect();
+    this._requireCompatible(compat);
+    const { serverInfo } = compat;
+    const p2pCaps = serverInfo?.capabilities?.p2p;
+    if (!p2pCaps?.enabled) throw directTransferDisabled();
+    const { host, port, secure } = parseServerUrl(this.baseUrl);
+    const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
+    return startP2PSend({
+      ...opts,
+      host,
+      port,
+      secure,
+      peerjsPath,
+      iceServers,
+      serverInfo,
+      cryptoObj: this.cryptoObj
+    });
+  }
+  async _directReceive(opts) {
+    const compat = await this._connect();
+    this._requireCompatible(compat);
+    const { serverInfo } = compat;
+    const p2pCaps = serverInfo?.capabilities?.p2p;
+    if (!p2pCaps?.enabled) throw directTransferDisabled();
+    const { host, port, secure } = parseServerUrl(this.baseUrl);
+    const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
+    return startP2PReceive({
+      ...opts,
+      host,
+      port,
+      secure,
+      peerjsPath,
+      iceServers,
+      serverInfo
     });
   }
   /**
-   * Upload a single file's chunks to the server. Used internally by uploadFiles().
+   * Upload a single file's chunks to the server. Used by hosted.upload().
    */
   async _uploadFileChunks(params) {
     const {
@@ -3198,468 +3516,6 @@ var DropgateClient = class {
         { retries, backoffMs, maxBackoffMs, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i }
       );
     }
-  }
-  /**
-   * Download one or more files from the server with optional decryption.
-   *
-   * For single files, use `fileId`. For bundles, use `bundleId`.
-   * With `asZip: true` on bundles, streams a ZIP archive via `onData`.
-   * Without `asZip`, delivers files individually via `onFileStart`/`onFileData`/`onFileEnd`.
-   *
-   * The promise is the download's one outcome: `completed` with the result,
-   * `cancelled` (by `signal`, or by the client's `cancelAll()`), or `failed`
-   * with a DropgateError. It never rejects.
-   *
-   * @param opts - Download options including file/bundle ID and optional key.
-   * @returns The download's outcome.
-   * @throws {DropgateError} INVALID_ARGUMENT if there's neither a fileId nor a bundleId, before a download starts.
-   */
-  async downloadFiles(opts) {
-    if (!opts?.fileId && !opts?.bundleId) {
-      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "Either fileId or bundleId is required." });
-    }
-    const scope = new CancelScope("download", { parent: this._scope, signal: opts.signal });
-    return settle(scope, () => this._download(opts, scope.signal));
-  }
-  async _download(opts, signal) {
-    const {
-      fileId,
-      bundleId,
-      keyB64,
-      asZip,
-      zipFilename: _zipFilename,
-      onProgress,
-      onData,
-      onFileStart,
-      onFileData,
-      onFileEnd,
-      timeoutMs = 6e4
-    } = opts;
-    const progress = (evt) => {
-      try {
-        if (onProgress) onProgress(evt);
-      } catch {
-      }
-    };
-    progress({ phase: "server-info", text: "Checking server...", processedBytes: 0, totalBytes: 0, percent: 0 });
-    const compat = await this.connect({ timeoutMs, signal });
-    const { baseUrl } = compat;
-    progress({ phase: "server-compat", text: compat.message, processedBytes: 0, totalBytes: 0, percent: 0 });
-    this._requireCompatible(compat);
-    if (fileId) {
-      return this._downloadSingleFile({ fileId, keyB64, onProgress, onData, signal, timeoutMs, baseUrl, compat });
-    }
-    progress({ phase: "metadata", text: "Fetching bundle info...", processedBytes: 0, totalBytes: 0, percent: 0 });
-    const bundleMeta = await this.getBundleMetadata(bundleId, keyB64, { timeoutMs, signal });
-    const isEncrypted = Boolean(bundleMeta.isEncrypted);
-    const totalBytes = bundleMeta.totalSizeBytes || 0;
-    let cryptoKey;
-    const filenames = [];
-    if (isEncrypted) {
-      if (!keyB64) throw new DropgateError({ code: "KEY_REQUIRED" });
-      if (!this.cryptoObj?.subtle) {
-        throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "Web Crypto API not available for decryption." });
-      }
-      try {
-        cryptoKey = await importKeyFromBase64(this.cryptoObj, keyB64, this.base64);
-        if (bundleMeta.sealed && bundleMeta.encryptedManifest) {
-          const encryptedBytes = this.base64.decode(bundleMeta.encryptedManifest);
-          const decryptedBuffer = await decryptChunk(this.cryptoObj, encryptedBytes, cryptoKey);
-          const manifestJson = new TextDecoder().decode(decryptedBuffer);
-          const manifest = JSON.parse(manifestJson);
-          bundleMeta.files = manifest.files.map((f) => ({
-            fileId: f.fileId,
-            sizeBytes: f.sizeBytes,
-            filename: f.name
-          }));
-          bundleMeta.fileCount = bundleMeta.files.length;
-          for (const f of bundleMeta.files) {
-            filenames.push(f.filename || "file");
-          }
-        } else {
-          for (const f of bundleMeta.files) {
-            filenames.push(await decryptFilenameFromBase64(this.cryptoObj, f.encryptedFilename, cryptoKey, this.base64));
-          }
-        }
-      } catch (err2) {
-        throw new DropgateError({ code: "DECRYPT_FAILED", cause: err2 });
-      }
-    } else {
-      for (const f of bundleMeta.files) {
-        filenames.push(f.filename || "file");
-      }
-    }
-    let totalReceivedBytes = 0;
-    if (asZip && onData) {
-      const zipWriter = new StreamingZipWriter(onData);
-      for (let fi = 0; fi < bundleMeta.files.length; fi++) {
-        const fileMeta = bundleMeta.files[fi];
-        const name = filenames[fi];
-        progress({
-          phase: "zipping",
-          text: `Downloading ${name}...`,
-          percent: totalBytes > 0 ? totalReceivedBytes / totalBytes * 100 : 0,
-          processedBytes: totalReceivedBytes,
-          totalBytes,
-          fileIndex: fi,
-          totalFiles: bundleMeta.files.length,
-          currentFileName: name
-        });
-        zipWriter.startFile(name);
-        const baseReceivedBytes = totalReceivedBytes;
-        const bytesReceived = await this._streamFileIntoCallback(
-          baseUrl,
-          fileMeta.fileId,
-          isEncrypted,
-          cryptoKey,
-          compat,
-          signal,
-          timeoutMs,
-          (chunk) => {
-            zipWriter.writeChunk(chunk);
-          },
-          (fileBytes) => {
-            const current = baseReceivedBytes + fileBytes;
-            progress({
-              phase: "zipping",
-              text: `Downloading ${name}...`,
-              percent: totalBytes > 0 ? current / totalBytes * 100 : 0,
-              processedBytes: current,
-              totalBytes,
-              fileIndex: fi,
-              totalFiles: bundleMeta.files.length,
-              currentFileName: name
-            });
-          }
-        );
-        zipWriter.endFile();
-        totalReceivedBytes += bytesReceived;
-      }
-      try {
-        await zipWriter.finalize();
-      } catch (err2) {
-        throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
-      }
-      try {
-        await fetchJson(this.fetchFn, `${baseUrl}/api/bundle/${bundleId}/downloaded`, {
-          method: "POST",
-          timeoutMs: 5e3,
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: "{}"
-        });
-      } catch {
-      }
-      progress({ phase: "complete", text: "Download complete!", percent: 100, processedBytes: totalReceivedBytes, totalBytes });
-      return { filenames, receivedBytes: totalReceivedBytes, wasEncrypted: isEncrypted };
-    } else {
-      const dataCallback = onFileData || onData;
-      for (let fi = 0; fi < bundleMeta.files.length; fi++) {
-        const fileMeta = bundleMeta.files[fi];
-        const name = filenames[fi];
-        progress({
-          phase: "downloading",
-          text: `Downloading ${name}...`,
-          percent: totalBytes > 0 ? totalReceivedBytes / totalBytes * 100 : 0,
-          processedBytes: totalReceivedBytes,
-          totalBytes,
-          fileIndex: fi,
-          totalFiles: bundleMeta.files.length,
-          currentFileName: name
-        });
-        onFileStart?.({ name, size: fileMeta.sizeBytes, index: fi });
-        const baseReceivedBytes = totalReceivedBytes;
-        const bytesReceived = await this._streamFileIntoCallback(
-          baseUrl,
-          fileMeta.fileId,
-          isEncrypted,
-          cryptoKey,
-          compat,
-          signal,
-          timeoutMs,
-          dataCallback ? (chunk) => dataCallback(chunk) : void 0,
-          (fileBytes) => {
-            const current = baseReceivedBytes + fileBytes;
-            progress({
-              phase: "downloading",
-              text: `Downloading ${name}...`,
-              percent: totalBytes > 0 ? current / totalBytes * 100 : 0,
-              processedBytes: current,
-              totalBytes,
-              fileIndex: fi,
-              totalFiles: bundleMeta.files.length,
-              currentFileName: name
-            });
-          }
-        );
-        onFileEnd?.({ name, index: fi });
-        totalReceivedBytes += bytesReceived;
-      }
-      progress({ phase: "complete", text: "Download complete!", percent: 100, processedBytes: totalReceivedBytes, totalBytes });
-      return { filenames, receivedBytes: totalReceivedBytes, wasEncrypted: isEncrypted };
-    }
-  }
-  /**
-   * Download a single file, handling encryption/decryption internally.
-   * Preserves the original downloadFile() behavior.
-   */
-  async _downloadSingleFile(params) {
-    const { fileId, keyB64, onProgress, onData, signal, timeoutMs, baseUrl, compat } = params;
-    const progress = (evt) => {
-      try {
-        if (onProgress) onProgress(evt);
-      } catch {
-      }
-    };
-    progress({ phase: "metadata", text: "Fetching file info...", processedBytes: 0, totalBytes: 0, percent: 0 });
-    const metadata = await this.getFileMetadata(fileId, { timeoutMs, signal });
-    const isEncrypted = Boolean(metadata.isEncrypted);
-    const encryptedTotalBytes = metadata.sizeBytes || 0;
-    let totalBytes = encryptedTotalBytes;
-    if (isEncrypted && encryptedTotalBytes > 0) {
-      const downloadChunkSize = Number.isFinite(compat.serverInfo?.capabilities?.upload?.chunkSize) && compat.serverInfo.capabilities.upload.chunkSize > 0 ? compat.serverInfo.capabilities.upload.chunkSize : this.chunkSize;
-      const encryptedChunkSize = downloadChunkSize + ENCRYPTION_OVERHEAD_PER_CHUNK;
-      const numChunks = Math.ceil(encryptedTotalBytes / encryptedChunkSize);
-      totalBytes = encryptedTotalBytes - numChunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
-    }
-    if (!onData && totalBytes > MAX_IN_MEMORY_DOWNLOAD_BYTES) {
-      const sizeMB = Math.round(totalBytes / (1024 * 1024));
-      const limitMB = Math.round(MAX_IN_MEMORY_DOWNLOAD_BYTES / (1024 * 1024));
-      throw new DropgateError({
-        code: "INVALID_ARGUMENT",
-        message: `File is too large (${sizeMB}MB) to download without streaming. Provide an onData callback to stream files larger than ${limitMB}MB.`
-      });
-    }
-    let filename;
-    let cryptoKey;
-    if (isEncrypted) {
-      if (!keyB64) throw new DropgateError({ code: "KEY_REQUIRED" });
-      if (!this.cryptoObj?.subtle) {
-        throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "Web Crypto API not available for decryption." });
-      }
-      progress({ phase: "decrypting", text: "Preparing decryption...", processedBytes: 0, totalBytes: 0, percent: 0 });
-      try {
-        cryptoKey = await importKeyFromBase64(this.cryptoObj, keyB64, this.base64);
-        filename = await decryptFilenameFromBase64(this.cryptoObj, metadata.encryptedFilename, cryptoKey, this.base64);
-      } catch (err2) {
-        throw new DropgateError({ code: "DECRYPT_FAILED", cause: err2 });
-      }
-    } else {
-      filename = metadata.filename || "file";
-    }
-    progress({ phase: "downloading", text: "Starting download...", percent: 0, processedBytes: 0, totalBytes });
-    const dataChunks = [];
-    const collectData = !onData;
-    const receivedBytes = await this._streamFileIntoCallback(
-      baseUrl,
-      fileId,
-      isEncrypted,
-      cryptoKey,
-      compat,
-      signal,
-      timeoutMs,
-      async (chunk) => {
-        if (collectData) {
-          dataChunks.push(chunk);
-        } else {
-          await onData(chunk);
-        }
-      },
-      (bytes) => {
-        progress({
-          phase: "downloading",
-          text: "Downloading...",
-          percent: totalBytes > 0 ? bytes / totalBytes * 100 : 0,
-          processedBytes: bytes,
-          totalBytes
-        });
-      }
-    );
-    progress({ phase: "complete", text: "Download complete!", percent: 100, processedBytes: receivedBytes, totalBytes });
-    let data;
-    if (collectData && dataChunks.length > 0) {
-      const totalLength = dataChunks.reduce((sum, c) => sum + c.length, 0);
-      data = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const c of dataChunks) {
-        data.set(c, offset);
-        offset += c.length;
-      }
-    }
-    return {
-      filename,
-      receivedBytes,
-      wasEncrypted: isEncrypted,
-      ...data ? { data } : {}
-    };
-  }
-  /**
-   * Stream a single file's content into a callback, handling decryption if needed.
-   * Returns total bytes received from the network (encrypted size).
-   */
-  async _streamFileIntoCallback(baseUrl, fileId, isEncrypted, cryptoKey, compat, signal, timeoutMs, onChunk, onBytesReceived) {
-    const { signal: downloadSignal, cleanup: downloadCleanup } = makeAbortSignal(signal, timeoutMs);
-    let receivedBytes = 0;
-    let stopWatching = () => {
-    };
-    const step = async (code, run) => {
-      try {
-        return await run();
-      } catch (err2) {
-        if (downloadSignal.aborted) throw downloadSignal.reason;
-        throw toDropgateError(err2, code);
-      }
-    };
-    try {
-      let downloadRes;
-      try {
-        downloadRes = await this.fetchFn(`${baseUrl}/api/file/${fileId}`, {
-          method: "GET",
-          signal: downloadSignal
-        });
-      } catch (err2) {
-        throw toDropgateError(err2, "SERVER_UNREACHABLE");
-      }
-      if (!downloadRes.ok) throw errorFromStatus(downloadRes.status, null, "Download failed.");
-      if (!downloadRes.body) throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "Streaming response not available." });
-      const reader = downloadRes.body.getReader();
-      const cancelRead = () => {
-        reader.cancel(downloadSignal.reason).catch(() => {
-        });
-      };
-      downloadSignal.addEventListener("abort", cancelRead, { once: true });
-      stopWatching = () => downloadSignal.removeEventListener("abort", cancelRead);
-      const read = async () => {
-        const next = await step("CONNECTION_LOST", () => reader.read());
-        if (downloadSignal.aborted) throw downloadSignal.reason;
-        return next;
-      };
-      const decrypt = (chunk) => step("INTEGRITY_FAILED", () => decryptChunk(this.cryptoObj, chunk, cryptoKey));
-      const deliver = (chunk) => step("OUTPUT_WRITE_FAILED", () => onChunk?.(chunk));
-      if (isEncrypted && cryptoKey) {
-        const downloadChunkSize = Number.isFinite(compat.serverInfo?.capabilities?.upload?.chunkSize) && compat.serverInfo.capabilities.upload.chunkSize > 0 ? compat.serverInfo.capabilities.upload.chunkSize : this.chunkSize;
-        const ENCRYPTED_CHUNK_SIZE = downloadChunkSize + ENCRYPTION_OVERHEAD_PER_CHUNK;
-        const pendingChunks = [];
-        let pendingLength = 0;
-        const flushPending = () => {
-          if (pendingChunks.length === 0) return new Uint8Array(0);
-          if (pendingChunks.length === 1) {
-            const result2 = pendingChunks[0];
-            pendingChunks.length = 0;
-            pendingLength = 0;
-            return result2;
-          }
-          const result = new Uint8Array(pendingLength);
-          let offset = 0;
-          for (const chunk of pendingChunks) {
-            result.set(chunk, offset);
-            offset += chunk.length;
-          }
-          pendingChunks.length = 0;
-          pendingLength = 0;
-          return result;
-        };
-        while (true) {
-          if (downloadSignal.aborted) throw downloadSignal.reason;
-          const { done, value } = await read();
-          if (done) break;
-          pendingChunks.push(value);
-          pendingLength += value.length;
-          while (pendingLength >= ENCRYPTED_CHUNK_SIZE) {
-            const buffer = flushPending();
-            const encryptedChunk = buffer.subarray(0, ENCRYPTED_CHUNK_SIZE);
-            if (buffer.length > ENCRYPTED_CHUNK_SIZE) {
-              pendingChunks.push(buffer.subarray(ENCRYPTED_CHUNK_SIZE));
-              pendingLength = buffer.length - ENCRYPTED_CHUNK_SIZE;
-            }
-            const decryptedBuffer = await decrypt(encryptedChunk);
-            receivedBytes += decryptedBuffer.byteLength;
-            if (onBytesReceived) onBytesReceived(receivedBytes);
-            await deliver(new Uint8Array(decryptedBuffer));
-          }
-        }
-        if (pendingLength > 0) {
-          const buffer = flushPending();
-          const decryptedBuffer = await decrypt(buffer);
-          receivedBytes += decryptedBuffer.byteLength;
-          if (onBytesReceived) onBytesReceived(receivedBytes);
-          await deliver(new Uint8Array(decryptedBuffer));
-        }
-      } else {
-        while (true) {
-          if (downloadSignal.aborted) throw downloadSignal.reason;
-          const { done, value } = await read();
-          if (done) break;
-          receivedBytes += value.length;
-          if (onBytesReceived) onBytesReceived(receivedBytes);
-          await deliver(value);
-        }
-      }
-    } catch (err2) {
-      throw toDropgateError(err2, "CONNECTION_LOST");
-    } finally {
-      stopWatching();
-      downloadCleanup();
-    }
-    return receivedBytes;
-  }
-  /**
-   * Start a P2P send session. Connects to the signalling server and waits for a receiver.
-   *
-   * Server info, peerjsPath, iceServers, and cryptoObj are provided automatically
-   * from the client's cached server info and configuration.
-   *
-   * @param opts - P2P send options (file, Peer constructor, callbacks, tuning).
-   * @returns P2P send session with control methods.
-   * @throws {DropgateError} VERSION_UNSUPPORTED; CAPABILITY_UNSUPPORTED if P2P is not enabled on the server;
-   * or connect()'s errors.
-   */
-  async p2pSend(opts) {
-    const compat = await this.connect();
-    this._requireCompatible(compat);
-    const { serverInfo } = compat;
-    const p2pCaps = serverInfo?.capabilities?.p2p;
-    if (!p2pCaps?.enabled) throw directTransferDisabled();
-    const { host, port, secure } = this.serverTarget;
-    const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
-    return startP2PSend({
-      ...opts,
-      host,
-      port,
-      secure,
-      peerjsPath,
-      iceServers,
-      serverInfo,
-      cryptoObj: this.cryptoObj
-    });
-  }
-  /**
-   * Start a P2P receive session. Connects to a sender via their sharing code.
-   *
-   * Server info, peerjsPath, and iceServers are provided automatically
-   * from the client's cached server info.
-   *
-   * @param opts - P2P receive options (code, Peer constructor, callbacks, tuning).
-   * @returns P2P receive session with control methods.
-   * @throws {DropgateError} VERSION_UNSUPPORTED; CAPABILITY_UNSUPPORTED if P2P is not enabled on the server;
-   * or connect()'s errors.
-   */
-  async p2pReceive(opts) {
-    const compat = await this.connect();
-    this._requireCompatible(compat);
-    const { serverInfo } = compat;
-    const p2pCaps = serverInfo?.capabilities?.p2p;
-    if (!p2pCaps?.enabled) throw directTransferDisabled();
-    const { host, port, secure } = this.serverTarget;
-    const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
-    return startP2PReceive({
-      ...opts,
-      host,
-      port,
-      secure,
-      peerjsPath,
-      iceServers,
-      serverInfo
-    });
   }
   async _attemptChunkUpload(url, fetchOptions, opts) {
     const {
@@ -3721,43 +3577,78 @@ var DropgateClient = class {
     }
   }
 };
+
+// src/utils/lifetime.ts
+var MULTIPLIERS = {
+  minutes: 60 * 1e3,
+  hours: 60 * 60 * 1e3,
+  days: 24 * 60 * 60 * 1e3
+};
+function lifetimeToMs(value, unit) {
+  const u = String(unit || "").toLowerCase();
+  const v = Number(value);
+  if (u === "unlimited") return 0;
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  const m = MULTIPLIERS[u];
+  if (!m) return 0;
+  return Math.round(v * m);
+}
+
+// src/helpers.ts
+var sources = Object.freeze({
+  /** A FileSource that reads a browser `File` or `Blob`. A Blob with no name is called `file`. */
+  blob: blobSource,
+  /**
+   * A FileSource that reads an open Node.js file handle. Its size is the file's
+   * size now; closing the handle once the upload has ended is the caller's job.
+   */
+  fileHandle: fileHandleSource
+});
+var lifetime = Object.freeze({
+  /** A lifetime in a unit (`minutes`, `hours`, `days`, or `unlimited`) in milliseconds, or 0 for unlimited or anything invalid. */
+  toMs: lifetimeToMs
+});
+var sizes = Object.freeze({
+  /** How many bytes an upload of a file sends: its size, plus each chunk's encryption overhead if it's encrypted. */
+  estimateUpload: estimateUploadBytes
+});
+var filenames = Object.freeze({
+  /**
+   * Checks a file name that will be sent to the server as it is (an
+   * unencrypted upload's).
+   * @throws {DropgateError} INVALID_FILENAME if it's empty, too long, or has a path in it.
+   */
+  validate: validatePlainFilename
+});
+var codes = Object.freeze({
+  /** A new random code. */
+  generate: generateP2PCode,
+  /** Whether a value is shaped like a code. */
+  isLike: isP2PCodeLike
+});
+var hosts = Object.freeze({
+  /** Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`). */
+  isLocalhost: isLocalhostHostname,
+  /** Whether a direct transfer can run here: a secure context, or this machine. */
+  isSecureForDirect: isSecureContextForP2P
+});
+var zip = Object.freeze({
+  /**
+   * A ZIP writer that gives the archive's bytes to `onData` as they're
+   * written: `startFile(name)`, `writeChunk(bytes)`, `endFile()`, then
+   * `finalize()`. Await `drained()` to let a slow `onData` keep up.
+   */
+  writer: (onData) => new StreamingZipWriter(onData)
+});
 export {
-  AES_GCM_IV_BYTES,
-  AES_GCM_TAG_BYTES,
-  DEFAULT_CHUNK_SIZE,
   DropgateClient,
   DropgateError,
-  ENCRYPTION_OVERHEAD_PER_CHUNK,
   ERROR_CODES,
-  StreamingZipWriter,
-  arrayBufferToBase64,
-  base64ToBytes,
-  blobSource,
-  buildBaseUrl,
-  bytesToBase64,
-  decryptChunk,
-  decryptFilenameFromBase64,
-  encryptFilenameToBase64,
-  encryptToBlob,
-  estimateTotalUploadSizeBytes,
-  exportKeyBase64,
-  fetchJson,
-  fileHandleSource,
-  generateAesGcmKey,
-  generateP2PCode,
-  getDefaultBase64,
-  getDefaultCrypto,
-  getDefaultFetch,
-  getServerInfo,
-  importKeyFromBase64,
-  isLocalhostHostname,
-  isP2PCodeLike,
-  isSecureContextForP2P,
-  lifetimeToMs,
-  makeAbortSignal,
-  parseSemverMajorMinor,
-  parseServerUrl,
-  sha256Hex,
-  sleep,
-  validatePlainFilename
+  codes,
+  filenames,
+  hosts,
+  lifetime,
+  sizes,
+  sources,
+  zip
 };

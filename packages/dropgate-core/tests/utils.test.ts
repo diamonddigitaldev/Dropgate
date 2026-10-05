@@ -1,18 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import {
-  lifetimeToMs,
-  parseSemverMajorMinor,
-  validatePlainFilename,
-  bytesToBase64,
-  base64ToBytes,
-  arrayBufferToBase64,
-  isLocalhostHostname,
-  isSecureContextForP2P,
-  generateP2PCode,
-  isP2PCodeLike,
-  parseServerUrl,
-  buildBaseUrl,
-} from '../src/index.js';
+import { lifetime, filenames, hosts, codes } from '../src/index.js';
+import { parseSemverMajorMinor } from '../src/utils/semver.js';
+import { bytesToBase64, base64ToBytes, arrayBufferToBase64 } from '../src/utils/base64.js';
+import { parseServerUrl, buildBaseUrl } from '../src/utils/network.js';
+
+const lifetimeToMs = lifetime.toMs;
+const validatePlainFilename = filenames.validate;
+const isLocalhostHostname = hosts.isLocalhost;
+const isSecureContextForP2P = hosts.isSecureForDirect;
+const generateP2PCode = codes.generate;
+const isP2PCodeLike = codes.isLike;
 import { DropgateError } from '../src/errors.js';
 
 /** The code of the DropgateError `run` throws. */
@@ -26,7 +23,7 @@ function codeThrownBy(run: () => unknown): string {
   throw new Error('expected it to throw');
 }
 
-describe('lifetimeToMs', () => {
+describe('lifetime.toMs', () => {
   it('converts minutes to milliseconds', () => {
     expect(lifetimeToMs(1, 'minutes')).toBe(60000);
     expect(lifetimeToMs(5, 'minutes')).toBe(300000);
@@ -67,7 +64,7 @@ describe('parseSemverMajorMinor', () => {
   });
 });
 
-describe('validatePlainFilename', () => {
+describe('filenames.validate', () => {
   it('accepts valid filenames', () => {
     expect(() => validatePlainFilename('test.txt')).not.toThrow();
     expect(() => validatePlainFilename('my-file.pdf')).not.toThrow();
@@ -118,7 +115,7 @@ describe('base64 encoding/decoding', () => {
 });
 
 describe('P2P utilities', () => {
-  describe('isLocalhostHostname', () => {
+  describe('hosts.isLocalhost', () => {
     it('identifies localhost variants', () => {
       expect(isLocalhostHostname('localhost')).toBe(true);
       expect(isLocalhostHostname('127.0.0.1')).toBe(true);
@@ -133,7 +130,7 @@ describe('P2P utilities', () => {
     });
   });
 
-  describe('isSecureContextForP2P', () => {
+  describe('hosts.isSecureForDirect', () => {
     it('returns true for secure context', () => {
       expect(isSecureContextForP2P('dropgate.link', true)).toBe(true);
     });
@@ -148,7 +145,7 @@ describe('P2P utilities', () => {
     });
   });
 
-  describe('generateP2PCode', () => {
+  describe('codes.generate', () => {
     it('generates codes in correct format', () => {
       const code = generateP2PCode();
       expect(code).toMatch(/^[A-Z]{4}-\d{4}$/);
@@ -164,7 +161,7 @@ describe('P2P utilities', () => {
     });
   });
 
-  describe('isP2PCodeLike', () => {
+  describe('codes.isLike', () => {
     it('validates correct P2P codes', () => {
       expect(isP2PCodeLike('ABCD-1234')).toBe(true);
       expect(isP2PCodeLike('WXYZ-9876')).toBe(true);

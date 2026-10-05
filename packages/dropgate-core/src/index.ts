@@ -1,10 +1,9 @@
-// Constants
-export {
-  DEFAULT_CHUNK_SIZE,
-  AES_GCM_IV_BYTES,
-  AES_GCM_TAG_BYTES,
-  ENCRYPTION_OVERHEAD_PER_CHUNK,
-} from './constants.js';
+// Client
+export { DropgateClient } from './client/DropgateClient.js';
+export type { HostedApi, DirectApi, LinksApi, ServerApi, ServerConnection } from './client/DropgateClient.js';
+
+// Standalone helpers, by what they're for
+export { sources, lifetime, sizes, filenames, codes, hosts, zip } from './helpers.js';
 
 // Errors
 export { DropgateError, ERROR_CODES } from './errors.js';
@@ -14,12 +13,14 @@ export type { DropgateErrorOptions, DropgateErrorCode, ErrorOrigin } from './err
 export type { Outcome, CompletedOutcome, CancelledOutcome, FailedOutcome } from './outcome.js';
 export type { Cancellation, CancelledBy } from './cancel.js';
 
-// Operation handles
-export type { OperationHandle } from './operation.js';
+// Operation handles, and client.operations
+export type { OperationHandle, OperationKind } from './operation.js';
+export type { Operations, OperationInfo } from './operations.js';
 
-// File sources
-export { blobSource, fileHandleSource } from './source.js';
+// File sources, and download sinks
 export type { FileSource, BlobLike, UploadSource, FileHandleLike } from './source.js';
+export type { DownloadSink, DownloadSinkOption, DownloadFileInfo } from './sink.js';
+export type { StreamingZipWriter } from './zip/stream-zip.js';
 
 // Types
 export type {
@@ -29,7 +30,6 @@ export type {
   ServerCapabilities,
   ServerInfo,
   BaseProgressEvent,
-  UploadResult,
   CompatibilityResult,
   ShareTargetResult,
   CryptoAdapter,
@@ -37,66 +37,31 @@ export type {
   Base64Adapter,
   DropgateClientOptions,
   ServerTarget,
-  UploadFilesOptions,
-  GetServerInfoOptions,
-  ConnectOptions,
+  RequestOptions,
   ValidateUploadOptions,
+  UploadOptions,
+  UploadResult,
+  UploadHandle,
+  UploadSnapshot,
+  UploadPhase,
+  UploadStatus,
+  UploadOutcome,
+  HostedTarget,
+  MetadataOptions,
+  HostedMetadata,
   FileMetadata,
-  DownloadProgressEvent,
-  DownloadFilesOptions,
-  DownloadResult,
   BundleMetadata,
+  HostedFileInfo,
+  DownloadOptions,
+  DownloadResult,
+  DownloadHandle,
+  DownloadSnapshot,
+  DownloadPhase,
+  DownloadStatus,
+  DownloadOutcome,
 } from './types.js';
 
-// Upload handle and outcome types
-export type { UploadHandle, UploadSnapshot, UploadPhase, UploadStatus, UploadOutcome, DownloadOutcome } from './types.js';
-
-// Utils - Base64
-export { bytesToBase64, arrayBufferToBase64, base64ToBytes } from './utils/base64.js';
-
-// Utils - Lifetime
-export { lifetimeToMs } from './utils/lifetime.js';
-
-// Utils - Semver
-export { parseSemverMajorMinor } from './utils/semver.js';
-export type { SemverParts } from './utils/semver.js';
-
-// Utils - Filename
-export { validatePlainFilename } from './utils/filename.js';
-
-// Utils - Network (internal helpers, but exported for advanced use)
-export { sleep, makeAbortSignal, fetchJson, buildBaseUrl, parseServerUrl } from './utils/network.js';
-export type { AbortSignalWithCleanup, FetchJsonResult, FetchJsonOptions } from './utils/network.js';
-
-// Crypto
-export {
-  sha256Hex,
-  generateAesGcmKey,
-  exportKeyBase64,
-  importKeyFromBase64,
-  decryptChunk,
-  decryptFilenameFromBase64,
-} from './crypto/index.js';
-export { encryptToBlob, encryptFilenameToBase64 } from './crypto/encrypt.js';
-
-// ZIP
-export { StreamingZipWriter } from './zip/stream-zip.js';
-
-// Client
-export { DropgateClient, estimateTotalUploadSizeBytes, getServerInfo } from './client/DropgateClient.js';
-
-// Adapters
-export { getDefaultBase64, getDefaultCrypto, getDefaultFetch } from './adapters/defaults.js';
-
-// P2P - Utility functions still useful for consumers
-export {
-  generateP2PCode,
-  isP2PCodeLike,
-  isLocalhostHostname,
-  isSecureContextForP2P,
-} from './p2p/index.js';
-
-// P2P Types - Consumer-facing types for client methods and sessions
+// P2P Types - Consumer-facing types for client.direct
 export type {
   // State machine types
   P2PSendState,

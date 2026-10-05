@@ -58,7 +58,7 @@ export async function createClient(server, recorder) {
     const client = new DropgateClient({ clientVersion: serverVersion, server: server.baseUrl, fetchFn: recorder.fetch });
     const upload = async (files, encrypt) => {
         for (const f of [files].flat()) recorder.note(f.name);
-        const handle = client.uploadFiles({ files, encrypt, lifetimeMs: 60 * 60 * 1000, maxDownloads: 1 });
+        const handle = client.hosted.upload({ files, encrypt, lifetimeMs: 60 * 60 * 1000, maxDownloads: 1 });
         const result = completed(await handle.result);
         for (const value of [result.fileId, result.bundleId, result.uploadId, result.keyB64, result.downloadUrl]) recorder.note(value);
         for (const f of result.files || []) recorder.note(f.fileId);
@@ -91,17 +91,18 @@ export async function runFixture(server, { faults = false } = {}) {
     const plain = await upload(fixtureFiles.plain(), false);
     const bundle = await upload(fixtureFiles.bundle(), true);
 
-    // A pasted link, fragment and all (the v3 web UI sends it as-is).
-    await client.resolveShareTarget(encrypted.downloadUrl);
+    // A pasted link, fragment and all, as someone would paste it.
+    await client.links.resolve(encrypted.downloadUrl);
 
     for (const page of ['/', `/${encrypted.fileId}`, `/${plain.fileId}`, `/b/${bundle.bundleId}`, `/p2p/${P2P_CODE}`]) {
         await (await recorder.fetch(server.baseUrl + page)).arrayBuffer();
     }
 
     // Downloads up to each limit. The bundle counts only as a whole ("Download All as ZIP").
-    completed(await client.downloadFiles({ fileId: encrypted.fileId, keyB64: encrypted.keyB64, onData: () => {} }));
-    completed(await client.downloadFiles({ fileId: plain.fileId, onData: () => {} }));
-    completed(await client.downloadFiles({ bundleId: bundle.bundleId, keyB64: bundle.keyB64, asZip: true, onData: () => {} }));
+    const sink = () => ({ write: () => {}, close: () => {} });
+    completed(await client.hosted.download({ fileId: encrypted.fileId, keyB64: encrypted.keyB64, sink: sink() }).result);
+    completed(await client.hosted.download({ fileId: plain.fileId, sink: sink() }).result);
+    completed(await client.hosted.download({ bundleId: bundle.bundleId, keyB64: bundle.keyB64, asZip: true, sink: sink() }).result);
 
     if (faults) {
         await recorder.fetch(`${server.baseUrl}/api/resolve`, {

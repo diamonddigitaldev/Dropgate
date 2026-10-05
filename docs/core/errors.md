@@ -2,13 +2,13 @@
 
 Core has one error class, `DropgateError`. Every error it gives is one, with a `code` from the table below. Check the `code`, never the message: the codes are stable, so a code keeps its meaning, and a new situation gets a new code. `ERROR_CODES` lists them all, each with its default origin, retryable and message.
 
-An upload or a download doesn't throw when it goes wrong: it ends with a `failed` [outcome](outcomes.md) that holds the error. The other calls, such as `connect()` and `getFileMetadata()`, throw it.
+An upload or a download doesn't throw when it goes wrong: it ends with a `failed` [outcome](outcomes.md) that holds the error. The other calls, such as `client.server.connect()` and `client.hosted.metadata()`, throw it.
 
 ```javascript
 import { DropgateError } from '@dropgate/core';
 
 try {
-  await client.connect();
+  await client.server.connect();
 } catch (err) {
   if (DropgateError.is(err, 'VERSION_UNSUPPORTED')) showUpdateRequired();
   else if (DropgateError.is(err) && err.retryable) showTryAgain(err.message);
@@ -37,11 +37,11 @@ When the server answers with an error, the message is the server's own, if it se
 
 | Code | Origin | Retryable | When |
 | --- | --- | --- | --- |
-| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, no files, no `fileId` or `bundleId`, a lifetime that isn't a whole number of milliseconds, or a download too large to keep in memory without `onData` |
+| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, no files, no `fileId` or `bundleId`, a download without a sink that fits it, or a lifetime that isn't a whole number of milliseconds |
 | `RUNTIME_UNSUPPORTED` | local | No | There's no `fetch()` or Web Crypto, or encryption was asked for where the browser gives no `crypto.subtle` (a page not served over HTTPS or from `localhost`) |
 | `OPERATION_CANCELLED` | local | No | A call was given an `AbortSignal`, and it was aborted. An upload or download that's cancelled ends with a `cancelled` outcome instead |
 | `SOURCE_UNAVAILABLE` | local | No | A file being uploaded couldn't be read |
-| `OUTPUT_WRITE_FAILED` | local | No | Your `onData` threw or rejected, or a direct transfer's receiver couldn't keep up |
+| `OUTPUT_WRITE_FAILED` | local | No | A download's sink failed a `write()` or its `close()`, or a function giving a sink failed; a direct transfer's `onData` threw or rejected, or its receiver couldn't keep up |
 | `ENCRYPT_FAILED` | local | No | The encryption key couldn't be made, or a file name or chunk couldn't be encrypted |
 | `KEY_REQUIRED` | local | No | The upload is encrypted, and there's no key |
 | `DECRYPT_FAILED` | local | No | A file name or a bundle's manifest couldn't be decrypted: usually the wrong key |

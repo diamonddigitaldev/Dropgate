@@ -3,8 +3,8 @@ import { DropgateError } from './errors.js';
 /**
  * Who cancelled an operation, as the operation sees it:
  * - `self`: its own `cancel()`;
- * - `parent`: an operation it runs under was cancelled, such as by the
- *   client's `cancelAll()`;
+ * - `parent`: what it runs under was cancelled, such as the whole
+ *   client, by `client.operations.cancelAll()`;
  * - `signal`: an AbortSignal passed in with it was aborted.
  */
 export type CancelledBy = 'self' | 'parent' | 'signal';

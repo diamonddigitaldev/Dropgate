@@ -1,10 +1,4 @@
-import {
-  DEFAULT_CHUNK_SIZE,
-  DropgateClient,
-  estimateTotalUploadSizeBytes,
-  isSecureContextForP2P,
-  lifetimeToMs,
-} from './dropgate-core.js';
+import { DropgateClient, hosts, lifetime, sizes } from './dropgate-core.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -288,8 +282,7 @@ function areFilesTooLargeForStandard(files) {
   // Check total estimated size across all files
   let totalEstimated = 0;
   for (const file of files) {
-    const totalChunks = Math.ceil(file.size / DEFAULT_CHUNK_SIZE);
-    totalEstimated += estimateTotalUploadSizeBytes(file.size, totalChunks, Boolean(state.encrypt));
+    totalEstimated += sizes.estimateUpload(file.size, { encrypted: Boolean(state.encrypt), chunkSize: state.info?.capabilities?.upload?.chunkSize });
   }
   return totalEstimated > maxBytes;
 }
@@ -451,7 +444,7 @@ function showInsecureUploadModal() {
 }
 
 function updateCapabilitiesUI() {
-  state.p2pSecureOk = isSecureContextForP2P(location.hostname, window.isSecureContext);
+  state.p2pSecureOk = hosts.isSecureForDirect(location.hostname, window.isSecureContext);
 
   // Upload
   if (state.uploadEnabled) {
@@ -546,7 +539,7 @@ function applyLifetimeDefaults() {
 }
 
 async function loadServerInfo() {
-  const { serverInfo: info } = await coreClient.connect({ timeoutMs: 5000 });
+  const { serverInfo: info } = await coreClient.server.connect({ timeoutMs: 5000 });
   state.info = info;
 
   const upload = info?.capabilities?.upload;
@@ -571,7 +564,7 @@ function lifetimeMsFromUI() {
   const unit = els.lifetimeUnit.value;
   if (unit === 'unlimited') return 0;
   const value = parseFloat(els.lifetimeValue.value);
-  return lifetimeToMs(value, unit);
+  return lifetime.toMs(value, unit);
 }
 
 function validateLifetimeInput() {
@@ -786,8 +779,7 @@ async function startStandardUpload() {
   if (maxBytes) {
     let totalEstimated = 0;
     for (const f of files) {
-      const totalChunks = Math.ceil(f.size / DEFAULT_CHUNK_SIZE);
-      totalEstimated += estimateTotalUploadSizeBytes(f.size, totalChunks, encrypt);
+      totalEstimated += sizes.estimateUpload(f.size, { encrypted: encrypt, chunkSize: state.info?.capabilities?.upload?.chunkSize });
     }
     if (totalEstimated > maxBytes) {
       if (state.p2pEnabled && state.p2pSecureOk) {
@@ -813,7 +805,7 @@ async function startStandardUpload() {
   showProgress({ title: 'Uploading', sub: 'Preparing...', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'cloud_upload', iconColor: 'text-primary' });
 
   try {
-    const upload = coreClient.uploadFiles({
+    const upload = coreClient.hosted.upload({
       files,
       encrypt,
       lifetimeMs,
@@ -944,7 +936,7 @@ async function startP2PSendFlow() {
   }
 
   els.tagline.textContent = 'Direct Transfer (P2P)';
-  state.p2pSession = await coreClient.p2pSend({
+  state.p2pSession = await coreClient.direct.send({
     file,
     Peer,
     onCode: (id) => {
@@ -1182,7 +1174,7 @@ function wireUI() {
 
     setDisabled(els.codeGo, true);
     try {
-      const result = await coreClient.resolveShareTarget(value, {
+      const result = await coreClient.links.resolve(value, {
         timeoutMs: 5000,
       });
       if (!result?.valid || !result?.target) {

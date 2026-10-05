@@ -6,15 +6,15 @@
 - Downloading files from Dropgate servers
 - Direct peer-to-peer file transfers (P2P)
 - Server capability detection and version checking
-- Utility functions for lifetime conversions, base64 encoding, and more
+- Helpers for lifetimes, upload sizes, file names, direct transfer codes and ZIP archives
 
 This package is **headless** and **environment-agnostic** — it contains no DOM manipulation, no browser-specific APIs, and no Node.js-specific code. All environment-specific concerns (loading PeerJS, handling file streams, etc.) are handled by the consumer.
 
 
 ## Contents
 
-* [Quick Start](quick-start.md): configuring a client, connecting, uploading (and file sources), downloading, metadata, and P2P transfers.
-* [API Reference](api-reference.md): the client's options, properties and methods, the upload handle, file sources, and every exported function, constant and class.
+* [Quick Start](quick-start.md): configuring a client, connecting, uploading (and file sources), metadata, downloading into a sink, what's running, links, and P2P transfers.
+* [API Reference](api-reference.md): the client's options and its calls by feature (`client.hosted`, `client.direct`, `client.links`, `client.server`, `client.operations`), operation handles, download sinks, metadata, file sources, and the helpers.
 * [Outcomes and Cancellation](outcomes.md): how an upload or a download ends, and the cancellation tree that cancels it.
 * [Errors](errors.md): the one error class, and the codes it carries.
 * [Browser Usage](browser-usage.md): loading core with a `<script>` tag or as an ES module.

@@ -11,7 +11,7 @@ An upload and a download each end with exactly one **outcome**, which says how i
 | `failed` | `error`: a [`DropgateError`](errors.md) | It stopped on an error |
 
 ```javascript
-const upload = client.uploadFiles({ files: myFile, lifetimeMs: 3600000 });
+const upload = client.hosted.upload({ files: myFile, lifetimeMs: 3600000 });
 const outcome = await upload.result;
 
 switch (outcome.status) {
@@ -31,7 +31,9 @@ A failed or cancelled outcome never holds a file name or a key, so it's safe to 
 
 Work that ends after a cancel, however it ends, is `cancelled`, even if a request then fails on the way out. Work that had already finished when the cancel came is `completed`: an upload the server has already saved can't be taken back by cancelling it.
 
-Calling an upload or a download with nothing to do (no files, or neither a `fileId` nor a `bundleId`) throws `INVALID_ARGUMENT` at once, since there's no operation for an outcome to describe.
+Calling an upload or a download with nothing to do (no files, or neither a `fileId` nor a `bundleId`), or a download without a sink that fits it, throws `INVALID_ARGUMENT` at once, since there's no operation for an outcome to describe.
+
+A download only completes once its sink has closed. A sink's `write()` or `close()` that fails fails the download, with `OUTPUT_WRITE_FAILED`, and a download that fails or is cancelled aborts its sink, so nothing half-written is finished as if it were whole.
 
 ## Cancellation
 
@@ -41,13 +43,13 @@ There are three ways to cancel an operation, and its `cancelled` outcome says wh
 
 | `cancellation.by` | `cancellation.source` | How |
 | --- | --- | --- |
-| `self` | `upload` | The upload's own `upload.cancel()` |
-| `parent` | `client` | The client's `cancelAll()`, which cancels everything running on it |
-| `signal` | `upload` or `download` | An `AbortSignal` passed in as `signal` was aborted |
+| `self` | `hosted.upload` or `hosted.download` | The operation's own `cancel()` |
+| `parent` | `client` | `client.operations.cancelAll()`, which cancels everything running on the client |
+| `signal` | `hosted.upload` or `hosted.download` | An `AbortSignal` passed in as `signal` was aborted |
 
-`source` names what was cancelled first: the operation itself, or the one it runs under.
+`source` names what was cancelled first: the operation itself, by its kind, or the client it runs under.
 
-A signal you pass in feeds into the operation's own node: aborting it cancels the operation as its own `cancel()` would. It doesn't replace that node, so `upload.cancel()` and `cancelAll()` still stop an upload that was given a signal. Cancelling never aborts your signal: it's yours.
+A signal you pass in feeds into the operation's own node: aborting it cancels the operation as its own `cancel()` would. It doesn't replace that node, so `upload.cancel()` and `client.operations.cancelAll()` still stop an upload that was given a signal. Cancelling never aborts your signal: it's yours.
 
 ```javascript
 // Cancel one upload:
@@ -55,13 +57,13 @@ upload.cancel();
 
 // Cancel every upload and download running on the client, such as when the app closes.
 // Each ends as { status: 'cancelled', cancellation: { by: 'parent', source: 'client' } }.
-client.cancelAll();
+client.operations.cancelAll();
 
 // Cancel an upload or a download with your own signal:
 const controller = new AbortController();
-const download = client.downloadFiles({ fileId, onData, signal: controller.signal });
+const download = client.hosted.download({ fileId, sink, signal: controller.signal });
 controller.abort();
-// (await download) is { status: 'cancelled', cancellation: { by: 'signal', source: 'download' } }
+// (await download.result) is { status: 'cancelled', cancellation: { by: 'signal', source: 'hosted.download' } }
 ```
 
 The client stays usable after `cancelAll()`: operations started afterwards run as normal. Once an operation has ended, cancelling it does nothing.

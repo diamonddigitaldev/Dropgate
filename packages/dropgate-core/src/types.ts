@@ -1,6 +1,7 @@
 import type { Outcome } from './outcome.js';
 import type { OperationHandle } from './operation.js';
 import type { UploadSource } from './source.js';
+import type { DownloadSinkOption } from './sink.js';
 
 /**
  * Server upload capabilities returned from the server info endpoint.
@@ -137,8 +138,8 @@ export type UploadOutcome = Outcome<UploadResult>;
 export type UploadStatus = 'initializing' | 'uploading' | 'completing' | Outcome<unknown>['status'];
 
 /**
- * The handle `uploadFiles()` gives: the upload's one outcome as `result`,
- * where it is as `snapshot` and through `subscribe()`, and `cancel()`.
+ * The handle `client.hosted.upload()` gives: the upload's one outcome as
+ * `result`, where it is as `snapshot` and through `subscribe()`, and `cancel()`.
  */
 export type UploadHandle = OperationHandle<UploadResult, UploadSnapshot>;
 
@@ -240,11 +241,10 @@ export interface ServerTarget {
 }
 
 /**
- * Options for uploading one or more files to the server.
- * Single files use the standard upload protocol. Multiple files use the bundle protocol.
- * Server connection is configured once in the DropgateClient constructor.
+ * Options for `client.hosted.upload()`: one or more files to upload to the
+ * server. One file is uploaded on its own; several are uploaded as a bundle.
  */
-export interface UploadFilesOptions {
+export interface UploadOptions {
   /** File(s) to upload: FileSources, or browser `File`s or `Blob`s, one or an array. */
   files: UploadSource | UploadSource[];
   /** File lifetime in milliseconds (0 = server default). */
@@ -283,23 +283,10 @@ export interface UploadFilesOptions {
 }
 
 /**
- * Options for fetching server information.
+ * Options for a request that isn't an operation: connecting, asking for the
+ * server's info, resolving a link, or reading an upload's metadata.
  */
-export interface GetServerInfoOptions {
-  /** Server URL string (e.g. 'https://dropgate.link') or ServerTarget object. */
-  server: string | ServerTarget;
-  /** Request timeout in milliseconds (default: 5000ms). */
-  timeoutMs?: number;
-  /** AbortSignal to cancel the request. */
-  signal?: AbortSignal;
-  /** Custom fetch implementation (uses global fetch by default). */
-  fetchFn?: FetchFn;
-}
-
-/**
- * Options for the connect() method on DropgateClient.
- */
-export interface ConnectOptions {
+export interface RequestOptions {
   /** Request timeout in milliseconds (default: 5000ms). */
   timeoutMs?: number;
   /** AbortSignal to cancel the request. */
@@ -307,7 +294,7 @@ export interface ConnectOptions {
 }
 
 /**
- * Options for validating upload inputs before starting an upload.
+ * Options for `client.hosted.validate()`: checking an upload against a server's limits before it starts.
  */
 export interface ValidateUploadOptions {
   /** File(s) to validate. */
@@ -320,110 +307,127 @@ export interface ValidateUploadOptions {
   serverInfo: ServerInfo;
 }
 
-/**
- * File metadata returned from the server.
- */
-export interface FileMetadata {
-  /** Whether the file is encrypted. */
-  isEncrypted: boolean;
-  /** File size in bytes (encrypted size if encrypted). */
-  sizeBytes: number;
-  /** Original filename (only for unencrypted files). */
-  filename?: string;
-  /** Encrypted filename (only for encrypted files). */
-  encryptedFilename?: string;
-}
+/** Which hosted upload: a single file by its ID, or a bundle by its ID. */
+export type HostedTarget = { fileId: string; bundleId?: undefined } | { bundleId: string; fileId?: undefined };
 
-/**
- * Download progress event.
- */
-export interface DownloadProgressEvent extends BaseProgressEvent {
-  /** Current phase of the download. */
-  phase: 'server-info' | 'server-compat' | 'metadata' | 'downloading' | 'decrypting' | 'zipping' | 'complete';
-  /** Human-readable status text. */
-  text?: string;
-  /** Index of the current file being downloaded (0-based). Only present for bundle downloads. */
-  fileIndex?: number;
-  /** Total number of files in the bundle. Only present for bundle downloads. */
-  totalFiles?: number;
-  /** Name of the current file being downloaded. Only present for bundle downloads. */
-  currentFileName?: string;
-}
-
-/**
- * Options for downloading one or more files.
- * Use `fileId` for single-file downloads or `bundleId` for multi-file bundle downloads.
- * Server connection is configured once in the DropgateClient constructor.
- */
-export interface DownloadFilesOptions {
-  /** File ID to download (for single-file downloads). */
-  fileId?: string;
-  /** Bundle ID to download (for multi-file bundle downloads). */
-  bundleId?: string;
-  /** Base64-encoded decryption key (required for encrypted files/bundles). */
+/** Options for `client.hosted.metadata()`. */
+export type MetadataOptions = HostedTarget & RequestOptions & {
+  /** The key from the link, after its #. Needed to read an encrypted upload's file names. */
   keyB64?: string;
-  /** If true and bundleId is set, streams all files as a single ZIP via onData. */
-  asZip?: boolean;
-  /** Filename for the generated ZIP (default: "dropgate-bundle.zip"). Only used with asZip. */
-  zipFilename?: string;
-  /** Callback for progress updates. */
-  onProgress?: (evt: DownloadProgressEvent) => void;
-  /** Callback for received data chunks (single-file or ZIP stream). Consumer handles writing. */
-  onData?: (chunk: Uint8Array) => Promise<void> | void;
-  /** Callback when a file download begins (bundle non-ZIP mode). Consumer opens a new write stream. */
-  onFileStart?: (file: { name: string; size: number; index: number }) => void;
-  /** Callback for received data chunks per file (bundle non-ZIP mode). */
-  onFileData?: (chunk: Uint8Array) => Promise<void> | void;
-  /** Callback when a file download ends (bundle non-ZIP mode). Consumer closes the write stream. */
-  onFileEnd?: (file: { name: string; index: number }) => void;
-  /** AbortSignal to cancel the download. */
-  signal?: AbortSignal;
-  /** Request timeout in milliseconds (default: 60000ms). */
-  timeoutMs?: number;
+};
+
+/** One file of a hosted upload, as its metadata describes it. */
+export interface HostedFileInfo {
+  /** The file's ID on the server. */
+  fileId: string;
+  /** The file's name, decrypted if it was encrypted. */
+  name: string;
+  /** The file's size in bytes, as it will be downloaded (decrypted). */
+  sizeBytes: number;
+}
+
+/** What `client.hosted.metadata()` gives for a single file. */
+export interface FileMetadata extends HostedFileInfo {
+  kind: 'file';
+  /** Whether the file is end-to-end encrypted. */
+  isEncrypted: boolean;
+}
+
+/** What `client.hosted.metadata()` gives for a bundle. */
+export interface BundleMetadata {
+  kind: 'bundle';
+  /** The bundle's ID on the server. */
+  bundleId: string;
+  /** Whether the bundle's files are end-to-end encrypted. */
+  isEncrypted: boolean;
+  /** Whether the list of files is encrypted too (sealed), so the server can't read which files belong to it. */
+  sealed: boolean;
+  /** The bundle's files, in order. */
+  files: HostedFileInfo[];
+  /** How many files the bundle has. */
+  fileCount: number;
+  /** The files' sizes added up, in bytes. */
+  totalSizeBytes: number;
+}
+
+/** What `client.hosted.metadata()` gives. */
+export type HostedMetadata = FileMetadata | BundleMetadata;
+
+/** The step a download is on. */
+export type DownloadPhase =
+  | 'server-info' | 'server-compat' | 'metadata' | 'file-start' | 'downloading' | 'complete' | 'done';
+
+/** Where a download is: one of the steps while it runs, then its outcome's status. */
+export type DownloadStatus = 'initializing' | 'downloading' | 'completing' | Outcome<unknown>['status'];
+
+/**
+ * Where a download is: what `handle.snapshot` holds and `subscribe()` gives.
+ * Like an upload's, it never holds a file name or a key; `fileIndex` says
+ * which of a bundle's files it's on.
+ */
+export interface DownloadSnapshot {
+  /** One of the steps while it runs, then its outcome's status. */
+  status: DownloadStatus;
+  /** The step it's on. `done` once it has completed; a cancelled or failed download keeps the step it stopped at. */
+  phase: DownloadPhase;
+  /** What it's doing, for people (such as "Downloading file 2 of 3..."). Never a file name. */
+  text: string;
+  /** Completion percentage (0-100). */
+  percent: number;
+  /** Bytes written to the sink so far. */
+  processedBytes: number;
+  /** Bytes of all the files together, once the metadata is in (0 until then). */
+  totalBytes: number;
+  /** Which file it's on (0-based), for a bundle. */
+  fileIndex?: number;
+  /** How many files, for a bundle. */
+  totalFiles?: number;
 }
 
 /**
- * Result of a file download.
+ * Options for `client.hosted.download()`: a single file by `fileId`, or a
+ * bundle by `bundleId`, and the sink its bytes are written to.
+ */
+export type DownloadOptions = HostedTarget & {
+  /**
+   * Where the bytes go: a sink, or a function giving one for each file as it
+   * starts (it's told the file's name and size). Required. A single file takes
+   * either; a bundle as a ZIP (`asZip`) takes a sink, and a bundle as separate
+   * files takes a function.
+   */
+  sink: DownloadSinkOption;
+  /** The key from the link, after its #. Required for an encrypted upload. */
+  keyB64?: string;
+  /** For a bundle: write its files into one ZIP archive, to the one sink. */
+  asZip?: boolean;
+  /**
+   * An AbortSignal that also cancels the download. Aborting it cancels the
+   * download as its handle's cancel() would, with the outcome `cancelled`, `by: 'signal'`.
+   */
+  signal?: AbortSignal;
+  /** Timeout for each request, and for each wait for the next bytes, in milliseconds (default: 60000ms; 0 for none). */
+  timeoutMs?: number;
+};
+
+/**
+ * What a completed download gives.
  */
 export interface DownloadResult {
-  /** Decrypted filename (for single-file downloads). */
+  /** The file's name, decrypted if it was encrypted (for a single file). */
   filename?: string;
-  /** Decrypted filenames (for bundle downloads). */
+  /** The files' names, decrypted if they were encrypted (for a bundle). */
   filenames?: string[];
-  /** Total bytes received across all files. */
+  /** Bytes written to the sink, across all the files. */
   receivedBytes: number;
   /** Whether the file(s) were encrypted. */
   wasEncrypted: boolean;
-  /** The file data (only for small single files when onData callback was not provided). */
-  data?: Uint8Array;
 }
 
 /** How a download ended: `completed` with its DownloadResult, `cancelled`, or `failed`. */
 export type DownloadOutcome = Outcome<DownloadResult>;
 
 /**
- * Bundle metadata returned from the server.
+ * The handle `client.hosted.download()` gives: the download's one outcome as
+ * `result`, where it is as `snapshot` and through `subscribe()`, and `cancel()`.
  */
-export interface BundleMetadata {
-  /** Whether the bundle files are encrypted. */
-  isEncrypted: boolean;
-  /** Total size of all files in bytes. */
-  totalSizeBytes: number;
-  /** Number of files in the bundle. */
-  fileCount: number;
-  /** Whether the bundle manifest is encrypted (sealed). Only the downloader can read the file list. */
-  sealed?: boolean;
-  /** Base64-encoded encrypted manifest blob (only present for sealed bundles). */
-  encryptedManifest?: string;
-  /** Individual file metadata entries. Populated from server for unsealed bundles, or from decrypted manifest for sealed bundles. */
-  files: Array<{
-    /** File ID for downloading this individual file. */
-    fileId: string;
-    /** File size in bytes (encrypted size if encrypted). */
-    sizeBytes: number;
-    /** Original filename (only for unencrypted files). */
-    filename?: string;
-    /** Encrypted filename (only for encrypted files). */
-    encryptedFilename?: string;
-  }>;
-}
+export type DownloadHandle = OperationHandle<DownloadResult, DownloadSnapshot>;

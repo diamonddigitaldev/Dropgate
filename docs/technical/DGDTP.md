@@ -109,7 +109,7 @@ An honest server has **no visibility** into data channel content once the WebRTC
 
 ### 4.4 Secure Context Requirement
 
-The Dropgate Web UI only allows direct transfers in a secure context (HTTPS or `localhost`). This is Dropgate's own check, using the core library's `isSecureContextForP2P()` helper, not a browser restriction on WebRTC; the core library does not enforce it itself. The signalling server MUST be accessed over HTTPS in production. The `proxied: true` flag is set on the PeerJS server to indicate it operates behind a TLS-terminating reverse proxy.
+The Dropgate Web UI only allows direct transfers in a secure context (HTTPS or `localhost`). This is Dropgate's own check, using the core library's `hosts.isSecureForDirect()` helper, not a browser restriction on WebRTC; the core library does not enforce it itself. The signalling server MUST be accessed over HTTPS in production. The `proxied: true` flag is set on the PeerJS server to indicate it operates behind a TLS-terminating reverse proxy.
 
 ---
 
@@ -400,7 +400,7 @@ Only after receiving the `file_end_ack` does the sender proceed to the next file
 
 ### 10.3 Browser-Side ZIP Streaming
 
-When a multi-file transfer is received in a browser, the Web UI creates a streaming ZIP archive. Each file's chunks are piped through a `StreamingZipWriter` and ultimately saved as a single `.zip` download.
+When a multi-file transfer is received in a browser, the Web UI creates a streaming ZIP archive. Each file's chunks are piped through the core library's streaming ZIP writer (`zip.writer()`) and ultimately saved as a single `.zip` download.
 
 ---
 

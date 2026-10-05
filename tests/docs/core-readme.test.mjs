@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { errorCodes, productFiles, stripScriptComments } from './helpers/code.mjs';
 import {
-    CONTENTS, CONTENTS_URL, DOCS, README, exportedValues, importedNames, readmeProblems, unlistedPages,
+    CONTENTS, CONTENTS_URL, DOCS, README, coreShape, exportedValues, importedNames, readmeProblems, unknownCalls, unlistedPages,
 } from './helpers/core-readme.mjs';
 import { errorCodeTableEntries } from './helpers/docs.mjs';
 import { isFile, markdownFiles, read } from './helpers/repo.mjs';
@@ -39,6 +39,20 @@ test('the README\'s example only imports what core exports', () => {
             .filter(({ name, from }) => !entryPoints[from] || !exportedValues(stripScriptComments(read(entryPoints[from]))).has(name))
             .map(({ name, from }) => `${name}, from ${from}`),
         `${README} imports these, but core doesn't export them:`,
+    );
+});
+
+// Core's calls are by feature, client.hosted.upload(), and its helpers by
+// group, lifetime.toMs(). A call the docs name that core doesn't have, such as
+// one renamed, fails here, in the README npm shows and in every other page.
+test('the docs only call what core has: each client.feature.method() and group.name()', async () => {
+    const shape = await coreShape();
+    assert.ok(Object.keys(shape.features).includes('hosted'), 'expected a client to have client.hosted');
+    assert.ok(Object.keys(shape.helpers).includes('lifetime'), 'expected core to have its lifetime helpers');
+    const named = markdownFiles.filter((file) => file === README || file.startsWith('docs/'));
+    expectNone(
+        named.flatMap((file) => unknownCalls(read(file), shape).map((problem) => `${file}, ${problem}`)),
+        'These name a call core doesn\'t have:',
     );
 });
 
@@ -110,6 +124,24 @@ test('a page the contents don\'t list is found', () => {
     const contents = '* [Quick Start](quick-start.md)\n* [Errors](./errors.md#codes)';
     const all = [CONTENTS, `${DOCS}/quick-start.md`, `${DOCS}/errors.md`, `${DOCS}/p2p.md`];
     assert.deepEqual(unlistedPages(contents, all), [`${DOCS}/p2p.md`]);
+});
+
+test('a call core doesn\'t have is found, on a client or a helper group', () => {
+    const shape = { features: { hosted: ['upload'], server: ['connect'] }, helpers: { lifetime: ['toMs'] } };
+    const markdown = [
+        'await client.hosted.upload(opts).result; client.server.connect();',
+        'lifetime.toMs(1, \'hours\'); `<group>.<name>()`; `client.<feature>.<method>()`',
+        'client.uploadFiles(opts);',
+        'client.hosted.uploadFiles(opts);',
+        'client.links.resolve(value);',
+        'lifetime.toSeconds(1);',
+    ].join('\n');
+    assert.deepEqual(unknownCalls(markdown, shape).map((problem) => problem.split(' (')[0]), [
+        'line 3: client.uploadFiles()',
+        'line 4: client.hosted.uploadFiles()',
+        'line 5: client.links.resolve()',
+        'line 6: lifetime.toSeconds()',
+    ]);
 });
 
 test('an import core doesn\'t export is found', () => {

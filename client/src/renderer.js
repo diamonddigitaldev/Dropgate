@@ -1,4 +1,4 @@
-import { DropgateClient, lifetimeToMs } from './dropgate-core.js';
+import { DropgateClient, lifetime } from './dropgate-core.js';
 
 // The page: Dropgate's Upload section and its Server tab, in the kit's frame
 // (kit.ui.mountShell()): the nav rail, the header, and the Settings view, with
@@ -215,10 +215,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 // Recreate client with current URL (includes HTTP fallback)
                 createClient(serverUrl);
-                await coreClient.connect({ timeoutMs: 5000 });
+                await coreClient.server.connect({ timeoutMs: 5000 });
 
-                const { secure } = coreClient.serverTarget;
-                if (secure) {
+                if (coreClient.server.baseUrl.startsWith('https://')) {
                     connectionStatus.textContent = 'Connection successful (HTTPS).';
                     connectionStatus.className = 'form-text reserved text-success-emphasis';
                 } else {
@@ -227,8 +226,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
 
                 // Update input to reflect resolved URL (may have changed due to HTTP fallback)
-                serverUrlInput.value = coreClient.baseUrl;
-                await saveServer(coreClient.baseUrl);
+                serverUrlInput.value = coreClient.server.baseUrl;
+                await saveServer(coreClient.server.baseUrl);
 
                 await checkServerCompatibility();
             } catch (error) {
@@ -478,7 +477,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
 
-            const isTargetSecure = coreClient?.baseUrl?.startsWith('https://') ?? false;
+            const isTargetSecure = coreClient?.server.baseUrl.startsWith('https://') ?? false;
             const hasE2EE = serverCapabilities?.upload?.e2ee && isTargetSecure;
 
             // Check if E2EE is available - show warning if not
@@ -516,7 +515,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             try {
                 const files = [...selectedFiles];
-                const upload = coreClient.uploadFiles({
+                const upload = coreClient.hosted.upload({
                     files: files.length === 1 ? files[0] : files,
                     lifetimeMs,
                     maxDownloads: (() => {
@@ -588,7 +587,7 @@ document.addEventListener('DOMContentLoaded', async () => {
          */
         function updateSecurityStatus() {
             // What counts is the server's address: its capability, and whether it's reached over HTTPS.
-            const isTargetSecure = coreClient?.baseUrl?.startsWith('https://') ?? false;
+            const isTargetSecure = coreClient?.server.baseUrl.startsWith('https://') ?? false;
             const hasE2EE = serverCapabilities?.upload?.e2ee && isTargetSecure;
 
             if (hasE2EE) {
@@ -631,7 +630,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const unit = fileLifetimeUnitSelect.value;
             if (unit === 'unlimited') return 0;
             const value = parseFloat(fileLifetimeValueInput.value);
-            return lifetimeToMs(value, unit);
+            return lifetime.toMs(value, unit);
         }
 
         async function checkServerCompatibility() {
@@ -646,10 +645,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 // Recreate client if URL changed (client handles HTTP fallback internally)
                 createClient(inputUrl);
-                const compat = await coreClient.connect({ timeoutMs: 5000 });
+                const compat = await coreClient.server.connect({ timeoutMs: 5000 });
 
                 // Update input to reflect resolved URL (may have changed due to HTTP fallback or protocol auto-detect)
-                serverUrlInput.value = coreClient.baseUrl;
+                serverUrlInput.value = coreClient.server.baseUrl;
 
                 const { serverInfo } = compat;
 

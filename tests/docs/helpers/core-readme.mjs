@@ -7,6 +7,7 @@
 // planted mistakes as well as on the real files.
 import path from 'node:path';
 import { parseMarkdown } from './markdown.mjs';
+import { read } from './repo.mjs';
 
 export const README = 'packages/dropgate-core/README.md';
 export const DOCS = 'docs/core';
@@ -94,6 +95,55 @@ export function importedNames(markdown) {
         }
     }
     return found;
+}
+
+/**
+ * What core's client and helpers have, from core's build as the web UI
+ * carries it (core's own tests check that copy is the build): each feature of
+ * a client, such as `hosted`, with its calls, and each helper group, such as
+ * `lifetime`, with its helpers. Nothing makes a request: a client is only made
+ * to look at it.
+ */
+export async function coreShape() {
+    const source = read('server/public/js/dropgate-core.js');
+    const core = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+    const client = new core.DropgateClient({
+        clientVersion: '0.0.0',
+        server: 'https://docs.example',
+        fetchFn: () => { throw new Error('The docs checks make no requests.'); },
+    });
+    const groups = (owner) => Object.fromEntries(Object.entries(owner)
+        .filter(([, value]) => value && typeof value === 'object' && Object.isFrozen(value) && !Array.isArray(value))
+        .map(([name, value]) => [name, Object.keys(value)]));
+    return { features: groups(client), helpers: groups(core) };
+}
+
+/**
+ * The calls a Markdown file names on a client (`client.feature.method()`) or
+ * on one of core's helper groups (`group.name()`) that core doesn't have, one
+ * line per problem, with its line.
+ * @param {string} markdown
+ * @param {{ features: Record<string, string[]>, helpers: Record<string, string[]> }} shape - From coreShape().
+ */
+export function unknownCalls(markdown, { features, helpers }) {
+    const problems = [];
+    const has = (groups, group, name) => Object.hasOwn(groups, group) && groups[group].includes(name);
+    markdown.split(/\r?\n/).forEach((text, i) => {
+        const at = `line ${i + 1}`;
+        for (const [, feature, method] of text.matchAll(/\bclient\.([A-Za-z_$][\w$]*)(?:\.([A-Za-z_$][\w$]*))?\s*\(/g)) {
+            if (method === undefined) {
+                problems.push(`${at}: client.${feature}() (a client's calls are by feature, such as client.hosted.upload(): ${Object.keys(features).join(', ')})`);
+            } else if (!has(features, feature, method)) {
+                problems.push(`${at}: client.${feature}.${method}() (${Object.hasOwn(features, feature) ? `client.${feature} has ${features[feature].join(', ')}` : `a client has no ${feature}`})`);
+            }
+        }
+        const groupNames = Object.keys(helpers).map((name) => name.replace(/\$/g, '\\$')).join('|');
+        if (!groupNames) return;
+        for (const [, group, name] of text.matchAll(new RegExp(`(?<![\\w$.])(${groupNames})\\.([A-Za-z_$][\\w$]*)\\s*\\(`, 'g'))) {
+            if (!has(helpers, group, name)) problems.push(`${at}: ${group}.${name}() (${group} has ${helpers[group].join(', ')})`);
+        }
+    });
+    return problems;
 }
 
 /** The names a TypeScript entry point exports as values, not types. */
