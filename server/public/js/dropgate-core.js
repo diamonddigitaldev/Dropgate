@@ -848,6 +848,36 @@ function makeAbortSignal(parentSignal, timeoutMs) {
     }
   };
 }
+function makeWaitSignal(parentSignal, timeoutMs) {
+  const controller = new AbortController();
+  const abort = (reason) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+  const onParentAbort = () => abort(parentSignal.reason);
+  if (parentSignal.aborted) abort(parentSignal.reason);
+  else parentSignal.addEventListener("abort", onParentAbort, { once: true });
+  const timed = Number.isFinite(timeoutMs) && timeoutMs > 0;
+  let timeoutId = null;
+  const stopTimer = () => {
+    if (timeoutId) clearTimeout(timeoutId);
+    timeoutId = null;
+  };
+  return {
+    signal: controller.signal,
+    async waiting(start) {
+      if (timed) timeoutId = setTimeout(() => abort(new DropgateError({ code: "TIMED_OUT" })), timeoutMs);
+      try {
+        return await start();
+      } finally {
+        stopTimer();
+      }
+    },
+    cleanup: () => {
+      stopTimer();
+      parentSignal.removeEventListener("abort", onParentAbort);
+    }
+  };
+}
 async function fetchJson(fetchFn, url, opts = {}) {
   const { timeoutMs, signal, ...rest } = opts;
   const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
@@ -1599,7 +1629,7 @@ async function startP2PSend(opts) {
         case "cancelled":
           if (state === "cancelled" || state === "closed" || state === "completed") return;
           transitionTo("cancelled");
-          onCancel?.({ cancelledBy: "receiver", message: msg.reason });
+          onCancel?.({ cancelledBy: "receiver" });
           cleanup();
           break;
       }
@@ -2190,7 +2220,7 @@ async function startP2PReceive(opts) {
           case "cancelled":
             if (state === "cancelled" || state === "closed" || state === "completed") return;
             transitionTo("cancelled");
-            onCancel?.({ cancelledBy: "sender", message: msg.reason });
+            onCancel?.({ cancelledBy: "sender" });
             cleanup();
             break;
         }
@@ -3128,8 +3158,9 @@ var DropgateClient = class {
     };
   }
   _validate(opts) {
-    const { files: rawFiles, lifetimeMs, encrypt, serverInfo } = opts;
+    const { files: rawFiles, lifetimeMs, serverInfo } = opts;
     const caps = serverInfo?.capabilities?.upload;
+    const encrypt = opts.encrypt ?? Boolean(caps?.e2ee);
     if (!caps || !caps.enabled) {
       throw new DropgateError({
         code: "CAPABILITY_UNSUPPORTED",
@@ -3158,7 +3189,7 @@ var DropgateClient = class {
         const estimatedBytes = estimateTotalUploadSizeBytes(
           fileSize,
           totalChunks,
-          Boolean(encrypt)
+          encrypt
         );
         if (estimatedBytes > limitBytes) {
           const msg = encrypt ? `File at index ${i} too large once encryption overhead is included. Server limit: ${maxMB} MB.` : `File at index ${i} too large. Server limit: ${maxMB} MB.`;
@@ -3638,7 +3669,7 @@ var DropgateClient = class {
    */
   async _streamFile(fileId, opts, deliverChunk, onBytesDelivered) {
     const { baseUrl, isEncrypted, cryptoKey, compat, signal, timeoutMs } = opts;
-    const { signal: downloadSignal, cleanup: downloadCleanup } = makeAbortSignal(signal, timeoutMs);
+    const { signal: downloadSignal, waiting, cleanup: downloadCleanup } = makeWaitSignal(signal, timeoutMs);
     let deliveredBytes = 0;
     let stopWatching = () => {
     };
@@ -3653,10 +3684,10 @@ var DropgateClient = class {
     try {
       let downloadRes;
       try {
-        downloadRes = await this.fetchFn(`${baseUrl}/api/file/${encodeURIComponent(fileId)}`, {
+        downloadRes = await waiting(() => this.fetchFn(`${baseUrl}/api/file/${encodeURIComponent(fileId)}`, {
           method: "GET",
           signal: downloadSignal
-        });
+        }));
       } catch (err2) {
         throw toDropgateError(err2, "SERVER_UNREACHABLE");
       }
@@ -3670,7 +3701,7 @@ var DropgateClient = class {
       downloadSignal.addEventListener("abort", cancelRead, { once: true });
       stopWatching = () => downloadSignal.removeEventListener("abort", cancelRead);
       const read = async () => {
-        const next = await step("CONNECTION_LOST", () => reader.read());
+        const next = await step("CONNECTION_LOST", () => waiting(() => reader.read()));
         if (downloadSignal.aborted) throw downloadSignal.reason;
         return next;
       };

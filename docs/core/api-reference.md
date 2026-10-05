@@ -22,6 +22,16 @@ The constructor throws a [`DropgateError`](errors.md): `INVALID_ARGUMENT` for a 
 
 Core does its own encryption, with the Web Crypto API: there's no option for it. Where a page has no `crypto.subtle` (one served over plain HTTP from another machine), random numbers and hashing still work, so unencrypted uploads and direct transfer codes do, but encrypting or decrypting fails with `RUNTIME_UNSUPPORTED`.
 
+### Members
+
+| Member | Description |
+| --- | --- |
+| `hosted`, `direct`, `links`, `server`, `operations` | The client's calls, by feature (below) |
+| `appInfo` | The `appInfo` it was given, frozen, or `undefined` |
+| `chunkSize` | The upload chunk size it falls back on, in bytes |
+| `fetchFn` | The fetch it makes every request with: yours or the global one, always with `credentials: 'omit'` and `redirect: 'manual'` |
+| `base64` | Its base64 encoder and decoder |
+
 ### Versions
 
 Core knows its own version, and the version of each protocol it speaks; nobody types one in.
@@ -73,11 +83,11 @@ Uploads to the server, and downloads from it.
 | `upload(opts)` | Upload one or more files, encrypted if the server supports it unless `encrypt: false`. Several files are uploaded as a bundle, under one link. Gives the upload's [handle](#operation-handles) at once |
 | `download(opts)` | Download a file (`fileId`) or a bundle (`bundleId`) into a [sink](#download-sinks), decrypting it with `keyB64` if it was encrypted. Gives the download's [handle](#operation-handles) at once |
 | `metadata(opts)` | What the server holds about a file (`fileId`) or a bundle (`bundleId`): the files' names and sizes, with the names decrypted with `keyB64` if it was encrypted ([below](#metadata)) |
-| `validate(opts)` | Check files and settings against a server's limits (`files`, `lifetimeMs`, `encrypt`, and the `serverInfo` from `client.server.connect()`), as `upload()` does before it starts |
+| `validate(opts)` | Check files and settings against a server's limits (`files`, `lifetimeMs`, `encrypt`, and the `serverInfo` from `client.server.connect()`), as `upload()` does before it starts, and give `true`. Left out, `encrypt` is what `upload()` would do: encrypted where the server supports it |
 
-`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for the server's unlimited, where allowed), and optionally `encrypt`, `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs`, `initMs`, `chunkMs`, `completeMs`) and `retry` (`retries`, `backoffMs`, `maxBackoffMs`, for each chunk). Its completed value, an `UploadResult`, holds `downloadUrl` (with the key after its `#` if it was encrypted), `fileId` or `bundleId`, `baseUrl`, `keyB64` if it was encrypted, for a bundle `files`, and `transport`.
+`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for unlimited, where the server allows it), and optionally `encrypt` (default: encrypted where the server supports it), `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs` 5000, `initMs` 15000, `chunkMs` 60000 for each chunk, `completeMs` 30000) and `retry` (`retries` 5, `backoffMs` 1000, `maxBackoffMs` 30000, for each chunk). Its completed value, an `UploadResult`, holds `downloadUrl` (with the key after its `#` if it was encrypted), `baseUrl`, `keyB64` if it was encrypted, and `transport`; for one file, `fileId` and `uploadId` (the server's upload session); for a bundle, `bundleId` and `files` (each `fileId`, `name` and `size`).
 
-`download()` takes `fileId` or `bundleId`, `sink`, and optionally `keyB64`, `asZip` (a bundle as one ZIP archive), `signal`, and `timeoutMs` (for each request, each file's download included; default 60000, and 0 for none). Its completed value, a `DownloadResult`, holds `filename` (a file) or `filenames` (a bundle), `receivedBytes`, `wasEncrypted` and `transport`.
+`download()` takes `fileId` or `bundleId`, `sink`, and optionally `keyB64`, `asZip` (a bundle as one ZIP archive), `signal`, and `timeoutMs`: how long each wait may take, for the server's answer and then for each file's next bytes (default 60000, and 0 for none). A big file never times out for taking long, only if it stalls, and time spent writing to the sink never counts. Its completed value, a `DownloadResult`, holds `filename` (a file) or `filenames` (a bundle), `receivedBytes`, `wasEncrypted` and `transport`.
 
 `upload()` and `download()` throw `INVALID_ARGUMENT` at once, before anything starts, for no files, something that isn't a file, neither a `fileId` nor a `bundleId`, or a sink that doesn't fit. After that, they report how they ended in their [outcome](outcomes.md), and never throw. `metadata()` and `validate()` throw a [`DropgateError`](errors.md).
 
@@ -92,11 +102,41 @@ Direct transfers, from one device to another. See [P2P Consumer Responsibilities
 
 They throw a [`DropgateError`](errors.md): `CAPABILITY_UNSUPPORTED` if the server has direct transfer turned off, and `VERSION_UNSUPPORTED` if its DGDTP doesn't work with this client's. The session each gives, and every event given to its `on...` listeners, carry `transport`, and so does every error given to `onError`.
 
+Direct transfers keep their Dropgate 3 shape, with listeners rather than a [handle](#operation-handles), until a later 4.x version moves them onto handles and outcomes, as hosted transfers are.
+
+`send()` takes `file` (a browser `File`, or an array of them) and `Peer` (PeerJS's `Peer` class), and optionally:
+
+| Option | Description |
+| --- | --- |
+| `onCode(code, attempt)` | The code to give the receiver, once the sender is registered |
+| `onStatus({ phase, message })`, `onProgress({ processedBytes, totalBytes, percent })` | Where it is |
+| `onComplete()`, `onCancel({ cancelledBy })`, `onError(err)`, `onDisconnect()` | How it ended |
+| `onConnectionHealth({ iceConnectionState, rtt?, bufferedAmount?, lastActivityMs })` | The connection's health, while it runs |
+| `codeGenerator()` | Makes the code instead of `codes.generate()`; `maxAttempts` is how many codes to try if one is taken (4) |
+| `chunkSize`, `endAckTimeoutMs`, `bufferHighWaterMark`, `bufferLowWaterMark`, `heartbeatIntervalMs` (5000, 0 for none), `chunkAcknowledgments` (true), `maxUnackedChunks` (64), `iceRestartTimeoutMs` (10000) | Tuning |
+
+Its session has `code`, `sessionId`, `peer`, `stop()`, `getStatus()`, `getBytesSent()` and `getConnectedPeerId()`.
+
+`receive()` takes `code` and `Peer`, and optionally:
+
+| Option | Description |
+| --- | --- |
+| `onMeta({ name, total, fileCount?, files?, totalSize?, sendReady? })` | What's being sent, before any of it. With `autoReady: false`, call `sendReady()` to start |
+| `onData(chunk)` | Each chunk received. Return a promise to hold the sender back until it's written |
+| `onFileStart({ fileIndex, name, size })`, `onFileEnd({ fileIndex, receivedBytes })` | Each file of several |
+| `onStatus`, `onProgress`, `onComplete({ received, total })`, `onCancel({ cancelledBy })`, `onError(err)`, `onDisconnect()` | As `send()`'s |
+| `autoReady` | Start as soon as `onMeta` has run (default `true`) |
+| `watchdogTimeoutMs` | Fail if no file data arrives for this long once the transfer has started (default 30000, 0 for none) |
+
+Its session has `peer`, `stop()`, `getStatus()`, `getBytesReceived()`, `getTotalBytes()` and `getSessionId()`. `onCancel` says only who cancelled (`sender` or `receiver`): what the other device said, if anything, isn't passed on. Every name received is checked by the [file name rule](quick-start.md#file-names); save it under `filenames.sanitize(name)`.
+
 ### client.links
 
 | Method | Description |
 | --- | --- |
-| `resolve(value, opts?)` | Resolve a sharing code or link someone typed or pasted. A link is read on the device, and only the ID or code in it is sent: never anything after its `#` (the encryption key), which comes back on the end of `target`. A link to another server is refused without a request. The result, valid or not, carries `transport` |
+| `resolve(value, opts?)` | Resolve a sharing code or link someone typed or pasted. A link is read on the device, and only the ID or code in it is sent: never anything after its `#` (the encryption key), which comes back on the end of `target`. A link to another server is refused without a request |
+
+Its result has `valid`, and `transport`, valid or not. A valid one has `type` (`file`, `bundle` or `p2p`) and `target`, the path to open on the server (such as `/b/<id>#<key>`); one that isn't has `reason`, for people. It throws `VERSION_UNSUPPORTED` if the server's DGUP doesn't work with this client's, or a request's error if the lookup fails.
 
 ### client.server
 
@@ -110,7 +150,17 @@ They throw a [`DropgateError`](errors.md): `CAPABILITY_UNSUPPORTED` if the serve
 
 `connect()` gives `dgup` and `dgdtp` (each `compatible`, `client` and `server` versions, `update` when they don't work together, and a `message`), `serverVersion`, `serverInfo`, `baseUrl` and `transport`. A server that doesn't work with this client still connects: the calls that need it fail with `VERSION_UNSUPPORTED` ([Versions](#versions)). `info()` gives the server's info with `transport`. Both throw a [`DropgateError`](errors.md) when the server can't be reached, redirects, or doesn't answer as a Dropgate server does.
 
-The calls that make a request take `opts`: `timeoutMs` (default 5000) and `signal`.
+`connect()`, `info()`, `client.links.resolve()` and `client.hosted.metadata()` each take `timeoutMs` (default 5000) and `signal`.
+
+The server's info (`ServerInfo`) is what it gives in `/api/info`:
+
+| Field | Description |
+| --- | --- |
+| `name`, `version` | The server's name, and its own version, for display |
+| `protocols` | `{ dgup, dgdtp }`, each `{ major, minor }` ([Versions](#versions)) |
+| `capabilities.upload` | `enabled`, `maxSizeMB` (0 for no limit), `maxLifetimeHours` (0 for unlimited), `maxFileDownloads` (the most an upload's `maxDownloads` may be, and what it is when left out; 0 for no limit), `e2ee`, `chunkSize` in bytes, and `credentialRequired` ([Credentials](#credentials)) |
+| `capabilities.p2p` | `enabled`, `peerjsPath` and `iceServers`, for direct transfers |
+| `capabilities.webUI` | `enabled` |
 
 ### client.operations
 

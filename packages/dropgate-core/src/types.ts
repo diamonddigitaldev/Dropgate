@@ -309,7 +309,7 @@ export interface ServerTarget {
 export interface UploadOptions {
   /** File(s) to upload: FileSources, or browser `File`s or `Blob`s, one or an array. */
   files: UploadSource | UploadSource[];
-  /** File lifetime in milliseconds (0 = server default). */
+  /** File lifetime in milliseconds (0 = unlimited, where the server allows it). */
   lifetimeMs: number;
   /** Whether to encrypt the file(s) with E2EE. Defaults to true if server supports E2EE. */
   encrypt?: boolean;
@@ -473,7 +473,12 @@ export type DownloadOptions = HostedTarget & {
    * download as its handle's cancel() would, with the outcome `cancelled`, `by: 'signal'`.
    */
   signal?: AbortSignal;
-  /** Timeout for each request, and for each wait for the next bytes, in milliseconds (default: 60000ms; 0 for none). */
+  /**
+   * How long each wait may take, in milliseconds: for each request's answer,
+   * and then for each file's next bytes (default: 60000ms; 0 for none). A big
+   * file never times out for taking long, only if it stalls, and time spent
+   * writing to the sink never counts.
+   */
   timeoutMs?: number;
 };
 

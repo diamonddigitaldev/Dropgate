@@ -42,7 +42,7 @@ import type {
   P2PReceiveSession,
 } from '../p2p/types.js';
 import { getDefaultFetch, getDefaultBase64 } from '../adapters/defaults.js';
-import { makeAbortSignal, fetchJson, sleep, buildBaseUrl, parseServerUrl } from '../utils/network.js';
+import { makeAbortSignal, makeWaitSignal, fetchJson, sleep, buildBaseUrl, parseServerUrl } from '../utils/network.js';
 import type { FetchJsonOptions, FetchJsonResult } from '../utils/network.js';
 import { parseShareInput } from '../utils/share-link.js';
 import { validateFilename, sanitizeFilename, uniqueFilename } from '../utils/filename.js';
@@ -657,8 +657,10 @@ export class DropgateClient {
   }
 
   private _validate(opts: ValidateUploadOptions): true {
-    const { files: rawFiles, lifetimeMs, encrypt, serverInfo } = opts;
+    const { files: rawFiles, lifetimeMs, serverInfo } = opts;
     const caps = serverInfo?.capabilities?.upload;
+    // As upload() does: encrypted unless told otherwise, where the server supports it.
+    const encrypt = opts.encrypt ?? Boolean(caps?.e2ee);
 
     if (!caps || !caps.enabled) {
       throw new DropgateError({
@@ -693,7 +695,7 @@ export class DropgateClient {
         const estimatedBytes = estimateTotalUploadSizeBytes(
           fileSize,
           totalChunks,
-          Boolean(encrypt)
+          encrypt
         );
         if (estimatedBytes > limitBytes) {
           const msg = encrypt
@@ -1257,7 +1259,9 @@ export class DropgateClient {
     onBytesDelivered: (deliveredBytes: number) => void,
   ): Promise<number> {
     const { baseUrl, isEncrypted, cryptoKey, compat, signal, timeoutMs } = opts;
-    const { signal: downloadSignal, cleanup: downloadCleanup } = makeAbortSignal(signal, timeoutMs);
+    // The timeout is on each wait, for the answer and then for the next bytes,
+    // so a big file never times out just for taking long, and a slow sink never counts.
+    const { signal: downloadSignal, waiting, cleanup: downloadCleanup } = makeWaitSignal(signal, timeoutMs);
     let deliveredBytes = 0;
     let stopWatching = (): void => { };
 
@@ -1275,9 +1279,9 @@ export class DropgateClient {
     try {
       let downloadRes: Response;
       try {
-        downloadRes = await this.fetchFn(`${baseUrl}/api/file/${encodeURIComponent(fileId)}`, {
+        downloadRes = await waiting(() => this.fetchFn(`${baseUrl}/api/file/${encodeURIComponent(fileId)}`, {
           method: 'GET', signal: downloadSignal,
-        });
+        }));
       } catch (err) {
         throw toDropgateError(err, 'SERVER_UNREACHABLE');
       }
@@ -1291,7 +1295,7 @@ export class DropgateClient {
       downloadSignal.addEventListener('abort', cancelRead, { once: true });
       stopWatching = () => downloadSignal.removeEventListener('abort', cancelRead);
       const read = async () => {
-        const next = await step('CONNECTION_LOST', () => reader.read());
+        const next = await step('CONNECTION_LOST', () => waiting(() => reader.read()));
         if (downloadSignal.aborted) throw downloadSignal.reason;
         return next;
       };

@@ -614,7 +614,8 @@ export async function startP2PSend(opts: P2PSendOptions): Promise<P2PSendSession
         case 'cancelled':
           if (state === 'cancelled' || state === 'closed' || state === 'completed') return;
           transitionTo('cancelled');
-          onCancel?.({ cancelledBy: 'receiver', message: msg.reason });
+          // What the receiver said isn't passed on: it could say anything.
+          onCancel?.({ cancelledBy: 'receiver' });
           cleanup();
           break;
       }

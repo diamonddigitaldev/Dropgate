@@ -912,6 +912,75 @@ describe('Hosted download into a sink', () => {
     }
     expect(secrets.filter((piece) => allSent(server).includes(piece)), 'the key or the name reached the server').toEqual([]);
   });
+
+  it('times each wait, not the whole download: a file that keeps arriving completes, however long it takes, and a slow sink never counts', async () => {
+    const server = fakeServer();
+    server.answer(`GET /api/file/${FILE_ID}/meta`, () => server.json(200, { isEncrypted: false, sizeBytes: 16, filename: 'notes.txt' }));
+    server.answer(`GET /api/file/${FILE_ID}`, () => {
+      let sent = 0;
+      return new Response(new ReadableStream({
+        async pull(controller) {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          if (sent === 4) {
+            controller.close();
+            return;
+          }
+          sent += 1;
+          controller.enqueue(new Uint8Array(4));
+        },
+      }));
+    });
+    const opened = recordingSink();
+    const write = opened.sink.write;
+    opened.sink.write = async (chunk) => {
+      write(chunk);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    };
+
+    const started = Date.now();
+    const outcome = await createClient(server.fetchFn).hosted.download({ fileId: FILE_ID, sink: opened.sink, timeoutMs: 100 }).result;
+    expect(codeOf(outcome)).toBe('completed');
+    expect(Date.now() - started, 'the whole download took longer than timeoutMs').toBeGreaterThan(400);
+    expect(opened.log).toEqual(['sink write 4', 'sink write 4', 'sink write 4', 'sink write 4', 'sink close']);
+  });
+
+  it('fails TIMED_OUT when the answer or the next bytes take longer than timeoutMs, and aborts its sink', async () => {
+    for (const [answer, log] of [
+      [endlessBody, ['sink write 4', 'sink abort TIMED_OUT']],
+      [noAnswer, ['sink abort TIMED_OUT']],
+    ] as const) {
+      const server = fakeServer();
+      server.answer(`GET /api/file/${FILE_ID}`, answer);
+      const opened = recordingSink();
+      const outcome = await createClient(server.fetchFn).hosted.download({ fileId: FILE_ID, sink: opened.sink, timeoutMs: 50 }).result;
+      expect(codeOf(outcome), answer.name).toBe('TIMED_OUT');
+      expect(opened.log, answer.name).toEqual(log);
+    }
+  });
+});
+
+describe('client.hosted.validate()', () => {
+  const MB = 1024 * 1024;
+  const serverInfo = (e2ee: boolean) => ({
+    version: '4.0.0',
+    capabilities: { upload: { enabled: true, maxSizeMB: 1, maxLifetimeHours: 0, e2ee, chunkSize: MB } },
+  });
+  const codeThrown = (run: () => unknown): string => {
+    try {
+      run();
+      return 'passed';
+    } catch (err) {
+      return (err as DropgateError).code;
+    }
+  };
+
+  it('counts encryption as upload() does when encrypt is left out: encrypted where the server supports it', () => {
+    const { hosted } = createClient(fakeServer().fetchFn);
+    const files = new File([new Uint8Array(MB)], 'data.bin');
+    expect(codeThrown(() => hosted.validate({ files, lifetimeMs: 60_000, serverInfo: serverInfo(true) })), 'overhead counted').toBe('FILE_TOO_LARGE');
+    expect(codeThrown(() => hosted.validate({ files, lifetimeMs: 60_000, encrypt: false, serverInfo: serverInfo(true) }))).toBe('passed');
+    expect(codeThrown(() => hosted.validate({ files, lifetimeMs: 60_000, serverInfo: serverInfo(false) })), 'no E2EE, so none').toBe('passed');
+  });
 });
 
 describe('client.hosted.metadata()', () => {

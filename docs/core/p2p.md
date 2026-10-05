@@ -10,7 +10,8 @@ This design allows the library to work in any environment (browser, Electron, No
 
 Behaviour to account for in the current version:
 
-- **`onCancel` also fires when the connection drops.** If the data channel closes mid-transfer, the receiver gets `cancelledBy: 'sender'` and the sender gets `cancelledBy: 'receiver'`, even if nobody cancelled. Word your UI accordingly.
+- **`onCancel` also fires when the connection drops.** If the data channel closes mid-transfer, the receiver gets `cancelledBy: 'sender'` and the sender gets `cancelledBy: 'receiver'`, even if nobody cancelled. Word your UI accordingly. It says only who cancelled: what the other device said about it isn't passed on, since it could say anything.
+- **Received names are checked, not made safe.** A name that breaks the [file name rule](quick-start.md#file-names) fails the transfer with `INVALID_FILENAME`; any other is given as the sender sent it. Save a file under `filenames.sanitize(name)`.
 - **The sender is told the transfer succeeded before `onComplete` runs.** The receiver acknowledges completion first, then calls `onComplete` without waiting for it. If closing or finalising your output fails there, the sender still reports success, so handle that error yourself.
 - **Flow control only works if `onData` waits for the write.** The receiver acknowledges a chunk when `onData` resolves. `zip.writer()`'s `writeChunk()` returns immediately and queues its output, so with a slow destination, await its `drained()` before acknowledging, or that queue can grow without limit.
 - **Resume is not implemented.** `onResumeRequest` is never called; an interrupted transfer has to be restarted.

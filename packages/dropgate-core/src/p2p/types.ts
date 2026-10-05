@@ -181,10 +181,8 @@ export interface P2PReceiveCompleteEvent extends ViaClient {
 
 /** Cancellation event for P2P operations. */
 export interface P2PCancellationEvent extends ViaClient {
-  /** Who cancelled the transfer ('sender' or 'receiver'). */
+  /** Who cancelled the transfer ('sender' or 'receiver'). What the other device said, if anything, isn't passed on. */
   cancelledBy: 'sender' | 'receiver';
-  /** Optional cancellation message. */
-  message?: string;
 }
 
 /** Connection health event for monitoring. */

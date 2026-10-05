@@ -257,3 +257,41 @@ describe('P2P sender', () => {
     expect(conn.sent.map((msg) => (msg as { t?: unknown }).t), 'what the sender sent').toEqual(['hello', 'meta']);
   });
 });
+
+describe('A cancel from the other device', () => {
+  const PEER_TEXT = 'Your files are locked. Visit evil.example to unlock them.';
+
+  it("reaches the receiver's onCancel as who cancelled, without the sender's own text", async () => {
+    const cancels: unknown[] = [];
+    const { conn } = await connectReceiver({ onData: () => {}, onCancel: (evt) => cancels.push(evt) });
+    await offerFile(conn, 8);
+
+    await conn.deliver({ t: 'cancelled', reason: PEER_TEXT });
+
+    expect(cancels).toEqual([{ cancelledBy: 'sender' }]);
+  });
+
+  it("reaches the sender's onCancel as who cancelled, without the receiver's own text", async () => {
+    const cancels: unknown[] = [];
+    const starting = startP2PSend({
+      file: memoryFile('notes.txt', new Uint8Array([1, 2, 3, 4])),
+      Peer: FakePeer as unknown as PeerConstructor,
+      codeGenerator: () => 'ABCD-1234',
+      onCancel: (evt) => cancels.push(evt),
+    });
+    FakePeer.latest().simulateOpen('ABCD-1234');
+    const session = await starting;
+    try {
+      const conn = FakePeer.latest().simulateConnection();
+      conn.simulateOpen();
+      await conn.deliver({ t: 'hello', protocolVersion: P2P_PROTOCOL_VERSION, sessionId: '' });
+      await settle();
+
+      await conn.deliver({ t: 'cancelled', reason: PEER_TEXT });
+
+      expect(cancels).toEqual([{ cancelledBy: 'receiver' }]);
+    } finally {
+      session.stop();
+    }
+  });
+});

@@ -655,7 +655,8 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
           case 'cancelled':
             if (state === 'cancelled' || state === 'closed' || state === 'completed') return;
             transitionTo('cancelled');
-            onCancel?.({ cancelledBy: 'sender', message: msg.reason });
+            // What the sender said isn't passed on: it could say anything.
+            onCancel?.({ cancelledBy: 'sender' });
             cleanup();
             break;
         }

@@ -26,7 +26,7 @@ try {
 | `origin` | `'local' \| 'server' \| 'network' \| 'peer'` | Where it went wrong: this device, the server, the network between, or the other device in a direct transfer |
 | `retryable` | `boolean` | Whether the same request could succeed if made again later |
 | `status` | `number` | The HTTP status, when the server answered with an error |
-| `details` | `object` | More about it, for some codes: `capability` for `CAPABILITY_UNSUPPORTED` (`upload`, `e2ee` or `p2p`), `component` (`dgup` or `dgdtp`) and `update` (`server` or `client`, the side that needs it) for `VERSION_UNSUPPORTED`, `index` for a file's problem, `cancellation` for `OPERATION_CANCELLED` |
+| `details` | `object` | More about it, for some codes: `capability` for `CAPABILITY_UNSUPPORTED` (`upload`, `e2ee` or `p2p`); `component` (`dgup` or `dgdtp`), `update` (`server` or `client`, the side that needs it), and the `client` and `server` versions for `VERSION_UNSUPPORTED`; `index` for a file's problem; `cancellation` for `OPERATION_CANCELLED` |
 | `transport` | `{ secure }` | How the client reached its server: every error a client gives has it, `secure: false` for an [insecure server](api-reference.md#insecure-servers). `JSON.stringify()` keeps it |
 | `cause` | `unknown` | The error underneath, when there was one. Core didn't write it, so it may hold anything: `JSON.stringify()` leaves it out |
 
@@ -38,8 +38,8 @@ When the server answers with an error, the message is the server's own, if it se
 
 | Code | Origin | Retryable | When |
 | --- | --- | --- | --- |
-| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, an `appInfo` that isn't `{ name, version? }`, no files, no `fileId` or `bundleId`, a download without a sink that fits it, or a lifetime that isn't a whole number of milliseconds |
-| `RUNTIME_UNSUPPORTED` | local | No | There's no `fetch()`, or no secure random numbers (`crypto.getRandomValues()`), or encryption was asked for where the browser gives no `crypto.subtle` (a page not served over HTTPS or from `localhost`) |
+| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, or one that isn't an address; an `appInfo` that isn't `{ name, version? }`; an `auth` that isn't a function, or a credential it gives that isn't `{ token }`; no files, or something that isn't a file; no `fileId` or `bundleId`; a download without a sink that fits it; a lifetime that isn't a whole number of milliseconds; or an event `client.server.on()` doesn't have |
+| `RUNTIME_UNSUPPORTED` | local | No | There's no `fetch()`, or no secure random numbers (`crypto.getRandomValues()`), or encryption was asked for where the browser gives no `crypto.subtle` (a page not served over HTTPS or from `localhost`), or a download's answer can't be read as a stream |
 | `OPERATION_CANCELLED` | local | No | A call was given an `AbortSignal`, and it was aborted. An upload or download that's cancelled ends with a `cancelled` outcome instead |
 | `SOURCE_UNAVAILABLE` | local | No | A file being uploaded couldn't be read |
 | `OUTPUT_WRITE_FAILED` | local | No | A download's sink failed a `write()` or its `close()`, or a function giving a sink failed; a direct transfer's `onData` threw or rejected, or its receiver couldn't keep up |
@@ -68,7 +68,7 @@ When the server answers with an error, the message is the server's own, if it se
 | `SERVER_ERROR` | server | Yes | The server ran into an error (HTTP 5xx) |
 | `INVALID_RESPONSE` | server | No | The server's answer wasn't understood, or isn't a Dropgate server's |
 | `SERVER_UNREACHABLE` | network | Yes | No answer came: the server couldn't be reached |
-| `TIMED_OUT` | network | Yes | The server took too long to answer, or a direct transfer's other device didn't answer in time (origin `peer`) |
+| `TIMED_OUT` | network | Yes | The server took too long to answer, or a download's next bytes took longer than its `timeoutMs`, or a direct transfer's other device didn't answer in time (origin `peer`) |
 | `CONNECTION_LOST` | network | Yes | A download was cut off part-way, or a direct transfer's connection dropped |
 | `PEER_FAILED` | peer | No | A direct transfer's other device reported an error. What it said isn't passed on, since it could say anything |
 | `UNEXPECTED_ERROR` | local | No | Anything else, with the error underneath as its `cause` |

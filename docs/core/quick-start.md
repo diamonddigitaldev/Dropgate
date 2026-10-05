@@ -112,7 +112,7 @@ A sealed bundle's list of files is encrypted as well, so only the key's holder c
 
 ## Downloading Files
 
-`client.hosted.download()` writes the file into a **sink**, which it needs: anything with `write(chunk)` and `close()`, and ideally `abort()`. Core awaits each write, and the download only completes once the sink has closed; a failed or cancelled download aborts it instead. Like an upload, it gives its handle at once, and ends with one outcome.
+`client.hosted.download()` writes the file into a **sink**, which it needs: anything with `write(chunk)` and `close()`, and ideally `abort()`. Core awaits each write, and the download only completes once the sink has closed; a failed or cancelled download aborts it instead. Like an upload, it gives its handle at once, and ends with one outcome. It only times out if the server's answer, or the next bytes, take longer than `timeoutMs` (60 seconds unless you give another), so a big file never times out for taking long.
 
 In a browser, a `WritableStream`'s writer is a sink, such as [StreamSaver](https://github.com/jimmywarting/StreamSaver.js)'s:
 
