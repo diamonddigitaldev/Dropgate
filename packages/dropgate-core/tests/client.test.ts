@@ -870,6 +870,19 @@ describe('Hosted download into a sink', () => {
     expect(server.paths()).not.toContain(`POST /api/bundle/${BUNDLE_ID}/downloaded`);
   });
 
+  it("a ZIP member whose bytes don't come to the size the server gave fails INTEGRITY_FAILED, and the archive is never finished", async () => {
+    for (const sent of [CHUNK_SIZE + 1, CHUNK_SIZE - 1]) {
+      const server = fakeServer();
+      server.answer(`GET /api/file/${FILE_ID}`, () => new Response(new Uint8Array(sent)));
+      const archive = recordingSink();
+      const outcome = await createClient(server.fetchFn).hosted.download({ bundleId: BUNDLE_ID, asZip: true, sink: archive.sink }).result;
+      expect(codeOf(outcome), `${sent} bytes for a ${CHUNK_SIZE}-byte member`).toBe('INTEGRITY_FAILED');
+      expect(archive.log.at(-1)).toBe('sink abort INTEGRITY_FAILED');
+      expect(archive.log).not.toContain('sink close');
+      expect(server.paths()).not.toContain(`POST /api/bundle/${BUNDLE_ID}/downloaded`);
+    }
+  });
+
   it('a download needs a sink that fits it, checked before it starts', () => {
     const server = fakeServer();
     const client = createClient(server.fetchFn);

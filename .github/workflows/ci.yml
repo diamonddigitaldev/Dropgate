@@ -185,6 +185,23 @@ jobs:
       - name: Run tests
         run: npx vitest run --reporter=verbose
 
+      # Core's ZIPs, read by readers that aren't core's: Info-ZIP's unzip -t and
+      # Python's zipfile. A small archive (accented, CJK and repeated names) must
+      # be the classic format; a member of 4 GiB + 1, offsets past 4 GiB and
+      # 65,536 members must be ZIP64. Each is read back whole (names, sizes,
+      # CRC-32, bytes), one at a time, since two are over 4 GiB.
+      - name: Read core's ZIPs with unzip and Python's zipfile
+        run: |
+          unzip -v | sed -n '1p'
+          python3 --version
+          dir="$RUNNER_TEMP/zips"
+          for kind in classic member-4gib offsets-4gib members-65536; do
+            node tests/zip-readers/write-archive.mjs "$kind" "$dir"
+            unzip -tq "$dir/$kind.zip"
+            python3 tests/zip-readers/check_archive.py "$dir/$kind.zip" "$dir/$kind.json"
+            rm -f "${dir:?}/${kind:?}.zip"
+          done
+
   integration:
     name: Integration tests (Chromium, Firefox, WebKit)
     runs-on: ubuntu-latest

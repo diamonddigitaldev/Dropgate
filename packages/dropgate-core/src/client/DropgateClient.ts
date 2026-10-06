@@ -45,7 +45,7 @@ import { getDefaultFetch, getDefaultBase64 } from '../adapters/defaults.js';
 import { makeAbortSignal, makeWaitSignal, fetchJson, sleep, buildBaseUrl, parseServerUrl } from '../utils/network.js';
 import type { FetchJsonOptions, FetchJsonResult } from '../utils/network.js';
 import { parseShareInput } from '../utils/share-link.js';
-import { validateFilename, sanitizeFilename, uniqueFilename } from '../utils/filename.js';
+import { validateFilename } from '../utils/filename.js';
 import { plaintextBytes, mbToBytes } from '../utils/size.js';
 import { cryptoProvider, sha256Hex, keyToBase64, keyFromBase64, encryptName, decryptName } from '../crypto/index.js';
 import type { ContentKey, CryptoProvider } from '../crypto/index.js';
@@ -1163,19 +1163,28 @@ export class DropgateClient {
               throw toDropgateError(err, 'OUTPUT_WRITE_FAILED');
             }
           };
-          // Each member is saved under its safe name, and two the same are told apart.
-          const members: string[] = [];
+          // The writer refuses a member whose bytes don't come to the size the
+          // metadata gave: the server sent something other than what it described.
+          const sized = (run: () => void) => {
+            try {
+              run();
+            } catch (err) {
+              if (err instanceof DropgateError && err.code === 'INVALID_ARGUMENT') {
+                throw new DropgateError({ code: 'INTEGRITY_FAILED', message: "A file's bytes didn't match its size.", cause: err });
+              }
+              throw toDropgateError(err, 'OUTPUT_WRITE_FAILED');
+            }
+          };
+          // The writer saves each member under its safe name, and tells two the same apart.
           for (let fi = 0; fi < files.length; fi++) {
             fileStarts(fi);
-            const member = uniqueFilename(sanitizeFilename(files[fi].name), members);
-            members.push(member);
-            zip.startFile(member);
+            zip.startFile(files[fi].name, files[fi].sizeBytes);
             const done = written;
             written += await this._streamFile(files[fi].fileId, streamOpts, async (chunk) => {
-              zip.writeChunk(chunk);
+              sized(() => zip.writeChunk(chunk));
               await drained();
             }, counted(fi, done));
-            zip.endFile();
+            sized(() => zip.endFile());
           }
           progress({ status: 'completing', phase: 'complete', text: 'Finishing the download...' });
           try {

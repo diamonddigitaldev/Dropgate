@@ -80,8 +80,8 @@ var DropgateError = class _DropgateError extends Error {
     if (opts.transport !== void 0) this.transport = Object.freeze({ secure: opts.transport.secure });
   }
   /** Whether `err` is a DropgateError, with `code` if one is given. */
-  static is(err2, code) {
-    return err2 instanceof _DropgateError && (code === void 0 || err2.code === code);
+  static is(err, code) {
+    return err instanceof _DropgateError && (code === void 0 || err.code === code);
   }
   /** What JSON.stringify() gives: never the cause, which Dropgate didn't write. */
   toJSON() {
@@ -97,8 +97,8 @@ var DropgateError = class _DropgateError extends Error {
     };
   }
 };
-function withTransport(err2, transport) {
-  const error = toDropgateError(err2);
+function withTransport(err, transport) {
+  const error = toDropgateError(err);
   if (error.transport === void 0) {
     Object.defineProperty(error, "transport", { value: Object.freeze({ secure: transport.secure }), enumerable: true });
   }
@@ -123,15 +123,15 @@ function directTransferDisabled() {
     details: { capability: "p2p" }
   });
 }
-function toDropgateError(err2, fallback = "UNEXPECTED_ERROR", message) {
-  if (err2 instanceof DropgateError) return err2;
-  const name = err2 instanceof Error || err2 && typeof err2 === "object" && "name" in err2 ? err2.name : void 0;
-  if (name === "TimeoutError") return new DropgateError({ code: "TIMED_OUT", cause: err2 });
-  if (name === "AbortError") return new DropgateError({ code: "OPERATION_CANCELLED", cause: err2 });
-  return new DropgateError({ code: fallback, cause: err2, ...message ? { message } : {} });
+function toDropgateError(err, fallback = "UNEXPECTED_ERROR", message) {
+  if (err instanceof DropgateError) return err;
+  const name = err instanceof Error || err && typeof err === "object" && "name" in err ? err.name : void 0;
+  if (name === "TimeoutError") return new DropgateError({ code: "TIMED_OUT", cause: err });
+  if (name === "AbortError") return new DropgateError({ code: "OPERATION_CANCELLED", cause: err });
+  return new DropgateError({ code: fallback, cause: err, ...message ? { message } : {} });
 }
-function isCredentialError(err2) {
-  return err2 instanceof DropgateError && SERVER_CREDENTIAL_CODES.has(err2.code);
+function isCredentialError(err) {
+  return err instanceof DropgateError && SERVER_CREDENTIAL_CODES.has(err.code);
 }
 
 // src/crypto/sha256-fallback.ts
@@ -575,10 +575,10 @@ async function settle(scope, work, transport) {
   try {
     const value = await work();
     return { status: "completed", value, transport };
-  } catch (err2) {
+  } catch (err) {
     const cancellation = scope.cancellation;
     if (cancellation) return { status: "cancelled", cancellation, transport };
-    return { status: "failed", error: withTransport(err2, transport), transport };
+    return { status: "failed", error: withTransport(err, transport), transport };
   } finally {
     scope.finish();
   }
@@ -692,8 +692,8 @@ var SinkWriter = class _SinkWriter {
     let sink;
     try {
       sink = typeof option === "function" ? await option(file) : option;
-    } catch (err2) {
-      throw new DropgateError({ code: "OUTPUT_WRITE_FAILED", cause: err2 });
+    } catch (err) {
+      throw new DropgateError({ code: "OUTPUT_WRITE_FAILED", cause: err });
     }
     if (!isDownloadSink(sink)) {
       throw new DropgateError({ code: "OUTPUT_WRITE_FAILED", message: "The function giving a sink gave something without write() and close()." });
@@ -703,16 +703,16 @@ var SinkWriter = class _SinkWriter {
   async write(chunk) {
     try {
       await this.sink.write(chunk);
-    } catch (err2) {
-      throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
+    } catch (err) {
+      throw toDropgateError(err, "OUTPUT_WRITE_FAILED");
     }
   }
   async close() {
     this.done = true;
     try {
       await this.sink.close();
-    } catch (err2) {
-      throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
+    } catch (err) {
+      throw toDropgateError(err, "OUTPUT_WRITE_FAILED");
     }
   }
   /** Aborts the sink, once, if it wasn't closed. Best effort: an abort that fails is ignored. */
@@ -769,8 +769,8 @@ async function readRange(source, start, end) {
   let bytes;
   try {
     bytes = await source.read(start, end);
-  } catch (err2) {
-    throw new DropgateError({ code: "SOURCE_UNAVAILABLE", cause: err2 });
+  } catch (err) {
+    throw new DropgateError({ code: "SOURCE_UNAVAILABLE", cause: err });
   }
   if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== end - start) {
     throw new DropgateError({
@@ -830,8 +830,8 @@ function parseServerUrl(urlStr) {
   let url;
   try {
     url = new URL(normalized);
-  } catch (err2) {
-    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "The server address is not a valid URL.", cause: err2 });
+  } catch (err) {
+    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "The server address is not a valid URL.", cause: err });
   }
   return {
     host: url.hostname,
@@ -932,14 +932,14 @@ async function fetchJson(fetchFn, url, opts = {}) {
     let res;
     try {
       res = await fetchFn(url, { ...rest, signal: s });
-    } catch (err2) {
-      throw toDropgateError(err2, "SERVER_UNREACHABLE");
+    } catch (err) {
+      throw toDropgateError(err, "SERVER_UNREACHABLE");
     }
     let text;
     try {
       text = await res.text();
-    } catch (err2) {
-      throw toDropgateError(err2, "CONNECTION_LOST");
+    } catch (err) {
+      throw toDropgateError(err, "CONNECTION_LOST");
     }
     let json = null;
     try {
@@ -1123,7 +1123,7 @@ var _OperationCredentials = class _OperationCredentials {
    * INVALID_ARGUMENT if what it gives isn't a credential; OPERATION_CANCELLED.
    */
   static async required(provider, operation, baseUrl, signal) {
-    var _a2;
+    var _a;
     if (!provider) {
       throw new DropgateError({
         code: "AUTH_REQUIRED",
@@ -1131,7 +1131,7 @@ var _OperationCredentials = class _OperationCredentials {
       });
     }
     const credentials = new _OperationCredentials(provider, operation, baseUrl);
-    __privateSet(credentials, _token, await __privateMethod(_a2 = credentials, _OperationCredentials_instances, ask_fn).call(_a2, "required", signal));
+    __privateSet(credentials, _token, await __privateMethod(_a = credentials, _OperationCredentials_instances, ask_fn).call(_a, "required", signal));
     return credentials;
   }
   /** The headers that carry the credential: none if there isn't one. */
@@ -1235,17 +1235,17 @@ async function createPeerWithRetries(opts) {
       peer = await new Promise((resolve, reject) => {
         const instance = buildPeer(nextCode);
         instance.on("open", () => resolve(instance));
-        instance.on("error", (err2) => {
+        instance.on("error", (err) => {
           try {
             instance.destroy();
           } catch {
           }
-          reject(err2);
+          reject(err);
         });
       });
       return { peer, code: nextCode };
-    } catch (err2) {
-      lastError = err2;
+    } catch (err) {
+      lastError = err;
       nextCode = codeGenerator();
     }
   }
@@ -1397,10 +1397,10 @@ async function startP2PSend(opts) {
     const percent = safeTotal ? safeReceived / safeTotal * 100 : 0;
     onProgress?.({ processedBytes: safeReceived, totalBytes: safeTotal, percent });
   };
-  const safeError = (err2) => {
+  const safeError = (err) => {
     if (state === "closed" || state === "completed" || state === "cancelled") return;
     transitionTo("closed");
-    onError?.(err2);
+    onError?.(err);
     cleanup();
   };
   const safeComplete = () => {
@@ -1794,12 +1794,12 @@ async function startP2PSend(opts) {
         }
         reportProgress({ received: ackReceived || ackTotal, total: ackTotal });
         safeComplete();
-      } catch (err2) {
-        safeError(err2);
+      } catch (err) {
+        safeError(err);
       }
     });
-    conn.on("error", (err2) => {
-      safeError(err2);
+    conn.on("error", (err) => {
+      safeError(err);
     });
     conn.on("close", () => {
       if (state === "closed" || state === "completed" || state === "cancelled") {
@@ -1956,10 +1956,10 @@ async function startP2PReceive(opts) {
       watchdogTimer = null;
     }
   };
-  const safeError = (err2) => {
+  const safeError = (err) => {
     if (state === "closed" || state === "completed" || state === "cancelled") return;
     transitionTo("closed");
-    onError?.(err2);
+    onError?.(err);
     cleanup();
   };
   const safeComplete = (completeData) => {
@@ -2012,8 +2012,8 @@ async function startP2PReceive(opts) {
     } catch {
     }
   };
-  peer.on("error", (err2) => {
-    safeError(err2);
+  peer.on("error", (err) => {
+    safeError(err);
   });
   peer.on("open", () => {
     transitionTo("connecting");
@@ -2088,15 +2088,15 @@ async function startP2PReceive(opts) {
             if (chunkSeq >= 0) {
               sendChunkAck(conn, chunkSeq);
             }
-          }).catch((err2) => {
+          }).catch((err) => {
             try {
               conn.send({
                 t: "error",
-                message: err2?.message || "Receiver write failed."
+                message: err?.message || "Receiver write failed."
               });
             } catch {
             }
-            safeError(err2);
+            safeError(err);
           }).finally(() => {
             writeQueueDepth--;
           });
@@ -2235,15 +2235,15 @@ async function startP2PReceive(opts) {
             const finalReceived = fileList ? totalReceivedAllFiles + currentFileReceived : received;
             const finalTotal = fileList ? fileList.totalSize : total;
             if (finalTotal && finalReceived < finalTotal) {
-              const err2 = new DropgateError({
+              const err = new DropgateError({
                 code: "CONNECTION_LOST",
                 message: "Transfer ended before all data was received."
               });
               try {
-                conn.send({ t: "error", message: err2.message });
+                conn.send({ t: "error", message: err.message });
               } catch {
               }
-              throw err2;
+              throw err;
             }
             try {
               conn.send({ t: "end_ack", received: finalReceived, total: finalTotal });
@@ -2271,8 +2271,8 @@ async function startP2PReceive(opts) {
             cleanup();
             break;
         }
-      } catch (err2) {
-        safeError(err2);
+      } catch (err) {
+        safeError(err);
       }
     });
     conn.on("close", () => {
@@ -2303,499 +2303,177 @@ async function startP2PReceive(opts) {
   };
 }
 
-// node_modules/fflate/esm/browser.js
-var u8 = Uint8Array;
-var u16 = Uint16Array;
-var i32 = Int32Array;
-var fleb = new u8([
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  1,
-  1,
-  1,
-  1,
-  2,
-  2,
-  2,
-  2,
-  3,
-  3,
-  3,
-  3,
-  4,
-  4,
-  4,
-  4,
-  5,
-  5,
-  5,
-  5,
-  0,
-  /* unused */
-  0,
-  0,
-  /* impossible */
-  0
-]);
-var fdeb = new u8([
-  0,
-  0,
-  0,
-  0,
-  1,
-  1,
-  2,
-  2,
-  3,
-  3,
-  4,
-  4,
-  5,
-  5,
-  6,
-  6,
-  7,
-  7,
-  8,
-  8,
-  9,
-  9,
-  10,
-  10,
-  11,
-  11,
-  12,
-  12,
-  13,
-  13,
-  /* unused */
-  0,
-  0
-]);
-var clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
-var freb = function(eb, start) {
-  var b = new u16(31);
-  for (var i = 0; i < 31; ++i) {
-    b[i] = start += 1 << eb[i - 1];
+// src/zip/crc32.ts
+var TABLES = (() => {
+  const tables = new Int32Array(256 * 8);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    tables[n] = c;
   }
-  var r = new i32(b[30]);
-  for (var i = 1; i < 30; ++i) {
-    for (var j = b[i]; j < b[i + 1]; ++j) {
-      r[j] = j - b[i] << 5 | i;
+  for (let n = 0; n < 256; n++) {
+    let c = tables[n];
+    for (let t = 1; t < 8; t++) {
+      c = tables[c & 255] ^ c >>> 8;
+      tables[t * 256 + n] = c;
     }
   }
-  return { b, r };
-};
-var _a = freb(fleb, 2);
-var fl = _a.b;
-var revfl = _a.r;
-fl[28] = 258, revfl[258] = 28;
-var _b = freb(fdeb, 0);
-var fd = _b.b;
-var revfd = _b.r;
-var rev = new u16(32768);
-for (i = 0; i < 32768; ++i) {
-  x = (i & 43690) >> 1 | (i & 21845) << 1;
-  x = (x & 52428) >> 2 | (x & 13107) << 2;
-  x = (x & 61680) >> 4 | (x & 3855) << 4;
-  rev[i] = ((x & 65280) >> 8 | (x & 255) << 8) >> 1;
-}
-var x;
-var i;
-var flt = new u8(288);
-for (i = 0; i < 144; ++i)
-  flt[i] = 8;
-var i;
-for (i = 144; i < 256; ++i)
-  flt[i] = 9;
-var i;
-for (i = 256; i < 280; ++i)
-  flt[i] = 7;
-var i;
-for (i = 280; i < 288; ++i)
-  flt[i] = 8;
-var i;
-var fdt = new u8(32);
-for (i = 0; i < 32; ++i)
-  fdt[i] = 5;
-var i;
-var slc = function(v, s, e) {
-  if (s == null || s < 0)
-    s = 0;
-  if (e == null || e > v.length)
-    e = v.length;
-  return new u8(v.subarray(s, e));
-};
-var ec = [
-  "unexpected EOF",
-  "invalid block type",
-  "invalid length/literal",
-  "invalid distance",
-  "stream finished",
-  "no stream handler",
-  ,
-  // determined by compression function
-  "no callback",
-  "invalid UTF-8 data",
-  "extra field too long",
-  "date not in range 1980-2099",
-  "filename too long",
-  "stream finishing",
-  "invalid zip data"
-  // determined by unknown compression method
-];
-var err = function(ind, msg, nt) {
-  var e = new Error(msg || ec[ind]);
-  e.code = ind;
-  if (Error.captureStackTrace)
-    Error.captureStackTrace(e, err);
-  if (!nt)
-    throw e;
-  return e;
-};
-var et = /* @__PURE__ */ new u8(0);
-var crct = /* @__PURE__ */ (function() {
-  var t = new Int32Array(256);
-  for (var i = 0; i < 256; ++i) {
-    var c = i, k = 9;
-    while (--k)
-      c = (c & 1 && -306674912) ^ c >>> 1;
-    t[i] = c;
-  }
-  return t;
+  return tables;
 })();
-var crc = function() {
-  var c = -1;
-  return {
-    p: function(d) {
-      var cr = c;
-      for (var i = 0; i < d.length; ++i)
-        cr = crct[cr & 255 ^ d[i]] ^ cr >>> 8;
-      c = cr;
-    },
-    d: function() {
-      return ~c;
-    }
-  };
-};
-var mrg = function(a, b) {
-  var o = {};
-  for (var k in a)
-    o[k] = a[k];
-  for (var k in b)
-    o[k] = b[k];
-  return o;
-};
-var wbytes = function(d, b, v) {
-  for (; v; ++b)
-    d[b] = v, v >>>= 8;
-};
-var te = typeof TextEncoder != "undefined" && /* @__PURE__ */ new TextEncoder();
-var td = typeof TextDecoder != "undefined" && /* @__PURE__ */ new TextDecoder();
-var tds = 0;
-try {
-  td.decode(et, { stream: true });
-  tds = 1;
-} catch (e) {
+var T0 = TABLES.subarray(0, 256);
+var T1 = TABLES.subarray(256, 512);
+var T2 = TABLES.subarray(512, 768);
+var T3 = TABLES.subarray(768, 1024);
+var T4 = TABLES.subarray(1024, 1280);
+var T5 = TABLES.subarray(1280, 1536);
+var T6 = TABLES.subarray(1536, 1792);
+var T7 = TABLES.subarray(1792, 2048);
+function crc32(data, crc = 0) {
+  let c = ~crc;
+  const n = data.length;
+  let i = 0;
+  for (const end = n - n % 8; i < end; i += 8) {
+    const lo = c ^ (data[i] | data[i + 1] << 8 | data[i + 2] << 16 | data[i + 3] << 24);
+    c = T7[lo & 255] ^ T6[lo >>> 8 & 255] ^ T5[lo >>> 16 & 255] ^ T4[lo >>> 24] ^ T3[data[i + 4]] ^ T2[data[i + 5]] ^ T1[data[i + 6]] ^ T0[data[i + 7]];
+  }
+  for (; i < n; i++) c = T0[(c ^ data[i]) & 255] ^ c >>> 8;
+  return ~c >>> 0;
 }
-function strToU8(str, latin1) {
-  if (latin1) {
-    var ar_1 = new u8(str.length);
-    for (var i = 0; i < str.length; ++i)
-      ar_1[i] = str.charCodeAt(i);
-    return ar_1;
-  }
-  if (te)
-    return te.encode(str);
-  var l = str.length;
-  var ar = new u8(str.length + (str.length >> 1));
-  var ai = 0;
-  var w = function(v) {
-    ar[ai++] = v;
-  };
-  for (var i = 0; i < l; ++i) {
-    if (ai + 5 > ar.length) {
-      var n = new u8(ai + 8 + (l - i << 1));
-      n.set(ar);
-      ar = n;
-    }
-    var c = str.charCodeAt(i);
-    if (c < 128 || latin1)
-      w(c);
-    else if (c < 2048)
-      w(192 | c >> 6), w(128 | c & 63);
-    else if (c > 55295 && c < 57344)
-      c = 65536 + (c & 1023 << 10) | str.charCodeAt(++i) & 1023, w(240 | c >> 18), w(128 | c >> 12 & 63), w(128 | c >> 6 & 63), w(128 | c & 63);
-    else
-      w(224 | c >> 12), w(128 | c >> 6 & 63), w(128 | c & 63);
-  }
-  return slc(ar, 0, ai);
-}
-var exfl = function(ex) {
-  var le = 0;
-  if (ex) {
-    for (var k in ex) {
-      var l = ex[k].length;
-      if (l > 65535)
-        err(9);
-      le += l + 4;
-    }
-  }
-  return le;
-};
-var wzh = function(d, b, f, fn, u, c, ce, co) {
-  var fl2 = fn.length, ex = f.extra, col = co && co.length;
-  var exl = exfl(ex);
-  wbytes(d, b, ce != null ? 33639248 : 67324752), b += 4;
-  if (ce != null)
-    d[b++] = 20, d[b++] = f.os;
-  d[b] = 20, b += 2;
-  d[b++] = f.flag << 1 | (c < 0 && 8), d[b++] = u && 8;
-  d[b++] = f.compression & 255, d[b++] = f.compression >> 8;
-  var dt = new Date(f.mtime == null ? Date.now() : f.mtime), y = dt.getFullYear() - 1980;
-  if (y < 0 || y > 119)
-    err(10);
-  wbytes(d, b, y << 25 | dt.getMonth() + 1 << 21 | dt.getDate() << 16 | dt.getHours() << 11 | dt.getMinutes() << 5 | dt.getSeconds() >> 1), b += 4;
-  if (c != -1) {
-    wbytes(d, b, f.crc);
-    wbytes(d, b + 4, c < 0 ? -c - 2 : c);
-    wbytes(d, b + 8, f.size);
-  }
-  wbytes(d, b + 12, fl2);
-  wbytes(d, b + 14, exl), b += 16;
-  if (ce != null) {
-    wbytes(d, b, col);
-    wbytes(d, b + 6, f.attrs);
-    wbytes(d, b + 10, ce), b += 14;
-  }
-  d.set(fn, b);
-  b += fl2;
-  if (exl) {
-    for (var k in ex) {
-      var exf = ex[k], l = exf.length;
-      wbytes(d, b, +k);
-      wbytes(d, b + 2, l);
-      d.set(exf, b + 4), b += 4 + l;
-    }
-  }
-  if (col)
-    d.set(co, b), b += col;
-  return b;
-};
-var wzf = function(o, b, c, d, e) {
-  wbytes(o, b, 101010256);
-  wbytes(o, b + 8, c);
-  wbytes(o, b + 10, c);
-  wbytes(o, b + 12, d);
-  wbytes(o, b + 16, e);
-};
-var ZipPassThrough = /* @__PURE__ */ (function() {
-  function ZipPassThrough2(filename) {
-    this.filename = filename;
-    this.c = crc();
-    this.size = 0;
-    this.compression = 0;
-  }
-  ZipPassThrough2.prototype.process = function(chunk, final) {
-    this.ondata(null, chunk, final);
-  };
-  ZipPassThrough2.prototype.push = function(chunk, final) {
-    if (!this.ondata)
-      err(5);
-    this.c.p(chunk);
-    this.size += chunk.length;
-    if (final)
-      this.crc = this.c.d();
-    this.process(chunk, final || false);
-  };
-  return ZipPassThrough2;
-})();
-var Zip = /* @__PURE__ */ (function() {
-  function Zip2(cb) {
-    this.ondata = cb;
-    this.u = [];
-    this.d = 1;
-  }
-  Zip2.prototype.add = function(file) {
-    var _this = this;
-    if (!this.ondata)
-      err(5);
-    if (this.d & 2)
-      this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, false);
-    else {
-      var f = strToU8(file.filename), fl_1 = f.length;
-      var com = file.comment, o = com && strToU8(com);
-      var u = fl_1 != file.filename.length || o && com.length != o.length;
-      var hl_1 = fl_1 + exfl(file.extra) + 30;
-      if (fl_1 > 65535)
-        this.ondata(err(11, 0, 1), null, false);
-      var header = new u8(hl_1);
-      wzh(header, 0, file, f, u, -1);
-      var chks_1 = [header];
-      var pAll_1 = function() {
-        for (var _i = 0, chks_2 = chks_1; _i < chks_2.length; _i++) {
-          var chk = chks_2[_i];
-          _this.ondata(null, chk, false);
-        }
-        chks_1 = [];
-      };
-      var tr_1 = this.d;
-      this.d = 0;
-      var ind_1 = this.u.length;
-      var uf_1 = mrg(file, {
-        f,
-        u,
-        o,
-        t: function() {
-          if (file.terminate)
-            file.terminate();
-        },
-        r: function() {
-          pAll_1();
-          if (tr_1) {
-            var nxt = _this.u[ind_1 + 1];
-            if (nxt)
-              nxt.r();
-            else
-              _this.d = 1;
-          }
-          tr_1 = 1;
-        }
-      });
-      var cl_1 = 0;
-      file.ondata = function(err2, dat, final) {
-        if (err2) {
-          _this.ondata(err2, dat, final);
-          _this.terminate();
-        } else {
-          cl_1 += dat.length;
-          chks_1.push(dat);
-          if (final) {
-            var dd = new u8(16);
-            wbytes(dd, 0, 134695760);
-            wbytes(dd, 4, file.crc);
-            wbytes(dd, 8, cl_1);
-            wbytes(dd, 12, file.size);
-            chks_1.push(dd);
-            uf_1.c = cl_1, uf_1.b = hl_1 + cl_1 + 16, uf_1.crc = file.crc, uf_1.size = file.size;
-            if (tr_1)
-              uf_1.r();
-            tr_1 = 1;
-          } else if (tr_1)
-            pAll_1();
-        }
-      };
-      this.u.push(uf_1);
-    }
-  };
-  Zip2.prototype.end = function() {
-    var _this = this;
-    if (this.d & 2) {
-      this.ondata(err(4 + (this.d & 1) * 8, 0, 1), null, true);
-      return;
-    }
-    if (this.d)
-      this.e();
-    else
-      this.u.push({
-        r: function() {
-          if (!(_this.d & 1))
-            return;
-          _this.u.splice(-1, 1);
-          _this.e();
-        },
-        t: function() {
-        }
-      });
-    this.d = 3;
-  };
-  Zip2.prototype.e = function() {
-    var bt = 0, l = 0, tl = 0;
-    for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
-      var f = _a2[_i];
-      tl += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0);
-    }
-    var out = new u8(tl + 22);
-    for (var _b2 = 0, _c = this.u; _b2 < _c.length; _b2++) {
-      var f = _c[_b2];
-      wzh(out, bt, f, f.f, f.u, -f.c - 2, l, f.o);
-      bt += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0), l += f.b;
-    }
-    wzf(out, bt, this.u.length, tl, l);
-    this.ondata(null, out, true);
-    this.d = 2;
-  };
-  Zip2.prototype.terminate = function() {
-    for (var _i = 0, _a2 = this.u; _i < _a2.length; _i++) {
-      var f = _a2[_i];
-      f.t();
-    }
-    this.d = 2;
-  };
-  return Zip2;
-})();
 
 // src/zip/stream-zip.ts
+var LOCAL_HEADER = 67324752;
+var DATA_DESCRIPTOR = 134695760;
+var CENTRAL_HEADER = 33639248;
+var ZIP64_END = 101075792;
+var ZIP64_LOCATOR = 117853008;
+var END = 101010256;
+var FLAGS = 2056;
+var VERSION_CLASSIC = 20;
+var VERSION_ZIP64 = 45;
+var MAX_32 = 4294967295;
+var MAX_16 = 65535;
+var ZIP64_EXTRA = 1;
+var DIRECTORY_CHUNK = 64 * 1024;
+var utf8 = new TextEncoder();
+var Bytes = class {
+  constructor(length) {
+    __publicField(this, "bytes");
+    __publicField(this, "view");
+    __publicField(this, "at", 0);
+    this.bytes = new Uint8Array(length);
+    this.view = new DataView(this.bytes.buffer);
+  }
+  u16(value) {
+    this.view.setUint16(this.at, value, true);
+    this.at += 2;
+    return this;
+  }
+  u32(value) {
+    this.view.setUint32(this.at, value >>> 0, true);
+    this.at += 4;
+    return this;
+  }
+  u64(value) {
+    this.view.setBigUint64(this.at, BigInt(value), true);
+    this.at += 8;
+    return this;
+  }
+  raw(value) {
+    this.bytes.set(value, this.at);
+    this.at += value.length;
+    return this;
+  }
+};
+function dosDateTime(when) {
+  const year = when.getFullYear();
+  if (year < 1980) return { time: 0, date: 1 << 5 | 1 };
+  return {
+    time: when.getHours() << 11 | when.getMinutes() << 5 | when.getSeconds() >> 1,
+    date: Math.min(year, 2107) - 1980 << 9 | when.getMonth() + 1 << 5 | when.getDate()
+  };
+}
+function refused(message) {
+  return new DropgateError({ code: "INVALID_ARGUMENT", message });
+}
 var StreamingZipWriter = class {
   constructor(onData) {
-    __publicField(this, "zip");
-    __publicField(this, "currentFile", null);
     __publicField(this, "onData");
+    __publicField(this, "time");
+    __publicField(this, "date");
+    __publicField(this, "members", []);
+    /** The names stored so far, lower-cased, as `filenames.unique()` compares them. */
+    __publicField(this, "taken", /* @__PURE__ */ new Set());
+    __publicField(this, "current", null);
+    __publicField(this, "offset", 0);
     __publicField(this, "finalized", false);
     __publicField(this, "pendingWrites", Promise.resolve());
     __publicField(this, "failed", null);
     this.onData = onData;
-    this.zip = new Zip((err2, data) => {
-      if (err2) {
-        this.failed ?? (this.failed = { error: err2 });
-        return;
-      }
-      this.pendingWrites = this.pendingWrites.then(() => this.failed ? void 0 : this.onData(data)).catch((error) => {
-        this.failed ?? (this.failed = { error });
-      });
-    });
+    ({ time: this.time, date: this.date } = dosDateTime(/* @__PURE__ */ new Date()));
   }
   /**
-   * Begin a new file entry in the ZIP.
-   * Must call endFile() before starting another file.
-   * @param name - Filename within the ZIP archive.
+   * Begins a member, `size` bytes long. Its name is made safe with
+   * `filenames.sanitize()` and, if an earlier member has it, unique with
+   * `filenames.unique()`. Must call endFile() before starting another file.
+   * @param name - The file's name.
+   * @param size - Exactly how many bytes will be written to it.
+   * @returns The name it's stored under.
+   * @throws {DropgateError} INVALID_ARGUMENT if a file is still open, the
+   * archive is finalized, or the size isn't a whole number of bytes.
    */
-  startFile(name) {
-    if (this.currentFile) {
-      throw new Error("Must call endFile() before starting a new file.");
+  startFile(name, size) {
+    this.usable();
+    if (this.current) throw refused("Must call endFile() before starting a new file.");
+    if (!Number.isSafeInteger(size) || size < 0) {
+      throw refused("A ZIP member's size must be a whole number of bytes, 0 or more.");
     }
-    if (this.finalized) {
-      throw new Error("ZIP has already been finalized.");
-    }
-    const entry = new ZipPassThrough(name);
-    this.zip.add(entry);
-    this.currentFile = entry;
+    const stored = uniqueFilename(sanitizeFilename(name), (n) => this.taken.has(n.toLowerCase()));
+    this.taken.add(stored.toLowerCase());
+    const nameBytes = utf8.encode(stored);
+    const zip64 = size >= MAX_32;
+    const header = new Bytes(30 + nameBytes.length + (zip64 ? 20 : 0)).u32(LOCAL_HEADER).u16(zip64 ? VERSION_ZIP64 : VERSION_CLASSIC).u16(FLAGS).u16(0).u16(this.time).u16(this.date).u32(0).u32(zip64 ? MAX_32 : 0).u32(zip64 ? MAX_32 : 0).u16(nameBytes.length).u16(zip64 ? 20 : 0).raw(nameBytes);
+    if (zip64) header.u16(ZIP64_EXTRA).u16(16).u64(0).u64(0);
+    this.current = { name: nameBytes, size, crc: 0, offset: this.offset, written: 0 };
+    this.emit(header.bytes);
+    return stored;
   }
   /**
-   * Write a chunk of data to the current file entry.
+   * Writes the next bytes of the current member.
    * @param data - The data chunk to write.
+   * @throws {DropgateError} INVALID_ARGUMENT if no file is started, or the
+   * bytes would take the member past the size it was started with.
    */
   writeChunk(data) {
-    if (!this.currentFile) {
-      throw new Error("No file started. Call startFile() first.");
+    this.usable();
+    const member = this.current;
+    if (!member) throw refused("No file started. Call startFile() first.");
+    if (member.written + data.byteLength > member.size) {
+      throw this.fail(refused("More bytes were written to a ZIP member than its size."));
     }
-    this.currentFile.push(data, false);
+    if (data.byteLength === 0) return;
+    member.crc = crc32(data, member.crc);
+    member.written += data.byteLength;
+    this.emit(data);
   }
   /**
-   * End the current file entry.
+   * Ends the current member, with its data descriptor.
+   * @throws {DropgateError} INVALID_ARGUMENT if no file is started, or fewer
+   * bytes were written to it than its size.
    */
   endFile() {
-    if (!this.currentFile) {
-      throw new Error("No file to end.");
+    this.usable();
+    const member = this.current;
+    if (!member) throw refused("No file to end.");
+    if (member.written !== member.size) {
+      throw this.fail(refused("Fewer bytes were written to a ZIP member than its size."));
     }
-    this.currentFile.push(new Uint8Array(0), true);
-    this.currentFile = null;
+    const zip64 = member.size >= MAX_32;
+    const descriptor = new Bytes(zip64 ? 24 : 16).u32(DATA_DESCRIPTOR).u32(member.crc);
+    if (zip64) descriptor.u64(member.size).u64(member.size);
+    else descriptor.u32(member.size).u32(member.size);
+    this.current = null;
+    this.members.push({ name: member.name, size: member.size, crc: member.crc, offset: member.offset });
+    this.emit(descriptor.bytes);
   }
   /** Waits until `onData` has taken everything written so far. Throws its error if it failed. */
   async drained() {
@@ -2803,18 +2481,81 @@ var StreamingZipWriter = class {
     if (this.failed) throw this.failed.error;
   }
   /**
-   * Finalize the ZIP archive. Must be called after all files are written.
-   * Waits for all pending async writes to complete before resolving.
+   * Finalize the ZIP archive: writes the central directory and the end
+   * records, then waits for `onData` to take them. Must be called after all
+   * files are written.
+   * @throws {DropgateError} INVALID_ARGUMENT if a file is still open.
    */
   async finalize() {
-    if (this.currentFile) {
-      throw new Error("Cannot finalize with an open file. Call endFile() first.");
-    }
+    if (this.failed) throw this.failed.error;
+    if (this.current) throw refused("Cannot finalize with an open file. Call endFile() first.");
     if (!this.finalized) {
       this.finalized = true;
-      this.zip.end();
+      this.writeDirectory();
     }
     await this.drained();
+  }
+  writeDirectory() {
+    const directoryOffset = this.offset;
+    let zip64 = this.members.length >= MAX_16 || directoryOffset >= MAX_32;
+    let gathered = [];
+    let gatheredLength = 0;
+    const flush = () => {
+      if (gatheredLength === 0) return;
+      const chunk = new Uint8Array(gatheredLength);
+      let at = 0;
+      for (const part of gathered) {
+        chunk.set(part, at);
+        at += part.length;
+      }
+      gathered = [];
+      gatheredLength = 0;
+      this.emit(chunk);
+    };
+    for (const member of this.members) {
+      const bigSize = member.size >= MAX_32;
+      const bigOffset = member.offset >= MAX_32;
+      const extraLength = (bigSize ? 16 : 0) + (bigOffset ? 8 : 0);
+      const version = extraLength ? VERSION_ZIP64 : VERSION_CLASSIC;
+      if (extraLength) zip64 = true;
+      const record = new Bytes(46 + member.name.length + (extraLength ? 4 + extraLength : 0)).u32(CENTRAL_HEADER).u16(version).u16(version).u16(FLAGS).u16(0).u16(this.time).u16(this.date).u32(member.crc).u32(bigSize ? MAX_32 : member.size).u32(bigSize ? MAX_32 : member.size).u16(member.name.length).u16(extraLength ? 4 + extraLength : 0).u16(0).u16(0).u16(0).u32(0).u32(bigOffset ? MAX_32 : member.offset).raw(member.name);
+      if (extraLength) {
+        record.u16(ZIP64_EXTRA).u16(extraLength);
+        if (bigSize) record.u64(member.size).u64(member.size);
+        if (bigOffset) record.u64(member.offset);
+      }
+      gathered.push(record.bytes);
+      gatheredLength += record.bytes.length;
+      if (gatheredLength >= DIRECTORY_CHUNK) flush();
+    }
+    const directorySize = this.offset + gatheredLength - directoryOffset;
+    if (directorySize >= MAX_32) zip64 = true;
+    const count = this.members.length;
+    if (zip64) {
+      const recordOffset = this.offset + gatheredLength;
+      const end64 = new Bytes(56 + 20).u32(ZIP64_END).u64(44).u16(VERSION_ZIP64).u16(VERSION_ZIP64).u32(0).u32(0).u64(count).u64(count).u64(directorySize).u64(directoryOffset).u32(ZIP64_LOCATOR).u32(0).u64(recordOffset).u32(1);
+      gathered.push(end64.bytes);
+      gatheredLength += end64.bytes.length;
+    }
+    const end = new Bytes(22).u32(END).u16(0).u16(0).u16(Math.min(count, MAX_16)).u16(Math.min(count, MAX_16)).u32(Math.min(directorySize, MAX_32)).u32(Math.min(directoryOffset, MAX_32)).u16(0);
+    gathered.push(end.bytes);
+    gatheredLength += end.bytes.length;
+    flush();
+  }
+  usable() {
+    if (this.failed) throw this.failed.error;
+    if (this.finalized) throw refused("ZIP has already been finalized.");
+  }
+  /** Stops the archive: nothing more goes to `onData`, and every call after throws `error`. */
+  fail(error) {
+    this.failed ?? (this.failed = { error });
+    return error;
+  }
+  emit(chunk) {
+    this.offset += chunk.byteLength;
+    this.pendingWrites = this.pendingWrites.then(() => this.failed ? void 0 : this.onData(chunk)).catch((error) => {
+      this.failed ?? (this.failed = { error });
+    });
   }
 };
 
@@ -2945,8 +2686,8 @@ var DropgateClient = class {
     this.fetchFn = guardedFetch(fetchFn);
     try {
       this._crypto = cryptoProvider();
-    } catch (err2) {
-      throw withTransport(err2, this.transport);
+    } catch (err) {
+      throw withTransport(err, this.transport);
     }
     if (opts.auth !== void 0 && typeof opts.auth !== "function") {
       throw new DropgateError({ code: "INVALID_ARGUMENT", message: "auth must be a function giving { token } or null.", transport: this.transport });
@@ -2958,11 +2699,11 @@ var DropgateClient = class {
       let out;
       try {
         out = fn(...args);
-      } catch (err2) {
-        throw withTransport(err2, transport);
+      } catch (err) {
+        throw withTransport(err, transport);
       }
-      if (out instanceof Promise) return out.catch((err2) => {
-        throw withTransport(err2, transport);
+      if (out instanceof Promise) return out.catch((err) => {
+        throw withTransport(err, transport);
       });
       return out;
     };
@@ -3032,8 +2773,8 @@ var DropgateClient = class {
     let serverInfo;
     try {
       serverInfo = await this._fetchInfo(opts);
-    } catch (err2) {
-      throw toDropgateError(err2, "SERVER_UNREACHABLE");
+    } catch (err) {
+      throw toDropgateError(err, "SERVER_UNREACHABLE");
     }
     const compat = this._checkVersionCompat(serverInfo);
     this._compat = Object.freeze({ ...compat, serverInfo, baseUrl: this.baseUrl, transport: this.transport });
@@ -3143,8 +2884,8 @@ var DropgateClient = class {
       try {
         cryptoKey ?? (cryptoKey = await keyFromBase64(this._crypto, keyB64, this.base64));
         return await run(cryptoKey);
-      } catch (err2) {
-        throw new DropgateError({ code: "DECRYPT_FAILED", cause: err2 });
+      } catch (err) {
+        throw new DropgateError({ code: "DECRYPT_FAILED", cause: err });
       }
     };
     const openName = (encrypted) => decrypt((key) => decryptName(this._crypto, String(encrypted ?? ""), key, this.base64));
@@ -3346,8 +3087,8 @@ var DropgateClient = class {
           for (const name of filenames2) {
             transmittedFilenames.push(await encryptName(this._crypto, name, cryptoKey, this.base64));
           }
-        } catch (err2) {
-          throw new DropgateError({ code: "ENCRYPT_FAILED", cause: err2 });
+        } catch (err) {
+          throw new DropgateError({ code: "ENCRYPT_FAILED", cause: err });
         }
       } else {
         transmittedFilenames.push(...filenames2);
@@ -3634,28 +3375,35 @@ var DropgateClient = class {
           const drained = async () => {
             try {
               await zip2.drained();
-            } catch (err2) {
-              throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
+            } catch (err) {
+              throw toDropgateError(err, "OUTPUT_WRITE_FAILED");
             }
           };
-          const members = [];
+          const sized = (run) => {
+            try {
+              run();
+            } catch (err) {
+              if (err instanceof DropgateError && err.code === "INVALID_ARGUMENT") {
+                throw new DropgateError({ code: "INTEGRITY_FAILED", message: "A file's bytes didn't match its size.", cause: err });
+              }
+              throw toDropgateError(err, "OUTPUT_WRITE_FAILED");
+            }
+          };
           for (let fi = 0; fi < files.length; fi++) {
             fileStarts(fi);
-            const member = uniqueFilename(sanitizeFilename(files[fi].name), members);
-            members.push(member);
-            zip2.startFile(member);
+            zip2.startFile(files[fi].name, files[fi].sizeBytes);
             const done = written;
             written += await this._streamFile(files[fi].fileId, streamOpts, async (chunk) => {
-              zip2.writeChunk(chunk);
+              sized(() => zip2.writeChunk(chunk));
               await drained();
             }, counted(fi, done));
-            zip2.endFile();
+            sized(() => zip2.endFile());
           }
           progress({ status: "completing", phase: "complete", text: "Finishing the download..." });
           try {
             await zip2.finalize();
-          } catch (err2) {
-            throw toDropgateError(err2, "OUTPUT_WRITE_FAILED");
+          } catch (err) {
+            throw toDropgateError(err, "OUTPUT_WRITE_FAILED");
           }
           await out.close();
           open = null;
@@ -3687,9 +3435,9 @@ var DropgateClient = class {
           wasEncrypted: meta.isEncrypted,
           transport: this.transport
         };
-      } catch (err2) {
-        await open?.abort(downloadSignal.aborted ? downloadSignal.reason : err2);
-        throw err2;
+      } catch (err) {
+        await open?.abort(downloadSignal.aborted ? downloadSignal.reason : err);
+        throw err;
       }
     };
     return this._registry.add(startOperation({
@@ -3723,9 +3471,9 @@ var DropgateClient = class {
     const step = async (code, run) => {
       try {
         return await run();
-      } catch (err2) {
+      } catch (err) {
         if (downloadSignal.aborted) throw downloadSignal.reason;
-        throw toDropgateError(err2, code);
+        throw toDropgateError(err, code);
       }
     };
     try {
@@ -3735,8 +3483,8 @@ var DropgateClient = class {
           method: "GET",
           signal: downloadSignal
         }));
-      } catch (err2) {
-        throw toDropgateError(err2, "SERVER_UNREACHABLE");
+      } catch (err) {
+        throw toDropgateError(err, "SERVER_UNREACHABLE");
       }
       if (!downloadRes.ok) throw errorFromStatus(downloadRes.status, null, "Download failed.");
       if (!downloadRes.body) throw new DropgateError({ code: "RUNTIME_UNSUPPORTED", message: "Streaming response not available." });
@@ -3807,8 +3555,8 @@ var DropgateClient = class {
           await deliver(value);
         }
       }
-    } catch (err2) {
-      throw toDropgateError(err2, "CONNECTION_LOST");
+    } catch (err) {
+      throw toDropgateError(err, "CONNECTION_LOST");
     } finally {
       stopWatching();
       downloadCleanup();
@@ -3867,7 +3615,7 @@ var DropgateClient = class {
       out[name] = (evt) => listener(evt && typeof evt === "object" ? { ...evt, transport } : evt);
     }
     const onError = out.onError;
-    if (typeof onError === "function") out.onError = (err2) => onError(withTransport(err2, transport));
+    if (typeof onError === "function") out.onError = (err) => onError(withTransport(err, transport));
     return out;
   }
   /**
@@ -3912,8 +3660,8 @@ var DropgateClient = class {
       if (cryptoKey) {
         try {
           uploadBytes = await this._crypto.encrypt(cryptoKey, chunkBytes);
-        } catch (err2) {
-          throw new DropgateError({ code: "ENCRYPT_FAILED", cause: err2 });
+        } catch (err) {
+          throw new DropgateError({ code: "ENCRYPT_FAILED", cause: err });
         }
       } else {
         uploadBytes = chunkBytes;
@@ -3953,8 +3701,8 @@ var DropgateClient = class {
         try {
           const headers = { ...fetchOptions.headers, ...credentials.headers() };
           res = await this.fetchFn(url, { ...fetchOptions, headers, signal: s });
-        } catch (err2) {
-          throw toDropgateError(err2, "SERVER_UNREACHABLE");
+        } catch (err) {
+          throw toDropgateError(err, "SERVER_UNREACHABLE");
         }
         if (res.ok) return;
         const text = await res.text().catch(() => "");
@@ -3964,15 +3712,15 @@ var DropgateClient = class {
         } catch {
         }
         throw errorFromStatus(res.status, said, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
-      } catch (err2) {
+      } catch (err) {
         cleanup();
         if (signal?.aborted) {
           throw signal.reason || new DropgateError({ code: "OPERATION_CANCELLED" });
         }
-        if (DropgateError.is(err2, "OPERATION_CANCELLED")) throw err2;
-        if (DropgateError.is(err2, "AUTH_EXPIRED") && await credentials.renew(signal)) continue;
-        if (isCredentialError(err2)) throw err2;
-        if (attemptsLeft <= 0) throw toDropgateError(err2, "SERVER_UNREACHABLE");
+        if (DropgateError.is(err, "OPERATION_CANCELLED")) throw err;
+        if (DropgateError.is(err, "AUTH_EXPIRED") && await credentials.renew(signal)) continue;
+        if (isCredentialError(err)) throw err;
+        if (attemptsLeft <= 0) throw toDropgateError(err, "SERVER_UNREACHABLE");
         const attemptNumber = maxRetries - attemptsLeft + 1;
         let remaining = currentBackoff;
         const tick = 100;
@@ -4082,8 +3830,10 @@ var hosts = Object.freeze({
 var zip = Object.freeze({
   /**
    * A ZIP writer that gives the archive's bytes to `onData` as they're
-   * written: `startFile(name)`, `writeChunk(bytes)`, `endFile()`, then
-   * `finalize()`. Await `drained()` to let a slow `onData` keep up.
+   * written: `startFile(name, size)`, `writeChunk(bytes)`, `endFile()`, then
+   * `finalize()`. Each member's name is made safe and unique, and its bytes
+   * must come to exactly its size. ZIP64 only where the archive needs it.
+   * Await `drained()` to let a slow `onData` keep up.
    */
   writer: (onData) => new StreamingZipWriter(onData)
 });

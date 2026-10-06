@@ -32,7 +32,6 @@ let received = 0;
 let transferCompleted = false;
 let writer = null;
 let zipWriter = null;
-let zipMembers = [];
 let isMultiFile = false;
 let fileCount = 0;
 let pendingSendReady = null;
@@ -176,7 +175,6 @@ function startDownload() {
 
     // For multi-file transfers, set up a ZIP writer that pipes ZIP data into the StreamSaver writer
     if (isMultiFile) {
-      zipMembers = [];
       zipWriter = zip.writer(async (chunk) => {
         await writer.write(chunk);
       });
@@ -262,12 +260,12 @@ async function start() {
         // Add click handler for download button
         elDownloadBtn.addEventListener('click', startDownload, { once: true });
       },
-      onFileStart: ({ name }) => {
-        // Start a new file entry in the ZIP writer (multi-file only)
+      onFileStart: ({ name, size }) => {
+        // Start a new file entry in the ZIP writer (multi-file only). The writer
+        // saves it under its safe name, told apart from any other the same, and
+        // refuses more or fewer bytes than the size the sender gave.
         if (zipWriter) {
-          const member = filenames.unique(filenames.sanitize(name), zipMembers);
-          zipMembers.push(member);
-          zipWriter.startFile(member);
+          zipWriter.startFile(name, size);
         }
       },
       onFileEnd: () => {
@@ -278,8 +276,10 @@ async function start() {
       },
       onData: async (chunk) => {
         if (zipWriter) {
-          // Multi-file: write chunk through the ZIP writer (which pipes to StreamSaver)
+          // Multi-file: write chunk through the ZIP writer (which pipes to StreamSaver),
+          // and wait for it, so the sender is slowed to what the download can take
           zipWriter.writeChunk(chunk);
+          await zipWriter.drained();
         } else if (writer) {
           // Single file: write directly to StreamSaver
           await writer.write(chunk);

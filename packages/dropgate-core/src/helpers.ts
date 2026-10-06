@@ -78,8 +78,10 @@ export const hosts = Object.freeze({
 export const zip = Object.freeze({
   /**
    * A ZIP writer that gives the archive's bytes to `onData` as they're
-   * written: `startFile(name)`, `writeChunk(bytes)`, `endFile()`, then
-   * `finalize()`. Await `drained()` to let a slow `onData` keep up.
+   * written: `startFile(name, size)`, `writeChunk(bytes)`, `endFile()`, then
+   * `finalize()`. Each member's name is made safe and unique, and its bytes
+   * must come to exactly its size. ZIP64 only where the archive needs it.
+   * Await `drained()` to let a slow `onData` keep up.
    */
   writer: (onData: (chunk: Uint8Array) => void | Promise<void>) => new StreamingZipWriter(onData),
 });

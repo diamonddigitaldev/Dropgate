@@ -403,7 +403,7 @@ Only after receiving the `file_end_ack` does the sender proceed to the next file
 
 ### 10.3 Browser-Side ZIP Streaming
 
-When a multi-file transfer is received in a browser, the Web UI creates a streaming ZIP archive. Each file's chunks are piped through the core library's streaming ZIP writer (`zip.writer()`) and ultimately saved as a single `.zip` download.
+When a multi-file transfer is received in a browser, the Web UI creates a streaming ZIP archive. Each file's chunks are piped through the core library's streaming ZIP writer (`zip.writer()`) and ultimately saved as a single `.zip` download. Each file starts its member with the name and size from its `meta` message ([§7.2](#72-file-metadata)): the writer stores the name made safe, told apart from any other the same, and fails the transfer if the file's bytes don't come to that size. The archive is stored, not compressed, and uses ZIP64 only when it needs it (a file or the archive past 4 GiB, or 65,535 files or more), so a smaller one is the classic format every reader opens.
 
 ---
 

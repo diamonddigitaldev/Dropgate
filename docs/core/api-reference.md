@@ -269,25 +269,31 @@ An upload reads each file one chunk at a time through a `FileSource`: `name`, `s
 
 ## zip.writer()
 
-A streaming ZIP writer, for writing several files received in a direct transfer into one archive. It wraps [fflate](https://github.com/101arrowz/fflate), stores without compressing, and never holds a whole file in memory. A hosted bundle's ZIP needs none of this: `client.hosted.download({ bundleId, asZip: true, sink })` writes it.
+A streaming ZIP writer, for writing several files received in a direct transfer into one archive. It's core's own: it stores without compressing, never holds a whole file in memory, and has no dependencies. A hosted bundle's ZIP needs none of this: `client.hosted.download({ bundleId, asZip: true, sink })` writes it with the same writer.
 
 ```javascript
 import { zip } from '@dropgate/core';
 
 const archive = zip.writer((zipChunk) => writer.write(zipChunk)); // e.g. a StreamSaver writer
 
-archive.startFile('photo.jpg');
+archive.startFile('photo.jpg', 2_500_000); // its size in bytes, before its first byte
 archive.writeChunk(chunk1);
 await archive.drained(); // waits for onData, so a slow output slows the writer down
 archive.writeChunk(chunk2);
 await archive.drained();
 archive.endFile();
 
-archive.startFile('notes.txt');
+const stored = archive.startFile('photo.jpg', 1200); // 'photo (1).jpg'
 archive.writeChunk(chunk3);
 archive.endFile();
 
-await archive.finalize(); // writes the rest and the ZIP's footer, and waits for onData
+await archive.finalize(); // writes the central directory and the end records, and waits for onData
 ```
 
-`writeChunk()` returns at once and queues its output for `onData`, one call at a time. Await `drained()` after it to wait for `onData`. Once `onData` fails, nothing more is given to it, and `drained()` and `finalize()` throw its error.
+- **`startFile(name, size)`** begins a member of exactly `size` bytes, and returns the name it's stored under: `name` through [`filenames.sanitize()`](#helpers), then [`filenames.unique()`](#helpers) against the members before it, so two files with the same name get distinct entries. Names are stored in UTF-8, with the flag that says so (bit 11), so accented and CJK names show correctly in every reader.
+- **The size is a promise.** `writeChunk()` refuses bytes that would take the member past it, and `endFile()` refuses a member that's short of it, each with `INVALID_ARGUMENT`. After either, the archive is stopped: nothing more goes to `onData`, and every call after, `drained()` and `finalize()` included, throws the same error, so a member that went wrong never ends up in an archive that looks whole.
+- **ZIP64 only where it's needed.** A member of 4 GiB or more, a member or the central directory starting at 4 GiB or later, or 65,535 members or more, get ZIP64's fields and end records. Any other archive is the classic format ("version needed" 2.0, no ZIP64 record), which every reader opens. Each member's size is known as it starts, so this is decided before its first byte.
+- **Each member has a CRC-32 and a data descriptor** after its bytes, and the time the writer was made as its modified time.
+- **`writeChunk()` returns at once** and queues its output for `onData`, one call at a time. The bytes it's given are passed on as they are, not copied, so don't change them until `drained()` has resolved. Await `drained()` after it to wait for `onData`. Once `onData` fails, nothing more is given to it, and `drained()` and `finalize()` throw its error.
+
+**Changed in 4.0:** `startFile()` takes the member's size, refuses more or fewer bytes than it, makes the name safe and unique itself (returning the name it stored), and the archive gets ZIP64 where it needs it. In 3.x, `startFile(name)` stored the name as given, and an archive over 4 GiB or 65,535 files was written corrupt, with no error. The writer no longer wraps fflate, and core no longer depends on it.
