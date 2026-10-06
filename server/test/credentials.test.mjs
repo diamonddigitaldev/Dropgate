@@ -13,7 +13,7 @@ test('the server asks no credential, and a client with an auth provider sends no
     t.after(server.stop);
 
     const info = await (await fetch(`${server.baseUrl}/api/info`)).json();
-    assert.equal(info.capabilities.upload.credentialRequired, undefined);
+    assert.equal(info.capabilities.upload.credentialRequired, false);
 
     const run = await runFixture(server);
     assert.ok(run.responses.length > 10, 'the fixture made its requests');

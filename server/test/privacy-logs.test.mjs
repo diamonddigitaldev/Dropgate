@@ -39,6 +39,8 @@ const KNOWN_EVENTS = [
     String.raw`Bundle expired\. Deleting \d+ member files\.\.\.`,
     String.raw`Cleaning zombie (bundle )?upload\.`,
     String.raw`Rate limit triggered\. Request blocked\.`,
+    String.raw`Refused a request whose body could not be read\.`,
+    String.raw`Unexpected error while answering a request( to [A-Z]+ [\w/:.-]+)?( \([A-Za-z]+(, [A-Z][A-Z0-9_]+)?\))?\.`,
 ].map((source) => new RegExp(`^${source}$`));
 const FILE_COUNT = /\(\d+ files|\d+ member files/;
 
@@ -90,12 +92,7 @@ describe('at every log level, with a malformed request and a missing stored file
         assert.deepEqual(leaks, []);
     });
 
-    test('nothing reaches stdout or stderr outside LOG_LEVEL', {
-        expectFailure: {
-            label: 'known issue until the v4 server rewrite: Express prints error stacks, one with a file ID',
-            match: /outside LOG_LEVEL/,
-        },
-    }, () => {
+    test('nothing reaches stdout or stderr outside LOG_LEVEL', () => {
         const problems = [];
         for (const { level, lines } of runs) {
             const own = lines.filter((l) => OWN_LINE.test(l));

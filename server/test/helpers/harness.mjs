@@ -78,6 +78,14 @@ export async function startServer({ env = {}, clock = false, requests = false, p
             return null;
         }
     };
+    // Why the server couldn't listen (listening.cjs), as a code such as EADDRINUSE, or null.
+    const listenError = () => {
+        try {
+            return JSON.parse(fs.readFileSync(path.join(dir, 'listen-error.json'), 'utf8')).code;
+        } catch {
+            return null;
+        }
+    };
 
     let run;
     const stop = async () => {
@@ -93,13 +101,17 @@ export async function startServer({ env = {}, clock = false, requests = false, p
     // answers on the port, so the server has only started once it says it's
     // listening, and a taken port means trying another.
     for (let attempt = 1; ; attempt++) {
+        fs.rmSync(path.join(dir, 'listen-error.json'), { force: true });
         run = launch(attempt === 1 && firstPort ? firstPort : await freePort());
         for (let i = 0; listeningOn() !== run.port && !run.exited && i <= 100; i++) await sleep(100);
         if (listeningOn() === run.port) break;
         if (run.exited) await run.closed;
-        if (attempt < 3 && run.exited && run.output.stderr.includes('EADDRINUSE')) continue;
+        if (attempt < 3 && run.exited && listenError() === 'EADDRINUSE') continue;
         await stop();
-        throw new Error(`Server did not start.\n${run.output.stdout}${run.output.stderr}`);
+        // A test of a setting the server refuses reads why from these.
+        throw Object.assign(new Error(`Server did not start.\n${run.output.stdout}${run.output.stderr}`), {
+            exitCode: run.child.exitCode, output: { ...run.output },
+        });
     }
     const { port, child, output } = run;
 
@@ -113,8 +125,18 @@ export async function startServer({ env = {}, clock = false, requests = false, p
         mark: () => ({ stdout: output.stdout.length, stderr: output.stderr.length }),
         /** Everything written after a mark(). */
         since: (m) => ({ stdout: output.stdout.slice(m.stdout), stderr: output.stderr.slice(m.stderr) }),
-        /** Files in uploads/ other than the tmp/ and db/ folders. */
-        storedFiles: () => fs.readdirSync(path.join(dir, 'uploads')).filter((f) => f !== 'tmp' && f !== 'db'),
+        /**
+         * Every stored upload's file, relative to uploads/: those in uploads/objects/ (as
+         * `objects/<name>`), and those in uploads/ itself other than its folders and the
+         * format marker.
+         */
+        storedFiles: () => [
+            ...fs.readdirSync(path.join(dir, 'uploads'))
+                .filter((f) => !['tmp', 'db', 'objects', 'dropgate-storage.json'].includes(f)),
+            ...(fs.existsSync(path.join(dir, 'uploads', 'objects'))
+                ? fs.readdirSync(path.join(dir, 'uploads', 'objects')).map((f) => `objects/${f}`)
+                : []),
+        ],
         tempFiles: () => fs.readdirSync(path.join(dir, 'uploads', 'tmp')),
         /**
          * Every record in one of the server's databases, as { id, value }.

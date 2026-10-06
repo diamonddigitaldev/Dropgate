@@ -860,9 +860,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // The server's limit, as its operator set it, in MB.
             const maxSizeMB = serverCapabilities.upload.maxSizeMB;
-            const sizeMode = serverCapabilities.upload.bundleSizeMode || 'total';
-            const sizeLabel = sizeMode === 'per-file' ? 'Max single file size' : 'Max upload size';
-            maxUploadHint.textContent = maxSizeMB === 0 ? 'You can upload files of any size.' : `${sizeLabel}: ${maxSizeMB} MB.`;
+            maxUploadHint.textContent = maxSizeMB === 0 ? 'You can upload files of any size.' : `Max upload size: ${maxSizeMB} MB.`;
 
             // Update Security Status UI (Auto-managed E2EE)
             updateSecurityStatus();

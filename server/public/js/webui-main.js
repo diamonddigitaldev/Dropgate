@@ -90,7 +90,6 @@ const state = {
   maxSizeMB: null,
   maxLifetimeHours: null,
   maxFileDownloads: 1,
-  bundleSizeMode: 'total',
   e2ee: false,
   peerjsPath: '/peerjs',
   iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }],
@@ -276,8 +275,9 @@ function updateFileUI() {
 
 function areFilesTooLargeForStandard(files) {
   if (!files.length || !state.uploadEnabled) return false;
+  // The server's limit counts in 1024s.
   const maxBytes = Number.isFinite(state.maxSizeMB) && state.maxSizeMB > 0
-    ? state.maxSizeMB * 1000 * 1000
+    ? state.maxSizeMB * 1024 * 1024
     : null;
   if (!maxBytes) return false;
   // Check total estimated size across all files
@@ -449,10 +449,9 @@ function updateCapabilitiesUI() {
 
   // Upload
   if (state.uploadEnabled) {
-    const sizeLabel = state.bundleSizeMode === 'per-file' ? 'Max single file size' : 'Max upload size';
     const maxText = (state.maxSizeMB === 0)
       ? 'You can upload files of any size.'
-      : `${sizeLabel}: ${formatBytes(state.maxSizeMB * 1000 * 1000)}.`;
+      : `Max upload size: ${formatBytes(state.maxSizeMB * 1000 * 1000)}.`;
 
     const p2pAvailable = state.p2pEnabled && state.p2pSecureOk;
     els.maxUploadHint.textContent = p2pAvailable && state.maxSizeMB > 0
@@ -546,7 +545,6 @@ async function loadServerInfo() {
   const upload = info?.capabilities?.upload;
   state.uploadEnabled = Boolean(upload?.enabled);
   state.maxSizeMB = state.uploadEnabled ? (upload?.maxSizeMB ?? null) : null;
-  state.bundleSizeMode = state.uploadEnabled ? (upload?.bundleSizeMode ?? 'total') : 'total';
   state.maxLifetimeHours = state.uploadEnabled ? (upload?.maxLifetimeHours ?? null) : null;
   state.maxFileDownloads = state.uploadEnabled ? (upload?.maxFileDownloads ?? 1) : 1;
   state.e2ee = state.uploadEnabled ? Boolean(upload?.e2ee) : false;
@@ -774,8 +772,9 @@ async function startStandardUpload() {
   }
 
   const encrypt = hasE2EE; // Auto-set encryption based on capability
+  // The server's limit counts in 1024s.
   const maxBytes = Number.isFinite(state.maxSizeMB) && state.maxSizeMB > 0
-    ? state.maxSizeMB * 1000 * 1000
+    ? state.maxSizeMB * 1024 * 1024
     : null;
   if (maxBytes) {
     let totalEstimated = 0;

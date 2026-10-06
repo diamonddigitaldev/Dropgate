@@ -1,6 +1,6 @@
 # DGUP — Dropgate Upload Protocol
 
-**Protocol Version:** 4.0, in development. Until it's finished, the requests below are version 3's, with `/api/info` giving `protocols`
+**Protocol Version:** 4.0, in development. Until it's finished, the requests below are version 3's, with `/api/info` giving version 4's fields. Version 4's routes go under `/api/v4/` as they're built
 **Status:** In development
 **Last Updated:** October 2026
 
@@ -57,14 +57,17 @@ A JSON object containing (at minimum):
 | `version` | `string` | Server version (semver). For display only: compatibility never depends on it. |
 | `protocols.dgup` | `{ major, minor }` | The version of DGUP (this protocol) the server speaks. |
 | `protocols.dgdtp` | `{ major, minor }` | The version of [DGDTP](./DGDTP.md) the server's direct transfers use. |
-| `capabilities.upload.enabled` | `boolean` | Whether DGUP is available. |
+| `capabilities.upload.enabled` | `boolean` | Whether DGUP is available. When it's `false`, `upload` has no other field. |
 | `capabilities.upload.e2ee` | `boolean` | Whether E2EE is supported. |
-| `capabilities.upload.maxSizeMB` | `number` | Maximum file size in megabytes (0 = unlimited). |
+| `capabilities.upload.maxSizeMB` | `number` | Maximum upload size in MB, counted in 1024s (× 1024 × 1024 bytes), for the whole upload: a bundle's files count together (0 = unlimited). |
 | `capabilities.upload.maxLifetimeHours` | `number` | Maximum permitted file lifetime in hours (0 = unlimited). |
 | `capabilities.upload.maxFileDownloads` | `number` | Server-enforced maximum download limit (0 = unlimited). |
 | `capabilities.upload.chunkSize` | `number` | Server's expected chunk size in bytes. |
-| `capabilities.upload.bundleSizeMode` | `string` | `"total"` or `"per-file"` — how bundle size limits are applied. |
-| `capabilities.upload.credentialRequired` | `boolean` | Whether an upload needs a credential ([§3.5](#35-credentials)). Absent means none. This server doesn't send it yet: it asks for no credential. |
+| `capabilities.upload.maxPauseMinutes` | `number` | How long the server keeps a paused upload, in minutes, or `0` when pausing is off. Pausing itself comes with version 4's upload routes, still being built. |
+| `capabilities.upload.credentialRequired` | `boolean` | Whether an upload needs a credential ([§3.5](#35-credentials)). Absent means none. This server sends `false`: it asks for no credential yet. |
+| `capabilities.accounts.enabled` | `boolean` | Whether the server has accounts. This server always sends `false`: accounts come later. |
+
+The answer is never cached (`Cache-Control: no-store`). Version 3's `bundleSizeMode` is gone: the size limit always applies to the whole upload.
 
 ### 3.3 Compatibility
 
@@ -180,7 +183,7 @@ Content-Type: application/json
 1. `filename` MUST be non-empty and MUST NOT contain null bytes or control characters (unless encrypted).
 2. Unencrypted filenames are checked for reserved OS names and path-traversal sequences.
 3. Unencrypted filenames MUST NOT exceed 255 characters.
-4. `totalSize` MUST NOT exceed the server's declared maximum file size.
+4. `totalSize` MUST NOT exceed the server's declared maximum upload size.
 5. `totalChunks` MUST NOT exceed 100,000.
 6. `totalChunks` MUST be consistent with `totalSize` and the server's chunk size (±1 for rounding).
 7. `lifetime` MUST NOT exceed the server's declared maximum lifetime.
@@ -227,6 +230,8 @@ Content-Type: application/json
 
 Each file in the bundle receives its own upload ID and is uploaded independently using the chunk mechanism described below.
 
+The files' combined size MUST NOT exceed the server's declared maximum upload size: the limit is for the whole bundle, whatever each file's size.
+
 ### 5.3 Session Expiry
 
 - **Single-file sessions** expire after **2 minutes** of inactivity.
@@ -251,7 +256,7 @@ The request body is the raw chunk bytes (encrypted or plaintext).
 
 ### 6.2 Chunk Sizing
 
-The default chunk size is **5,242,880 bytes** (5 MiB). The server MAY advertise a different chunk size via `/api/info`. The minimum permitted chunk size is **65,536 bytes** (64 KiB).
+The default chunk size is **5,242,880 bytes** (5 MiB). The server MAY advertise a different chunk size via `/api/info`, from **65,536 bytes** (64 KiB) to **67,108,864 bytes** (64 MiB).
 
 For encrypted uploads, each chunk's on-wire size includes the 28-byte encryption overhead.
 
@@ -431,7 +436,7 @@ Streams the raw file bytes. For encrypted files, the client decrypts the stream 
 
 ### 12.1 Expiry
 
-Files and bundles are automatically deleted once their `expiresAt` timestamp is reached. The server runs a cleanup task every **60 seconds**.
+A file or bundle is gone the moment its `expiresAt` timestamp is reached: from then on every route answers for it as for an ID that never existed (`404`, and the not-found page). Its bytes and record are deleted by a cleanup task that runs every **60 seconds**.
 
 ### 12.2 Zombie Upload Cleanup
 
@@ -447,13 +452,24 @@ By default, all uploads and temporary files are cleared on server restart. If `U
 
 ## 13. Error Model
 
-All error responses follow a consistent JSON structure:
+Errors are JSON. Version 4's give a stable code with a short message for people:
 
 ```json
 {
+  "code": "<CODE>",
   "error": "<human-readable message>"
 }
 ```
+
+A message never holds an ID, a name, a key, a token, or anything from the request. Version 3's routes, described above until version 4's replace them, give their own errors with `error` alone. These codes come from anywhere on the server, version 3's routes included:
+
+| Status | Code | When |
+|--------|------|------|
+| `400` | `INVALID_REQUEST` | A request body that can't be read, such as malformed JSON. |
+| `404` | `NOT_FOUND` | Anything under `/api/v4/` that isn't a route. Version 4's routes go there as they're built; until then, all of it. |
+| `413` | `TOO_LARGE` | A JSON request body over 1 MiB. |
+| `429` | `RATE_LIMITED` | Too many requests ([§14.1](#141-rate-limits)). |
+| `500` | `SERVER_ERROR` | Anything unexpected while answering. The server logs the error's kind and the route's pattern, never its message, which can hold a path or part of the request ([PRIVACY.md](../PRIVACY.md)). |
 
 ### 13.1 Status Codes
 
@@ -470,7 +486,9 @@ All error responses follow a consistent JSON structure:
 
 ---
 
-## 14. Rate Limiting
+## 14. Rate Limiting and Cross-Origin Requests
+
+### 14.1 Rate Limits
 
 The server enforces a request rate limit to protect against abuse. The defaults are:
 
@@ -479,7 +497,11 @@ The server enforces a request rate limit to protect against abuse. The defaults 
 | Window | 60,000 ms |
 | Maximum requests per window | 25 |
 
-Rate limits are applied per IP address. When triggered, the server responds with HTTP 429.
+Rate limits are applied per IP address. When triggered, the server responds with HTTP 429, `RATE_LIMITED`, and `Retry-After` gives the seconds until the window resets.
+
+### 14.2 Cross-Origin Requests
+
+Everything under `/api/` answers any origin (`Access-Control-Allow-Origin: *`), because the desktop app and other integrators call it from their own. No cookie is ever set or sent, so another site has nothing to borrow. A request may send `Content-Type`, `Content-Digest`, `Range`, `If-Range`, `Authorization`, `Dropgate-Upload`, `Dropgate-Lease` and `Dropgate-Manage-Token`, and a script may read `ETag`, `Content-Range`, `Accept-Ranges`, `Retry-After` and `Content-Length` from the answer. Version 3's upload routes, under `/upload/`, allow any request header until they go. Pages and the Web UI's files get no CORS headers.
 
 ---
 
@@ -487,8 +509,8 @@ Rate limits are applied per IP address. When triggered, the server responds with
 
 | Aspect | Default | Notes |
 |--------|---------|-------|
-| Chunk size | 5 MiB | Minimum 64 KiB; server-configurable. |
-| Maximum file size | 100 MiB | 0 = unlimited; server-configurable. |
+| Chunk size | 5 MiB | 64 KiB to 64 MiB; server-configurable. |
+| Maximum upload size | 100 MiB | For the whole upload; 0 = unlimited; server-configurable. |
 | Maximum chunk count | 100,000 | Hard limit to prevent abuse. |
 | Maximum bundle file count | 1,000 | Hard limit. |
 | Maximum filename length | 255 chars | Unencrypted files only. |

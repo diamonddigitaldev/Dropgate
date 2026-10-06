@@ -22,9 +22,9 @@ export const sendChunk = (server, uploadId, index, bytes) => fetch(`${server.bas
     body: bytes,
 });
 
-export const initUpload = async (server, totalSize, totalChunks) => {
+export const initUpload = async (server, totalSize, totalChunks, { lifetime = HOUR_MS, isEncrypted = false } = {}) => {
     const res = await postJson(server, '/upload/init', {
-        filename: 'cleanup-test.bin', lifetime: HOUR_MS, isEncrypted: false, totalSize, totalChunks,
+        filename: 'cleanup-test.bin', lifetime, isEncrypted, totalSize, totalChunks,
     });
     return { status: res.status, uploadId: res.ok ? (await res.json()).uploadId : null };
 };

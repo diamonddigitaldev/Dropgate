@@ -39,6 +39,8 @@ The following tables enumerate every category of data processed by Dropgate, gro
 | **Received chunk indices** | Temporarily | In-memory (Set within upload session) | Detects duplicate chunks and validates completeness. | On each chunk upload. | When the upload session ends. |
 | **Reserved storage bytes** | Temporarily | In-memory (quota counter) | Prevents TOCTOU race conditions during concurrent uploads. | On upload initialisation (under mutex). | Released on completion, cancellation, or zombie cleanup. |
 | **Chunk hash** (SHA-256) | No | — | Verified on receipt and discarded. Not persisted. | — | — |
+| **Storage format marker** | Yes | Filesystem: `/uploads/dropgate-storage.json` | Says which version's layout the uploads folder holds (`{"format": 4}`), so a later version can tell. It holds nothing about any upload. | At every start with uploads on. | With the rest of the uploads folder: at shutdown and the next start in the default mode. |
+| **Server data folder** | Empty | Filesystem: `data/`, beside the uploads folder, never cleaned | Made at every start for the server's own data. Nothing uses it yet, and it holds nothing. | At every start. | — |
 
 ### 2.2 Dropgate Server — Bundle Data
 
@@ -181,8 +183,8 @@ The server has no access to encryption keys and therefore **cannot**:
 
 | Trigger | What Is Deleted | Frequency |
 |---------|-----------------|-----------|
-| **File expiry** (`expiresAt < now`) | File from disk + database record. | Checked every **60 seconds**. |
-| **Bundle expiry** | Sealed: manifest record. Unsealed: all member files + manifest. | Checked every **60 seconds**. |
+| **File expiry** (`expiresAt`) | File from disk + database record. | Gone the moment it expires: from then on every route answers as if it had never existed. Deleted at the next check, every **60 seconds**. |
+| **Bundle expiry** | Sealed: manifest record. Unsealed: all member files + manifest. | Gone the moment it expires, as a file is. Deleted at the next check, every **60 seconds**. |
 | **Max downloads reached** | Single file: file + record. Unsealed bundle: all member files + manifest. Sealed bundle: manifest record only; the member files stay on disk, and can still be downloaded by file ID, until they expire. A bundle download only counts when every file is downloaded together (**Download All as ZIP**); downloading files one at a time never counts. See [DGUP §11.3](./DGUP.md#113-download-counting). | Immediately after the triggering download. |
 | **Zombie upload cleanup** | Temporary file + storage reservation + session state. **Known issue in 3.x:** when a bundle upload is cancelled or abandoned part-way, files that had already finished uploading stay on disk with no database record, so expiry never removes them. They're deleted at the next restart in the default mode, and kept indefinitely with `UPLOAD_PRESERVE_UPLOADS=true`. | Every **5 minutes** (configurable via `UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS`). |
 | **Server restart** (non-persistent mode) | All files, temporary files, and in-memory data. | On process start. |
@@ -272,8 +274,8 @@ Data in transit peer-to-peer: File content + metadata (DTLS-encrypted)
 
 | Level | Value | What Is Logged |
 |-------|-------|----------------|
-| `NONE` | -1 | None of Dropgate's own messages (see [§8.3](#83-what-does-not-appear-in-logs) for what can still reach stderr). |
-| `ERROR` | 0 | Startup and configuration errors, and file I/O failures. |
+| `NONE` | -1 | Nothing at all: the server writes nothing to stdout or stderr. |
+| `ERROR` | 0 | Startup and configuration errors, file I/O failures, and unexpected errors, by their kind only (see [§8.3](#83-what-does-not-appear-in-logs)). |
 | `WARN` | 1 | Configuration warnings (such as the HTTPS requirement or an unlimited limit) and rate limit triggers. |
 | `INFO` | 2 | Startup configuration and storage capacity at startup. Nothing per upload or download. **Default.** |
 | `DEBUG` | 3 | Per-transfer events: upload init, each chunk, completion, downloads, deletion, expiry, cleanup and rejections. |
@@ -309,10 +311,10 @@ At any log level, Dropgate's own messages do **not** include:
 - Download URLs.
 - User-Agent strings.
 
-**Two exceptions sit outside `LOG_LEVEL`.** They write to stderr at every level, including `NONE`:
+**Everything the server writes goes through `LOG_LEVEL`,** errors included:
 
-- **Unexpected errors.** Express prints the stack trace of any error Dropgate doesn't handle itself. A stack trace can include the internal path of a stored file, which contains its file ID (for example, if a file is deleted by expiry while it's being requested), or a few characters of a malformed request body.
-- **Misconfigured reverse proxies.** If a proxy passes an invalid client address (for example `IP:port`), the rate limiter prints a one-time warning that includes it.
+- **Unexpected errors** are logged at `ERROR` by the kind of error and the route's pattern only, such as `GET /api/file/:fileId (Error, ENOENT)`. An error's message or stack trace is never written: it could hold the internal path of a stored file, which contains its file ID (for example, if a file is deleted by expiry while it's being requested), or part of a request body. A request body that can't be read is logged at `DEBUG`, without any of it.
+- **A misconfigured reverse proxy,** one that passes a client address the rate limiter can't read (for example `IP:port`), is logged at `ERROR` by the rate limiter's error code, never the address.
 
 ### 8.4 PeerJS Debug Logging
 
@@ -389,7 +391,6 @@ Dropgate itself receives none of this.
 - **Set conservative lifetimes and download limits.** Shorter lifetimes (`UPLOAD_MAX_FILE_LIFETIME_HOURS`) and low download counts (`UPLOAD_MAX_FILE_DOWNLOADS=1`) minimise the duration and accessibility of stored data.
 - **Restrict storage quota.** A bounded `UPLOAD_MAX_STORAGE_GB` limits the volume of data that can accumulate.
 - **Keep `LOG_LEVEL` at `INFO` or lower in production.** `DEBUG` logging includes chunk-level details that, in aggregate, reveal transfer patterns.
-- **Treat stderr as a log.** Stack traces from unexpected errors reach it at every `LOG_LEVEL` (see §8.3), so apply the same retention to it.
 - **Audit reverse proxy logs.** The reverse proxy may capture data that Dropgate itself does not log. Apply appropriate retention and access controls.
 - **Review the `P2P_STUN_SERVERS` configuration.** If IP privacy is a concern, self-host STUN infrastructure rather than relying on third-party servers.
 

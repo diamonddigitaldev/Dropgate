@@ -7,5 +7,6 @@ jsconfig.json
 .git
 .gitignore
 uploads
+data
 test
 README.md

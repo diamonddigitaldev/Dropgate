@@ -27,6 +27,26 @@ if (rawLogLevel && normalizeLogLevel(rawLogLevel) === 'INFO' && String(rawLogLev
     log('warn', 'Invalid LOG_LEVEL value. Defaulting to INFO.');
 }
 
+/**
+ * What kind of error this is, for a log line: its name and its system code, as
+ * in " (Error, ENOENT)". Never its message or stack, which can hold a path, an
+ * ID or part of a request.
+ */
+const describeError = (err) => {
+    const parts = [];
+    if (/^[A-Za-z]{1,40}$/.test(String(err?.name))) parts.push(err.name);
+    if (/^[A-Z][A-Z0-9_]{1,40}$/.test(String(err?.code))) parts.push(err.code);
+    return parts.length ? ` (${parts.join(', ')})` : '';
+};
+
+// Node would print the error's stack, outside LOG_LEVEL. The server still stops.
+const stopOnError = (err) => {
+    log('error', `Dropgate Server stopped after an unexpected error${describeError(err)}.`);
+    process.exit(1);
+};
+process.on('uncaughtException', stopOnError);
+process.on('unhandledRejection', stopOnError);
+
 log('info', 'Dropgate Server is starting...');
 log('info', `Log level: ${LOG_LEVEL}`);
 
@@ -143,6 +163,17 @@ const server = http.createServer(app);
 
 const uploadDir = path.join(__dirname, 'uploads');
 const tmpDir = path.join(__dirname, 'uploads', 'tmp');
+// Stored uploads, in Dropgate 4's format.
+const objectsDir = path.join(__dirname, 'uploads', 'objects');
+// Says which version's layout uploads/ holds, so a later version can tell.
+const storageMarker = path.join(__dirname, 'uploads', 'dropgate-storage.json');
+const STORAGE_FORMAT = 4;
+// The server's own data, outside uploads/, which is never cleaned. Nothing uses it yet.
+const dataDir = path.join(__dirname, 'data');
+
+// Sizes count in 1024s: a MB is 1024 × 1024 bytes, and a GB 1024 MB.
+const MIB = 1024 * 1024;
+const GIB = 1024 * MIB;
 
 const cleanupDir = (dirPath) => {
     if (fs.existsSync(dirPath)) {
@@ -166,6 +197,8 @@ const getDirSize = (dirPath) => {
         const files = fs.readdirSync(dirPath);
         for (const file of files) {
             const filePath = path.join(dirPath, file);
+            // The format marker isn't an upload, so it doesn't count against storage.
+            if (filePath === storageMarker) continue;
             const stats = fs.statSync(filePath);
             if (stats.isDirectory()) size += getDirSize(filePath);
             else size += stats.size;
@@ -183,6 +216,7 @@ let MAX_STORAGE_BYTES = Infinity;
 let MAX_FILE_LIFETIME_MS = Infinity;
 let maxFileDownloads = 1;
 let uploadChunkSizeBytes = 5 * 1024 * 1024;
+let maxPauseMinutes = 60;
 let currentDiskUsage = 0;
 let fileDatabase = null;
 let bundleDatabase = null;
@@ -208,30 +242,32 @@ if (enableUpload) {
     log('info', `UPLOAD_PRESERVE_UPLOADS: ${preserveUploads}`);
 
     maxFileSizeMB = parseEnvInt('UPLOAD_MAX_FILE_SIZE_MB', process.env.UPLOAD_MAX_FILE_SIZE_MB, 100);
-    MAX_FILE_SIZE_BYTES = maxFileSizeMB === 0 ? Infinity : maxFileSizeMB * 1000 * 1000;
+    MAX_FILE_SIZE_BYTES = maxFileSizeMB === 0 ? Infinity : maxFileSizeMB * MIB;
     log('info', `UPLOAD_MAX_FILE_SIZE_MB: ${maxFileSizeMB} MB`);
     if (maxFileSizeMB === 0) {
         log('warn', 'UPLOAD_MAX_FILE_SIZE_MB is set to 0! Files of any size can be uploaded.');
     }
 
-    // Bundle size mode: 'total' means UPLOAD_MAX_FILE_SIZE_MB applies to the total bundle size,
-    // 'per-file' means it applies to each individual file. Default is 'total'.
-    const bundleSizeModeRaw = (process.env.UPLOAD_BUNDLE_SIZE_MODE || 'total').trim().toLowerCase();
-    if (bundleSizeModeRaw !== 'total' && bundleSizeModeRaw !== 'per-file') {
-        log('error', "Invalid UPLOAD_BUNDLE_SIZE_MODE. Must be 'total' or 'per-file'.");
-        process.exit(1);
+    // Dropgate 4 removed per-file limits: a bundle is one upload, and the limit
+    // applies to all of it. A server set to per-file would allow less than its
+    // operator meant, so it doesn't start. This check goes in a later version.
+    const bundleSizeModeRaw = process.env.UPLOAD_BUNDLE_SIZE_MODE;
+    if (bundleSizeModeRaw !== undefined) {
+        if (bundleSizeModeRaw.trim().toLowerCase() === 'per-file') {
+            log('error', 'UPLOAD_BUNDLE_SIZE_MODE was removed in Dropgate 4, and per-file size limits with it: UPLOAD_MAX_FILE_SIZE_MB now applies to the whole upload, all its files together. Remove UPLOAD_BUNDLE_SIZE_MODE to start the server.');
+            process.exit(1);
+        }
+        log('warn', 'UPLOAD_BUNDLE_SIZE_MODE was removed in Dropgate 4 and is ignored: UPLOAD_MAX_FILE_SIZE_MB applies to the whole upload, all its files together.');
     }
-    var bundleSizeMode = bundleSizeModeRaw;
-    log('info', `UPLOAD_BUNDLE_SIZE_MODE: ${bundleSizeMode}`);
 
     maxStorageGB = parseEnvNumber('UPLOAD_MAX_STORAGE_GB', process.env.UPLOAD_MAX_STORAGE_GB, 10);
-    MAX_STORAGE_BYTES = maxStorageGB === 0 ? Infinity : maxStorageGB * 1000 * 1000 * 1000;
+    MAX_STORAGE_BYTES = maxStorageGB === 0 ? Infinity : maxStorageGB * GIB;
     log('info', `UPLOAD_MAX_STORAGE_GB: ${maxStorageGB} GB`);
     if (maxStorageGB === 0) {
         log('warn', 'UPLOAD_MAX_STORAGE_GB is set to 0! Consider setting a limit on total storage used by uploaded files to prevent disk exhaustion.');
     }
 
-    if (maxFileSizeMB > (maxStorageGB * 1000) && maxStorageGB !== 0) {
+    if (maxFileSizeMB > (maxStorageGB * 1024) && maxStorageGB !== 0) {
         log('warn', 'UPLOAD_MAX_FILE_SIZE_MB is larger than UPLOAD_MAX_STORAGE_GB! Any uploads larger than the allocated storage quota will be rejected.');
     }
 
@@ -253,7 +289,24 @@ if (enableUpload) {
         log('error', 'UPLOAD_CHUNK_SIZE_BYTES must be at least 65536 (64KB). Smaller values cause extreme fragmentation and per-chunk overhead.');
         process.exit(1);
     }
-    log('info', `UPLOAD_CHUNK_SIZE_BYTES: ${uploadChunkSizeBytes} bytes (${(uploadChunkSizeBytes / (1024 * 1024)).toFixed(2)} MB)`);
+    // The most an upload's object can say it uses, and each chunk is held in memory as it arrives.
+    if (uploadChunkSizeBytes > 64 * MIB) {
+        log('error', 'UPLOAD_CHUNK_SIZE_BYTES must be at most 67108864 (64 MB).');
+        process.exit(1);
+    }
+    log('info', `UPLOAD_CHUNK_SIZE_BYTES: ${uploadChunkSizeBytes} bytes (${(uploadChunkSizeBytes / MIB).toFixed(2)} MB)`);
+
+    // How long a paused upload is kept, in whole minutes: 1 to 1440 (a day), or 0 to turn pausing off.
+    const maxPauseMinutesRaw = process.env.UPLOAD_MAX_PAUSE_MINUTES;
+    if (maxPauseMinutesRaw !== undefined) {
+        const text = maxPauseMinutesRaw.trim();
+        if (!/^\d{1,4}$/.test(text) || Number(text) > 1440) {
+            log('error', 'Invalid UPLOAD_MAX_PAUSE_MINUTES environment variable. It must be a whole number of minutes from 1 to 1440, or 0 to turn pausing off.');
+            process.exit(1);
+        }
+        maxPauseMinutes = Number(text);
+    }
+    log('info', `UPLOAD_MAX_PAUSE_MINUTES: ${maxPauseMinutes === 0 ? '0 (pausing is off)' : `${maxPauseMinutes} minutes`}`);
 
     if (!preserveUploads) {
         log('info', 'Clearing any existing uploads on startup...');
@@ -264,14 +317,16 @@ if (enableUpload) {
 
     createDirIfNotExists(uploadDir);
     createDirIfNotExists(tmpDir);
+    createDirIfNotExists(objectsDir);
     if (preserveUploads) {
         createDirIfNotExists(path.join(__dirname, 'uploads', 'db'));
     }
+    fs.writeFileSync(storageMarker, `${JSON.stringify({ format: STORAGE_FORMAT })}\n`);
 
     currentDiskUsage = getDirSize(uploadDir);
     setInterval(() => { currentDiskUsage = getDirSize(uploadDir); }, 300000); // Sync every 5 minutes in case of discrepancies
     if (maxStorageGB !== 0) {
-        log('info', `Current server capacity: ${(currentDiskUsage / 1000 / 1000 / 1000).toFixed(2)} GB / ${maxStorageGB} GB`);
+        log('info', `Current server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB`);
     }
 
     fileDatabase = preserveUploads ? new QuickDB({ filePath: path.join(__dirname, 'uploads', 'db', 'file-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
@@ -283,6 +338,7 @@ if (enableUpload) {
     log('info', 'Upload protocol disabled. Cleaning up upload directory...');
     cleanupDir(uploadDir);
 }
+createDirIfNotExists(dataDir);
 log('info', 'Configuring server endpoints and middleware...');
 
 app.set('trust proxy', 1); // Trust the first hop from a reverse proxy
@@ -292,7 +348,17 @@ app.disable('x-powered-by');
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 
-app.use(cors());
+// The API answers any origin: the desktop app and other integrators call it
+// from their own, and no cookie is ever set or sent, so there's nothing for
+// another site to borrow. It allows the headers Dropgate's requests send, and
+// lets a script read the ones its answers carry. Pages get no CORS headers.
+const API_CORS = {
+    allowedHeaders: ['Content-Type', 'Content-Digest', 'Range', 'If-Range', 'Authorization', 'Dropgate-Upload', 'Dropgate-Lease', 'Dropgate-Manage-Token'],
+    exposedHeaders: ['ETag', 'Content-Range', 'Accept-Ranges', 'Retry-After', 'Content-Length'],
+};
+app.use('/api', cors(API_CORS));
+// Dropgate 3's upload routes, as they were, until they go.
+app.use('/upload', cors());
 app.use(express.json({ limit: '1mb' }));
 app.use((req, res, next) => {
     res.locals.nonce = crypto.randomBytes(16).toString('base64');
@@ -388,9 +454,16 @@ if (Number(rateLimitMaxRequests) > 0 && Number(rateLimitWindowMs) > 0) {
         max: Number(rateLimitMaxRequests),
         standardHeaders: true,
         legacyHeaders: false,
+        // The limiter's own checks, such as a reverse proxy sending a client
+        // address it can't read, go through LOG_LEVEL by their code only: their
+        // messages can quote the address.
+        logger: {
+            warn: (err) => log('warn', `The rate limiter reported a problem with the server's setup${describeError(err)}.`),
+            error: (err) => log('error', `The rate limiter reported a problem with the server's setup${describeError(err)}.`),
+        },
         handler: (_req, res) => {
             log('warn', 'Rate limit triggered. Request blocked.');
-            res.status(429).json({ error: 'Too many requests, please try again later.' });
+            res.status(429).json({ code: 'RATE_LIMITED', error: 'Too many requests, please try again later.' });
         },
     });
 }
@@ -398,8 +471,34 @@ if (Number(rateLimitMaxRequests) > 0 && Number(rateLimitWindowMs) > 0) {
 // Verify chunk uploads are valid, otherwise apply rate limiting
 const apiRouter = express.Router();
 const uploadRouter = express.Router();
+// Dropgate 4's routes. Their answers are never cached.
+const v4Router = express.Router();
+v4Router.use((_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+});
+
+// Express hands a router's error on without the path the router is mounted
+// at, so each router notes the route's pattern (never the request's path,
+// which can hold an ID) for the last handler's log line.
+const noteRoute = (err, req, res, next) => {
+    if (req.route?.path && !res.locals.failedRoute) res.locals.failedRoute = `${req.method} ${req.baseUrl}${req.route.path}`;
+    next(err);
+};
 
 let uploadAuth = null;
+
+// An upload is gone the moment it expires: every route answers as if it had
+// never existed, and the expiry sweep removes its bytes later.
+const isLive = (record) => Boolean(record) && !(record.expiresAt && record.expiresAt <= Date.now());
+const getLiveFile = async (fileId) => {
+    const record = await fileDatabase.get(fileId);
+    return isLive(record) ? record : null;
+};
+const getLiveBundle = async (bundleId) => {
+    const record = await bundleDatabase.get(bundleId);
+    return isLive(record) ? record : null;
+};
 
 if (enableUpload) {
     uploadAuth = (req, res, next) => {
@@ -414,10 +513,10 @@ if (enableUpload) {
         const fileId = req.params.fileId;
         const bundleId = req.params.bundleId;
         if (fileId) {
-            if (await fileDatabase.has(fileId)) return next();
+            if (await getLiveFile(fileId)) return next();
         }
         if (bundleId) {
-            if (await bundleDatabase.has(bundleId)) return next();
+            if (await getLiveBundle(bundleId)) return next();
         }
         return limiter(req, res, next);
     };
@@ -531,7 +630,7 @@ if (enableUpload) {
             ongoingUploads.forEach(u => reservedSpace += u.reservedBytes || 0);
 
             if ((currentDiskUsage + reservedSpace + size) > MAX_STORAGE_BYTES) {
-                log('debug', `Upload rejected due to insufficient storage. Current usage: ${(currentDiskUsage / 1000 / 1000 / 1000).toFixed(2)} GB, Reserved: ${(reservedSpace / 1000 / 1000 / 1000).toFixed(2)} GB, Requested: ${(size / 1000 / 1000 / 1000).toFixed(2)} GB.`);
+                log('debug', `Upload rejected due to insufficient storage. Current usage: ${(currentDiskUsage / GIB).toFixed(2)} GB, Reserved: ${(reservedSpace / GIB).toFixed(2)} GB, Requested: ${(size / GIB).toFixed(2)} GB.`);
                 return res.status(507).json({ error: 'Server out of capacity. Try again later.' });
             }
 
@@ -555,7 +654,7 @@ if (enableUpload) {
             releaseLock();
         }
 
-        log('debug', `Initialised upload. Reserved ${(size / 1000 / 1000).toFixed(2)} MB.`);
+        log('debug', `Initialised upload. Reserved ${(size / MIB).toFixed(2)} MB.`);
         res.status(200).json({ uploadId });
     });
 
@@ -636,10 +735,6 @@ if (enableUpload) {
             if (!Number.isInteger(chunks) || chunks <= 0) {
                 return res.status(400).json({ error: `Invalid totalChunks for file at index ${i}.` });
             }
-            // In per-file mode, each file is checked individually against the limit
-            if (bundleSizeMode === 'per-file' && size > MAX_FILE_SIZE_BYTES) {
-                return res.status(413).json({ error: `File at index ${i} exceeds limit of ${maxFileSizeMB} MB.` });
-            }
             if (!isEncrypted) {
                 if (f.filename.length > 255 || /[\/\\]/.test(f.filename)) {
                     return res.status(400).json({ error: `Invalid filename at index ${i}. Contains illegal characters or is too long.` });
@@ -655,8 +750,8 @@ if (enableUpload) {
             fileEntries.push({ uploadId, filename: f.filename, totalSize: size, totalChunks: chunks });
         }
 
-        // In total mode, check the combined bundle size against the limit
-        if (bundleSizeMode === 'total' && totalBundleSize > MAX_FILE_SIZE_BYTES) {
+        // The limit applies to the whole upload, all its files together
+        if (totalBundleSize > MAX_FILE_SIZE_BYTES) {
             return res.status(413).json({ error: `Total bundle size exceeds limit of ${maxFileSizeMB} MB.` });
         }
 
@@ -708,7 +803,7 @@ if (enableUpload) {
             expiresAt: Date.now() + (2 * 60 * 1000), // 2 minute inactivity deadline (refreshed on each chunk)
         });
 
-        log('debug', `Initialised bundle upload (${fileCount} files). Reserved ${(totalBundleSize / 1000 / 1000).toFixed(2)} MB total.`);
+        log('debug', `Initialised bundle upload (${fileCount} files). Reserved ${(totalBundleSize / MIB).toFixed(2)} MB total.`);
         res.status(200).json({ bundleUploadId, fileUploadIds });
     });
 
@@ -730,7 +825,7 @@ if (enableUpload) {
         // Remove from ongoing uploads (releases reservation)
         ongoingUploads.delete(uploadId);
 
-        log('debug', `Upload cancelled by client. Released ${(session.reservedBytes / 1000 / 1000).toFixed(2)} MB.`);
+        log('debug', `Upload cancelled by client. Released ${(session.reservedBytes / MIB).toFixed(2)} MB.`);
         res.status(200).json({ success: true });
     });
 
@@ -774,7 +869,7 @@ if (enableUpload) {
         req.on('end', () => {
             if (aborted) return;
             const buffer = Buffer.concat(chunks);
-            log('debug', `Received chunk ${chunkIndex + 1}/${session.totalChunks}. Size: ${(buffer.length / 1000).toFixed(2)} KB`);
+            log('debug', `Received chunk ${chunkIndex + 1}/${session.totalChunks}. Size: ${(buffer.length / 1024).toFixed(2)} KB`);
 
             // 2. Verify Integrity
             const serverHash = crypto.createHash('sha256').update(buffer).digest('hex');
@@ -921,7 +1016,7 @@ if (enableUpload) {
         await fileDatabase.set(fileId, fileRecord);
 
         ongoingUploads.delete(uploadId); // Remove the reservation
-        log('debug', `[${uploadInfo.isEncrypted ? 'Encrypted' : 'Simple'}] File received.${maxStorageGB !== 0 ? ` Server capacity: ${(currentDiskUsage / 1000 / 1000 / 1000).toFixed(2)} GB / ${maxStorageGB} GB.` : ''}`);
+        log('debug', `[${uploadInfo.isEncrypted ? 'Encrypted' : 'Simple'}] File received.${maxStorageGB !== 0 ? ` Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.` : ''}`);
         res.status(200).json({ id: fileId });
     });
 
@@ -1012,13 +1107,13 @@ if (enableUpload) {
         }
 
         ongoingBundles.delete(bundleUploadId);
-        log('debug', `Bundle created${bundleSession.sealedManifest ? ' (sealed)' : ''} (${bundleSession.fileCount} files, ${(totalSizeBytes / 1000 / 1000).toFixed(2)} MB total). Server capacity: ${(currentDiskUsage / 1000 / 1000 / 1000).toFixed(2)} GB / ${maxStorageGB} GB.`);
+        log('debug', `Bundle created${bundleSession.sealedManifest ? ' (sealed)' : ''} (${bundleSession.fileCount} files, ${(totalSizeBytes / MIB).toFixed(2)} MB total). Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.`);
         res.status(200).json({ bundleId });
     });
 
     apiRouter.get('/file/:fileId/meta', downloadAuth, async (req, res) => {
         const fileId = req.params.fileId;
-        const fileInfo = await fileDatabase.get(fileId);
+        const fileInfo = await getLiveFile(fileId);
 
         if (!fileInfo) {
             return res.status(404).json({ error: 'File not found.' });
@@ -1051,7 +1146,7 @@ if (enableUpload) {
 
     apiRouter.get('/file/:fileId', downloadAuth, async (req, res) => {
         const fileId = req.params.fileId;
-        const fileInfo = await fileDatabase.get(fileId);
+        const fileInfo = await getLiveFile(fileId);
 
         if (!fileInfo) {
             return res.status(404).json({ error: 'File not found.' });
@@ -1092,7 +1187,7 @@ if (enableUpload) {
 
                 fs.rm(fileInfo.path, { force: true }, () => { });
                 await fileDatabase.delete(fileId);
-                log('debug', `[${fileInfo.isEncrypted ? 'Encrypted' : 'Simple'}] File data sent and deleted (${newDownloadCount}/${maxDl} downloads).${maxStorageGB !== 0 ? ` Server capacity: ${(currentDiskUsage / 1000 / 1000 / 1000).toFixed(2)} GB / ${maxStorageGB} GB.` : ''}`);
+                log('debug', `[${fileInfo.isEncrypted ? 'Encrypted' : 'Simple'}] File data sent and deleted (${newDownloadCount}/${maxDl} downloads).${maxStorageGB !== 0 ? ` Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.` : ''}`);
             } else {
                 // Update download count in database
                 await fileDatabase.set(fileId, {
@@ -1108,7 +1203,7 @@ if (enableUpload) {
 
     apiRouter.get('/bundle/:bundleId/meta', downloadAuth, async (req, res) => {
         const bundleId = req.params.bundleId;
-        const bundleInfo = await bundleDatabase.get(bundleId);
+        const bundleInfo = await getLiveBundle(bundleId);
 
         if (!bundleInfo) {
             return res.status(404).json({ error: 'Bundle not found.' });
@@ -1149,7 +1244,7 @@ if (enableUpload) {
 
     apiRouter.post('/bundle/:bundleId/downloaded', downloadAuth, async (req, res) => {
         const bundleId = req.params.bundleId;
-        const bundleInfo = await bundleDatabase.get(bundleId);
+        const bundleInfo = await getLiveBundle(bundleId);
 
         if (!bundleInfo) {
             return res.status(404).json({ error: 'Bundle not found.' });
@@ -1178,7 +1273,7 @@ if (enableUpload) {
                     }
                 }
                 await bundleDatabase.delete(bundleId);
-                log('debug', `Bundle downloaded and deleted (${newDownloadCount}/${maxDl} downloads). Server capacity: ${(currentDiskUsage / 1000 / 1000 / 1000).toFixed(2)} GB / ${maxStorageGB} GB.`);
+                log('debug', `Bundle downloaded and deleted (${newDownloadCount}/${maxDl} downloads). Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.`);
             }
         } else {
             await bundleDatabase.set(bundleId, { ...bundleInfo, downloadCount: newDownloadCount });
@@ -1190,15 +1285,18 @@ if (enableUpload) {
 }
 
 apiRouter.get('/info', limiter, (req, res) => {
-    const uploadCapabilities = {
-        enabled: enableUpload,
-        maxSizeMB: enableUpload ? maxFileSizeMB : undefined,
-        bundleSizeMode: enableUpload ? bundleSizeMode : undefined,
-        maxLifetimeHours: enableUpload ? maxFileLifetimeHours : undefined,
-        maxFileDownloads: enableUpload ? maxFileDownloads : undefined,
-        e2ee: enableUpload ? uploadEnableE2EE : undefined,
-        chunkSize: enableUpload ? uploadChunkSizeBytes : undefined,
-    };
+    // The limits are what the operator set. maxSizeMB counts in 1024s, and
+    // maxPauseMinutes is 0 when pausing is off. Nothing asks for a credential yet.
+    const uploadCapabilities = enableUpload ? {
+        enabled: true,
+        e2ee: uploadEnableE2EE,
+        maxSizeMB: maxFileSizeMB,
+        maxLifetimeHours: maxFileLifetimeHours,
+        maxFileDownloads: maxFileDownloads,
+        chunkSize: uploadChunkSizeBytes,
+        maxPauseMinutes: maxPauseMinutes,
+        credentialRequired: false,
+    } : { enabled: false };
 
     const p2pCapabilities = {
         enabled: enableP2P,
@@ -1207,6 +1305,7 @@ apiRouter.get('/info', limiter, (req, res) => {
         peerjsDebugLogging: enableP2P ? (process.env.PEERJS_DEBUG === 'true') : undefined,
     };
 
+    res.set('Cache-Control', 'no-store');
     res.status(200).json({
         name: serverName,
         version: version,
@@ -1217,6 +1316,9 @@ apiRouter.get('/info', limiter, (req, res) => {
             p2p: p2pCapabilities,
             webUI: {
                 enabled: enableWebUI
+            },
+            accounts: {
+                enabled: false
             }
         }
     });
@@ -1255,7 +1357,7 @@ apiRouter.post('/resolve', limiter, async (req, res) => {
 
             if (path.startsWith('/b/')) {
                 const bundleId = path.slice(3);
-                if (isUuid(bundleId) && enableUpload && bundleDatabase && await bundleDatabase.get(bundleId)) {
+                if (isUuid(bundleId) && enableUpload && bundleDatabase && await getLiveBundle(bundleId)) {
                     return res.status(200).json({ valid: true, type: 'bundle', target: `/b/${bundleId}` });
                 }
             }
@@ -1264,10 +1366,10 @@ apiRouter.post('/resolve', limiter, async (req, res) => {
                 const id = path.slice(1);
                 if (isUuid(id)) {
                     // Check bundles first, then files
-                    if (enableUpload && bundleDatabase && await bundleDatabase.get(id)) {
+                    if (enableUpload && bundleDatabase && await getLiveBundle(id)) {
                         return res.status(200).json({ valid: true, type: 'bundle', target: `/b/${id}` });
                     }
-                    const fileInfo = await fileDatabase.get(id);
+                    const fileInfo = enableUpload && fileDatabase ? await getLiveFile(id) : null;
                     if (!fileInfo) {
                         return res.status(200).json({ valid: false, reason: 'File not found.' });
                     }
@@ -1284,10 +1386,10 @@ apiRouter.post('/resolve', limiter, async (req, res) => {
     const compact = raw.replace(/\s+/g, '');
     if (isUuid(compact)) {
         // Check bundles first, then files
-        if (enableUpload && bundleDatabase && await bundleDatabase.get(compact)) {
+        if (enableUpload && bundleDatabase && await getLiveBundle(compact)) {
             return res.status(200).json({ valid: true, type: 'bundle', target: `/b/${compact}` });
         }
-        const fileInfo = enableUpload && fileDatabase ? await fileDatabase.get(compact) : null;
+        const fileInfo = enableUpload && fileDatabase ? await getLiveFile(compact) : null;
         if (!fileInfo) {
             return res.status(200).json({ valid: false, reason: 'File not found.' });
         }
@@ -1305,6 +1407,12 @@ apiRouter.post('/resolve', limiter, async (req, res) => {
     return res.status(200).json({ valid: false, reason: 'Unrecognised sharing code.' });
 });
 
+// Anything under /api/v4 that isn't a route is a JSON error, as every API error is.
+const v4NotFound = (_req, res) => res.status(404).json({ code: 'NOT_FOUND', error: 'There is nothing here.' });
+v4Router.use(noteRoute);
+apiRouter.use(noteRoute);
+app.use('/api/v4', v4Router);
+app.use('/api/v4', v4NotFound);
 app.use('/api', apiRouter);
 
 // ===== PeerJS signalling server (PeerServer) =====
@@ -1333,12 +1441,13 @@ app.get('/', limiter, (req, res) => {
 
 // Download pages
 if (enableUpload) {
+    uploadRouter.use(noteRoute);
     app.use('/upload', uploadRouter);
 
     // Bundle download page
     app.get('/b/:bundleId', limiter, async (req, res) => {
         const bundleId = req.params.bundleId;
-        const bundleInfo = await bundleDatabase.get(bundleId);
+        const bundleInfo = await getLiveBundle(bundleId);
 
         if (!bundleInfo) return res.status(404).render('pages/404', { serverName });
 
@@ -1362,12 +1471,12 @@ if (enableUpload) {
         const fileId = req.params.fileId;
 
         // Check if this ID is actually a bundle
-        const bundleInfo = await bundleDatabase.get(fileId);
+        const bundleInfo = await getLiveBundle(fileId);
         if (bundleInfo) {
             return res.redirect(301, `/b/${fileId}`);
         }
 
-        const fileInfo = await fileDatabase.get(fileId);
+        const fileInfo = await getLiveFile(fileId);
 
         if (!fileInfo) return res.status(404).render('pages/404', { serverName });
 
@@ -1389,6 +1498,31 @@ if (enableUpload) {
 
 // 404 fallback
 app.use((_req, res) => res.status(404).render('pages/404', { serverName }));
+
+// The last handler, for anything that went wrong while answering. The answer
+// says only that, in JSON like every API error. The log line goes through
+// LOG_LEVEL and names the route's pattern and the error's kind: never its
+// message or stack, a header, a body, a path or an ID. Express's own handler
+// would print the stack whatever LOG_LEVEL says.
+app.use((err, req, res, _next) => {
+    // A request body that couldn't be read is the client's: body-parser's errors say so.
+    const clientError = err?.expose === true && err.status >= 400 && err.status < 500;
+    if (clientError) {
+        log('debug', 'Refused a request whose body could not be read.');
+    } else {
+        const route = res.locals.failedRoute ?? (req.route?.path ? `${req.method} ${req.route.path}` : null);
+        log('error', `Unexpected error while answering a request${route ? ` to ${route}` : ''}${describeError(err)}.`);
+    }
+    // Part of an answer has gone already, so the client must see it fail.
+    if (res.headersSent) return req.socket.destroy();
+    if (clientError && err.status === 413) {
+        return res.status(413).json({ code: 'TOO_LARGE', error: 'The request is too large.' });
+    }
+    if (clientError) {
+        return res.status(400).json({ code: 'INVALID_REQUEST', error: 'The request could not be read.' });
+    }
+    return res.status(500).json({ code: 'SERVER_ERROR', error: 'Something went wrong on the server.' });
+});
 
 if (enableUpload) {
     const cleanupExpiredFiles = async () => {
@@ -1496,6 +1630,12 @@ if (enableUpload) {
         log('warn', 'UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS is set to 0! Zombie upload cleanup is disabled.');
     }
 }
+
+// Not being able to listen, such as when the port is taken, stops the server.
+server.on('error', (err) => {
+    log('error', `Dropgate Server couldn't listen on port ${port}${describeError(err)}.`);
+    process.exit(1);
+});
 
 server.listen(port, () => {
     log('info', `Dropgate Server v${version} is running. | SERVER_PORT: ${port}`);

@@ -127,10 +127,13 @@ docker run -d \
   -e UPLOAD_PRESERVE_UPLOADS=true \
   -e UPLOAD_MAX_FILE_SIZE_MB=1000 \
   -v /path/to/uploads:/usr/src/app/uploads \
+  -v /path/to/data:/usr/src/app/data \
   willtda/dropgate-server:latest
 ```
 
 If you want uploads to persist across restarts, map `/usr/src/app/uploads` to a path on the host machine and set `UPLOAD_PRESERVE_UPLOADS=true`.
+
+`/usr/src/app/data` is the server's own data folder, kept apart from uploads and never cleaned. Nothing uses it yet, so it stays empty, but map it too and it's ready. The entrypoint makes both folders and hands them to the user the server runs as, and [`docker-compose.yml`](docker-compose.yml) keeps `data` in a named volume.
 
 The image holds only what the server runs, and its license: the Dockerfile copies the package files, `server.js`, `views/`, `public/`, `LICENSE` and `entrypoint.sh`, and `.dockerignore` keeps the tests, `test/`, out of the build context altogether. Its `org.opencontainers.image.licenses` label is `AGPL-3.0-only`, as `package.json` gives it.
 
@@ -146,7 +149,7 @@ Images are built for `linux/amd64` and `linux/arm64`. Each release's image is ta
 | `SERVER_PORT` | `52443` | Port to run the server on. |
 | `SERVER_NAME` | `Dropgate Server` | Display name used by the Web UI and `GET /api/info`. |
 | `ENABLE_WEB_UI` | `true` | Enables the Web UI at `/`. |
-| `LOG_LEVEL` | `INFO` | `NONE`, `ERROR`, `WARN`, `INFO`, `DEBUG`. |
+| `LOG_LEVEL` | `INFO` | `NONE`, `ERROR`, `WARN`, `INFO`, `DEBUG`. At `NONE` the server writes nothing at all, errors included. |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window in milliseconds (`0` disables rate limiting). |
 | `RATE_LIMIT_MAX_REQUESTS` | `25` | Requests allowed per window (`0` disables rate limiting). |
 
@@ -157,12 +160,13 @@ Images are built for `linux/amd64` and `linux/arm64`. Each release's image is ta
 | `ENABLE_UPLOAD` | `false` | Enables the hosted upload protocol and routes. |
 | `UPLOAD_ENABLE_E2EE` | `true` | Enables end-to-end encryption for hosted uploads (keys stay client-side). |
 | `UPLOAD_PRESERVE_UPLOADS` | `false` | Persist uploads across restarts (uses `uploads/db/`). |
-| `UPLOAD_MAX_FILE_SIZE_MB` | `100` | Max file size in MB (`0` = unlimited). |
-| `UPLOAD_MAX_STORAGE_GB` | `10` | Max total storage in GB (`0` = unlimited). |
+| `UPLOAD_MAX_FILE_SIZE_MB` | `100` | Max upload size in MB, counted in 1024s (`100` is 100 × 1024 × 1024 bytes). It applies to the whole upload: several files count together (`0` = unlimited). |
+| `UPLOAD_MAX_STORAGE_GB` | `10` | Max total storage in GB, counted in 1024s (`0` = unlimited). |
 | `UPLOAD_MAX_FILE_LIFETIME_HOURS` | `24` | Max file lifetime in hours (`0` = unlimited). |
 | `UPLOAD_MAX_FILE_DOWNLOADS` | `1` | Max downloads before file is deleted (`0` = unlimited). |
-| `UPLOAD_CHUNK_SIZE_BYTES` | `5242880` | Upload chunk size in bytes (default 5MB). Minimum `65536` (64KB). Smaller values increase per-chunk overhead; larger values may need proxy body-size adjustments. |
-| `UPLOAD_BUNDLE_SIZE_MODE` | `total` | How multi-file bundle uploads are size-checked. `total` enforces the limit against the combined size of all files; `per-file` enforces it against each file individually. |
+| `UPLOAD_CHUNK_SIZE_BYTES` | `5242880` | Upload chunk size in bytes (default 5MB). Minimum `65536` (64KB), maximum `67108864` (64MB): outside that, the server doesn't start. Smaller values increase per-chunk overhead; larger values may need proxy body-size adjustments. |
+| `UPLOAD_MAX_PAUSE_MINUTES` | `60` | How long an upload can stay paused before the server drops it, in whole minutes from `1` to `1440` (a day), or `0` to turn pausing off. Anything else stops the server at startup. `GET /api/info` gives it as `maxPauseMinutes`. Pausing itself comes with Dropgate 4's upload routes, still being built. |
+| `UPLOAD_BUNDLE_SIZE_MODE` | — | **Removed in 4.0.** The size limit always applies to the whole upload. Set to `per-file`, the server stops at startup and says why; any other value is ignored, with a warning. |
 | `UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS` | `300000` | Cleanup interval for incomplete uploads (`0` = disabled). |
 
 ### Direct Transfer (P2P)
@@ -186,16 +190,21 @@ Example response:
 {
   "name": "Dropgate Server",
   "version": "3.0.13",
+  "protocols": {
+    "dgup": { "major": 4, "minor": 0 },
+    "dgdtp": { "major": 4, "minor": 0 }
+  },
   "logLevel": "INFO",
   "capabilities": {
     "upload": {
       "enabled": true,
+      "e2ee": true,
       "maxSizeMB": 100,
       "maxLifetimeHours": 24,
       "maxFileDownloads": 1,
-      "e2ee": true,
       "chunkSize": 5242880,
-      "bundleSizeMode": "total"
+      "maxPauseMinutes": 60,
+      "credentialRequired": false
     },
     "p2p": {
       "enabled": true,
@@ -211,10 +220,15 @@ Example response:
     },
     "webUI": {
       "enabled": true
+    },
+    "accounts": {
+      "enabled": false
     }
   }
 }
 ```
+
+With uploads off, `upload` is `{ "enabled": false }` and nothing more. `maxSizeMB` is `UPLOAD_MAX_FILE_SIZE_MB` as set, in 1024s, and `maxPauseMinutes` is `0` when pausing is off. Nothing asks for a credential yet, and accounts aren't built yet. The answer is never cached. The [DGUP spec](../docs/technical/DGUP.md#3-capability-discovery) describes each field.
 
 
 ## HTTPS / Reverse Proxy Setup
@@ -232,8 +246,9 @@ Run the server behind a reverse proxy that terminates TLS:
 
 ## Storage and Lifecycle
 
-- Uploaded files live in `uploads/`.
-- Files can be set to expire after a certain period or after a certain number of downloads.
+- Uploaded files live in `uploads/`. Dropgate 4 writes `uploads/dropgate-storage.json` at each start, saying which version's layout the folder holds, and keeps Dropgate 4's uploads in `uploads/objects/`.
+- The server's own data has a folder of its own, `data/`, beside `uploads/`. It's never cleaned, and nothing uses it yet.
+- Files can be set to expire after a certain period or after a certain number of downloads. An upload is gone the moment it expires: from then on the server answers as if it had never existed, and deletes it within a minute.
 - Incomplete uploads are cleaned up on an interval.
 
 

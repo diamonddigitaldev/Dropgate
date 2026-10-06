@@ -11,7 +11,8 @@
 #   server/package.json gives.
 # - Started as it is, with a port on 127.0.0.1 only, it must answer GET
 #   /api/info with server/package.json's version, and its health check must
-#   pass.
+#   pass. Its entrypoint must have made uploads/ and data/, owned by the user
+#   the server runs as.
 #
 # CI runs it on the image it builds on every push, and the release workflow's
 # dry run on each platform's image. It pushes and publishes nothing, and the
@@ -78,3 +79,13 @@ if [ "$health" != healthy ]; then
     exit 1
 fi
 echo "$label: its health check passes."
+
+# The entrypoint makes the folders the server writes to, and gives them to dropgate.
+for dir in /usr/src/app/uploads /usr/src/app/data; do
+    owner=$(docker exec "$id" stat -c '%U' "$dir" 2> /dev/null || echo 'no one (it is missing)')
+    if [ "$owner" != dropgate ]; then
+        echo "$label: $dir belongs to $owner, not dropgate."
+        exit 1
+    fi
+done
+echo "$label: uploads/ and data/ belong to dropgate, the user the server runs as."

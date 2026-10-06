@@ -22,7 +22,12 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 
 - `LOG_LEVEL=DEBUG` → detailed transfer flow
 - `LOG_LEVEL=INFO` → normal operation
-- `LOG_LEVEL=NONE` → none of Dropgate's own logs (unexpected errors can still print a stack trace; see [PRIVACY.md](PRIVACY.md))
+- `LOG_LEVEL=NONE` → nothing at all, errors included (see [PRIVACY.md](PRIVACY.md))
+
+**The server stops as it starts**
+- It refuses a setting it can't use, and says why in an `ERROR` line (at `LOG_LEVEL=NONE` it prints nothing, so set `LOG_LEVEL=ERROR` or higher to see it).
+- `UPLOAD_BUNDLE_SIZE_MODE=per-file`: Dropgate 4 removed per-file size limits, so `UPLOAD_MAX_FILE_SIZE_MB` applies to the whole upload. Remove `UPLOAD_BUNDLE_SIZE_MODE`; any other value of it is ignored, with a warning.
+- `UPLOAD_MAX_PAUSE_MINUTES` must be a whole number from `0` to `1440`, and `UPLOAD_CHUNK_SIZE_BYTES` from `65536` to `67108864`.
 
 ## 3) Hosted upload issues
 
@@ -30,8 +35,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - Make sure `ENABLE_UPLOAD=true`.
 
 **"File exceeds limit … MB" / "Total bundle size exceeds limit" / "Chunk too large" / 413**
-- Increase `UPLOAD_MAX_FILE_SIZE_MB`.
-- For multi-file uploads, the default behaviour (`UPLOAD_BUNDLE_SIZE_MODE=total`) enforces the size limit against the combined size of all files. Set it to `per-file` to check each file individually instead.
+- Increase `UPLOAD_MAX_FILE_SIZE_MB`. It counts in 1024s (`100` is 100 × 1024 × 1024 bytes), and applies to the whole upload: for several files, their combined size.
 - If you're behind NGINX/Caddy/etc, also check your proxy's upload/body size limit.
 
 **“Server out of capacity” / 507**
@@ -42,7 +46,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - Enable `LOG_LEVEL=DEBUG`, retry once, and check where it fails (init vs chunk vs complete).
 
 **Tuning chunk size**
-- The upload chunk size is controlled by `UPLOAD_CHUNK_SIZE_BYTES` (default `5242880` / 5MB, minimum `65536` / 64KB).
+- The upload chunk size is controlled by `UPLOAD_CHUNK_SIZE_BYTES` (default `5242880` / 5MB, minimum `65536` / 64KB, maximum `67108864` / 64MB).
 - If you're behind a reverse proxy with a body size limit, make sure the proxy allows at least `UPLOAD_CHUNK_SIZE_BYTES + 1024` bytes per request (the extra 1024 accounts for encryption overhead and request framing).
 - Lowering the chunk size can help on unstable connections (smaller chunks = less data to re-upload on failure), but increases the number of HTTP requests per file and adds per-chunk overhead (hashing, encryption IV/tag).
 - The 64KB minimum prevents extreme fragmentation — values below this would generate millions of chunks for moderate files and cause significant per-chunk overhead.

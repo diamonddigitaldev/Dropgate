@@ -24,10 +24,10 @@ By design, Dropgate's own log messages **never** include:
 
 If you’re running a public instance, this is one of the key ways the project tries to reduce “paper trails”.
 
-**Two exceptions sit outside `LOG_LEVEL`.** They write to stderr at every level, including `NONE`:
+**Everything the server writes goes through `LOG_LEVEL`,** errors included:
 
-- **Unexpected errors.** Express prints the stack trace of any error Dropgate doesn't handle itself. A stack trace can include the internal path of a stored file, which contains its file ID, or a few characters of a malformed request body.
-- **Misconfigured reverse proxies.** If a proxy passes an invalid client address (for example `IP:port`), the rate limiter prints a one-time warning that includes it.
+- **Unexpected errors** are logged at `ERROR` by the kind of error and the route's pattern only, such as `GET /api/file/:fileId (Error, ENOENT)`: never the error's message or stack trace, which could hold the internal path of a stored file (and so its file ID) or part of a request body. The answer to the request says only that something went wrong.
+- **A misconfigured reverse proxy,** one that passes a client address the rate limiter can't read (for example `IP:port`), is logged at `ERROR` by the rate limiter's error code, never the address.
 
 ---
 
@@ -38,7 +38,7 @@ Depending on your `LOG_LEVEL`, you may see:
 - Startup configuration (feature flags, limits, and server name)
 - Storage usage at startup (useful for capacity limits)
 - Rate limit warnings
-- Internal errors and exceptions (from Node.js / the OS)
+- Internal errors, by their kind only (from Node.js / the OS)
 
 At `DEBUG` level you may also see:
 
@@ -54,8 +54,7 @@ File sizes and capacity values may appear in logs because they’re necessary fo
 ## 📊 Log levels
 
 - **`NONE`**
-  - Turns off all of Dropgate's own log messages
-  - Stack traces from unexpected errors still reach stderr (see the exceptions above)
+  - Turns off all logging: the server writes nothing to stdout or stderr
 
 - **`ERROR`**
   - Startup/config failures
@@ -82,7 +81,7 @@ File sizes and capacity values may appear in logs because they’re necessary fo
 
 - Run with **`LOG_LEVEL=INFO`** for normal use.
 - Temporarily switch to **`LOG_LEVEL=DEBUG`** when diagnosing an issue, then turn it back down.
-- If you’re extremely sensitive about logging, use **`LOG_LEVEL=NONE`**, and don't keep the server's stderr (see the exceptions above).
+- If you’re extremely sensitive about logging, use **`LOG_LEVEL=NONE`**: the server then writes nothing at all.
 
 ---
 
