@@ -26,8 +26,8 @@ The following tables enumerate every category of data processed by Dropgate, gro
 
 | Data | Stored? | Where | Why | When Created | When Deleted |
 |------|---------|-------|-----|--------------|--------------|
-| **File content** (plaintext or ciphertext) | Yes | Filesystem: `/uploads/<fileId>` | Core purpose — the file must be persisted so recipients can download it. | On upload completion (`/upload/complete`). | On expiry, max downloads reached, or server restart (unless `UPLOAD_PRESERVE_UPLOADS=true`). |
-| **Temporary file** (partial chunks) | Yes | Filesystem: `/uploads/tmp/<uploadId>` | Chunks must be written to disk as they arrive; holding them in memory would be infeasible for large files. | On upload initialisation (`/upload/init`). | On upload completion (renamed), cancellation, zombie cleanup, or server restart. |
+| **File content** (plaintext or ciphertext) | Yes | Filesystem: `data/uploads/<fileId>` | Core purpose — the file must be persisted so recipients can download it. | On upload completion (`/upload/complete`). | On expiry, max downloads reached, or server restart (unless `UPLOAD_PRESERVE_UPLOADS=true`). |
+| **Temporary file** (partial chunks) | Yes | Filesystem: `data/uploads/tmp/<uploadId>` | Chunks must be written to disk as they arrive; holding them in memory would be infeasible for large files. | On upload initialisation (`/upload/init`). | On upload completion (renamed), cancellation, zombie cleanup, or server restart. |
 | **Filename** | Yes | Database (in-memory or SQLite) | Required to set `Content-Disposition` on download. For encrypted uploads, the stored value is a Base64-encoded ciphertext blob — the server cannot read it. | On upload completion. | When the file record is deleted. |
 | **File size** (bytes) | Yes | Database | Used for storage quota accounting, `Content-Length` headers, and progress reporting to download clients. | On upload completion. | When the file record is deleted. |
 | **Encryption flag** (`isEncrypted`) | Yes | Database | Determines how the server serves the file (headers, MIME type, secure-context enforcement). | On upload completion. | When the file record is deleted. |
@@ -39,8 +39,7 @@ The following tables enumerate every category of data processed by Dropgate, gro
 | **Received chunk indices** | Temporarily | In-memory (Set within upload session) | Detects duplicate chunks and validates completeness. | On each chunk upload. | When the upload session ends. |
 | **Reserved storage bytes** | Temporarily | In-memory (quota counter) | Prevents TOCTOU race conditions during concurrent uploads. | On upload initialisation (under mutex). | Released on completion, cancellation, or zombie cleanup. |
 | **Chunk hash** (SHA-256) | No | — | Verified on receipt and discarded. Not persisted. | — | — |
-| **Storage format marker** | Yes | Filesystem: `/uploads/dropgate-storage.json` | Says which version's layout the uploads folder holds (`{"format": 4}`), so a later version can tell. It holds nothing about any upload. | At every start with uploads on. | With the rest of the uploads folder: at shutdown and the next start in the default mode. |
-| **Server data folder** | Empty | Filesystem: `data/`, beside the uploads folder, never cleaned | Made at every start for the server's own data. Nothing uses it yet, and it holds nothing. | At every start. | — |
+| **Storage format marker** | Yes | Filesystem: `data/uploads/dropgate-storage.json` | Says which version's layout the uploads folder holds (`{"format": 4}`), so a later version can tell. It holds nothing about any upload. | At every start with uploads on. | With the rest of the uploads folder: at shutdown and the next start in the default mode. |
 
 ### 2.2 Dropgate Server — Bundle Data
 
@@ -148,14 +147,19 @@ The server has no access to encryption keys and therefore **cannot**:
 
 ### 4.1 Server Filesystem
 
+Everything the server keeps is in one folder, `data/` beside `server.js` (`/app/data` in the Docker image). Its uploads are in `data/uploads/`, which the default mode clears; the rest of `data/` is the server's own and is never cleaned, though nothing uses it yet.
+
 ```
-/uploads/                    Main upload directory
-  ├── <fileId>               Completed files (UUID names, no extensions)
-  ├── tmp/
-  │   └── <uploadId>         Temporary files during upload
-  └── db/                    Only if UPLOAD_PRESERVE_UPLOADS=true
-      ├── file-database.sqlite
-      └── bundle-database.sqlite
+data/
+  └── uploads/                 Main upload directory
+      ├── dropgate-storage.json  {"format": 4}: which version's layout this is
+      ├── <fileId>             Completed files (UUID names, no extensions)
+      ├── objects/             Dropgate 4's stored uploads (none yet)
+      ├── tmp/
+      │   └── <uploadId>       Temporary files during upload
+      └── db/                  Only if UPLOAD_PRESERVE_UPLOADS=true
+          ├── file-database.sqlite
+          └── bundle-database.sqlite
 ```
 
 ### 4.2 Server Memory
@@ -172,8 +176,8 @@ The server has no access to encryption keys and therefore **cannot**:
 
 | `UPLOAD_PRESERVE_UPLOADS` | Database Driver | Behaviour on Restart |
 |---------------------------|-----------------|----------------------|
-| `false` (default) | In-memory | All metadata lost. All files in `/uploads/` deleted. |
-| `true` | SQLite (`/uploads/db/`) | Metadata and files preserved. Only `/uploads/tmp/` is cleaned. |
+| `false` (default) | In-memory | All metadata lost. All files in `data/uploads/` deleted. |
+| `true` | SQLite (`data/uploads/db/`) | Metadata and files preserved. Only `data/uploads/tmp/` is cleaned. |
 
 ---
 
@@ -188,7 +192,7 @@ The server has no access to encryption keys and therefore **cannot**:
 | **Max downloads reached** | Single file: file + record. Unsealed bundle: all member files + manifest. Sealed bundle: manifest record only; the member files stay on disk, and can still be downloaded by file ID, until they expire. A bundle download only counts when every file is downloaded together (**Download All as ZIP**); downloading files one at a time never counts. See [DGUP §11.3](./DGUP.md#113-download-counting). | Immediately after the triggering download. |
 | **Zombie upload cleanup** | Temporary file + storage reservation + session state. **Known issue in 3.x:** when a bundle upload is cancelled or abandoned part-way, files that had already finished uploading stay on disk with no database record, so expiry never removes them. They're deleted at the next restart in the default mode, and kept indefinitely with `UPLOAD_PRESERVE_UPLOADS=true`. | Every **5 minutes** (configurable via `UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS`). |
 | **Server restart** (non-persistent mode) | All files, temporary files, and in-memory data. | On process start. |
-| **Server restart** (persistent mode) | Only temporary files in `/uploads/tmp/`. | On process start. |
+| **Server restart** (persistent mode) | Only temporary files in `data/uploads/tmp/`. | On process start. |
 
 ### 5.2 User-Initiated Deletion
 
@@ -231,7 +235,7 @@ Client                          Server                        Filesystem
   │                               │  10. Update quota counter     │
   │                               │                               │
 
-Data at rest: /uploads/<fileId> (ciphertext if E2EE)
+Data at rest: data/uploads/<fileId> (ciphertext if E2EE)
               Database record: filename, size, expiry, download count
 ```
 

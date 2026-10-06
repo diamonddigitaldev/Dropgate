@@ -5,7 +5,7 @@ FROM node:24-alpine
 LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
 
 # Set the working directory in the container
-WORKDIR /usr/src/app
+WORKDIR /app
 
 # Copy package.json and package-lock.json
 COPY package*.json ./
@@ -29,9 +29,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # Install su-exec for dropping privileges and add a non-root user
 RUN apk add --no-cache su-exec && \
     addgroup -S dropgate && adduser -S dropgate -G dropgate && \
-    chown -R dropgate:dropgate /usr/src/app
+    chown -R dropgate:dropgate /app
 
-# Entrypoint creates uploads dir at runtime then drops to dropgate
+# Entrypoint creates the data folders at runtime then drops to dropgate
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

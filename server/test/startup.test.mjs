@@ -136,17 +136,19 @@ test('/api/info gives Dropgate 4\'s upload settings, the accounts block, and is 
     });
 });
 
-test('uploads/ holds objects/ and a format marker, and the data folder is beside it', async () => {
+test('everything the server keeps is in data/: its uploads in data/uploads/, with objects/ and a format marker', async () => {
     for (const env of [UPLOADS, { ...UPLOADS, UPLOAD_PRESERVE_UPLOADS: 'true' }]) {
         await withServer(env, async (server) => {
+            assert.equal(server.uploadsDir, path.join(server.dataDir, 'uploads'));
             assert.ok(fs.statSync(path.join(server.uploadsDir, 'objects')).isDirectory());
             assert.deepEqual(JSON.parse(fs.readFileSync(path.join(server.uploadsDir, 'dropgate-storage.json'), 'utf8')), { format: 4 });
-            assert.deepEqual(fs.readdirSync(path.join(server.dir, 'data')), [], 'the data folder is there, and empty');
+            assert.deepEqual(fs.readdirSync(server.dataDir), ['uploads'], 'data/ holds nothing else yet');
+            assert.equal(fs.existsSync(path.join(server.dir, 'uploads')), false, 'no uploads/ beside data/');
             assert.deepEqual(server.storedFiles(), []);
         });
     }
     await withServer({}, async (server) => {
-        assert.ok(fs.statSync(path.join(server.dir, 'data')).isDirectory(), 'with uploads off too');
+        assert.ok(fs.statSync(server.dataDir).isDirectory(), 'with uploads off, data/ is there too');
         assert.equal(fs.existsSync(path.join(server.uploadsDir, 'dropgate-storage.json')), false, 'and no format marker');
     });
 });

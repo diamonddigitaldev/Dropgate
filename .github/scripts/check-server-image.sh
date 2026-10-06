@@ -11,8 +11,8 @@
 #   server/package.json gives.
 # - Started as it is, with a port on 127.0.0.1 only, it must answer GET
 #   /api/info with server/package.json's version, and its health check must
-#   pass. Its entrypoint must have made uploads/ and data/, owned by the user
-#   the server runs as.
+#   pass. Its entrypoint must have made /app/data and /app/data/uploads, owned
+#   by the user the server runs as.
 #
 # CI runs it on the image it builds on every push, and the release workflow's
 # dry run on each platform's image. It pushes and publishes nothing, and the
@@ -27,7 +27,7 @@ label=${platform:-$image}
 
 copy=$(mktemp)
 for file in public/js/dropgate-core.js LICENSE; do
-    if ! docker run --rm "${on[@]}" --entrypoint cat "$image" "/usr/src/app/$file" > "$copy" ||
+    if ! docker run --rm "${on[@]}" --entrypoint cat "$image" "/app/$file" > "$copy" ||
         ! cmp -s "$copy" "server/$file"; then
         echo "$label: the image's $file isn't server/$file."
         exit 1
@@ -81,11 +81,11 @@ fi
 echo "$label: its health check passes."
 
 # The entrypoint makes the folders the server writes to, and gives them to dropgate.
-for dir in /usr/src/app/uploads /usr/src/app/data; do
+for dir in /app/data /app/data/uploads; do
     owner=$(docker exec "$id" stat -c '%U' "$dir" 2> /dev/null || echo 'no one (it is missing)')
     if [ "$owner" != dropgate ]; then
         echo "$label: $dir belongs to $owner, not dropgate."
         exit 1
     fi
 done
-echo "$label: uploads/ and data/ belong to dropgate, the user the server runs as."
+echo "$label: /app/data and its uploads/ belong to dropgate, the user the server runs as."

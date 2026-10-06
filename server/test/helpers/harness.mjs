@@ -118,26 +118,27 @@ export async function startServer({ env = {}, clock = false, requests = false, p
     return {
         baseUrl: `http://127.0.0.1:${port}`,
         dir,
-        uploadsDir: path.join(dir, 'uploads'),
-        tmpDir: path.join(dir, 'uploads', 'tmp'),
+        dataDir: path.join(dir, 'data'),
+        uploadsDir: path.join(dir, 'data', 'uploads'),
+        tmpDir: path.join(dir, 'data', 'uploads', 'tmp'),
         output,
         /** Position in the output, for since(). */
         mark: () => ({ stdout: output.stdout.length, stderr: output.stderr.length }),
         /** Everything written after a mark(). */
         since: (m) => ({ stdout: output.stdout.slice(m.stdout), stderr: output.stderr.slice(m.stderr) }),
         /**
-         * Every stored upload's file, relative to uploads/: those in uploads/objects/ (as
-         * `objects/<name>`), and those in uploads/ itself other than its folders and the
-         * format marker.
+         * Every stored upload's file, relative to uploadsDir (data/uploads/): those in
+         * objects/ (as `objects/<name>`), and those in uploadsDir itself other than its
+         * folders and the format marker.
          */
         storedFiles: () => [
-            ...fs.readdirSync(path.join(dir, 'uploads'))
+            ...fs.readdirSync(path.join(dir, 'data', 'uploads'))
                 .filter((f) => !['tmp', 'db', 'objects', 'dropgate-storage.json'].includes(f)),
-            ...(fs.existsSync(path.join(dir, 'uploads', 'objects'))
-                ? fs.readdirSync(path.join(dir, 'uploads', 'objects')).map((f) => `objects/${f}`)
+            ...(fs.existsSync(path.join(dir, 'data', 'uploads', 'objects'))
+                ? fs.readdirSync(path.join(dir, 'data', 'uploads', 'objects')).map((f) => `objects/${f}`)
                 : []),
         ],
-        tempFiles: () => fs.readdirSync(path.join(dir, 'uploads', 'tmp')),
+        tempFiles: () => fs.readdirSync(path.join(dir, 'data', 'uploads', 'tmp')),
         /**
          * Every record in one of the server's databases, as { id, value }.
          * Needs UPLOAD_PRESERVE_UPLOADS=true; the in-memory mode stores the same records.
@@ -145,7 +146,7 @@ export async function startServer({ env = {}, clock = false, requests = false, p
          */
         records: (name) => {
             const Database = createRequire(path.join(dir, 'server.js'))('better-sqlite3');
-            const db = new Database(path.join(dir, 'uploads', 'db', name), { readonly: true });
+            const db = new Database(path.join(dir, 'data', 'uploads', 'db', name), { readonly: true });
             try {
                 const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all();
                 return tables.flatMap(({ name: table }) => db.prepare(`SELECT * FROM "${table}"`).all())

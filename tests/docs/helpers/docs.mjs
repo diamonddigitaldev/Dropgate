@@ -105,8 +105,8 @@ export function codeFormattedNames() {
 }
 
 // Absolute paths in inline code that are folders on the server's disk, not
-// endpoints: its uploads folder and the Docker image's app folder.
-const FILESYSTEM_PATHS = new Set(['uploads', 'usr']);
+// endpoints: its uploads folder and the Docker image's folders.
+const FILESYSTEM_PATHS = new Set(['app', 'uploads', 'usr']);
 
 /**
  * Endpoints the docs name:

@@ -95,7 +95,7 @@ npm ci
 npm test
 ```
 
-Each test starts its own copy of the server in a temporary folder on a free port, so it never touches your `uploads/` folder or a running server. Server settings in your shell (`LOG_LEVEL`, `ENABLE_UPLOAD` and so on) are ignored during tests.
+Each test starts its own copy of the server in a temporary folder on a free port, so it never touches your `data/` folder or a running server. Server settings in your shell (`LOG_LEVEL`, `ENABLE_UPLOAD` and so on) are ignored during tests.
 
 Tests for known issues are marked as expected failures. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. To see what each one is waiting on, run the tests with the TAP reporter, which prints each label:
 
@@ -126,14 +126,13 @@ docker run -d \
   -e UPLOAD_ENABLE_E2EE=true \
   -e UPLOAD_PRESERVE_UPLOADS=true \
   -e UPLOAD_MAX_FILE_SIZE_MB=1000 \
-  -v /path/to/uploads:/usr/src/app/uploads \
-  -v /path/to/data:/usr/src/app/data \
+  -v /path/to/dropgate/data:/app/data \
   willtda/dropgate-server:latest
 ```
 
-If you want uploads to persist across restarts, map `/usr/src/app/uploads` to a path on the host machine and set `UPLOAD_PRESERVE_UPLOADS=true`.
+Everything the server keeps is in `/app/data`, so that's the one folder to map, as above. Its uploads are in `/app/data/uploads`, cleared at each start unless `UPLOAD_PRESERVE_UPLOADS=true`; the rest of it is the server's own data, which is never cleaned (nothing uses it yet). Without a mapping, it all goes when the container is removed. The entrypoint makes the folder and hands it to the user the server runs as, and [`docker-compose.yml`](docker-compose.yml) keeps it in a named volume, `dropgate-data`.
 
-`/usr/src/app/data` is the server's own data folder, kept apart from uploads and never cleaned. Nothing uses it yet, so it stays empty, but map it too and it's ready. The entrypoint makes both folders and hands them to the user the server runs as, and [`docker-compose.yml`](docker-compose.yml) keeps `data` in a named volume.
+**Changed in 4.0:** the image's folder is `/app`, not `/usr/src/app`, and uploads moved into `/app/data`. A mapping of version 3's `/usr/src/app/uploads` does nothing in version 4, whose server can't serve version 3's uploads anyway: map `/app/data` instead.
 
 The image holds only what the server runs, and its license: the Dockerfile copies the package files, `server.js`, `views/`, `public/`, `LICENSE` and `entrypoint.sh`, and `.dockerignore` keeps the tests, `test/`, out of the build context altogether. Its `org.opencontainers.image.licenses` label is `AGPL-3.0-only`, as `package.json` gives it.
 
@@ -159,7 +158,7 @@ Images are built for `linux/amd64` and `linux/arm64`. Each release's image is ta
 | --- | --- | --- |
 | `ENABLE_UPLOAD` | `false` | Enables the hosted upload protocol and routes. |
 | `UPLOAD_ENABLE_E2EE` | `true` | Enables end-to-end encryption for hosted uploads (keys stay client-side). |
-| `UPLOAD_PRESERVE_UPLOADS` | `false` | Persist uploads across restarts (uses `uploads/db/`). |
+| `UPLOAD_PRESERVE_UPLOADS` | `false` | Persist uploads across restarts (uses `data/uploads/db/`). |
 | `UPLOAD_MAX_FILE_SIZE_MB` | `100` | Max upload size in MB, counted in 1024s (`100` is 100 × 1024 × 1024 bytes). It applies to the whole upload: several files count together (`0` = unlimited). |
 | `UPLOAD_MAX_STORAGE_GB` | `10` | Max total storage in GB, counted in 1024s (`0` = unlimited). |
 | `UPLOAD_MAX_FILE_LIFETIME_HOURS` | `24` | Max file lifetime in hours (`0` = unlimited). |
@@ -246,8 +245,9 @@ Run the server behind a reverse proxy that terminates TLS:
 
 ## Storage and Lifecycle
 
-- Uploaded files live in `uploads/`. Dropgate 4 writes `uploads/dropgate-storage.json` at each start, saying which version's layout the folder holds, and keeps Dropgate 4's uploads in `uploads/objects/`.
-- The server's own data has a folder of its own, `data/`, beside `uploads/`. It's never cleaned, and nothing uses it yet.
+- Everything the server keeps is in `data/`, beside `server.js` (`/app/data` in Docker).
+- Uploaded files live in `data/uploads/`. Dropgate 4 writes `data/uploads/dropgate-storage.json` at each start, saying which version's layout the folder holds, and keeps Dropgate 4's uploads in `data/uploads/objects/`.
+- The rest of `data/` is the server's own data. It's never cleaned, and nothing uses it yet.
 - Files can be set to expire after a certain period or after a certain number of downloads. An upload is gone the moment it expires: from then on the server answers as if it had never existed, and deletes it within a minute.
 - Incomplete uploads are cleaned up on an interval.
 

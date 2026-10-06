@@ -161,15 +161,17 @@ const app = express();
 // to the same port/path (fixed mount: /peerjs).
 const server = http.createServer(app);
 
-const uploadDir = path.join(__dirname, 'uploads');
-const tmpDir = path.join(__dirname, 'uploads', 'tmp');
-// Stored uploads, in Dropgate 4's format.
-const objectsDir = path.join(__dirname, 'uploads', 'objects');
-// Says which version's layout uploads/ holds, so a later version can tell.
-const storageMarker = path.join(__dirname, 'uploads', 'dropgate-storage.json');
-const STORAGE_FORMAT = 4;
-// The server's own data, outside uploads/, which is never cleaned. Nothing uses it yet.
+// Everything the server keeps is in data/, one folder to map and back up. Its
+// uploads are in data/uploads/, which default mode clears; the rest of data/
+// is the server's own, never cleaned (nothing uses it yet).
 const dataDir = path.join(__dirname, 'data');
+const uploadDir = path.join(dataDir, 'uploads');
+const tmpDir = path.join(uploadDir, 'tmp');
+// Stored uploads, in Dropgate 4's format.
+const objectsDir = path.join(uploadDir, 'objects');
+// Says which version's layout uploads/ holds, so a later version can tell.
+const storageMarker = path.join(uploadDir, 'dropgate-storage.json');
+const STORAGE_FORMAT = 4;
 
 // Sizes count in 1024s: a MB is 1024 × 1024 bytes, and a GB 1024 MB.
 const MIB = 1024 * 1024;
@@ -319,7 +321,7 @@ if (enableUpload) {
     createDirIfNotExists(tmpDir);
     createDirIfNotExists(objectsDir);
     if (preserveUploads) {
-        createDirIfNotExists(path.join(__dirname, 'uploads', 'db'));
+        createDirIfNotExists(path.join(uploadDir, 'db'));
     }
     fs.writeFileSync(storageMarker, `${JSON.stringify({ format: STORAGE_FORMAT })}\n`);
 
@@ -329,8 +331,8 @@ if (enableUpload) {
         log('info', `Current server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB`);
     }
 
-    fileDatabase = preserveUploads ? new QuickDB({ filePath: path.join(__dirname, 'uploads', 'db', 'file-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
-    bundleDatabase = preserveUploads ? new QuickDB({ filePath: path.join(__dirname, 'uploads', 'db', 'bundle-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
+    fileDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'file-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
+    bundleDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'bundle-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
     ongoingUploads = new Map();
     ongoingBundles = new Map();
     log('info', `File database is ready. (${preserveUploads ? 'persistent' : 'in-memory'})`);
