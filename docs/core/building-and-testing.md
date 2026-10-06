@@ -19,6 +19,8 @@ npx vitest run --reporter=verbose
 
 The tests run in plain Node, with no browser environment. The P2P tests use stand-ins for the PeerJS objects (core's [`tests/helpers/fake-peer.ts`](../../packages/dropgate-core/tests/helpers/fake-peer.ts)), and the client tests use a fake server passed in as `fetchFn`, so no test needs a network or a PeerJS server. The Web UI and the Dropgate Client are tested in real browsers and Electron by the [integration tests](../../tests/integration/README.md).
 
+DGUP 4's encrypted object (its header, keys, chunks, padding and file list) is pinned byte for byte in [`tests/fixtures/dgup4-object-vectors.json`](../../packages/dropgate-core/tests/fixtures/dgup4-object-vectors.json). The vectors were made by [`tests/helpers/reference-object.mjs`](../../packages/dropgate-core/tests/helpers/reference-object.mjs), a second implementation on `node:crypto`, written from the format rather than from core's code. Core's tests check that both make exactly those bytes, and anything else that builds the object, such as the server's tests, can be checked against the same file.
+
 Core's [`tests/copies.test.ts`](../../packages/dropgate-core/tests/copies.test.ts) checks that the server's and the client's copies are the build in `dist/`, so run it after `npm run build`.
 
 Outside the repository, for example unpacked from a release's `dropgate-core-<version>.tar.gz`, there are no copies. The build then says so and writes none, and their tests are skipped. A test that always runs checks this only happens when the server's and the client's copies aren't there.

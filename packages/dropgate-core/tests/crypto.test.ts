@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { inspect } from 'node:util';
+import { createCipheriv, createHmac } from 'node:crypto';
 import { DropgateClient, codes } from '../src/index.js';
 import { cryptoProvider, webCryptoProvider, sha256Hex } from '../src/crypto/index.js';
 import { newOperationId } from '../src/operation.js';
@@ -64,6 +65,57 @@ describe('The WebCrypto provider', () => {
     await expect(provider.encrypt({} as never, new Uint8Array(1))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
 
+  it('seals under a given nonce: the NIST AES-256-GCM known answer, with no IV in front', async () => {
+    const key = await provider.importKey(fromHex('31bdadd96698c204aa9ce1448ea94ae1fb4a9a0b3c9d773b51bb1822666b8f22'));
+    const nonce = fromHex('0d18e06c7c725ac9e362e1ce');
+    const sealed = await provider.encryptWithNonce(key, nonce, fromHex('2db5168e932556f8089a0622981d017d'));
+    expect(hex(sealed)).toBe('fa4362189661d163fcd6a56d8bf0405a' + 'd636ac1bbedd5cc3ee727dc2ab4a9489');
+    expect(hex(await provider.decryptWithNonce(key, nonce, sealed))).toBe('2db5168e932556f8089a0622981d017d');
+    // Under another nonce, or changed, it doesn't open; a nonce is 12 bytes.
+    await expect(provider.decryptWithNonce(key, new Uint8Array(12), sealed)).rejects.toThrow();
+    const changed = sealed.slice();
+    changed[0] ^= 1;
+    await expect(provider.decryptWithNonce(key, nonce, changed)).rejects.toThrow();
+    await expect(provider.encryptWithNonce(key, new Uint8Array(16), new Uint8Array(1))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('derives keys with HKDF-SHA256 (RFC 5869, test case 1), for AES-256-GCM and for HMAC-SHA256', async () => {
+    const ikm = fromHex('0b'.repeat(22));
+    const salt = fromHex('000102030405060708090a0b0c');
+    const info = fromHex('f0f1f2f3f4f5f6f7f8f9');
+    // The test case's OKM, of which a 32-byte key is the first 32 bytes.
+    const okm = Buffer.from('3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf', 'hex');
+    const data = new TextEncoder().encode('Dropgate');
+
+    const macKey = await provider.deriveMacKey(ikm, salt, info);
+    const mac = await provider.hmacSha256(macKey, data);
+    expect(hex(mac)).toBe(createHmac('sha256', okm).update(data).digest('hex'));
+    expect(await provider.verifyHmacSha256(macKey, mac, data)).toBe(true);
+    const wrong = mac.slice();
+    wrong[31] ^= 1;
+    expect(await provider.verifyHmacSha256(macKey, wrong, data)).toBe(false);
+    expect(await provider.verifyHmacSha256(macKey, mac.subarray(0, 16), data)).toBe(false);
+
+    const contentKey = await provider.deriveContentKey(ikm, salt, info);
+    const nonce = new Uint8Array(12);
+    const cipher = createCipheriv('aes-256-gcm', okm, nonce);
+    const expected = Buffer.concat([cipher.update(data), cipher.final(), cipher.getAuthTag()]);
+    expect(hex(await provider.encryptWithNonce(contentKey, nonce, data))).toBe(expected.toString('hex'));
+  });
+
+  it("keeps derived keys to itself: they can't be exported, show no bytes, and each does only its own job", async () => {
+    const ikm = provider.randomBytes(32);
+    const salt = provider.randomBytes(16);
+    const contentKey = await provider.deriveContentKey(ikm, salt, new Uint8Array(1));
+    const macKey = await provider.deriveMacKey(ikm, salt, new Uint8Array(1));
+    await expect(provider.exportKey(contentKey)).rejects.toThrow();
+    expect(JSON.stringify({ contentKey, macKey })).toBe('{"contentKey":"[ContentKey]","macKey":"[MacKey]"}');
+    expect(`${inspect(macKey)} ${String(macKey)}`).toBe('[MacKey] [MacKey]');
+    expect(Object.keys(macKey)).toEqual([]);
+    await expect(provider.hmacSha256(contentKey as never, new Uint8Array(1))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(provider.encryptWithNonce(macKey as never, new Uint8Array(12), new Uint8Array(1))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
   it('hashes SHA-256 (FIPS 180-4 "abc"), and gives random bytes of any length', async () => {
     expect(await sha256Hex(provider, new TextEncoder().encode('abc'))).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
     const big = provider.randomBytes(200_000);
@@ -85,6 +137,8 @@ describe('On a page served over plain HTTP (no crypto.subtle, no randomUUID)', (
     const data = cryptoProvider().randomBytes(10_000);
     expect(await sha256Hex(provider, data)).toBe(await sha256Hex(cryptoProvider(), data));
     await expect(provider.generateKey()).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });
+    await expect(provider.deriveContentKey(new Uint8Array(32), new Uint8Array(16), new Uint8Array(1))).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });
+    await expect(provider.deriveMacKey(new Uint8Array(32), new Uint8Array(16), new Uint8Array(1))).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });
   });
 
   it('codes, operation IDs and an unencrypted upload work; an encrypted one fails RUNTIME_UNSUPPORTED', async () => {

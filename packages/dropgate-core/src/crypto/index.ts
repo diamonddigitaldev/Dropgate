@@ -4,7 +4,7 @@ import type { ContentKey, CryptoProvider } from './provider.js';
 // DGUP's content encryption, on the crypto provider: one AES-256-GCM key per
 // upload, carried in the link's # part as base64.
 
-export { ContentKey, cryptoProvider, webCryptoProvider } from './provider.js';
+export { ContentKey, MacKey, cryptoProvider, webCryptoProvider } from './provider.js';
 export type { CryptoProvider, CryptoProviderName } from './provider.js';
 
 /** The SHA-256 digest of `data`, as lowercase hex. */

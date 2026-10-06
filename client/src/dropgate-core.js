@@ -212,9 +212,9 @@ function sha256Fallback(data) {
   );
   padded.set(bytes);
   padded[bytes.length] = 128;
-  const view = new DataView(padded.buffer);
-  view.setUint32(padded.length - 8, bitLen / 4294967296 >>> 0, false);
-  view.setUint32(padded.length - 4, bitLen >>> 0, false);
+  const view2 = new DataView(padded.buffer);
+  view2.setUint32(padded.length - 8, bitLen / 4294967296 >>> 0, false);
+  view2.setUint32(padded.length - 4, bitLen >>> 0, false);
   let h0 = 1779033703;
   let h1 = 3144134277;
   let h2 = 1013904242;
@@ -226,7 +226,7 @@ function sha256Fallback(data) {
   const W = new Uint32Array(64);
   for (let offset = 0; offset < padded.length; offset += 64) {
     for (let i = 0; i < 16; i++) {
-      W[i] = view.getUint32(offset + i * 4, false);
+      W[i] = view2.getUint32(offset + i * 4, false);
     }
     for (let i = 16; i < 64; i++) {
       const s0 = rotr(W[i - 15], 7) ^ rotr(W[i - 15], 18) ^ W[i - 15] >>> 3;
@@ -273,36 +273,50 @@ function sha256Fallback(data) {
 }
 
 // src/crypto/provider.ts
-var _provider, _handle;
-var _ContentKey = class _ContentKey {
-  constructor(provider, handle) {
+var _label, _provider, _handle;
+var ProviderKey = class {
+  constructor(label, provider, handle) {
+    __privateAdd(this, _label);
     __privateAdd(this, _provider);
     __privateAdd(this, _handle);
+    __privateSet(this, _label, label);
     __privateSet(this, _provider, provider);
     __privateSet(this, _handle, handle);
     Object.freeze(this);
   }
-  /** The provider's own handle, for the provider that made it. */
+  /** The provider's own handle, for the provider that made it, if the key is of this kind. */
   static handle(key, provider) {
-    if (!(key instanceof _ContentKey) || __privateGet(key, _provider) !== provider) {
-      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "That key wasn't made by this crypto provider." });
+    if (!(key instanceof this) || __privateGet(key, _provider) !== provider) {
+      throw new DropgateError({ code: "INVALID_ARGUMENT", message: "That key wasn't made by this crypto provider, or isn't for this." });
     }
     return __privateGet(key, _handle);
   }
   toJSON() {
-    return "[ContentKey]";
+    return __privateGet(this, _label);
   }
   toString() {
-    return "[ContentKey]";
+    return __privateGet(this, _label);
   }
   [/* @__PURE__ */ Symbol.for("nodejs.util.inspect.custom")]() {
-    return "[ContentKey]";
+    return __privateGet(this, _label);
   }
 };
+_label = new WeakMap();
 _provider = new WeakMap();
 _handle = new WeakMap();
-var ContentKey = _ContentKey;
+var ContentKey = class extends ProviderKey {
+  constructor(provider, handle) {
+    super("[ContentKey]", provider, handle);
+  }
+};
+var MacKey = class extends ProviderKey {
+  constructor(provider, handle) {
+    super("[MacKey]", provider, handle);
+  }
+};
 var own = (bytes) => new Uint8Array(bytes);
+var view = (bytes) => bytes.buffer instanceof ArrayBuffer ? bytes : own(bytes);
+var HMAC_KEY_BITS = 256;
 var noEncryption = () => new DropgateError({
   code: "RUNTIME_UNSUPPORTED",
   message: "Web Crypto API not available (crypto.subtle). Encryption needs a secure context (HTTPS or localhost)."
@@ -315,6 +329,21 @@ function webCryptoProvider(webCrypto) {
     return subtle;
   };
   const cryptoKey = (key) => ContentKey.handle(key, name);
+  const macKey = (key) => MacKey.handle(key, name);
+  const nonceOf = (nonce) => {
+    if (nonce.byteLength !== AES_GCM_IV_BYTES) throw new DropgateError({ code: "INVALID_ARGUMENT", message: "An AES-GCM nonce is 12 bytes." });
+    return own(nonce);
+  };
+  const hkdf = async (ikm, salt, info, algorithm, usages) => {
+    const base = await needSubtle().importKey("raw", own(ikm), "HKDF", false, ["deriveKey"]);
+    return needSubtle().deriveKey(
+      { name: "HKDF", hash: "SHA-256", salt: own(salt), info: own(info) },
+      base,
+      algorithm,
+      false,
+      usages
+    );
+  };
   const randomBytes = (length) => {
     const out = new Uint8Array(length);
     for (let i = 0; i < length; i += 65536) webCrypto.getRandomValues(out.subarray(i, Math.min(length, i + 65536)));
@@ -346,7 +375,7 @@ function webCryptoProvider(webCrypto) {
     },
     async encrypt(key, plaintext) {
       const iv = randomBytes(AES_GCM_IV_BYTES);
-      const sealed = new Uint8Array(await needSubtle().encrypt({ name: "AES-GCM", iv }, cryptoKey(key), own(plaintext)));
+      const sealed = await provider.encryptWithNonce(key, iv, own(plaintext));
       const out = new Uint8Array(iv.byteLength + sealed.byteLength);
       out.set(iv);
       out.set(sealed, iv.byteLength);
@@ -356,6 +385,24 @@ function webCryptoProvider(webCrypto) {
       const iv = sealed.slice(0, AES_GCM_IV_BYTES);
       const ciphertext = sealed.slice(AES_GCM_IV_BYTES);
       return new Uint8Array(await needSubtle().decrypt({ name: "AES-GCM", iv }, cryptoKey(key), ciphertext));
+    },
+    async encryptWithNonce(key, nonce, plaintext) {
+      return new Uint8Array(await needSubtle().encrypt({ name: "AES-GCM", iv: nonceOf(nonce) }, cryptoKey(key), view(plaintext)));
+    },
+    async decryptWithNonce(key, nonce, sealed) {
+      return new Uint8Array(await needSubtle().decrypt({ name: "AES-GCM", iv: nonceOf(nonce) }, cryptoKey(key), view(sealed)));
+    },
+    async deriveContentKey(ikm, salt, info) {
+      return new ContentKey(name, await hkdf(ikm, salt, info, { name: "AES-GCM", length: 256 }, ["encrypt", "decrypt"]));
+    },
+    async deriveMacKey(ikm, salt, info) {
+      return new MacKey(name, await hkdf(ikm, salt, info, { name: "HMAC", hash: "SHA-256", length: HMAC_KEY_BITS }, ["sign", "verify"]));
+    },
+    async hmacSha256(key, data) {
+      return new Uint8Array(await needSubtle().sign("HMAC", macKey(key), view(data)));
+    },
+    async verifyHmacSha256(key, mac, data) {
+      return needSubtle().verify("HMAC", macKey(key), own(mac), view(data));
     },
     async sha256(data) {
       if (subtle) return new Uint8Array(await subtle.digest("SHA-256", own(data)));
@@ -731,8 +778,8 @@ async function readRange(source, start, end) {
       message: "A file gave a different number of bytes than asked for. It may have changed while it was read."
     });
   }
-  const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return view.buffer instanceof ArrayBuffer ? view : new Uint8Array(view);
+  const view2 = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return view2.buffer instanceof ArrayBuffer ? view2 : new Uint8Array(view2);
 }
 
 // src/adapters/defaults.ts
