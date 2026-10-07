@@ -55,6 +55,9 @@ export async function startServer({ env = {}, clock = false, requests = false, p
     if (clock) preloads.push('--require', CLOCK_PRELOAD);
     if (requests) preloads.push('--require', REQUESTS_PRELOAD);
 
+    // Everything every run of the server in this folder has written, restarts included.
+    const output = { stdout: '', stderr: '' };
+
     const launch = (port) => {
         const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SERVER_ENV.test(k)));
         Object.assign(childEnv, { SERVER_PORT: String(port) }, env);
@@ -63,7 +66,7 @@ export async function startServer({ env = {}, clock = false, requests = false, p
             env: childEnv,
             stdio: ['ignore', 'pipe', 'pipe', clock ? 'ipc' : 'ignore'],
         });
-        const run = { port, child, output: { stdout: '', stderr: '' }, exited: false, closed: once(child, 'close') };
+        const run = { port, child, output, exited: false, closed: once(child, 'close') };
         child.stdout.on('data', (d) => { run.output.stdout += d; });
         child.stderr.on('data', (d) => { run.output.stderr += d; });
         child.once('exit', () => { run.exited = true; });
@@ -88,11 +91,14 @@ export async function startServer({ env = {}, clock = false, requests = false, p
     };
 
     let run;
-    const stop = async () => {
+    const kill = async () => {
         if (!run.exited) {
             run.child.kill();
             await once(run.child, 'exit');
         }
+    };
+    const stop = async () => {
+        await kill();
         fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
     };
 
@@ -100,23 +106,26 @@ export async function startServer({ env = {}, clock = false, requests = false, p
     // one listens on it. Then this server exits with EADDRINUSE while the other
     // answers on the port, so the server has only started once it says it's
     // listening, and a taken port means trying another.
-    for (let attempt = 1; ; attempt++) {
-        fs.rmSync(path.join(dir, 'listen-error.json'), { force: true });
-        run = launch(attempt === 1 && firstPort ? firstPort : await freePort());
-        for (let i = 0; listeningOn() !== run.port && !run.exited && i <= 100; i++) await sleep(100);
-        if (listeningOn() === run.port) break;
-        if (run.exited) await run.closed;
-        if (attempt < 3 && run.exited && listenError() === 'EADDRINUSE') continue;
-        await stop();
-        // A test of a setting the server refuses reads why from these.
-        throw Object.assign(new Error(`Server did not start.\n${run.output.stdout}${run.output.stderr}`), {
-            exitCode: run.child.exitCode, output: { ...run.output },
-        });
-    }
-    const { port, child, output } = run;
+    const start = async (preferredPort) => {
+        for (let attempt = 1; ; attempt++) {
+            fs.rmSync(path.join(dir, 'listening.json'), { force: true });
+            fs.rmSync(path.join(dir, 'listen-error.json'), { force: true });
+            run = launch(attempt === 1 && preferredPort ? preferredPort : await freePort());
+            for (let i = 0; listeningOn() !== run.port && !run.exited && i <= 100; i++) await sleep(100);
+            if (listeningOn() === run.port) return;
+            if (run.exited) await run.closed;
+            if (attempt < 3 && run.exited && listenError() === 'EADDRINUSE') continue;
+            await stop();
+            // A test of a setting the server refuses reads why from these.
+            throw Object.assign(new Error(`Server did not start.\n${run.output.stdout}${run.output.stderr}`), {
+                exitCode: run.child.exitCode, output: { ...run.output },
+            });
+        }
+    };
+    await start(firstPort);
 
-    return {
-        baseUrl: `http://127.0.0.1:${port}`,
+    const server = {
+        baseUrl: `http://127.0.0.1:${run.port}`,
         dir,
         dataDir: path.join(dir, 'data'),
         uploadsDir: path.join(dir, 'data', 'uploads'),
@@ -142,7 +151,7 @@ export async function startServer({ env = {}, clock = false, requests = false, p
         /**
          * Every record in one of the server's databases, as { id, value }.
          * Needs UPLOAD_PRESERVE_UPLOADS=true; the in-memory mode stores the same records.
-         * @param {'file-database.sqlite' | 'bundle-database.sqlite'} name
+         * @param {'file-database.sqlite' | 'bundle-database.sqlite' | 'objects.sqlite'} name - Dropgate 3's two, or 4's one.
          */
         records: (name) => {
             const Database = createRequire(path.join(dir, 'server.js'))('better-sqlite3');
@@ -180,14 +189,28 @@ export async function startServer({ env = {}, clock = false, requests = false, p
             }
             return received.map(({ body, ...request }) => ({ ...request, body: Buffer.concat(body) }));
         },
-        /** Move the server's clock forward. Repeating timers due in that time run once before it resolves. */
+        /**
+         * Move the server's clock forward. Repeating timers due in that time run once, and
+         * timeouts due in it run, before it resolves (see clock.cjs).
+         */
         advanceClock: async (ms) => {
             if (!clock) throw new Error('Start the server with { clock: true } to use advanceClock().');
-            child.send({ type: 'advance-clock', ms });
-            await once(child, 'message');
+            run.child.send({ type: 'advance-clock', ms });
+            await once(run.child, 'message');
+        },
+        /**
+         * Stop the server and start it again in the same folder, as an operator's
+         * restart would, on a port that may differ: baseUrl follows it. The output
+         * goes on. The test clock, if any, starts again at the real time.
+         */
+        restart: async () => {
+            await kill();
+            await start();
+            server.baseUrl = `http://127.0.0.1:${run.port}`;
         },
         stop,
     };
+    return server;
 }
 
 /** Poll until check() returns true, or fail after timeoutMs. */

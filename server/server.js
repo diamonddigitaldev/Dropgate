@@ -193,14 +193,18 @@ const createDirIfNotExists = (dir) => {
     }
 };
 
+// Storage used is the uploads stored and the space reserved for those in
+// progress. So uploads in progress (tmp/, counted by their reservations), the
+// databases and the format marker don't count.
+const notStorage = new Set([storageMarker, tmpDir, path.join(uploadDir, 'db')]);
+
 const getDirSize = (dirPath) => {
     let size = 0;
     if (fs.existsSync(dirPath)) {
         const files = fs.readdirSync(dirPath);
         for (const file of files) {
             const filePath = path.join(dirPath, file);
-            // The format marker isn't an upload, so it doesn't count against storage.
-            if (filePath === storageMarker) continue;
+            if (notStorage.has(filePath)) continue;
             const stats = fs.statSync(filePath);
             if (stats.isDirectory()) size += getDirSize(filePath);
             else size += stats.size;
@@ -224,6 +228,15 @@ let fileDatabase = null;
 let bundleDatabase = null;
 let ongoingUploads = null;
 let ongoingBundles = null;
+// Dropgate 4's stored uploads' records, by ID.
+let objectDatabase = null;
+// Dropgate 4's uploads in progress, by upload ID, in memory only: what each
+// will be, the chunks the server holds with their digests, and its deadline.
+// Nothing in one says who sent it.
+let v4Uploads = null;
+// A finished upload's answer, by upload ID, kept a few minutes so that
+// finishing again gets the same answer.
+let v4Finished = null;
 
 // Security: Mutex for atomic quota checking (prevents TOCTOU race condition)
 let quotaLock = Promise.resolve();
@@ -233,6 +246,14 @@ const acquireQuotaLock = () => {
     const previousLock = quotaLock;
     quotaLock = acquire;
     return previousLock.then(() => release);
+};
+
+// The space held for the uploads in progress, Dropgate 3's and 4's alike.
+const reservedBytes = () => {
+    let total = 0;
+    ongoingUploads.forEach((u) => { total += u.reservedBytes || 0; });
+    v4Uploads.forEach((u) => { total += u.size; });
+    return total;
 };
 
 // Security: Limits to prevent DoS attacks
@@ -333,8 +354,11 @@ if (enableUpload) {
 
     fileDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'file-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
     bundleDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'bundle-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
+    objectDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'objects.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
     ongoingUploads = new Map();
     ongoingBundles = new Map();
+    v4Uploads = new Map();
+    v4Finished = new Map();
     log('info', `File database is ready. (${preserveUploads ? 'persistent' : 'in-memory'})`);
 } else {
     log('info', 'Upload protocol disabled. Cleaning up upload directory...');
@@ -361,7 +385,10 @@ const API_CORS = {
 app.use('/api', cors(API_CORS));
 // Dropgate 3's upload routes, as they were, until they go.
 app.use('/upload', cors());
-app.use(express.json({ limit: '1mb' }));
+// An upload's start carries its sealed file list, up to 1 MiB before base64url.
+const jsonBody = express.json({ limit: '1mb' });
+const uploadStartBody = express.json({ limit: '2mb' });
+app.use((req, res, next) => (req.path === '/api/v4/uploads' ? uploadStartBody : jsonBody)(req, res, next));
 app.use((req, res, next) => {
     res.locals.nonce = crypto.randomBytes(16).toString('base64');
     next();
@@ -628,8 +655,7 @@ if (enableUpload) {
         // Check Storage Quota (CRITICAL: atomic section to prevent TOCTOU race)
         const releaseLock = await acquireQuotaLock();
         try {
-            let reservedSpace = 0;
-            ongoingUploads.forEach(u => reservedSpace += u.reservedBytes || 0);
+            const reservedSpace = reservedBytes();
 
             if ((currentDiskUsage + reservedSpace + size) > MAX_STORAGE_BYTES) {
                 log('debug', `Upload rejected due to insufficient storage. Current usage: ${(currentDiskUsage / GIB).toFixed(2)} GB, Reserved: ${(reservedSpace / GIB).toFixed(2)} GB, Requested: ${(size / GIB).toFixed(2)} GB.`);
@@ -760,8 +786,7 @@ if (enableUpload) {
         // Check storage quota for the entire bundle (CRITICAL: atomic section to prevent TOCTOU race)
         const releaseLock = await acquireQuotaLock();
         try {
-            let reservedSpace = 0;
-            ongoingUploads.forEach(u => reservedSpace += u.reservedBytes || 0);
+            const reservedSpace = reservedBytes();
             if ((currentDiskUsage + reservedSpace + totalBundleSize) > MAX_STORAGE_BYTES) {
                 return res.status(507).json({ error: 'Server out of capacity. Try again later.' });
             }
@@ -1286,6 +1311,462 @@ if (enableUpload) {
     });
 }
 
+// ===== Dropgate 4's uploads =====
+// One upload is one object, a file or a bundle alike: started, sent in chunks
+// that can be sent again, then finished. Every route after the start names the
+// upload in the Dropgate-Upload header, never in its URL.
+
+// An encrypted object starts with a 60-byte header, and every chunk carries a
+// 16-byte tag. The server reads only the header's format and chunk size.
+const OBJECT_HEADER_BYTES = 60;
+const CHUNK_TAG_BYTES = 16;
+const OBJECT_MAGIC = Buffer.from('DGUP', 'ascii');
+const OBJECT_VERSION = 4;
+const OBJECT_SUITE = 1;
+// The sealed file list: a 12-byte nonce and a 16-byte tag around at most 1 MiB.
+const MAX_META_BYTES = MIB + 28;
+// An upload with no request for this long ends, unless it's paused.
+const UPLOAD_QUIET_MS = 5 * 60 * 1000;
+// How long a finished upload's answer is kept for a repeated finish.
+const FINISHED_ANSWER_MS = 5 * 60 * 1000;
+
+/** The bytes a base64url string (no padding) holds, if it's exactly that, and `length` of them when given. */
+const fromBase64url = (value, length) => {
+    if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value)) return null;
+    const bytes = Buffer.from(value, 'base64url');
+    if (bytes.toString('base64url') !== value) return null;
+    return length === undefined || bytes.length === length ? bytes : null;
+};
+
+/** The one file name rule: not empty, at most 255 UTF-8 bytes, no control character, no path separator. */
+const isValidFileName = (name) => typeof name === 'string'
+    && name.trim().length > 0
+    && Buffer.byteLength(name, 'utf8') <= 255
+    && !/\p{Cc}/u.test(name)
+    && !/[/\\]/.test(name);
+
+/** The SHA-256 digest in a Content-Digest header (`sha-256=:<base64>:`), or null. */
+const sha256FromContentDigest = (header) => {
+    if (typeof header !== 'string') return null;
+    for (const member of header.split(',')) {
+        const match = /^\s*sha-256=:([A-Za-z0-9+/]+={0,2}):\s*$/.exec(member);
+        if (match) {
+            const digest = Buffer.from(match[1], 'base64');
+            return digest.length === 32 ? digest : null;
+        }
+    }
+    return null;
+};
+
+/**
+ * How many chunks an upload of `size` stored bytes has at chunk size `chunkSize`,
+ * or 0 when no object can be that size: an encrypted object's chunks are each
+ * `chunkSize` + 16 bytes, but the last, which is 17 to `chunkSize` + 16.
+ */
+const chunkCountFor = (encrypted, size, chunkSize) => {
+    if (!encrypted) return Math.ceil(size / chunkSize);
+    const body = size - OBJECT_HEADER_BYTES;
+    if (body <= CHUNK_TAG_BYTES) return 0;
+    const stride = chunkSize + CHUNK_TAG_BYTES;
+    const count = Math.ceil(body / stride);
+    return body - (count - 1) * stride > CHUNK_TAG_BYTES ? count : 0;
+};
+
+/** Where chunk `index` of an upload goes in its object, and how long it is. */
+const chunkPlace = (upload, index) => {
+    const base = upload.encrypted ? OBJECT_HEADER_BYTES : 0;
+    const stride = upload.encrypted ? upload.chunkSize + CHUNK_TAG_BYTES : upload.chunkSize;
+    const offset = base + index * stride;
+    return { offset, length: index === upload.chunks - 1 ? upload.size - offset : stride };
+};
+
+/** The chunks an upload holds, as inclusive ranges: [[0, 11], [13, 13]]. */
+const receivedRanges = (upload) => {
+    const ranges = [];
+    for (const index of [...upload.received.keys()].sort((a, b) => a - b)) {
+        const last = ranges[ranges.length - 1];
+        if (last && last[1] === index - 1) last[1] = index;
+        else ranges.push([index, index]);
+    }
+    return ranges;
+};
+
+if (enableUpload) {
+    // An upload's credential is checked here, on every upload route, once the
+    // server can ask for one (capabilities.upload.credentialRequired). It asks
+    // for none yet, so this checks nothing. It must never log the credential.
+    const uploadCredential = (_req, _res, next) => next();
+
+    // The routes after the start skip the rate limiter for an upload that's
+    // in progress, or just finished, as Dropgate 3's did.
+    const v4UploadAuth = (req, res, next) => {
+        const uploadId = req.get('Dropgate-Upload');
+        if (uploadId && (v4Uploads.has(uploadId) || v4Finished.has(uploadId))) return next();
+        return limiter(req, res, next);
+    };
+
+    const sizeInMB = (bytes) => (bytes / MIB).toFixed(2);
+
+    // Every unknown, ended or dropped upload gets the same answer, so nothing says which.
+    const uploadNotFound = (res) => res.status(404).json({ code: 'NOT_FOUND', error: 'The server has no such upload.' });
+
+    const invalidRequest = (res, field) => res.status(400).json({
+        code: 'INVALID_REQUEST',
+        error: 'A field of the request is missing or wrong.',
+        ...(field ? { details: { field } } : {}),
+    });
+
+    /** Ends an upload: its timer, its temp file and its reservation go. */
+    const dropUpload = (upload) => {
+        if (v4Uploads.get(upload.id) !== upload) return false;
+        clearTimeout(upload.timer);
+        v4Uploads.delete(upload.id);
+        // A chunk still being written removes it when it's done (see the chunk route).
+        try { fs.rmSync(upload.tempFilePath, { force: true }); } catch { }
+        return true;
+    };
+
+    /** The upload ends at once `ms` from now, unless something renews it. */
+    const setDeadline = (upload, ms) => {
+        clearTimeout(upload.timer);
+        upload.deadline = Date.now() + ms;
+        upload.timer = setTimeout(() => endAtDeadline(upload), ms);
+    };
+
+    const endAtDeadline = (upload) => {
+        if (v4Uploads.get(upload.id) !== upload) return;
+        // A chunk still arriving isn't quiet.
+        if (upload.busy > 0) return setDeadline(upload, UPLOAD_QUIET_MS);
+        dropUpload(upload);
+        log('debug', `Upload ended at its deadline${upload.paused ? ' while paused' : ''}. Released ${sizeInMB(upload.size)} MB.`);
+    };
+
+    /** Any request renews a quiet upload's deadline; only pausing renews a paused one's. */
+    const renew = (upload) => {
+        if (!upload.paused) setDeadline(upload, UPLOAD_QUIET_MS);
+    };
+
+    /** The upload the request names, if it's in progress and not being finished. */
+    const requestedUpload = (req) => {
+        const upload = v4Uploads.get(req.get('Dropgate-Upload'));
+        if (!upload || upload.finishing) return null;
+        if (upload.deadline <= Date.now()) endAtDeadline(upload);
+        return v4Uploads.get(upload.id) === upload ? upload : null;
+    };
+
+    v4Router.post('/uploads', limiter, uploadCredential, async (req, res) => {
+        const body = req.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return invalidRequest(res);
+        const { encrypted, size, header, meta, files, lifetimeMs, maxDownloads } = body;
+
+        if (typeof encrypted !== 'boolean') return invalidRequest(res, 'encrypted');
+        if (!Number.isSafeInteger(size) || size < 1) return invalidRequest(res, 'size');
+        let headerBytes = null;
+        let manifest = null;
+        if (encrypted) {
+            headerBytes = fromBase64url(header, OBJECT_HEADER_BYTES);
+            if (!headerBytes) return invalidRequest(res, 'header');
+            const metaBytes = fromBase64url(meta);
+            if (!metaBytes || metaBytes.length <= 28 || metaBytes.length > MAX_META_BYTES) return invalidRequest(res, 'meta');
+            if (files !== undefined) return invalidRequest(res, 'files');
+        } else {
+            if (header !== undefined) return invalidRequest(res, 'header');
+            if (meta !== undefined) return invalidRequest(res, 'meta');
+            if (!Array.isArray(files) || files.length < 1 || files.length > MAX_BUNDLE_FILES) return invalidRequest(res, 'files');
+            manifest = [];
+            let total = 0;
+            for (const file of files) {
+                if (!file || !isValidFileName(file.name) || !Number.isSafeInteger(file.size) || file.size < 1) return invalidRequest(res, 'files');
+                total += file.size;
+                manifest.push({ name: file.name, size: file.size });
+            }
+            if (total !== size) return invalidRequest(res, 'files');
+        }
+        if (!Number.isSafeInteger(lifetimeMs) || lifetimeMs < 0) return invalidRequest(res, 'lifetimeMs');
+        if (maxDownloads !== undefined && (!Number.isSafeInteger(maxDownloads) || maxDownloads < 0)) return invalidRequest(res, 'maxDownloads');
+        if (!fromBase64url(body.manageTokenHash, 32)) return invalidRequest(res, 'manageTokenHash');
+
+        if (encrypted && !uploadEnableE2EE) {
+            return res.status(400).json({ code: 'E2EE_DISABLED', error: 'This server doesn\'t accept encrypted uploads.' });
+        }
+        if (encrypted) {
+            const known = headerBytes.subarray(0, 4).equals(OBJECT_MAGIC)
+                && headerBytes[4] === OBJECT_VERSION && headerBytes[5] === OBJECT_SUITE
+                && headerBytes[6] === 0 && headerBytes[7] === 0;
+            if (!known) {
+                return res.status(400).json({ code: 'UNSUPPORTED_OBJECT', error: 'This upload is in a format this server doesn\'t store.' });
+            }
+            if (headerBytes.readUInt32BE(8) !== uploadChunkSizeBytes) {
+                return res.status(400).json({ code: 'CHUNK_SIZE_MISMATCH', error: 'This upload\'s chunk size isn\'t the server\'s.' });
+            }
+        }
+        const chunks = chunkCountFor(encrypted, size, uploadChunkSizeBytes);
+        if (chunks === 0 || chunks > MAX_CHUNKS) return invalidRequest(res, 'size');
+        if (size > MAX_FILE_SIZE_BYTES) {
+            return res.status(413).json({ code: 'TOO_LARGE', error: `This upload is over the server's limit of ${maxFileSizeMB} MB.` });
+        }
+
+        if (MAX_FILE_LIFETIME_MS !== Infinity) {
+            if (lifetimeMs === 0) {
+                return res.status(400).json({ code: 'LIFETIME_NOT_ALLOWED', error: `This server doesn't keep uploads without a limit: at most ${maxFileLifetimeHours} hours.` });
+            }
+            if (lifetimeMs > MAX_FILE_LIFETIME_MS) {
+                return res.status(400).json({ code: 'LIFETIME_NOT_ALLOWED', error: `This server keeps uploads for at most ${maxFileLifetimeHours} hours.` });
+            }
+        }
+
+        // Dropgate 3's rules: a server limit of 1 is always 1; otherwise the
+        // upload's own, within the server's.
+        let effectiveMaxDownloads = maxFileDownloads;
+        if (maxDownloads !== undefined && maxFileDownloads !== 1) {
+            if (maxFileDownloads !== 0 && maxDownloads === 0) {
+                return res.status(400).json({ code: 'DOWNLOADS_NOT_ALLOWED', error: `This server doesn't allow unlimited downloads: at most ${maxFileDownloads}.` });
+            }
+            if (maxFileDownloads !== 0 && maxDownloads > maxFileDownloads) {
+                return res.status(400).json({ code: 'DOWNLOADS_NOT_ALLOWED', error: `This server allows at most ${maxFileDownloads} downloads.` });
+            }
+            effectiveMaxDownloads = maxDownloads;
+        }
+
+        const releaseLock = await acquireQuotaLock();
+        let upload;
+        try {
+            const reserved = reservedBytes();
+            if (currentDiskUsage + reserved + size > MAX_STORAGE_BYTES) {
+                log('debug', `Upload rejected due to insufficient storage. Current usage: ${(currentDiskUsage / GIB).toFixed(2)} GB, Reserved: ${(reserved / GIB).toFixed(2)} GB, Requested: ${(size / GIB).toFixed(2)} GB.`);
+                return res.status(507).json({ code: 'SERVER_FULL', error: 'The server is out of space. Try again later.' });
+            }
+            const id = uuidv4();
+            const tempFilePath = path.join(tmpDir, id);
+            fs.writeFileSync(tempFilePath, encrypted ? headerBytes : '');
+            upload = {
+                id,
+                tempFilePath,
+                encrypted,
+                size,
+                chunkSize: uploadChunkSizeBytes,
+                chunks,
+                meta: encrypted ? meta : undefined,
+                files: manifest ?? undefined,
+                lifetimeMs,
+                maxDownloads: effectiveMaxDownloads,
+                manageTokenHash: body.manageTokenHash,
+                // Chunk index → SHA-256 digest: those written, and those being written.
+                received: new Map(),
+                writing: new Map(),
+                paused: false,
+                deadline: 0,
+                timer: null,
+                busy: 0,
+                finishing: null,
+            };
+            v4Uploads.set(id, upload);
+            setDeadline(upload, UPLOAD_QUIET_MS);
+        } finally {
+            releaseLock();
+        }
+
+        log('debug', `Upload started. Reserved ${sizeInMB(size)} MB.`);
+        res.status(201).json({ uploadId: upload.id, chunks, chunkSize: upload.chunkSize, deadline: upload.deadline });
+    });
+
+    v4Router.put('/upload/chunks/:index', v4UploadAuth, uploadCredential, async (req, res) => {
+        // An answer before the body is read closes the connection, so the rest
+        // of the body is never read.
+        res.set('Connection', 'close');
+        const upload = requestedUpload(req);
+        if (!upload) return uploadNotFound(res);
+        renew(upload);
+
+        const index = /^\d{1,6}$/.test(req.params.index) ? Number(req.params.index) : -1;
+        if (index < 0 || index >= upload.chunks) {
+            return res.status(400).json({ code: 'INVALID_CHUNK', error: 'There is no chunk with that index in this upload.' });
+        }
+        const { offset, length } = chunkPlace(upload, index);
+        const wrongLength = () => res.status(400).json({ code: 'INVALID_CHUNK', error: 'That chunk is the wrong length.' });
+        const declared = req.get('Content-Length');
+        if (declared !== undefined && Number(declared) !== length) return wrongLength();
+        const digest = sha256FromContentDigest(req.get('Content-Digest'));
+        const digestMismatch = () => res.status(400).json({ code: 'DIGEST_MISMATCH', error: 'The chunk\'s Content-Digest is missing, or doesn\'t match its bytes.' });
+        if (!digest) return digestMismatch();
+        res.removeHeader('Connection');
+
+        upload.busy++;
+        let body;
+        try {
+            // Read no more than the chunk's length: one byte past it, and it's refused.
+            body = await new Promise((resolve) => {
+                // A body sent as JSON was read already, and isn't a chunk.
+                if (req.readableEnded) return resolve({ bytes: Buffer.alloc(0) });
+                const parts = [];
+                let received = 0;
+                const done = (result) => {
+                    req.off('data', onData);
+                    req.off('end', onEnd);
+                    req.off('close', onClose);
+                    req.off('error', onClose);
+                    resolve(result);
+                };
+                const onData = (part) => {
+                    received += part.length;
+                    if (received > length) return done({ tooLong: true });
+                    parts.push(part);
+                };
+                const onEnd = () => done({ bytes: Buffer.concat(parts, received) });
+                // The connection went before the whole chunk came: nothing is kept.
+                const onClose = () => done({ dropped: true });
+                req.on('data', onData);
+                req.on('end', onEnd);
+                req.on('close', onClose);
+                req.on('error', onClose);
+            });
+        } finally {
+            upload.busy--;
+        }
+        if (body.dropped) return renew(upload);
+        if (body.tooLong) {
+            res.set('Connection', 'close');
+            return wrongLength();
+        }
+        if (v4Uploads.get(upload.id) !== upload) return uploadNotFound(res);
+        renew(upload);
+        if (body.bytes.length !== length) return wrongLength(res);
+        if (!crypto.createHash('sha256').update(body.bytes).digest().equals(digest)) return digestMismatch(res);
+
+        // A chunk the server already holds isn't written again: the same bytes are
+        // fine, different bytes are refused. It compares the digests it kept.
+        const held = upload.received.get(index) ?? upload.writing.get(index);
+        if (!held) {
+            upload.writing.set(index, digest);
+            try {
+                const file = await fs.promises.open(upload.tempFilePath, 'r+');
+                try {
+                    await file.write(body.bytes, 0, length, offset);
+                } finally {
+                    await file.close();
+                }
+            } catch (err) {
+                upload.writing.delete(index);
+                // A cancelled or ended upload's file is gone, which isn't the server's fault.
+                if (v4Uploads.get(upload.id) !== upload) return uploadNotFound(res);
+                throw err;
+            }
+            upload.writing.delete(index);
+            if (v4Uploads.get(upload.id) !== upload) {
+                // It ended while this chunk was being written, so its file is this chunk's to remove.
+                fs.rm(upload.tempFilePath, { force: true }, () => { });
+                return uploadNotFound(res);
+            }
+            upload.received.set(index, digest);
+            log('debug', `Received chunk ${index + 1}/${upload.chunks}. Size: ${(length / 1024).toFixed(2)} KB`);
+        } else if (!held.equals(digest)) {
+            return res.status(409).json({ code: 'CHUNK_CONFLICT', error: 'The server already holds different bytes for that chunk.' });
+        }
+
+        // A chunk sent while paused resumes the upload.
+        if (upload.paused) {
+            upload.paused = false;
+            log('debug', 'Upload resumed.');
+        }
+        renew(upload);
+        res.status(200).json({ deadline: upload.deadline });
+    });
+
+    v4Router.get('/upload', v4UploadAuth, uploadCredential, (req, res) => {
+        const upload = requestedUpload(req);
+        if (!upload) return uploadNotFound(res);
+        renew(upload);
+        res.status(200).json({ chunks: upload.chunks, received: receivedRanges(upload), paused: upload.paused, deadline: upload.deadline });
+    });
+
+    v4Router.post('/upload/pause', v4UploadAuth, uploadCredential, (req, res) => {
+        const upload = requestedUpload(req);
+        if (!upload) return uploadNotFound(res);
+        if (maxPauseMinutes === 0) {
+            renew(upload);
+            return res.status(409).json({ code: 'PAUSE_DISABLED', error: 'Pausing is turned off on this server.' });
+        }
+        // Pausing again renews the pause from now.
+        upload.paused = true;
+        setDeadline(upload, maxPauseMinutes * 60 * 1000);
+        log('debug', 'Upload paused.');
+        res.status(200).json({ paused: true, deadline: upload.deadline });
+    });
+
+    v4Router.post('/upload/resume', v4UploadAuth, uploadCredential, (req, res) => {
+        const upload = requestedUpload(req);
+        if (!upload) return uploadNotFound(res);
+        if (upload.paused) log('debug', 'Upload resumed.');
+        upload.paused = false;
+        renew(upload);
+        res.status(200).json({ paused: false, deadline: upload.deadline, received: receivedRanges(upload) });
+    });
+
+    v4Router.post('/upload/complete', v4UploadAuth, uploadCredential, async (req, res) => {
+        // Finishing again gets the same answer, while it's kept.
+        const uploadId = req.get('Dropgate-Upload');
+        const finished = uploadId ? v4Finished.get(uploadId) : undefined;
+        if (finished) return res.status(201).json({ id: finished.id });
+        const finishing = uploadId ? v4Uploads.get(uploadId)?.finishing : null;
+        if (finishing) return res.status(201).json({ id: await finishing });
+
+        const upload = requestedUpload(req);
+        if (!upload) return uploadNotFound(res);
+        if (upload.received.size !== upload.chunks) {
+            renew(upload);
+            return res.status(409).json({
+                code: 'UPLOAD_INCOMPLETE',
+                error: 'The server doesn\'t hold every chunk of this upload yet.',
+                details: { received: receivedRanges(upload) },
+            });
+        }
+        upload.finishing = finishUpload(upload);
+        res.status(201).json({ id: await upload.finishing });
+    });
+
+    /** Stores a whole upload as its object, writes its record, and ends it. Gives the object's ID. */
+    const finishUpload = async (upload) => {
+        clearTimeout(upload.timer);
+        const id = uuidv4();
+        const objectPath = path.join(objectsDir, id);
+        try {
+            if (fs.statSync(upload.tempFilePath).size !== upload.size) throw new Error('The upload is not the size it was started with.');
+            fs.renameSync(upload.tempFilePath, objectPath);
+            // The record: only what serving and ending the upload needs. Its ID
+            // is the object's file name. No creation time, address or account.
+            const record = {
+                encrypted: upload.encrypted,
+                size: upload.size,
+                ...(upload.encrypted ? { meta: upload.meta } : { files: upload.files }),
+                expiresAt: upload.lifetimeMs > 0 ? Date.now() + upload.lifetimeMs : null,
+                maxDownloads: upload.maxDownloads,
+                ...(upload.maxDownloads > 0 ? { downloadCount: 0 } : {}),
+                manageTokenHash: upload.manageTokenHash,
+            };
+            await objectDatabase.set(id, record);
+        } catch (err) {
+            fs.rmSync(objectPath, { force: true });
+            dropUpload(upload);
+            throw err;
+        }
+        currentDiskUsage += upload.size;
+        v4Uploads.delete(upload.id);
+        const forget = setTimeout(() => v4Finished.delete(upload.id), FINISHED_ANSWER_MS);
+        v4Finished.set(upload.id, { id, forget });
+        log('debug', `Upload finished.${maxStorageGB !== 0 ? ` Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.` : ''}`);
+        return id;
+    };
+
+    // Cancelling never removes a finished upload: that's the uploader's delete, with its manage token.
+    v4Router.delete('/upload', v4UploadAuth, uploadCredential, (req, res) => {
+        const upload = requestedUpload(req);
+        if (!upload) return uploadNotFound(res);
+        dropUpload(upload);
+        log('debug', `Upload cancelled by client. Released ${sizeInMB(upload.size)} MB.`);
+        res.status(204).end();
+    });
+}
+
 apiRouter.get('/info', limiter, (req, res) => {
     // The limits are what the operator set. maxSizeMB counts in 1024s, and
     // maxPauseMinutes is 0 when pausing is off. Nothing asks for a credential yet.
@@ -1541,6 +2022,16 @@ if (enableUpload) {
                     fs.rmSync(record.value.path, { force: true });
                 } catch (e) { }
                 await fileDatabase.delete(record.id);
+            }
+        }
+
+        // Dropgate 4's uploads: each is one object, a file or a bundle alike.
+        for (const record of await objectDatabase.all()) {
+            if (record.value?.expiresAt && record.value.expiresAt < now) {
+                log('debug', 'Upload expired. Deleting...');
+                currentDiskUsage = Math.max(0, currentDiskUsage - record.value.size);
+                fs.rmSync(path.join(objectsDir, record.id), { force: true });
+                await objectDatabase.delete(record.id);
             }
         }
 

@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import { startServer } from './helpers/harness.mjs';
 import { CLIENT_IP, USER_AGENT, createClient, createRecorder, fixtureFiles, runFixture } from './helpers/fixture.mjs';
+import { HOUR_MS, SMALL_CHUNKS, runUploads } from './helpers/dgup4.mjs';
 
 // Every field a stored record may have. A new field has to be added here deliberately.
 const FILE_FIELDS = new Set(['name', 'path', 'expiresAt', 'isEncrypted', 'maxDownloads', 'downloadCount', 'bundleId']);
 const BUNDLE_FIELDS = new Set(['encryptedManifest', 'files', 'isEncrypted', 'sealed', 'expiresAt', 'maxDownloads', 'downloadCount']);
+// Dropgate 4's record, for a file and a bundle alike: no path (the ID names the object), no creation time.
+const OBJECT_FIELDS = new Set(['encrypted', 'size', 'meta', 'files', 'expiresAt', 'maxDownloads', 'downloadCount', 'manageTokenHash']);
 
 // CSP sources that stay on this server.
 const LOCAL_SOURCE = /^('self'|'none'|'unsafe-inline'|data:|blob:|'nonce-[^']+')$/;
@@ -59,6 +62,56 @@ describe('what the server stores', () => {
         assert.equal(perFile.length, 0, `the bundle added ${perFile.length} per-file record(s) with a name and size`);
         assert.equal(bundleRecords.length, 1, `the bundle added ${bundleRecords.length} records`);
         assert.equal(bundleRecords[0].value.files, undefined, 'the bundle record lists per-file names and sizes');
+    });
+});
+
+describe('what Dropgate 4\'s uploads store, paused and resumed part-way', () => {
+    let server;
+    let records = [];
+    let secrets;
+    let finishedBetween;
+
+    before(async () => {
+        server = await startServer({
+            env: { ENABLE_UPLOAD: 'true', UPLOAD_PRESERVE_UPLOADS: 'true', UPLOAD_CHUNK_SIZE_BYTES: SMALL_CHUNKS, RATE_LIMIT_MAX_REQUESTS: '0' },
+        });
+        const started = Date.now();
+        ({ secrets } = await runUploads(server));
+        finishedBetween = [started, Date.now()];
+        records = server.records('objects.sqlite');
+    });
+
+    after(() => server?.stop());
+
+    test('every record holds only known fields: no address, upload ID, file name of an encrypted upload, or creation time', () => {
+        assert.equal(records.length, 2, 'the two finished uploads');
+        const problems = [];
+        for (const { id, value } of records) {
+            const extra = Object.keys(value).filter((k) => !OBJECT_FIELDS.has(k));
+            if (extra.length) problems.push(`record ${id} has unknown field(s): ${extra.join(', ')}`);
+            const text = JSON.stringify(value);
+            const plainName = value.encrypted ? null : value.files?.[0]?.name;
+            for (const secret of ['127.0.0.1', '::1', ...secrets]) {
+                if (secret !== plainName && secret !== value.manageTokenHash && text.includes(secret)) problems.push(`record ${id} contains "${secret}"`);
+            }
+        }
+        assert.deepEqual(problems, []);
+    });
+
+    test('the one time a record keeps is when it expires, an hour after it finished', () => {
+        for (const { value } of records) {
+            assert.ok(value.expiresAt >= finishedBetween[0] + HOUR_MS && value.expiresAt <= finishedBetween[1] + HOUR_MS);
+        }
+    });
+
+    test('an encrypted bundle is one record, with its sealed list and no file names or sizes', () => {
+        const encrypted = records.filter((r) => r.value.encrypted);
+        assert.equal(encrypted.length, 1);
+        const [{ value }] = encrypted;
+        assert.equal(value.files, undefined);
+        assert.match(value.meta, /^[A-Za-z0-9_-]+$/);
+        assert.equal(Buffer.from(value.meta, 'base64url').length, 12 + 4096 + 16, 'the sealed list, in its smallest bucket');
+        assert.equal(value.downloadCount, 0, 'the server\'s default limit of 1 is counted');
     });
 });
 

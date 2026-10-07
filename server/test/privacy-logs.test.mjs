@@ -5,6 +5,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { startServer, waitFor } from './helpers/harness.mjs';
 import { runFixture } from './helpers/fixture.mjs';
 import { PAST_SESSION_EXPIRY_MS, initUpload, postJson, sendChunk } from './helpers/uploads.mjs';
+import { QUIET_MS, SMALL_CHUNKS, plainObject, fileBytes, runUploads, sendChunks, startUpload } from './helpers/dgup4.mjs';
+
+// Each run does Dropgate 3's transfers and Dropgate 4's uploads: within the rate limit, which stays on.
+const UPLOADS = { ENABLE_UPLOAD: 'true', UPLOAD_CHUNK_SIZE_BYTES: SMALL_CHUNKS, RATE_LIMIT_MAX_REQUESTS: '100' };
 
 // Dropgate's own log lines: "[<ISO time>] [LEVEL] message".
 const OWN_LINE = /^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\] \[(ERROR|WARN|INFO|DEBUG)\] (.*)$/;
@@ -39,17 +43,24 @@ const KNOWN_EVENTS = [
     String.raw`Bundle expired\. Deleting \d+ member files\.\.\.`,
     String.raw`Cleaning zombie (bundle )?upload\.`,
     String.raw`Rate limit triggered\. Request blocked\.`,
+    // Dropgate 4's uploads.
+    String.raw`Upload started\. Reserved \d+\.\d{2} MB\.`,
+    String.raw`Upload (paused|resumed)\.`,
+    String.raw`Upload finished\.( ${CAPACITY})?`,
+    String.raw`Upload ended at its deadline( while paused)?\. Released \d+\.\d{2} MB\.`,
+    String.raw`Upload expired\. Deleting\.\.\.`,
     String.raw`Refused a request whose body could not be read\.`,
     String.raw`Unexpected error while answering a request( to [A-Z]+ [\w/:.-]+)?( \([A-Za-z]+(, [A-Z][A-Z0-9_]+)?\))?\.`,
 ].map((source) => new RegExp(`^${source}$`));
 const FILE_COUNT = /\(\d+ files|\d+ member files/;
 
 test('the default log level writes nothing per transfer', async () => {
-    const server = await startServer({ env: { ENABLE_UPLOAD: 'true' } });
+    const server = await startServer({ env: UPLOADS });
     try {
         await waitFor(() => server.output.stdout.includes('is running'), { what: 'the startup log' });
         const mark = server.mark();
         await runFixture(server);
+        await runUploads(server);
         await sleep(500);
         assert.deepEqual(linesOf(server.since(mark)), [], 'Lines written after startup at the default level');
     } finally {
@@ -62,9 +73,10 @@ describe('at every log level, with a malformed request and a missing stored file
 
     before(async () => {
         for (const level of LEVELS) {
-            const server = await startServer({ env: { ENABLE_UPLOAD: 'true', LOG_LEVEL: level } });
+            const server = await startServer({ env: { ...UPLOADS, LOG_LEVEL: level } });
             try {
                 const { secrets } = await runFixture(server, { faults: true });
+                for (const secret of (await runUploads(server, { faults: true })).secrets) secrets.add(secret);
                 const info = await (await fetch(`${server.baseUrl}/api/info`)).json();
                 await sleep(500);
                 runs.push({
@@ -115,13 +127,20 @@ describe('what DEBUG logs', () => {
 
     before(async () => {
         const server = await startServer({
-            env: { ENABLE_UPLOAD: 'true', LOG_LEVEL: 'DEBUG', UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS: '100' },
+            env: { ...UPLOADS, LOG_LEVEL: 'DEBUG', UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS: '100' },
             clock: true,
         });
         try {
             await waitFor(() => server.output.stdout.includes('is running'), { what: 'the startup log' });
             const mark = server.mark();
             await runFixture(server);
+            await runUploads(server, { faults: true });
+
+            // A Dropgate 4 upload left quiet, which ends at its deadline.
+            const quiet = plainObject({ files: [{ name: 'quiet.bin', bytes: fileBytes(70_000) }] });
+            await sendChunks(server, await startUpload(server, quiet), quiet, 0, 1);
+            await server.advanceClock(QUIET_MS + 1_000);
+            await waitFor(() => server.output.stdout.includes('Upload ended at its deadline.'), { what: 'the quiet upload to end' });
 
             // A cancelled upload, and an abandoned one for the zombie sweep.
             const cancelled = await initUpload(server, 1000, 2);
@@ -146,6 +165,12 @@ describe('what DEBUG logs', () => {
         assert.ok(messages.length > 10, 'the run produced DEBUG messages');
         const unknown = messages.filter((m) => !KNOWN_EVENTS.some((re) => re.test(m)));
         assert.deepEqual(unknown, [], 'Messages that are not in the list of known events');
+    });
+
+    test('a Dropgate 4 upload\'s start, pause, resume, finish, cancel and deadline are each one of them', () => {
+        for (const expected of [/^Upload started\./, /^Upload paused\.$/, /^Upload resumed\.$/, /^Upload finished\./, /^Upload cancelled by client\./, /^Upload ended at its deadline\./]) {
+            assert.ok(messages.some((m) => expected.test(m)), `no message like ${expected}`);
+        }
     });
 
     test("no message gives a bundle's file count", {

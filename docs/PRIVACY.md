@@ -43,9 +43,12 @@ Depending on your `LOG_LEVEL`, you may see:
 At `DEBUG` level you may also see:
 
 - Upload/download lifecycle events (init/chunk/complete/download)
+- An upload paused or resumed, and one that ended at its deadline, with its size
 - Chunk counts and chunk sizes
 - The number of files in a bundle
 - Cleanup of expired or incomplete uploads
+
+**A paused upload** is kept only in the server's memory, with its temporary file and the storage it reserved, until its pause runs out (`UPLOAD_MAX_PAUSE_MINUTES`): then it goes at once. Nothing about it, not even that it exists, is written to a database, so a restart ends it, with `UPLOAD_PRESERVE_UPLOADS=true` too. No upload in progress, paused or not, records an IP address or when it started.
 
 File sizes and capacity values may appear in logs because they’re necessary for understanding limits and diagnosing issues.
 

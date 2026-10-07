@@ -1,6 +1,6 @@
 # DGUP — Dropgate Upload Protocol
 
-**Protocol Version:** 4.0, in development. Until it's finished, the requests below are version 3's, with `/api/info` giving version 4's fields. Version 4's routes go under `/api/v4/` as they're built
+**Protocol Version:** 4.0, in development. Until it's finished, §4 to §12 and §16 to §18 describe version 3's requests, with `/api/info` giving version 4's fields. Version 4's routes go under `/api/v4/` as they're built: its uploads are in [§19](#19-version-4-uploads)
 **Status:** In development
 **Last Updated:** October 2026
 
@@ -63,7 +63,7 @@ A JSON object containing (at minimum):
 | `capabilities.upload.maxLifetimeHours` | `number` | Maximum permitted file lifetime in hours (0 = unlimited). |
 | `capabilities.upload.maxFileDownloads` | `number` | Server-enforced maximum download limit (0 = unlimited). |
 | `capabilities.upload.chunkSize` | `number` | Server's expected chunk size in bytes. |
-| `capabilities.upload.maxPauseMinutes` | `number` | How long the server keeps a paused upload, in minutes, or `0` when pausing is off. Pausing itself comes with version 4's upload routes, still being built. |
+| `capabilities.upload.maxPauseMinutes` | `number` | How long the server keeps a paused upload, in minutes, or `0` when pausing is off ([§19.5](#195-pause-and-resume)). |
 | `capabilities.upload.credentialRequired` | `boolean` | Whether an upload needs a credential ([§3.5](#35-credentials)). Absent means none. This server sends `false`: it asks for no credential yet. |
 | `capabilities.accounts.enabled` | `boolean` | Whether the server has accounts. This server always sends `false`: accounts come later. |
 
@@ -96,7 +96,7 @@ The client uses the server's address as it was given.
 
 A server can ask for a credential before it accepts an upload, for accounts or quotas, with `capabilities.upload.credentialRequired: true`. This server doesn't yet: accounts come later.
 
-- The client MUST NOT send a credential to a server that doesn't ask for one, nor with any request but an upload's (`/upload/init`, `/upload/init-bundle`, `/upload/chunk`, `/upload/complete`, `/upload/complete-bundle` and `/upload/cancel`). Downloads, metadata and `/api/resolve` never need one: a link is its own permission.
+- The client MUST NOT send a credential to a server that doesn't ask for one, nor with any request but an upload's: version 4's `POST /api/v4/uploads` and every `/api/v4/upload` request ([§19](#19-version-4-uploads)), the status, pause and resume included; version 3's `/upload/init`, `/upload/init-bundle`, `/upload/chunk`, `/upload/complete`, `/upload/complete-bundle` and `/upload/cancel`. Downloads, metadata and `/api/resolve` never need one: a link is its own permission.
 - It sends the credential only in the `Authorization` header, as `Bearer <token>`: never in a URL, a request body, a link or an encrypted manifest, and never to another server (it follows no redirect).
 - A server that refuses an upload's credential answers with an error whose JSON `code` is `AUTH_REQUIRED`, `AUTH_EXPIRED`, `AUTH_DENIED` or `QUOTA_EXCEEDED`. After `AUTH_EXPIRED`, the client may get a new credential once and make the request again; it retries none of the others as they are.
 
@@ -159,6 +159,8 @@ If `UPLOAD_CHUNK_SIZE_BYTES` changes on a server that keeps uploads across resta
 ---
 
 ## 5. Upload Initialisation
+
+Sections 5 to 9 are version 3's uploads, until they go. Version 4's, which replace them, are in [§19](#19-version-4-uploads).
 
 ### 5.1 Single-File Upload
 
@@ -461,23 +463,37 @@ Errors are JSON. Version 4's give a stable code with a short message for people:
 }
 ```
 
-A message never holds an ID, a name, a key, a token, or anything from the request. Version 3's routes, described above until version 4's replace them, give their own errors with `error` alone. These codes come from anywhere on the server, version 3's routes included:
+A message never holds an ID, a name, a key, a token, or anything from the request. Some add `details`, such as the field that's wrong (`details.field`) or the chunks held (`details.received`). Version 3's routes, described above until version 4's replace them, give their own errors with `error` alone. These are every code the server gives:
 
 | Status | Code | When |
 |--------|------|------|
-| `400` | `INVALID_REQUEST` | A request body that can't be read, such as malformed JSON. |
-| `404` | `NOT_FOUND` | Anything under `/api/v4/` that isn't a route. Version 4's routes go there as they're built; until then, all of it. |
-| `413` | `TOO_LARGE` | A JSON request body over 1 MiB. |
+| `400` | `INVALID_REQUEST` | A request body that can't be read, such as malformed JSON; or, starting a version 4 upload, a field missing or wrong ([§19.2](#192-start)). |
+| `400` | `E2EE_DISABLED` | An encrypted version 4 upload, with E2EE off. |
+| `400` | `UNSUPPORTED_OBJECT` | A version 4 upload whose header isn't version 4's. |
+| `400` | `CHUNK_SIZE_MISMATCH` | A version 4 upload whose header's chunk size isn't the server's. |
+| `400` | `LIFETIME_NOT_ALLOWED` | A version 4 upload's lifetime over the server's maximum, or none where it has one. |
+| `400` | `DOWNLOADS_NOT_ALLOWED` | A version 4 upload's download limit over the server's, or none where it has one. |
+| `400` | `INVALID_CHUNK` | A chunk index out of range, or a chunk of the wrong length ([§19.3](#193-chunks)). |
+| `400` | `DIGEST_MISMATCH` | A chunk with no SHA-256 `Content-Digest`, or one that doesn't match it. |
+| `404` | `NOT_FOUND` | Anything under `/api/v4/` that isn't a route, and a version 4 upload that's unknown, ended or dropped: one answer, so nothing says which. |
+| `409` | `CHUNK_CONFLICT` | Different bytes for a chunk the server already holds. |
+| `409` | `UPLOAD_INCOMPLETE` | A finish before every chunk is held, with `details.received`. |
+| `409` | `PAUSE_DISABLED` | A pause, on a server with pausing off. |
+| `413` | `TOO_LARGE` | A JSON request body over its limit (1 MiB, or 2 MiB for a version 4 upload's start), or a version 4 upload over the maximum upload size. |
 | `429` | `RATE_LIMITED` | Too many requests ([§14.1](#141-rate-limits)). |
 | `500` | `SERVER_ERROR` | Anything unexpected while answering. The server logs the error's kind and the route's pattern, never its message, which can hold a path or part of the request ([PRIVACY.md](../PRIVACY.md)). |
+| `507` | `SERVER_FULL` | Not enough storage for a version 4 upload. |
 
 ### 13.1 Status Codes
 
 | Code | Context |
 |------|---------|
 | `200` | Success. |
+| `201` | A version 4 upload started, or finished. |
+| `204` | A version 4 upload cancelled. |
 | `400` | Validation failure (malformed request, invalid parameters). |
 | `404` | File, bundle, or upload session not found. |
+| `409` | A version 4 chunk conflict, a finish too soon, or pausing off. |
 | `410` | Upload session expired. |
 | `413` | File or chunk exceeds size limit. |
 | `429` | Rate limit exceeded. |
@@ -520,6 +536,9 @@ Everything under `/api/` answers any origin (`Access-Control-Allow-Origin: *`), 
 | Encrypted manifest size | 1 MiB max | Sealed bundles only. |
 | Upload session timeout | 2 minutes | Per-chunk inactivity. |
 | Bundle session timeout | 2 minutes | Per-chunk inactivity (same as upload sessions). |
+| Version 4 upload, quiet | 5 minutes | After its last request, unless paused. |
+| Version 4 upload, paused | 60 minutes | `UPLOAD_MAX_PAUSE_MINUTES`, 1 to 1,440, or 0 to turn pausing off. |
+| Version 4 finish kept | 5 minutes | A repeated finish gets the same answer. |
 | IV size | 12 bytes | AES-GCM standard. |
 | Authentication tag size | 16 bytes | AES-GCM standard. |
 | Key size | 256 bits | AES-256. |
@@ -613,3 +632,155 @@ Client                                          Server
 
 Download URL: https://<host>/b/<bundleId>#<keyBase64>
 ```
+
+---
+
+## 19. Version 4 Uploads
+
+Version 4's upload routes are under `/api/v4/`, beside version 3's while version 4 is built. They replace §5 to §9: one upload is one **object**, a single file or a bundle alike, started, sent in chunks that can be sent again, then finished. Downloads, and the uploader's own delete, come with the next routes.
+
+- **The upload's ID** is given by the start, and every request after it names the upload in the `Dropgate-Upload` header, never in its URL.
+- **Every answer to an upload in progress carries its `deadline`**: when the server ends it unless something renews it, in milliseconds since 1970 ([§19.8](#198-how-long-an-upload-lasts)).
+- **Every error is JSON** with a `code` ([§13](#13-error-model)). One that names a field gives it in `details.field`.
+
+### 19.1 The Object
+
+What the server stores is bytes it doesn't need to understand, except an encrypted object's header, which says where each chunk goes.
+
+- **Encrypted:** a 60-byte header, then the chunks. The header begins `DGUP` (`44 47 55 50`), then the version (`04`), the cipher suite (`01`), two reserved zero bytes, and the chunk size, an unsigned 32-bit big-endian number: the plaintext bytes in every chunk but the last. The rest of it is the object's own random salt and a MAC only the link's holder can check. Each chunk is AES-256-GCM ciphertext with its 16-byte tag, so every chunk but the last is the chunk size plus 16 bytes, and the last is 17 bytes up to that. The files are padded inside the chunks (Padmé), so the object's size says little about theirs.
+- **The sealed file list** (`meta`) travels apart from the object: a 12-byte nonce, then the encrypted list with its tag, padded to a size from 4 KiB up to 1 MiB, so a single file and a bundle of up to around 50 files look the same.
+- **Unencrypted:** the files' bytes one after another, in the list's order, in chunks of the chunk size; the last chunk is the rest. The file list is in plain, with each file's name and size.
+
+The client makes the object; the server checks its header's format and chunk size, and each chunk's length and digest.
+
+### 19.2 Start
+
+```
+POST /api/v4/uploads
+Content-Type: application/json
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `encrypted` | `boolean` | Whether the object is encrypted. |
+| `size` | `number` | The stored object's bytes: for an encrypted one, the header, padding and tags included. |
+| `header` | `string` | Encrypted only: the object's 60-byte header, base64url with no padding. |
+| `meta` | `string` | Encrypted only: the sealed file list, base64url, at most 1 MiB + 28 bytes. Sent at the start, so the finish takes no body. |
+| `files` | `array` | Unencrypted only: 1 to 1,000 `{ name, size }`, in order. Each name by the file name rule ([§5.1](#51-single-file-upload)), each size at least 1, and the sizes add up to `size`. |
+| `lifetimeMs` | `number` | How long to keep the upload once it's finished, in milliseconds; `0` for no limit, where the server allows it. |
+| `maxDownloads` | `number` | Optional: the download limit, `0` for none, by the same rules as version 3's. |
+| `manageTokenHash` | `string` | The SHA-256 of a manage token the client made, base64url (32 bytes). The token itself never reaches the server at the start. |
+
+The body may be up to 2 MiB. The server checks, and the first failure answers:
+
+| Status | Code | When |
+|--------|------|------|
+| `400` | `INVALID_REQUEST` | A field missing or wrong, named in `details.field`; or a `size` no object can have at the server's chunk size, or one of more than 100,000 chunks (`size`). |
+| `400` | `E2EE_DISABLED` | An encrypted upload, on a server with E2EE off. |
+| `400` | `UNSUPPORTED_OBJECT` | A header that isn't version 4's: another magic, version, suite, or reserved bytes. |
+| `400` | `CHUNK_SIZE_MISMATCH` | A header whose chunk size isn't the server's (`capabilities.upload.chunkSize`). |
+| `413` | `TOO_LARGE` | A `size` over the server's maximum upload size, which is for the whole object, padding included. |
+| `400` | `LIFETIME_NOT_ALLOWED` | A lifetime over the server's maximum, or none where the server has one. |
+| `400` | `DOWNLOADS_NOT_ALLOWED` | A download limit over the server's, or none where the server has one. |
+| `507` | `SERVER_FULL` | Not enough storage: what's stored, and what every upload in progress has reserved, counts. |
+
+Then the server reserves `size` bytes of storage, keeps the upload in memory, writes an encrypted object's header to its temporary file, and responds `201`:
+
+```json
+{
+  "uploadId": "<uuid>",
+  "chunks": 20,
+  "chunkSize": 5242880,
+  "deadline": 1759766700000
+}
+```
+
+### 19.3 Chunks
+
+```
+PUT /api/v4/upload/chunks/{index}
+Content-Type: application/octet-stream
+Content-Digest: sha-256=:<base64>:
+Dropgate-Upload: <uploadId>
+```
+
+The body is chunk `index`'s bytes, from 0, exactly its length. `Content-Digest` is the SHA-256 of the body ([RFC 9530](https://www.rfc-editor.org/rfc/rfc9530)); another algorithm may sit beside it. Chunks can come in any order, and each is written where it goes in the object.
+
+- **The same chunk again,** with the same digest, is `200` and isn't written again, so a retry is always safe. With different bytes it's refused: the server compares the digest it kept.
+- **A chunk sent while the upload is paused resumes it.**
+- The server reads no more than the chunk's length. A request it refuses before reading its body closes the connection.
+
+| Status | Code | When |
+|--------|------|------|
+| `200` | — | Written, or the same bytes already held. The body is `{ "deadline": … }`. |
+| `400` | `INVALID_CHUNK` | No chunk has that index, or the body isn't that chunk's length. |
+| `400` | `DIGEST_MISMATCH` | No `Content-Digest` with SHA-256, or one that doesn't match the body. |
+| `404` | `NOT_FOUND` | No upload in progress by that ID. |
+| `409` | `CHUNK_CONFLICT` | Different bytes for a chunk the server already holds. |
+
+### 19.4 Status
+
+```
+GET /api/v4/upload
+Dropgate-Upload: <uploadId>
+```
+
+```json
+{ "chunks": 20, "received": [[0, 11], [13, 13]], "paused": false, "deadline": 1759766700000 }
+```
+
+`received` gives the chunks the server holds, as inclusive ranges. A client resuming an upload asks for it, then sends the rest.
+
+### 19.5 Pause and Resume
+
+```
+POST /api/v4/upload/pause
+POST /api/v4/upload/resume
+```
+
+Each names the upload in `Dropgate-Upload`, with no body.
+
+- **Pause** responds `{ "paused": true, "deadline": … }`: the server keeps the upload for `UPLOAD_MAX_PAUSE_MINUTES` (`capabilities.upload.maxPauseMinutes`) from now, and pausing again renews that from then. With pausing off (`0`), it's `409`, `PAUSE_DISABLED`, and the upload goes on unpaused.
+- **Resume** responds `{ "paused": false, "deadline": …, "received": [...] }`, with the chunks held, as the status gives them, and a quiet upload's deadline.
+
+### 19.6 Finish
+
+```
+POST /api/v4/upload/complete
+Dropgate-Upload: <uploadId>
+```
+
+No body. Before every chunk is held, it's `409`, `UPLOAD_INCOMPLETE`, with `details.received` as the status gives it. Then the server checks the object is `size` bytes, stores it as `data/uploads/objects/<id>`, writes its record ([§19.10](#1910-the-record)), ends the upload, releases its reservation, and responds `201`:
+
+```json
+{ "id": "<uuid>" }
+```
+
+The upload's lifetime starts now. **Finishing can be asked again:** for 5 minutes, the same request gets the same answer, and two at once store one object. After that, it's `404`. Nothing else can change a finished upload.
+
+### 19.7 Cancel
+
+```
+DELETE /api/v4/upload
+Dropgate-Upload: <uploadId>
+```
+
+Responds `204`, with no body: the temporary file, the reservation and the upload go. An upload that isn't in progress, finished ones included, is `404`; cancelling never removes a finished upload.
+
+### 19.8 How Long an Upload Lasts
+
+- **5 minutes after its last request,** unless it's paused. Any request renews it, the status included; a chunk still arriving isn't quiet.
+- **Paused, until the pause's deadline,** which only pausing again renews. Asking for the status meanwhile doesn't.
+- **At its deadline it ends at once:** its temporary file and its reservation go, and from then on it's `404`, `NOT_FOUND`, the same answer as for an upload that never existed.
+- **A restart ends every upload,** paused or not, in persistent mode too: nothing about one is ever written to a database, and `data/uploads/tmp/` is cleared at each start.
+
+### 19.9 Rate Limits and Credentials
+
+- **The start is rate-limited** ([§14.1](#141-rate-limits)). Every request after it skips the limit while its upload is in progress, or just finished; one naming an upload the server doesn't have is limited.
+- **Every upload route has the place a credential is checked** ([§3.5](#35-credentials)), the status, pause and resume included. This server asks for none yet, so they check nothing, and never write one anywhere.
+
+### 19.10 The Record
+
+A finished upload's record holds only what serving and ending it needs: `encrypted`, `size`, `meta` (encrypted) or `files` (unencrypted), `expiresAt`, `maxDownloads`, `downloadCount` (only with a limit) and `manageTokenHash`. Its ID is the object's file name. There's no creation time, address, account or upload ID. Records are in memory, or with `UPLOAD_PRESERVE_UPLOADS=true` in `data/uploads/db/objects.sqlite`. An expired upload's object and record are deleted at the next check, every 60 seconds.
+
+Storage used is the stored objects (and version 3's files) and what every upload in progress has reserved: not temporary files, the databases or the format marker.

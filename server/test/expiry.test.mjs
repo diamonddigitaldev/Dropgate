@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { startServer } from './helpers/harness.mjs';
 import { initUpload, postJson, sendChunk } from './helpers/uploads.mjs';
+import { HOUR_MS, SMALL_CHUNKS, fileBytes, plainObject, uploadObject } from './helpers/dgup4.mjs';
 
 const LIFETIME_MS = 30_000;
 // The expiry sweep runs every minute, so a move of the clock shorter than that,
@@ -91,4 +92,20 @@ test('an expired upload answers as one that never existed, at once, and the swee
 
     await server.advanceClock(SWEEP_MS);
     assert.deepEqual(server.storedFiles(), [], 'the sweep removed the bytes');
+});
+
+test('the sweep removes a Dropgate 4 upload\'s object and record once its lifetime has ended', async (t) => {
+    const server = await startServer({
+        env: { ENABLE_UPLOAD: 'true', UPLOAD_CHUNK_SIZE_BYTES: SMALL_CHUNKS, UPLOAD_PRESERVE_UPLOADS: 'true', RATE_LIMIT_MAX_REQUESTS: '0' },
+        clock: true,
+    });
+    t.after(server.stop);
+    const object = plainObject({ files: [{ name: 'expires.bin', bytes: fileBytes(70_000) }] });
+    const short = await uploadObject(server, object, { lifetimeMs: LIFETIME_MS });
+    const long = await uploadObject(server, object, { lifetimeMs: HOUR_MS });
+    assert.deepEqual(server.storedFiles().sort(), [`objects/${short.id}`, `objects/${long.id}`].sort());
+
+    await server.advanceClock(SWEEP_MS);
+    assert.deepEqual(server.storedFiles(), [`objects/${long.id}`], 'the expired one\'s object went');
+    assert.deepEqual(server.records('objects.sqlite').map((r) => r.id), [long.id], 'and its record');
 });
