@@ -144,7 +144,7 @@ For a single file (a Dropgate 4 upload):
 4. **Not transmitted to the server.** URL fragments are not included in HTTP requests. A whole link pasted into the Web UI's "enter a sharing code" box, or given to the core library's `client.links.resolve()`, is read on the device, and nothing of it is sent: the download page it opens asks about the upload. See [DGUP §4.5](./DGUP.md#45-key-transmission).
 5. **Not persisted** by the client. The secret exists only in the download link. If the link is lost, the file cannot be decrypted.
 
-The upload's **manage token**, which deletes it ([DGUP §20.6](./DGUP.md#206-the-uploaders-delete)), is 32 more random bytes, made with the secret. The server is sent only its SHA-256, and the token itself stays in the memory of the page or app that uploaded the file: neither the Web UI nor the desktop app writes it anywhere, and it's gone when the page or the app closes.
+The upload's **manage token**, which deletes it ([DGUP §20.6](./DGUP.md#206-the-uploaders-delete)), is 32 more random bytes, made with the secret. The server is sent only its SHA-256, and the token itself stays in the memory of the page or app that uploaded the file: neither the Web UI nor the desktop app writes it anywhere, and it's gone when the page or the app closes. The Web UI's result screen offers **Delete upload** while the page holds it; a reload, or **Send more files**, drops it ([DGUP §21.4](./DGUP.md#214-deleting-from-the-result-screen)). The token itself is sent only to delete the upload, in the `Dropgate-Manage-Token` header: never in a URL, so it's in no address bar, history or proxy log, and never in an error or a log line, on either side.
 
 For a bundle (still uploaded as in Dropgate 3), the key is:
 

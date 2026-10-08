@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { open, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,8 @@ import { newOperationId } from '../src/operation.js';
 import { cryptoProvider, keyToBase64 } from '../src/crypto/index.js';
 import { getDefaultBase64 } from '../src/adapters/defaults.js';
 import { createObject } from '../src/object/index.js';
-import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
+import { CHUNK_SIZE, MANAGE_TOKEN, MANAGE_TOKEN_HASH, fakeV4 } from './helpers/fake-v4.js';
+import { readZip } from './helpers/zip-reader.js';
 
 const provider = cryptoProvider();
 const base64 = getDefaultBase64();
@@ -544,7 +545,7 @@ describe('Outcomes', () => {
     const failing = fakeServer();
     noteToken(failing);
     failing.answer(FINISH, () => failing.json(500, { code: 'SERVER_ERROR', error: 'Something went wrong on the server.' }));
-    const failingUpload = createClient(failing.fetchFn).hosted.upload({ files: fileNamed(name, 2), lifetimeMs: 60_000, encrypt: true });
+    const failingUpload = createClient(failing.fetchFn).hosted.upload({ files: fileNamed(name, 2), lifetimeMs: 60_000, encrypt: true, retry: { retries: 0 } });
     failingUpload.subscribe((snapshot) => snapshots.push(snapshot));
     reported.push(await failingUpload.result);
     failing.answer('POST /upload/complete', () => failing.json(500, { error: 'Server error during file validation.' }));
@@ -700,7 +701,7 @@ describe('The upload handle', () => {
 
     const waiting = seen.find((snapshot) => snapshot.phase === 'retry-wait');
     expect(waiting).toMatchObject({ status: 'uploading', chunkIndex: 0, processedBytes: 0, totalBytes: CHUNK_SIZE });
-    expect(waiting?.text).toMatch(/^Chunk upload failed\. Retrying in 0\.1s\.\.\. \(1\/1\)$/);
+    expect(waiting?.text).toMatch(/^Chunk upload failed\. Retrying in 0\.\ds\.\.\. \(1\/1\)$/);
     // A sealed chunk is sealed once: what's sent again is the same bytes, with the same digest.
     expect(server.chunkBodies).toHaveLength(2);
     expect(Buffer.from(server.chunkBodies[1]).equals(Buffer.from(server.chunkBodies[0]))).toBe(true);
@@ -1004,15 +1005,18 @@ describe('Hosted download into a sink', () => {
 
     // Even with every byte of the file in: the download isn't whole until the answer has ended.
     const lost = fakeServer();
-    let pulls = 0;
-    lost.answer(CONTENT, () => new Response(new ReadableStream({
-      pull(controller) {
-        if (pulls++ === 0) controller.enqueue(new Uint8Array(CHUNK_SIZE));
-        else controller.error(new TypeError('terminated'));
-      },
-    })));
+    lost.answer(CONTENT, () => {
+      let pulls = 0;
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (pulls++ === 0) controller.enqueue(new Uint8Array(CHUNK_SIZE));
+          else controller.error(new TypeError('terminated'));
+        },
+      }));
+    });
     const cut = recordingSink();
-    expect(codeOf(await createClient(lost.fetchFn).hosted.download({ id: FILE_ID, sink: cut.sink }).result)).toBe('CONNECTION_LOST');
+    const outcome = await createClient(lost.fetchFn).hosted.download({ id: FILE_ID, sink: cut.sink, retry: { retries: 0 } }).result;
+    expect(codeOf(outcome)).toBe('CONNECTION_LOST');
     expect(cut.log).toEqual([`sink write ${CHUNK_SIZE}`, 'sink abort CONNECTION_LOST']);
   });
 
@@ -1210,7 +1214,7 @@ describe('Hosted download into a sink', () => {
       server.v4.store(FILE_ID, { encrypted: false, size: CHUNK_SIZE * 2, bytes: new Uint8Array(CHUNK_SIZE * 2), files: [{ name: 'notes.txt', size: CHUNK_SIZE * 2 }] });
       server.answer(CONTENT, answer);
       const opened = recordingSink();
-      const outcome = await createClient(server.fetchFn).hosted.download({ id: FILE_ID, sink: opened.sink, timeoutMs: 50 }).result;
+      const outcome = await createClient(server.fetchFn).hosted.download({ id: FILE_ID, sink: opened.sink, timeoutMs: 50, retry: { retries: 0 } }).result;
       expect(codeOf(outcome), answer.name).toBe('TIMED_OUT');
       expect(opened.log, answer.name).toEqual(log);
     }
@@ -1429,6 +1433,423 @@ describe('Downloading some of an upload\'s files', () => {
       expect(() => client.hosted.download({ id: FILE_ID, files, sink: nullSink() } as never), JSON.stringify(files))
         .toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
     }
+    expect(server.requests).toEqual([]);
+  });
+});
+
+/** A copy of `body` that gives its first `bytes` bytes, then fails as a dropped connection does. */
+function cutAfter(body: ReadableStream<Uint8Array>, bytes: number): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let left = bytes;
+  return new ReadableStream({
+    async pull(controller) {
+      if (left <= 0) {
+        controller.error(new TypeError('terminated'));
+        return;
+      }
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      const part = value.subarray(0, left);
+      left -= part.byteLength;
+      controller.enqueue(part);
+    },
+  });
+}
+
+/**
+ * Answers the content route as the fake server does, but cuts each answer's
+ * body after the next of `cuts` bytes (none once they've run out).
+ */
+function cutting(server: ReturnType<typeof fakeServer>, cuts: number[]) {
+  server.answer(CONTENT, async (init) => {
+    const res = (await server.v4.handle('GET', `/api/v4/objects/${FILE_ID}/content`, init))!;
+    const cut = cuts.shift();
+    return cut === undefined || !res.body ? res : new Response(cutAfter(res.body, cut), { status: res.status, headers: res.headers });
+  });
+}
+
+/** Several files as one encrypted upload, as core makes it: what the server stores, and the link's secret. */
+async function sealedFiles(files: Array<{ name: string; bytes: Uint8Array }>) {
+  const writer = await createObject(provider, { files: files.map((f) => ({ name: f.name, size: f.bytes.length })), chunkSize: CHUNK_SIZE });
+  const { layout } = writer;
+  const padded = new Uint8Array(layout.length);
+  padded.set(Buffer.concat(files.map((f) => f.bytes)));
+  const parts: Uint8Array[] = [writer.header];
+  for (let i = 0; i < layout.chunkCount; i++) {
+    parts.push(await writer.seal(i, padded.slice(i * CHUNK_SIZE, i * CHUNK_SIZE + layout.chunkLength(i))));
+  }
+  return {
+    secret: Buffer.from(writer.secret()).toString('base64url'),
+    stored: { encrypted: true, size: layout.storedSize, bytes: new Uint8Array(Buffer.concat(parts)), meta: Buffer.from(writer.meta).toString('base64url') },
+  };
+}
+
+/** Bytes that differ along their length, so a piece out of place or written twice shows. */
+const varied = (size: number, seed: number) => Uint8Array.from({ length: size }, (_, i) => (i * 31 + seed * 7 + (i >> 8)) % 256);
+
+/** Runs the fake timers, a tenth of a second at a time, until `promise` settles. */
+async function settled<T>(promise: Promise<T>): Promise<T> {
+  let done = false;
+  void promise.finally(() => { done = true; });
+  while (!done) {
+    await vi.advanceTimersByTimeAsync(100);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return promise;
+}
+
+describe('Retries', () => {
+  it('retries a chunk that got no answer, timed out, or got a 408, 429 or 5xx, sending the same sealed bytes each time, then completes', async () => {
+    const server = fakeServer();
+    const plaintext = varied(CHUNK_SIZE, 1);
+    const faults: Array<(init: RequestInit) => Response | Promise<Response>> = [
+      () => new Response('Busy.', { status: 503 }),
+      () => { throw new TypeError('fetch failed'); },
+      noAnswer,
+      () => server.json(500, { code: 'SERVER_ERROR', error: 'Something went wrong on the server.' }),
+      () => server.json(408, { error: 'Request timeout.' }),
+      () => new Response(JSON.stringify({ code: 'RATE_LIMITED', error: 'Too many requests.' }), {
+        status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '1' },
+      }),
+      // The server took it, and the answer was lost on the way back.
+      async (init) => { await server.v4.handle('PUT', '/api/v4/upload/chunks/0', init); throw new TypeError('terminated'); },
+    ];
+    const faultCount = faults.length;
+    server.answer(CHUNK, async (init) => {
+      const fault = faults.shift();
+      return fault ? fault(init) : (await server.v4.handle('PUT', '/api/v4/upload/chunks/0', init))!;
+    });
+    const tries: number[] = [];
+    server.onChunk = () => tries.push(Date.now());
+    const random = vi.spyOn(Math, 'random');
+
+    try {
+      const upload = createClient(server.fetchFn).hosted.upload({
+        files: new File([plaintext], 'notes.txt'), lifetimeMs: 60_000, encrypt: true,
+        timeouts: { chunkMs: 50 }, retry: { backoffMs: 1 },
+      });
+      const outcome = await upload.result;
+      expect(outcome.status).toBe('completed');
+      expect(random, 'jitter comes from the crypto provider').not.toHaveBeenCalled();
+
+      expect(server.chunkBodies).toHaveLength(faultCount + 1);
+      for (const body of server.chunkBodies) expect(Buffer.from(body).equals(Buffer.from(server.chunkBodies[0])), 'the same sealed bytes').toBe(true);
+      const digests = server.headerOf('PUT /api/v4/upload/chunks/0', 'Content-Digest');
+      expect(new Set(digests).size).toBe(1);
+      // The server's Retry-After is waited, not the backoff.
+      expect(tries[6] - tries[5], 'the wait after a 429 with Retry-After: 1').toBeGreaterThanOrEqual(950);
+
+      const secret = new URL((outcome as { value: { downloadUrl: string } }).value.downloadUrl).hash.slice(1);
+      const got = recordingSink();
+      expect((await createClient(server.fetchFn).hosted.download({ id: FILE_ID, secret, sink: got.sink }).result).status).toBe('completed');
+      expect(Buffer.from(got.bytes()).equals(Buffer.from(plaintext))).toBe(true);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it('fails at once with its code, never retrying, for any other 4xx and for 507', async () => {
+    for (const [status, body, code] of [
+      [400, { code: 'INVALID_CHUNK', error: 'There is no chunk with that index in this upload.' }, 'REQUEST_REJECTED'],
+      [400, { code: 'DIGEST_MISMATCH', error: "The chunk's Content-Digest is missing, or doesn't match its bytes." }, 'INTEGRITY_FAILED'],
+      [403, { code: 'AUTH_DENIED', error: 'No.' }, 'AUTH_DENIED'],
+      [404, { code: 'NOT_FOUND', error: 'The server has no such upload.' }, 'NOT_FOUND'],
+      [409, { code: 'CHUNK_CONFLICT', error: 'That chunk was already sent with other bytes.' }, 'INTEGRITY_FAILED'],
+      [410, { code: 'VERSION_UNSUPPORTED', error: 'This server runs Dropgate 4.' }, 'NOT_FOUND'],
+      [413, { code: 'TOO_LARGE', error: 'Too large.' }, 'FILE_TOO_LARGE'],
+      [507, { code: 'SERVER_FULL', error: 'The server is out of space.' }, 'SERVER_FULL'],
+    ] as const) {
+      const server = fakeServer();
+      server.answer(CHUNK, () => server.json(status, body));
+      const outcome = await createClient(server.fetchFn).hosted.upload({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false }).result;
+      expect(codeOf(outcome), `${status} ${body.code}`).toBe(code);
+      expect(server.chunkIndexes, `${status} ${body.code} sent again`).toEqual([0]);
+      if (status === 404) expect(outcome.status === 'failed' && outcome.error.message).toBe('The server dropped this upload.');
+    }
+  });
+
+  it('retries the finish as a chunk, since the server gives the same answer again, and fails at once if it has dropped the upload', async () => {
+    const server = fakeServer();
+    let failures = 2;
+    server.answer(FINISH, async (init) => (failures-- > 0
+      ? server.json(502, { error: 'Bad gateway.' })
+      : (await server.v4.handle('POST', '/api/v4/upload/complete', init))!));
+    const outcome = await createClient(server.fetchFn).hosted.upload({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false, retry: { backoffMs: 1 } }).result;
+    expect(outcome.status).toBe('completed');
+    expect(server.paths().filter((path) => path === FINISH)).toHaveLength(3);
+
+    const dropped = fakeServer();
+    dropped.answer(FINISH, () => dropped.json(404, { code: 'NOT_FOUND', error: 'The server has no such upload.' }));
+    const failed = await createClient(dropped.fetchFn).hosted.upload({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: false }).result;
+    expect(failed.status === 'failed' && failed.error).toMatchObject({ code: 'NOT_FOUND', status: 404, message: 'The server dropped this upload.' });
+    expect(dropped.paths().filter((path) => path === FINISH)).toHaveLength(1);
+  });
+
+  it("with the server unreachable for 3 minutes, backs off with jitter up to 30 s and completes once it's back; past the server's 5 minutes, it fails, saying the server dropped the upload", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const run = async (downMs: number) => {
+        const server = fakeServer();
+        let downUntil = 0;
+        const failed: number[] = [];
+        server.answer(CHUNK, async (init) => {
+          const index = server.chunkIndexes.at(-1)!;
+          // The network goes as the second chunk is sent.
+          if (index === 1 && downUntil === 0) downUntil = Date.now() + downMs;
+          if (index === 1 && Date.now() < downUntil) {
+            failed.push(Date.now());
+            throw new TypeError('fetch failed');
+          }
+          return (await server.v4.handle('PUT', `/api/v4/upload/chunks/${index}`, init))!;
+        });
+        const outcome = await settled(createClient(server.fetchFn).hosted.upload({ files: fileNamed('notes.txt', 3), lifetimeMs: 60_000, encrypt: false }).result);
+        return { outcome, failed, gaps: failed.slice(1).map((at, i) => at - failed[i]), server };
+      };
+
+      const back = await run(3 * 60_000);
+      expect(back.outcome.status).toBe('completed');
+      expect(back.server.chunkIndexes.filter((i) => i === 2), 'the chunks after it').toHaveLength(1);
+      expect(back.gaps.length).toBeGreaterThan(5);
+      expect(Math.max(...back.gaps), 'capped at 30 s').toBeLessThanOrEqual(30_000 + 200);
+      // Each backoff doubles, from 1 s, and is jittered within its upper half.
+      back.gaps.forEach((gap, i) => {
+        const full = Math.min(1000 * 2 ** i, 30_000);
+        expect(gap, `retry ${i + 1}`).toBeGreaterThanOrEqual(full / 2 - 200);
+        expect(gap, `retry ${i + 1}`).toBeLessThanOrEqual(full + 200);
+      });
+      expect(new Set(back.gaps.slice(5)).size, 'the capped waits differ').toBeGreaterThan(1);
+
+      const gone = await run(6 * 60_000);
+      expect(gone.outcome.status === 'failed' && gone.outcome.error).toMatchObject({ code: 'NOT_FOUND', message: expect.stringMatching(/^The server dropped this upload/) });
+      const triedFor = gone.failed.at(-1)! - gone.failed[0];
+      expect(triedFor, "tried until the server's 5 minutes were up").toBeGreaterThan(5 * 60_000 - 31_000);
+      expect(triedFor).toBeLessThanOrEqual(5 * 60_000 + 200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a download that keeps failing to reconnect stops once the server stops holding its lease, and releases it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const server = fakeServer();
+      const tries: number[] = [];
+      server.answer(CONTENT, () => { tries.push(Date.now()); throw new TypeError('fetch failed'); });
+      const { sink, log } = recordingSink();
+      const outcome = await settled(createClient(server.fetchFn).hosted.download({ id: FILE_ID, sink }).result);
+      expect(codeOf(outcome)).toBe('SERVER_UNREACHABLE');
+      expect(tries.at(-1)! - tries[0]).toBeGreaterThan(5 * 60_000 - 31_000);
+      expect(tries.at(-1)! - tries[0]).toBeLessThanOrEqual(5 * 60_000 + 200);
+      expect(log).toEqual(['sink abort SERVER_UNREACHABLE']);
+      expect(server.paths().filter((path) => path === RELEASE)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('A download cut off part-way, after a while', () => {
+  it("still reconnects after receiving for longer than 5 minutes: the server holds its lease 5 minutes from its last bytes", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const server = fakeServer();
+      const bytes = varied(CHUNK_SIZE * 2, 6);
+      server.v4.store(FILE_ID, { encrypted: false, size: bytes.length, bytes, files: [{ name: 'slow.bin', size: bytes.length }] });
+      let answers = 0;
+      server.answer(CONTENT, async (init) => {
+        if (answers++ > 0) return (await server.v4.handle('GET', `/api/v4/objects/${FILE_ID}/content`, init))!;
+        // 4 KiB every 30 s for 7 minutes, then the connection drops.
+        let sent = 0;
+        return new Response(new ReadableStream({
+          async pull(controller) {
+            await new Promise((resolve) => setTimeout(resolve, 30_000));
+            if (sent === 14) return controller.error(new TypeError('terminated'));
+            controller.enqueue(bytes.slice(sent * 4096, (sent + 1) * 4096));
+            sent += 1;
+          },
+        }));
+      });
+      const { sink, bytes: got } = recordingSink();
+      const outcome = await settled(createClient(server.fetchFn).hosted.download({ id: FILE_ID, sink }).result);
+      expect(outcome.status).toBe('completed');
+      expect(Buffer.from(got()).equals(Buffer.from(bytes))).toBe(true);
+      expect(server.headerOf(CONTENT, 'Range')).toEqual([undefined, `bytes=${14 * 4096}-`]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('A download cut off part-way', () => {
+  /** The content requests' Range, If-Range and lease, in order. */
+  const asked = (server: ReturnType<typeof fakeServer>) => ({
+    ranges: server.headerOf(CONTENT, 'Range'),
+    ifRanges: server.headerOf(CONTENT, 'If-Range'),
+    leases: server.headerOf(CONTENT, 'Dropgate-Lease'),
+  });
+
+  it('continues with Range from the next whole chunk, under the same lease and If-Range, and writes every byte once, encrypted or not', async () => {
+    const plaintext = varied(CHUNK_SIZE * 3 + 1234, 2);
+    const sealed = await sealedObject('report.pdf', plaintext);
+    const stored = CHUNK_SIZE + 16;
+    for (const [what, object, secret, cuts] of [
+      // In the header, in chunk 1, in the next answer's first chunk, and just past the next chunk's start.
+      ['encrypted', sealed.stored, sealed.secret, [10, 60 + stored + 500, 30, stored + 5]],
+      ['unencrypted', { encrypted: false, size: plaintext.length, bytes: plaintext, files: [{ name: 'report.pdf', size: plaintext.length }] }, undefined, [7, CHUNK_SIZE + 99, 1, CHUNK_SIZE]],
+    ] as const) {
+      const server = fakeServer();
+      server.v4.store(FILE_ID, object);
+      cutting(server, [...cuts]);
+      const { sink, log, bytes } = recordingSink();
+      const outcome = await createClient(server.fetchFn).hosted.download({ id: FILE_ID, secret, sink, retry: { backoffMs: 1 } }).result;
+      expect(outcome.status, what).toBe('completed');
+      expect(Buffer.from(bytes()).equals(Buffer.from(plaintext)), `${what}: byte for byte`).toBe(true);
+      expect(log.filter((entry) => !entry.startsWith('sink write')), what).toEqual(['sink close']);
+
+      const { ranges, ifRanges, leases } = asked(server);
+      expect(ranges, what).toHaveLength(cuts.length + 1);
+      expect(server.paths().filter((path) => path === LEASE), `${what}: one lease`).toHaveLength(1);
+      expect(new Set(leases).size, `${what}: the same lease every time`).toBe(1);
+      expect(server.paths().filter((path) => path === RELEASE), `${what}: released once`).toHaveLength(1);
+      // Asked from where it got to: the start until something was written, then the rest, as the same upload.
+      const starts = ranges.map((range) => (range === undefined ? 0 : Number(/^bytes=(\d+)-$/.exec(range)![1])));
+      if (what === 'encrypted') {
+        expect(starts).toEqual([0, 0, 60 + stored, 60 + stored, 60 + stored * 2]);
+      } else {
+        expect(starts).toEqual([0, 7, 7 + CHUNK_SIZE + 99, 7 + CHUNK_SIZE + 100, 7 + CHUNK_SIZE * 2 + 100]);
+      }
+      ranges.forEach((range, i) => expect(ifRanges[i], `${what}: If-Range with Range ${i}`).toBe(range === undefined ? undefined : `"${FILE_ID}"`));
+    }
+  });
+
+  it('continues a ZIP of several files, and one file of several, the same way', async () => {
+    const files = [{ name: 'a.bin', bytes: varied(CHUNK_SIZE + 300, 3) }, { name: 'b.bin', bytes: varied(CHUNK_SIZE * 2 + 7, 4) }];
+    const sealed = await sealedFiles(files);
+    const stored = CHUNK_SIZE + 16;
+    for (const [what, run] of [
+      ['a ZIP', async (client: DropgateClient) => {
+        const archive = recordingSink();
+        const outcome = await client.hosted.download({ id: FILE_ID, secret: sealed.secret, asZip: true, sink: archive.sink, retry: { backoffMs: 1 } }).result;
+        expect(outcome.status, 'a ZIP').toBe('completed');
+        const zip = readZip([{ bytes: archive.bytes() }]);
+        expect(zip.entries.map((e) => e.name)).toEqual(['a.bin', 'b.bin']);
+        zip.entries.forEach((entry, i) => expect(Buffer.from(zip.bytesOf(entry)).equals(Buffer.from(files[i].bytes)), entry.name).toBe(true));
+      }],
+      ['the second file', async (client: DropgateClient) => {
+        const one = recordingSink();
+        const outcome = await client.hosted.download({ id: FILE_ID, secret: sealed.secret, files: [1], sink: () => one.sink, retry: { backoffMs: 1 } }).result;
+        expect(outcome.status, 'the second file').toBe('completed');
+        expect(Buffer.from(one.bytes()).equals(Buffer.from(files[1].bytes))).toBe(true);
+      }],
+    ] as const) {
+      const server = fakeServer();
+      server.v4.store(FILE_ID, sealed.stored);
+      cutting(server, [60 + stored + 1, stored * 2 - 3]);
+      await run(createClient(server.fetchFn));
+      expect(server.headerOf(CONTENT, 'Range'), what).toEqual([undefined, `bytes=${60 + stored}-`, `bytes=${60 + stored * 2}-`]);
+      expect(server.paths().filter((path) => path === LEASE), `${what}: one lease`).toHaveLength(1);
+    }
+  });
+
+  it('refuses to append a whole upload sent in answer to a Range (its If-Range no longer matched): INTEGRITY_FAILED, and none of it is written', async () => {
+    const plaintext = varied(CHUNK_SIZE * 2 + 50, 5);
+    const sealed = await sealedObject('report.pdf', plaintext);
+    for (const encrypted of [true, false]) {
+      const server = fakeServer();
+      server.v4.store(FILE_ID, encrypted ? sealed.stored : { encrypted: false, size: plaintext.length, bytes: plaintext, files: [{ name: 'report.pdf', size: plaintext.length }] });
+      let answers = 0;
+      server.answer(CONTENT, async (init) => {
+        // The first is cut off in its second chunk; the second ignores the Range, as a changed upload's answer would.
+        const whole = (await server.v4.handle('GET', `/api/v4/objects/${FILE_ID}/content`, { ...init, headers: { 'Dropgate-Lease': new Headers(init.headers).get('Dropgate-Lease')! } }))!;
+        return answers++ === 0 ? new Response(cutAfter(whole.body!, 60 + CHUNK_SIZE + 16 + 10), { headers: whole.headers }) : whole;
+      });
+      const { sink, log, bytes } = recordingSink();
+      const outcome = await createClient(server.fetchFn).hosted.download({ id: FILE_ID, secret: encrypted ? sealed.secret : undefined, sink, retry: { backoffMs: 1 } }).result;
+      expect(outcome.status === 'failed' && outcome.error.code, `encrypted: ${encrypted}`).toBe('INTEGRITY_FAILED');
+      // Only what came before the cut: a whole chunk encrypted, every byte unencrypted.
+      const before = encrypted ? CHUNK_SIZE : 60 + CHUNK_SIZE + 16 + 10;
+      expect(Buffer.from(bytes()).equals(Buffer.from(plaintext.subarray(0, before))), `encrypted: ${encrypted}`).toBe(true);
+      expect(log.at(-1)).toBe('sink abort INTEGRITY_FAILED');
+      expect(log).not.toContain('sink close');
+      expect(server.headerOf(CONTENT, 'If-Range')).toEqual([undefined, `"${FILE_ID}"`]);
+      expect(server.paths().filter((path) => path === RELEASE)).toHaveLength(1);
+    }
+
+    // A 206 for any other range than the rest is refused too.
+    const server = fakeServer();
+    server.v4.store(FILE_ID, sealed.stored);
+    let answers = 0;
+    server.answer(CONTENT, async (init) => {
+      const res = (await server.v4.handle('GET', `/api/v4/objects/${FILE_ID}/content`, init))!;
+      if (answers++ === 0) return new Response(cutAfter(res.body!, 60 + CHUNK_SIZE + 16 + 10), { headers: res.headers });
+      return new Response(res.body, { status: 206, headers: { 'Content-Range': `bytes 60-${sealed.stored.size - 1}/${sealed.stored.size}` } });
+    });
+    const { sink } = recordingSink();
+    expect(codeOf(await createClient(server.fetchFn).hosted.download({ id: FILE_ID, secret: sealed.secret, sink, retry: { backoffMs: 1 } }).result)).toBe('INVALID_RESPONSE');
+  });
+});
+
+describe('client.hosted.delete()', () => {
+  const DELETE = `DELETE /api/v4/objects/${FILE_ID}`;
+
+  it('deletes an upload with its manage token, sent only in Dropgate-Manage-Token with no credential; its details and its bytes are then gone', async () => {
+    const server = fakeServer();
+    let asked = 0;
+    const client = new DropgateClient({ server: BASE_URL, fetchFn: server.fetchFn, auth: () => { asked++; return { token: 'account-token' }; } });
+    const outcome = await client.hosted.upload({ files: fileNamed('notes.txt'), lifetimeMs: 60_000, encrypt: true }).result;
+    if (outcome.status !== 'completed') throw new Error('The upload failed.');
+    const { id, manageToken, downloadUrl } = outcome.value;
+    const secret = new URL(downloadUrl).hash.slice(1);
+
+    await expect(client.hosted.delete({ id, manageToken: manageToken! })).resolves.toBeUndefined();
+    const sent = server.requests.filter((r) => `${r.method} ${new URL(r.url).pathname}` === DELETE);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].url).toBe(`${BASE_URL}/api/v4/objects/${id}`);
+    expect(JSON.parse(sent[0].headers)).toEqual({ Accept: 'application/json', 'Dropgate-Manage-Token': manageToken });
+    expect(sent[0].body).toBe('');
+    expect(asked, 'the credential was asked for').toBe(0);
+    // Nowhere else: not in a URL, and in no other request.
+    const elsewhere = server.requests.filter((r) => r !== sent[0] && [r.url, r.headers, r.body].some((part) => part.includes(manageToken!)));
+    expect(elsewhere).toEqual([]);
+
+    await expect(client.hosted.metadata({ id, secret })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(codeOf(await client.hosted.download({ id, secret, sink: nullSink() }).result)).toBe('NOT_FOUND');
+  });
+
+  it("a token that isn't the upload's is REQUEST_REJECTED (403) and deletes nothing; an upload that isn't there is NOT_FOUND; neither error holds the token", async () => {
+    const server = fakeServer();
+    server.v4.store(FILE_ID, { encrypted: false, size: 4, bytes: new Uint8Array(4), files: [{ name: 'a.txt', size: 4 }], manageTokenHash: MANAGE_TOKEN_HASH });
+    const client = createClient(server.fetchFn);
+    const wrong = Buffer.alloc(32, 9).toString('base64url');
+
+    const denied = await client.hosted.delete({ id: FILE_ID, manageToken: wrong }).catch((err: unknown) => err as DropgateError);
+    expect(denied).toMatchObject({ code: 'REQUEST_REJECTED', status: 403, transport });
+    expect((await client.hosted.metadata({ id: FILE_ID })).files, 'still there').toEqual([{ name: 'a.txt', size: 4 }]);
+
+    const missing = await client.hosted.delete({ id: SECOND_FILE_ID, manageToken: MANAGE_TOKEN }).catch((err: unknown) => err as DropgateError);
+    expect(missing).toMatchObject({ code: 'NOT_FOUND', status: 404 });
+    for (const err of [denied, missing]) {
+      const shown = [JSON.stringify(err), (err as Error).message, String((err as Error).stack)].join('\n');
+      expect(shown.includes(wrong) || shown.includes(MANAGE_TOKEN), shown).toBe(false);
+    }
+
+    await client.hosted.delete({ id: FILE_ID, manageToken: MANAGE_TOKEN });
+    await expect(client.hosted.metadata({ id: FILE_ID })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('needs an id and a token that could be one, and asks nothing without them', async () => {
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
+    for (const opts of [{}, { id: FILE_ID }, { manageToken: MANAGE_TOKEN }, { id: FILE_ID, manageToken: 'not-a-token' }, { id: FILE_ID, manageToken: `${MANAGE_TOKEN}A` }]) {
+      const err = await client.hosted.delete(opts as never).catch((e: unknown) => e as DropgateError);
+      expect(err, JSON.stringify(opts)).toMatchObject({ code: 'INVALID_ARGUMENT' });
+      expect((err as Error).message.includes('not-a-token')).toBe(false);
+    }
+    // An ID no server makes is never put in a path.
+    await expect(client.hosted.delete({ id: '../uploads', manageToken: MANAGE_TOKEN })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(server.requests).toEqual([]);
   });
 });

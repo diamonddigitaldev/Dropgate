@@ -61,6 +61,7 @@ const els = {
   cancelP2P: $('cancelP2P'),
 
   shareCard: $('shareCard'),
+  shareIcon: $('shareIcon'),
   shareTitle: $('shareTitle'),
   shareSub: $('shareSub'),
   shareLinkGroup: $('shareLinkGroup'),
@@ -68,6 +69,9 @@ const els = {
   copyShare: $('copyShare'),
   qrShare: $('qrShare'),
   newUpload: $('newUpload'),
+  deleteUpload: $('deleteUpload'),
+  deleteUploadModal: $('deleteUploadModal'),
+  confirmDeleteUpload: $('confirmDeleteUpload'),
 
   qrModal: $('qrModal'),
   qrCanvas: $('qrCanvas'),
@@ -96,6 +100,9 @@ const state = {
   p2pSession: null,
   p2pSecureOk: true,
   upload: null,
+  // The upload just finished, with the manage token that deletes it: held in
+  // this page's memory only, so a reload or "Send more files" drops it.
+  uploaded: null,
 };
 
 // Title progress tracking
@@ -412,17 +419,25 @@ function updateSecurityStatus() {
  * @returns {Promise<boolean>} True if user confirms, false if cancelled.
  */
 function showInsecureUploadModal() {
+  // If the modal doesn't exist, proceed anyway.
+  return confirmWithModal(els.insecureUploadModal, els.confirmInsecureUpload, true);
+}
+
+/**
+ * Show a modal asking to confirm, and return a promise.
+ * @returns {Promise<boolean>} True if `confirmEl` was clicked, false if the modal closed otherwise.
+ */
+function confirmWithModal(modalEl, confirmEl, withoutModal) {
   return new Promise((resolve) => {
-    const modalEl = els.insecureUploadModal;
     if (!modalEl) {
-      resolve(true); // If modal doesn't exist, proceed anyway
+      resolve(withoutModal);
       return;
     }
 
     const modal = new window.bootstrap.Modal(modalEl);
 
     const cleanup = () => {
-      els.confirmInsecureUpload?.removeEventListener('click', onConfirm);
+      confirmEl?.removeEventListener('click', onConfirm);
       modalEl.removeEventListener('hidden.bs.modal', onHide);
     };
 
@@ -437,7 +452,7 @@ function showInsecureUploadModal() {
       resolve(false);
     };
 
-    els.confirmInsecureUpload?.addEventListener('click', onConfirm, { once: true });
+    confirmEl?.addEventListener('click', onConfirm, { once: true });
     modalEl.addEventListener('hidden.bs.modal', onHide, { once: true });
 
     modal.show();
@@ -672,18 +687,63 @@ function showProgress({ title, sub, percent, doneBytes, totalBytes, icon, iconCo
 
 function showShare({ link = '', title = 'Upload Complete', sub = 'Share this link with your recipient:', showLinkGroup = true } = {}) {
   showPanels('share');
+  setShareIcon('check_circle', 'text-success');
   if (els.shareTitle) els.shareTitle.textContent = title;
   if (els.shareSub) els.shareSub.textContent = sub;
   if (els.shareLinkGroup) setHidden(els.shareLinkGroup, !showLinkGroup);
-  els.shareCard.classList.remove('border-danger', 'border-success', 'border-primary');
+  els.shareCard.classList.remove('border-danger', 'border-success', 'border-primary', 'border-secondary');
   els.shareCard.classList.add('border', 'border-success');
   els.shareLink.value = link || '';
+  // Delete is there only for the upload this page just made, while it holds its manage token.
+  setHidden(els.deleteUpload, !state.uploaded);
+  setDisabled(els.deleteUpload, false);
   // Hide code entry when upload complete
   if (els.codeCard) setHidden(els.codeCard, true);
 }
 
+function setShareIcon(icon, color) {
+  if (!els.shareIcon) return;
+  els.shareIcon.className = `${color} mb-2`;
+  els.shareIcon.innerHTML = `<span class="material-icons-round">${icon}</span>`;
+}
+
+/** Deletes the upload this page just made, once confirmed, with the manage token only this page holds. */
+async function deleteUploaded() {
+  const uploaded = state.uploaded;
+  if (!uploaded) return;
+  const confirmed = await confirmWithModal(els.deleteUploadModal, els.confirmDeleteUpload, false);
+  if (!confirmed || state.uploaded !== uploaded) return;
+
+  setDisabled(els.deleteUpload, true);
+  let alreadyGone = false;
+  try {
+    await coreClient.hosted.delete({ id: uploaded.id, manageToken: uploaded.manageToken });
+  } catch (err) {
+    // An upload that has expired, or been downloaded as many times as it allows, is already gone.
+    if (err?.code !== 'NOT_FOUND') {
+      setDisabled(els.deleteUpload, false);
+      showToast(err?.message || "The upload couldn't be deleted.", 'danger');
+      return;
+    }
+    alreadyGone = true;
+  }
+
+  state.uploaded = null;
+  setHidden(els.deleteUpload, true);
+  setHidden(els.shareLinkGroup, true);
+  els.shareLink.value = '';
+  setShareIcon('delete', 'text-body-secondary');
+  els.shareCard.classList.remove('border-success');
+  els.shareCard.classList.add('border-secondary');
+  if (els.shareTitle) els.shareTitle.textContent = 'Upload Deleted';
+  if (els.shareSub) els.shareSub.textContent = alreadyGone ? 'It was already gone from the server.' : 'It has been removed from the server, and its link no longer works.';
+  showToast(alreadyGone ? 'The upload was already gone.' : 'Upload deleted.', 'success');
+}
+
 function resetToMain() {
   stopP2P();
+  state.uploaded = null;
+  setHidden(els.deleteUpload, true);
   state.files = [];
   state.fileTooLargeForStandard = false;
   updateFileUI();
@@ -869,6 +929,9 @@ async function startStandardUpload() {
 
     if (outcome.status === 'completed') {
       showProgress({ title: 'Uploading', sub: 'Upload successful!', percent: 100, doneBytes: totalSize, totalBytes: totalSize, icon: 'cloud_upload' });
+      // A bundle's upload has no manage token yet, so it has no Delete.
+      const { id, manageToken } = outcome.value;
+      state.uploaded = manageToken ? { id, manageToken } : null;
       showShare({ link: outcome.value.downloadUrl });
     } else if (outcome.status === 'cancelled') {
       showToast('Upload cancelled.', 'warning');
@@ -997,6 +1060,7 @@ async function startP2PSendFlow() {
       resetTitleProgress();
       els.cancelP2PSend.style.display = 'none';
       stopP2P();
+      state.uploaded = null;
       showShare({
         title: 'Transfer Complete',
         sub: `Your recipient has received the file${Array.isArray(file) ? 's' : ''}.`,
@@ -1166,6 +1230,7 @@ function wireUI() {
   els.copyShare?.addEventListener('click', () => copyToClipboard(els.shareLink.value).then(() => showToast('Copied link.', 'success')));
   els.qrShare?.addEventListener('click', () => showQRModal(els.shareLink.value));
   els.newUpload?.addEventListener('click', resetToMain);
+  els.deleteUpload?.addEventListener('click', deleteUploaded);
 
   // Enter code
   const goWithCode = async () => {

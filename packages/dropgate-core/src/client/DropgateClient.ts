@@ -1,8 +1,10 @@
 import { DEFAULT_CHUNK_SIZE, ENCRYPTION_OVERHEAD_PER_CHUNK } from '../constants.js';
-import { DropgateError, directTransferDisabled, errorFromStatus, isCredentialError, toDropgateError, withTransport } from '../errors.js';
+import { DropgateError, directTransferDisabled, errorFromStatus, toDropgateError, withTransport } from '../errors.js';
 import { guardedFetch, insecureTransportNotAllowed, isSecureServerUrl } from '../transport.js';
 import type { Transport } from '../transport.js';
 import { CORE_VERSION, PROTOCOLS } from '../version.js';
+import { RetryWindow, retrying, retryPolicy, withRetryAfter } from '../retry.js';
+import type { RetryPolicy } from '../retry.js';
 import type { ProtocolName, ProtocolVersion, Protocols } from '../version.js';
 import { startOperation } from '../operation.js';
 import type { OperationContext } from '../operation.js';
@@ -37,6 +39,7 @@ import type {
   MetadataOptions,
   UploadMetadata,
   BundleMetadata,
+  DeleteOptions,
 } from '../types.js';
 import type {
   P2PSendFileOptions,
@@ -164,6 +167,17 @@ export interface HostedApi {
    * or LIFETIME_NOT_ALLOWED, for the first check that fails.
    */
   validate(opts: ValidateUploadOptions): true;
+  /**
+   * Deletes an upload (`id`) from the server at once, with the `manageToken`
+   * its upload gave: its bytes and its details go, and a download of it under
+   * way stops. Only whoever holds the token can: it's sent only in the
+   * `Dropgate-Manage-Token` header, to this client's server, never in a URL,
+   * and it's never in an error. No credential is needed.
+   * @throws {DropgateError} INVALID_ARGUMENT, before any request, without an id or a token that
+   * could be one; NOT_FOUND if the upload isn't there (it was deleted, expired, or downloaded as many
+   * times as it allowed); REQUEST_REJECTED (403) if the token isn't this upload's; or a request's error.
+   */
+  delete(opts: DeleteOptions): Promise<void>;
 }
 
 /** `client.direct`: direct transfers, from one device to another. */
@@ -314,6 +328,21 @@ function chooseFiles(picked: number[] | undefined, count: number): number[] {
   return picked;
 }
 
+/** The error for an upload the server says it no longer has. */
+function droppedUpload(cause: DropgateError): DropgateError {
+  return new DropgateError({ code: 'NOT_FOUND', status: cause.status, message: 'The server dropped this upload.', cause });
+}
+
+/** The error for an upload whose server couldn't be reached for as long as it waits for one. */
+function unreachableTooLong(cause: DropgateError): DropgateError {
+  if (cause.code === 'NOT_FOUND') return cause;
+  return new DropgateError({
+    code: 'NOT_FOUND',
+    message: "The server dropped this upload: it couldn't be reached for longer than the server waits.",
+    cause,
+  });
+}
+
 /** How long a server's `Retry-After` (in seconds) says to wait, within a minute, or `fallback`. */
 function retryAfterMs(res: Response, fallback: number): number {
   const header = res.headers.get('Retry-After');
@@ -462,6 +491,7 @@ export class DropgateClient {
       download: stamped((o: DownloadOptions) => this._download(o)),
       metadata: stamped((o: MetadataOptions) => this._metadata(o)) as HostedApi['metadata'],
       validate: stamped((o: ValidateUploadOptions) => this._validate(o)),
+      delete: stamped((o: DeleteOptions) => this._delete(o)),
     });
     this.direct = Object.freeze({
       send: stamped((o: P2PSendFileOptions) => this._directSend(o)),
@@ -750,6 +780,22 @@ export class DropgateClient {
     };
   }
 
+  private async _delete(opts: DeleteOptions): Promise<void> {
+    const { id, manageToken, timeoutMs = 5000, signal } = opts ?? ({} as DeleteOptions);
+    // The token is 32 bytes as URL-safe base64; anything else is never sent. Neither is ever repeated.
+    if (typeof id !== 'string' || !id || typeof manageToken !== 'string' || !base64urlToBytes(manageToken, 32, this.base64)) {
+      throw new DropgateError({ code: 'INVALID_ARGUMENT', message: "Deleting an upload needs its id, and the manageToken its upload gave." });
+    }
+    if (!UPLOAD_ID.test(id)) throw new DropgateError({ code: 'NOT_FOUND' });
+    const compat = await this._connect({ timeoutMs, signal });
+    this._requireCompatible(compat, 'dgup');
+    const { res, json } = await fetchJson(this.fetchFn, `${compat.baseUrl}/api/v4/objects/${id}`, {
+      method: 'DELETE', timeoutMs, signal,
+      headers: { Accept: 'application/json', 'Dropgate-Manage-Token': manageToken },
+    });
+    if (!res.ok) throw errorFromStatus(res.status, json, "The upload couldn't be deleted.");
+  }
+
   private _validate(opts: ValidateUploadOptions): true {
     const { files: rawFiles, lifetimeMs, serverInfo } = opts;
     const caps = serverInfo?.capabilities?.upload;
@@ -920,16 +966,14 @@ export class DropgateClient {
         credentials = await OperationCredentials.required(this.#auth, 'hosted.upload', baseUrl, effectiveSignal);
       }
 
-      const retries = Number.isFinite(retry.retries) ? retry.retries! : 5;
-      const baseBackoffMs = Number.isFinite(retry.backoffMs) ? retry.backoffMs! : 1000;
-      const maxBackoffMs = Number.isFinite(retry.maxBackoffMs) ? retry.maxBackoffMs! : 30000;
+      // What can recover is retried until the server stops waiting, or `retries` times if that's set.
+      const policy = retryPolicy(retry);
 
       // ========== ONE FILE: one Dropgate 4 object ==========
       if (files.length === 1) {
         return this._uploadObject({
           file: files[0], name: filenames[0], encrypted: effectiveEncrypt, lifetimeMs, maxDownloads,
-          compat, progress, signal: effectiveSignal, send, credentials,
-          timeouts, retries, backoffMs: baseBackoffMs, maxBackoffMs,
+          compat, progress, signal: effectiveSignal, send, credentials, timeouts, policy,
           started: (uploadId) => { currentObjectUpload = uploadId; },
           finished: () => { currentObjectUpload = null; },
         });
@@ -1026,8 +1070,7 @@ export class DropgateClient {
         await this._uploadFileChunks({
           file, uploadId, cryptoKey, effectiveChunkSize, totalChunks, totalUploadSize,
           baseOffset: cumulativeBytes, totalBytesAllFiles: totalSizeBytes,
-          progress, signal: effectiveSignal, baseUrl,
-          retries, backoffMs: baseBackoffMs, maxBackoffMs,
+          progress, signal: effectiveSignal, baseUrl, policy,
           chunkTimeoutMs: timeouts.chunkMs ?? 60000,
           credentials,
         });
@@ -1149,9 +1192,7 @@ export class DropgateClient {
     send: (url: string, init: FetchJsonOptions) => Promise<FetchJsonResult>;
     credentials: OperationCredentials;
     timeouts: NonNullable<UploadOptions['timeouts']>;
-    retries: number;
-    backoffMs: number;
-    maxBackoffMs: number;
+    policy: RetryPolicy;
     started: (uploadId: string) => void;
     finished: () => void;
   }): Promise<UploadResult> {
@@ -1210,11 +1251,14 @@ export class DropgateClient {
       }),
     });
     if (!start.res.ok) throw errorFromStatus(start.res.status, start.json, 'The server refused to start the upload.');
-    const { uploadId, chunks } = (start.json ?? {}) as { uploadId?: unknown; chunks?: unknown };
+    const { uploadId, chunks, deadline } = (start.json ?? {}) as { uploadId?: unknown; chunks?: unknown; deadline?: unknown };
     if (typeof uploadId !== 'string' || !uploadId || chunks !== layout.chunkCount) {
       throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server's answer to starting the upload wasn't understood." });
     }
     p.started(uploadId);
+    // How long the server waits for the next request: every answer moves it on.
+    const window = new RetryWindow();
+    window.heard(deadline);
     progress({ status: 'uploading' });
 
     const totalChunks = layout.chunkCount;
@@ -1259,22 +1303,30 @@ export class DropgateClient {
           },
           body: new Blob([body]),
         },
-        {
-          retries: p.retries, backoffMs: p.backoffMs, maxBackoffMs: p.maxBackoffMs,
-          timeoutMs: timeouts.chunkMs ?? 60000, signal, progress, chunkIndex: i, credentials: p.credentials,
-        },
+        { policy: p.policy, window, timeoutMs: timeouts.chunkMs ?? 60000, signal, progress, chunkIndex: i, credentials: p.credentials },
       );
       writer?.confirm(i);
     }
 
     progress({ status: 'completing', phase: 'complete', text: 'Finalising upload...', percent: 100, processedBytes: file.size });
-    const finish = await send(`${baseUrl}/api/v4/upload/complete`, {
-      method: 'POST',
-      timeoutMs: timeouts.completeMs ?? 30000,
-      signal,
-      headers: { Accept: 'application/json', 'Dropgate-Upload': uploadId },
+    // The finish gives the same answer if it's asked again, so it's retried as a chunk is.
+    const finish = await retrying(async () => {
+      const out = await send(`${baseUrl}/api/v4/upload/complete`, {
+        method: 'POST',
+        timeoutMs: timeouts.completeMs ?? 30000,
+        signal,
+        headers: { Accept: 'application/json', 'Dropgate-Upload': uploadId },
+      });
+      if (out.res.ok) return out;
+      const err = errorFromStatus(out.res.status, out.json, 'Finalisation failed.');
+      throw err.code === 'NOT_FOUND' ? droppedUpload(err) : withRetryAfter(err, out.res);
+    }, {
+      policy: p.policy, window, signal,
+      random: (length) => this._crypto.randomBytes(length),
+      waiting: ({ remainingMs }) => progress({ text: `Finalising failed. Retrying in ${(remainingMs / 1000).toFixed(1)}s...` }),
+      retrying: () => progress({ text: 'Finalising upload...' }),
+      expired: unreachableTooLong,
     });
-    if (!finish.res.ok) throw errorFromStatus(finish.res.status, finish.json, 'Finalisation failed.');
     const id = (finish.json as { id?: unknown } | null)?.id;
     if (typeof id !== 'string' || !UPLOAD_ID.test(id)) {
       throw new DropgateError({ code: 'INVALID_RESPONSE', message: 'Server did not return a valid upload id.' });
@@ -1293,6 +1345,8 @@ export class DropgateClient {
   private _download(opts: DownloadOptions): DownloadHandle {
     const target = hostedTarget(opts);
     const { asZip, sink, signal, timeoutMs = 60000 } = opts;
+    // A download cut off is continued until the server stops holding its lease, or `retries` times if that's set.
+    const policy = retryPolicy(opts.retry);
     const picked = opts.files;
     if (picked !== undefined && (!Array.isArray(picked) || picked.length === 0
       || picked.some((i) => !Number.isSafeInteger(i) || i < 0) || new Set(picked).size !== picked.length)) {
@@ -1444,7 +1498,7 @@ export class DropgateClient {
     };
 
     const work = (ctx: OperationContext<DownloadSnapshot>): Promise<DownloadResult> => (target.id !== undefined
-      ? this._downloadObject(ctx, { id: target.id, secret: target.secret, sink, zipped, files: chosenIndexes, timeoutMs })
+      ? this._downloadObject(ctx, { id: target.id, secret: target.secret, sink, zipped, files: chosenIndexes, timeoutMs, policy })
       : bundleWork(ctx, target.bundleId, target.keyB64));
 
     return this._registry.add(startOperation<DownloadResult, DownloadSnapshot>({
@@ -1470,24 +1524,23 @@ export class DropgateClient {
    * each chunk of an encrypted one opened as it comes, to the one marked last,
    * padding included, so nothing can have been cut off; and its files written
    * out in order. The last file, or the ZIP, is only finished once everything
-   * has come and been checked. The lease is released as soon as the download
-   * ends, however it ends, so it counts at once.
+   * has come and been checked. A connection that drops, or stalls, is asked
+   * again under the same lease for the rest, from the next whole chunk; and if
+   * the server sends anything but the rest of the same upload, none of it is
+   * written. The lease is released as soon as the download ends, however it
+   * ends, so it counts at once.
    */
   private async _downloadObject(
     ctx: OperationContext<DownloadSnapshot>,
-    o: { id: string; secret?: string; sink: DownloadOptions['sink']; zipped: boolean; files?: number[]; timeoutMs: number },
+    o: { id: string; secret?: string; sink: DownloadOptions['sink']; zipped: boolean; files?: number[]; timeoutMs: number; policy: RetryPolicy },
   ): Promise<DownloadResult> {
     const progress = ctx.update;
     const downloadSignal = ctx.signal;
     const { id, secret, sink, zipped, timeoutMs } = o;
-    // The timeout is on each wait, for an answer and then for the next bytes,
-    // so a big file never times out just for taking long, and a slow sink never counts.
-    const { signal: waitSignal, waiting, cleanup } = makeWaitSignal(downloadSignal, timeoutMs);
     let baseUrl = this.baseUrl;
     let lease: string | null = null;
     // The sink being written, to abort if the download doesn't complete.
     let open: SinkWriter | null = null;
-    let stopWatching = (): void => { };
 
     try {
       const compat = await this._connect({ timeoutMs, signal: downloadSignal });
@@ -1510,7 +1563,11 @@ export class DropgateClient {
       }
       progress({ status: 'downloading', totalBytes: totalSize, ...(several ? { totalFiles: indexes.length } : {}) });
 
-      lease = await this._takeLease(baseUrl, id, { timeoutMs, signal: downloadSignal, progress });
+      const taken = await this._takeLease(baseUrl, id, { timeoutMs, signal: downloadSignal, progress });
+      lease = taken.lease;
+      // How long the server holds the lease for a download that has stopped: every answer, and every byte, moves it on.
+      const window = new RetryWindow();
+      window.heard(taken.deadline);
 
       // Where each file goes: a sink of its own, or its place in one ZIP.
       const zipOut = zipped ? await SinkWriter.open(sink, { name: '', size: totalSize, index: 0 }) : null;
@@ -1560,16 +1617,11 @@ export class DropgateClient {
           const piece = bytes.subarray(at, at + Math.min(bytes.byteLength - at, files[fileIndex].size - fileWritten));
           if (wanted.has(fileIndex)) {
             if (started !== fileIndex) await startFile(fileIndex);
-            try {
-              if (zip) {
-                await zipStep(() => zip.writeChunk(piece));
-                await zipStep(() => zip.drained());
-              } else {
-                await current!.write(piece);
-              }
-            } catch (err) {
-              if (waitSignal.aborted) throw waitSignal.reason;
-              throw err;
+            if (zip) {
+              await zipStep(() => zip.writeChunk(piece));
+              await zipStep(() => zip.drained());
+            } else {
+              await current!.write(piece);
             }
             written += piece.byteLength;
             progress({ phase: 'downloading', percent: (written / totalSize) * 100, processedBytes: written, ...(several ? { fileIndex } : {}) });
@@ -1596,49 +1648,94 @@ export class DropgateClient {
       // download that fails before its first byte still aborts it.
       await startFile(indexes[0]);
 
-      // The whole object, under the lease.
-      let res: Response;
-      try {
-        res = await waiting(() => this.fetchFn(`${baseUrl}/api/v4/objects/${id}/content`, {
-          method: 'GET', headers: { 'Dropgate-Lease': lease! }, signal: waitSignal,
-        }));
-      } catch (err) {
-        throw toDropgateError(err, 'SERVER_UNREACHABLE');
-      }
-      if (!res.ok) throw errorFromStatus(res.status, await res.json().catch(() => null), 'Download failed.');
-      if (res.status !== 200) throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server didn't send the whole upload." });
-      if (!res.body) throw new DropgateError({ code: 'RUNTIME_UNSUPPORTED', message: 'Streaming response not available.' });
+      // How far it has got: an encrypted upload's chunks opened and written,
+      // or an unencrypted one's bytes written. A try that drops is followed by
+      // one for the rest, from there.
+      const size = opened ? opened.layout.storedSize : meta.totalSize;
+      let nextChunk = 0;
+      let plainWritten = 0;
 
-      const reader = res.body.getReader();
-      // A cancel or timeout ends a read that's waiting, whether or not fetch() errors the body itself.
-      const cancelRead = () => { reader.cancel(waitSignal.reason).catch(() => { }); };
-      waitSignal.addEventListener('abort', cancelRead, { once: true });
-      stopWatching = () => waitSignal.removeEventListener('abort', cancelRead);
-      async function* received(): AsyncGenerator<Uint8Array> {
-        for (;;) {
-          let next: ReadableStreamReadResult<Uint8Array>;
+      await retrying(async () => {
+        const from = opened ? (nextChunk === 0 ? 0 : opened.layout.range(nextChunk).start) : plainWritten;
+        // The timeout is on each wait, for an answer and then for the next bytes,
+        // so a big file never times out just for taking long, and a slow sink never counts.
+        const { signal: waitSignal, waiting, cleanup } = makeWaitSignal(downloadSignal, timeoutMs);
+        let stopWatching = (): void => { };
+        // Only what the server sends goes wrong in a way that may recover; what's written stays as it went.
+        const failed = (err: unknown, code: 'SERVER_UNREACHABLE' | 'CONNECTION_LOST') => (waitSignal.aborted ? waitSignal.reason : toDropgateError(err, code));
+        try {
+          let res: Response;
           try {
-            next = await waiting(() => reader.read());
+            res = await waiting(() => this.fetchFn(`${baseUrl}/api/v4/objects/${id}/content`, {
+              method: 'GET',
+              // The rest of it, and only if it's still the same upload: anything else is sent whole, and refused.
+              headers: { 'Dropgate-Lease': lease!, ...(from > 0 ? { Range: `bytes=${from}-`, 'If-Range': taken.etag } : {}) },
+              signal: waitSignal,
+            }));
           } catch (err) {
-            if (waitSignal.aborted) throw waitSignal.reason;
-            throw toDropgateError(err, 'CONNECTION_LOST');
+            throw failed(err, 'SERVER_UNREACHABLE');
           }
-          if (waitSignal.aborted) throw waitSignal.reason;
-          if (next.done) return;
-          yield next.value;
-        }
-      }
+          if (!res.ok) throw withRetryAfter(errorFromStatus(res.status, await res.json().catch(() => null), 'Download failed.'), res);
+          window.heard();
+          if (from > 0) {
+            if (res.status === 200) {
+              throw new DropgateError({ code: 'INTEGRITY_FAILED', message: "The server sent the whole upload again, not the rest of it, so it may have changed. Nothing more of it was written." });
+            }
+            const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(res.headers.get('Content-Range') ?? '');
+            if (res.status !== 206 || !range || Number(range[1]) !== from || Number(range[2]) !== size - 1 || Number(range[3]) !== size) {
+              throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server didn't send the rest of the upload." });
+            }
+          } else if (res.status !== 200) {
+            throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server didn't send the whole upload." });
+          }
+          if (!res.body) throw new DropgateError({ code: 'RUNTIME_UNSUPPORTED', message: 'Streaming response not available.' });
 
-      if (opened) {
-        for await (const { plaintext } of opened.read(received())) await deliver(plaintext);
-      } else {
-        let count = 0;
-        for await (const piece of received()) {
-          count += piece.byteLength;
-          if (count > meta.totalSize) throw new DropgateError({ code: 'INTEGRITY_FAILED', message: 'More data came than the upload holds.' });
-          await deliver(piece);
+          const reader = res.body.getReader();
+          // A cancel or timeout ends a read that's waiting, whether or not fetch() errors the body itself.
+          const cancelRead = () => { reader.cancel(waitSignal.reason).catch(() => { }); };
+          waitSignal.addEventListener('abort', cancelRead, { once: true });
+          stopWatching = () => waitSignal.removeEventListener('abort', cancelRead);
+          async function* received(): AsyncGenerator<Uint8Array> {
+            for (;;) {
+              let next: ReadableStreamReadResult<Uint8Array>;
+              try {
+                next = await waiting(() => reader.read());
+              } catch (err) {
+                throw failed(err, 'CONNECTION_LOST');
+              }
+              if (waitSignal.aborted) throw waitSignal.reason;
+              if (next.done) return;
+              window.heard();
+              yield next.value;
+            }
+          }
+
+          if (opened) {
+            // From the start, the header is checked against the metadata's; after a drop, the chunks go on from the next.
+            const chunks = from === 0 ? opened.read(received()) : opened.chunks(received(), nextChunk);
+            for await (const { index, plaintext } of chunks) {
+              await deliver(plaintext);
+              nextChunk = index + 1;
+            }
+          } else {
+            for await (const piece of received()) {
+              if (plainWritten + piece.byteLength > meta.totalSize) {
+                throw new DropgateError({ code: 'INTEGRITY_FAILED', message: 'More data came than the upload holds.' });
+              }
+              await deliver(piece);
+              plainWritten += piece.byteLength;
+            }
+          }
+        } finally {
+          stopWatching();
+          cleanup();
         }
-      }
+      }, {
+        policy: o.policy, window, signal: downloadSignal,
+        random: (length) => this._crypto.randomBytes(length),
+        waiting: ({ remainingMs }) => progress({ text: `The connection was lost. Reconnecting in ${(remainingMs / 1000).toFixed(1)}s...` }),
+        retrying: () => progress({ text: 'Reconnecting...' }),
+      });
       if (fileIndex !== files.length) throw new DropgateError({ code: 'INTEGRITY_FAILED', message: 'The data ended before the last file did.' });
 
       // Everything has come, and been checked: the last file, or the ZIP, is finished.
@@ -1662,8 +1759,6 @@ export class DropgateClient {
       await open?.abort(downloadSignal.aborted ? downloadSignal.reason : err);
       throw toDropgateError(err, 'CONNECTION_LOST');
     } finally {
-      stopWatching();
-      cleanup();
       if (lease) await this._releaseLease(baseUrl, lease);
     }
   }
@@ -1678,7 +1773,7 @@ export class DropgateClient {
     baseUrl: string,
     id: string,
     { timeoutMs, signal, progress }: { timeoutMs: number; signal: AbortSignal; progress: (patch: Partial<DownloadSnapshot>) => void },
-  ): Promise<string> {
+  ): Promise<{ lease: string; etag: string; deadline: unknown }> {
     for (;;) {
       const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/v4/objects/${id}/leases`, {
         method: 'POST', timeoutMs, signal, headers: { Accept: 'application/json' },
@@ -1689,11 +1784,12 @@ export class DropgateClient {
         continue;
       }
       if (!res.ok) throw errorFromStatus(res.status, json, 'The download could not start.');
-      const lease = (json as { lease?: unknown } | null)?.lease;
-      if (typeof lease !== 'string' || !base64urlToBytes(lease, 32, this.base64)) {
+      // The lease, and the upload's ETag, which a resumed download asks for the rest of.
+      const { lease, etag, deadline } = (json ?? {}) as { lease?: unknown; etag?: unknown; deadline?: unknown };
+      if (typeof lease !== 'string' || !base64urlToBytes(lease, 32, this.base64) || typeof etag !== 'string' || !/^"[^"]+"$/.test(etag)) {
         throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server's answer to starting the download wasn't understood." });
       }
-      return lease;
+      return { lease, etag, deadline };
     }
   }
 
@@ -1912,17 +2008,16 @@ export class DropgateClient {
     progress: (patch: Partial<UploadSnapshot>) => void;
     signal: AbortSignal;
     baseUrl: string;
-    retries: number;
-    backoffMs: number;
-    maxBackoffMs: number;
+    policy: RetryPolicy;
     chunkTimeoutMs: number;
     credentials: OperationCredentials;
   }): Promise<void> {
     const {
       file, uploadId, cryptoKey, effectiveChunkSize, totalChunks,
       baseOffset, totalBytesAllFiles, progress, signal, baseUrl,
-      retries, backoffMs, maxBackoffMs, chunkTimeoutMs, credentials,
+      policy, chunkTimeoutMs, credentials,
     } = params;
+    const window = new RetryWindow();
 
     for (let i = 0; i < totalChunks; i++) {
       if (signal.aborted) {
@@ -1964,18 +2059,22 @@ export class DropgateClient {
       await this._attemptChunkUpload(
         `${baseUrl}/upload/chunk`,
         { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Upload-ID': uploadId, 'X-Chunk-Index': String(i), 'X-Chunk-Hash': hashHex }, body: new Blob([uploadBytes]) },
-        { retries, backoffMs, maxBackoffMs, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i, credentials }
+        { policy, window, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i, credentials }
       );
     }
   }
 
+  /**
+   * Sends one chunk, the same bytes on every try. A try that can recover is
+   * made again, after its backoff or the server's Retry-After, until the server
+   * stops waiting for the upload; anything else the server says fails at once.
+   */
   private async _attemptChunkUpload(
     url: string,
     fetchOptions: RequestInit,
     opts: {
-      retries: number;
-      backoffMs: number;
-      maxBackoffMs: number;
+      policy: RetryPolicy;
+      window: RetryWindow;
       timeoutMs: number;
       signal: AbortSignal;
       progress: (patch: Partial<UploadSnapshot>) => void;
@@ -1983,81 +2082,47 @@ export class DropgateClient {
       credentials: OperationCredentials;
     }
   ): Promise<void> {
-    const {
-      retries,
-      backoffMs,
-      maxBackoffMs,
-      timeoutMs,
-      signal,
-      progress,
-      chunkIndex,
-      credentials,
-    } = opts;
+    const { policy, window, timeoutMs, signal, progress, chunkIndex, credentials } = opts;
+    const counted = (attempt: number) => (policy.retries !== undefined ? `(${attempt}/${policy.retries})` : `(retry ${attempt})`);
 
-    let attemptsLeft = retries;
-    let currentBackoff = backoffMs;
-    const maxRetries = retries;
-
-    while (true) {
-      if (signal?.aborted) {
-        throw signal.reason || new DropgateError({ code: 'OPERATION_CANCELLED' });
-      }
-
-      const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
-      try {
-        let res: Response;
+    await retrying(async () => {
+      for (;;) {
+        const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
         try {
-          // The credential is added to each attempt, so a renewed one is used.
-          const headers = { ...(fetchOptions.headers as Record<string, string>), ...credentials.headers() };
-          res = await this.fetchFn(url, { ...fetchOptions, headers, signal: s });
-        } catch (err) {
-          throw toDropgateError(err, 'SERVER_UNREACHABLE');
+          let res: Response;
+          try {
+            // The credential is added to each try, so a renewed one is used.
+            const headers = { ...(fetchOptions.headers as Record<string, string>), ...credentials.headers() };
+            res = await this.fetchFn(url, { ...fetchOptions, headers, signal: s });
+          } catch (err) {
+            throw toDropgateError(err, 'SERVER_UNREACHABLE');
+          }
+          const text = await res.text().catch(() => '');
+          let said: unknown = { error: text };
+          try { said = JSON.parse(text); } catch { /* A plain-text answer. */ }
+          if (res.ok) {
+            window.heard((said as { deadline?: unknown } | null)?.deadline);
+            return;
+          }
+          const err = errorFromStatus(res.status, said, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
+          // An expired credential is renewed once, and the chunk sent again at
+          // once; any other credential error stands.
+          if (DropgateError.is(err, 'AUTH_EXPIRED') && await credentials.renew(signal)) continue;
+          if (err.code === 'NOT_FOUND') throw droppedUpload(err);
+          throw withRetryAfter(err, res);
+        } finally {
+          cleanup();
         }
-        if (res.ok) return;
-
-        const text = await res.text().catch(() => '');
-        let said: unknown = { error: text };
-        try { said = JSON.parse(text); } catch { /* A plain-text answer. */ }
-        throw errorFromStatus(res.status, said, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
-      } catch (err) {
-        cleanup();
-
-        // A cancel is never retried; a timeout is.
-        if (signal?.aborted) {
-          throw signal.reason || new DropgateError({ code: 'OPERATION_CANCELLED' });
-        }
-        if (DropgateError.is(err, 'OPERATION_CANCELLED')) throw err;
-        // An expired credential is renewed once, and the chunk sent again at
-        // once; any other credential error stands.
-        if (DropgateError.is(err, 'AUTH_EXPIRED') && await credentials.renew(signal)) continue;
-        if (isCredentialError(err)) throw err;
-
-        if (attemptsLeft <= 0) throw toDropgateError(err, 'SERVER_UNREACHABLE');
-
-        const attemptNumber = maxRetries - attemptsLeft + 1;
-        let remaining = currentBackoff;
-        const tick = 100;
-        while (remaining > 0) {
-          const secondsLeft = (remaining / 1000).toFixed(1);
-          progress({
-            phase: 'retry-wait',
-            text: `Chunk upload failed. Retrying in ${secondsLeft}s... (${attemptNumber}/${maxRetries})`,
-          });
-          await sleep(Math.min(tick, remaining), signal);
-          remaining -= tick;
-        }
-
-        progress({
-          phase: 'retry',
-          text: `Chunk upload failed. Retrying now... (${attemptNumber}/${maxRetries})`,
-        });
-
-        attemptsLeft -= 1;
-        currentBackoff = Math.min(currentBackoff * 2, maxBackoffMs);
-        continue;
-      } finally {
-        cleanup();
       }
-    }
+    }, {
+      policy, window, signal,
+      random: (length) => this._crypto.randomBytes(length),
+      waiting: ({ attempt, remainingMs }) => progress({
+        phase: 'retry-wait',
+        text: `Chunk upload failed. Retrying in ${(remainingMs / 1000).toFixed(1)}s... ${counted(attempt)}`,
+      }),
+      retrying: (attempt) => progress({ phase: 'retry', text: `Chunk upload failed. Retrying now... ${counted(attempt)}` }),
+      expired: unreachableTooLong,
+    });
   }
 }

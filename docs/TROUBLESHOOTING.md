@@ -45,6 +45,10 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - Often proxy buffering/timeouts, unstable networks, or middleware touching the request body.
 - Enable `LOG_LEVEL=DEBUG`, retry once, and check where it fails (init vs chunk vs complete).
 
+**"Chunk upload failed. Retrying in …" / "The connection was lost. Reconnecting in …"**
+- The server didn't answer, took too long, or answered `408`, `429` or a `5xx` other than `507`. The upload or the download tries again by itself, waiting a little longer each time, up to 30 seconds, for as long as the server keeps it: 5 minutes after it last heard from it. A download picks up where it stopped, and counts once. Any other error fails at once, since trying again wouldn't change it. See [DGUP §7](./technical/DGUP.md#7-retry-strategy).
+- If it keeps happening behind a reverse proxy, check the proxy's timeouts and body size limit, and that it passes `Range` and `If-Range` through to the server.
+
 **Tuning chunk size**
 - The upload chunk size is controlled by `UPLOAD_CHUNK_SIZE_BYTES` (default `5242880` / 5MB, minimum `65536` / 64KB, maximum `67108864` / 64MB).
 - If you're behind a reverse proxy with a body size limit, make sure the proxy allows at least `UPLOAD_CHUNK_SIZE_BYTES + 1024` bytes per request (the extra 1024 accounts for encryption overhead and request framing).

@@ -341,15 +341,23 @@ export interface UploadOptions {
     /** Timeout for upload completion (default: 30000ms). */
     completeMs?: number;
   };
-  /** Retry settings for failed chunk uploads. */
-  retry?: {
-    /** Maximum number of retries per chunk (default: 5). */
-    retries?: number;
-    /** Initial backoff delay in milliseconds (default: 1000ms). */
-    backoffMs?: number;
-    /** Maximum backoff delay in milliseconds (default: 30000ms). */
-    maxBackoffMs?: number;
-  };
+  /**
+   * How a chunk, or the finish, is retried when it gets no answer (the
+   * network, or a timeout) or a 408, 429 or 5xx other than 507. By default
+   * it's retried until the server stops waiting for the upload (5 minutes
+   * after its last answer); any other error fails the upload at once.
+   */
+  retry?: RetryOptions;
+}
+
+/** How an operation retries what can recover. */
+export interface RetryOptions {
+  /** At most this many retries of one request (default: no limit, until the server stops waiting). */
+  retries?: number;
+  /** The first backoff in milliseconds, doubled for each retry after it, with jitter (default: 1000ms). */
+  backoffMs?: number;
+  /** The longest backoff in milliseconds (default and most: 30000ms). A server's `Retry-After` is waited instead. */
+  maxBackoffMs?: number;
 }
 
 /**
@@ -502,7 +510,22 @@ export type DownloadOptions = HostedTarget & {
    * writing to the sink never counts.
    */
   timeoutMs?: number;
+  /**
+   * How a download that's cut off, or stalls past `timeoutMs`, is continued:
+   * it asks for the rest under the same lease, from the next whole chunk. By
+   * default it keeps trying until the server stops holding the lease (5
+   * minutes after its last bytes).
+   */
+  retry?: RetryOptions;
 };
+
+/** Options for `client.hosted.delete()`: the upload, and the manage token its upload gave. */
+export interface DeleteOptions extends RequestOptions {
+  /** The upload's ID, from the completed upload's `id`. */
+  id: string;
+  /** The completed upload's `manageToken`. It's sent only in the `Dropgate-Manage-Token` header. */
+  manageToken: string;
+}
 
 /**
  * What a completed download gives.

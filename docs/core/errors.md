@@ -38,7 +38,7 @@ When the server answers with an error, the message is the server's own, if it se
 
 | Code | Origin | Retryable | When |
 | --- | --- | --- | --- |
-| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, or one that isn't an address; an `appInfo` that isn't `{ name, version? }`; an `auth` that isn't a function, or a credential it gives that isn't `{ token }`; no files, or something that isn't a file; no `id` or `bundleId`; a download's `files` that isn't indexes, each once, or names a file the upload doesn't have; a download without a sink that fits it; a lifetime that isn't a whole number of milliseconds; or an event `client.server.on()` doesn't have |
+| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, or one that isn't an address; an `appInfo` that isn't `{ name, version? }`; an `auth` that isn't a function, or a credential it gives that isn't `{ token }`; no files, or something that isn't a file; no `id` or `bundleId`; a download's `files` that isn't indexes, each once, or names a file the upload doesn't have; a download without a sink that fits it; a delete without an `id`, or with a `manageToken` that isn't one; a lifetime that isn't a whole number of milliseconds; or an event `client.server.on()` doesn't have |
 | `RUNTIME_UNSUPPORTED` | local | No | There's no `fetch()`, or no secure random numbers (`crypto.getRandomValues()`), or encryption was asked for where the browser gives no `crypto.subtle` (a page not served over HTTPS or from `localhost`), or a download's answer can't be read as a stream |
 | `OPERATION_CANCELLED` | local | No | A call was given an `AbortSignal`, and it was aborted. An upload or download that's cancelled ends with a `cancelled` outcome instead |
 | `SOURCE_UNAVAILABLE` | local | No | A file being uploaded couldn't be read |
@@ -46,7 +46,7 @@ When the server answers with an error, the message is the server's own, if it se
 | `ENCRYPT_FAILED` | local | No | The encryption keys couldn't be made, or a file name, list of files or chunk couldn't be encrypted |
 | `KEY_REQUIRED` | local | No | The upload is encrypted, and there's no secret (or, for a bundle, no key) |
 | `DECRYPT_FAILED` | local | No | An upload's list of files, a file name or a bundle's manifest couldn't be decrypted: usually the wrong link. A secret that isn't 32 bytes of URL-safe base64 is refused the same way |
-| `INTEGRITY_FAILED` | server | No | Downloaded data didn't decrypt, or an upload's header, list of files or chunks were changed, reordered or cut short, or its files don't fit it; the server already held different bytes for a chunk, or a chunk's `Content-Digest` didn't match it; or a direct transfer's sender sent data that didn't match what it declared (origin `peer`) |
+| `INTEGRITY_FAILED` | server | No | Downloaded data didn't decrypt, or an upload's header, list of files or chunks were changed, reordered or cut short, or its files don't fit it; the server already held different bytes for a chunk, or a chunk's `Content-Digest` didn't match it; a download being picked up again was sent the whole upload instead of the rest, so it may not be the same upload (none of it is written); or a direct transfer's sender sent data that didn't match what it declared (origin `peer`) |
 | `INVALID_MANIFEST` | peer | No | A direct transfer's list of files didn't add up |
 | `INVALID_FILENAME` | local, or `server` or `peer` for a name received | No | A file name sent or received, encrypted or not, is empty, longer than 255 bytes in UTF-8, or has a control character or path separator in it ([File Names](quick-start.md#file-names)) |
 | `INVALID_CODE` | local | No | A direct transfer code isn't the shape of one |
@@ -61,14 +61,16 @@ When the server answers with an error, the message is the server's own, if it se
 | `AUTH_EXPIRED` | server | No | The credential has expired, and did again after `auth` was asked for a new one (HTTP 401) |
 | `AUTH_DENIED` | server | No | The credential doesn't allow this |
 | `QUOTA_EXCEEDED` | server | No | This would go over the quota the server allows the credential's holder |
-| `NOT_FOUND` | server | No | The upload isn't on the server: it never was, it expired, or it was downloaded as many times as it could be (HTTP 404 or 410) |
-| `REQUEST_REJECTED` | server | No | The server refused the request for another reason (any other 4xx status), and says why |
+| `NOT_FOUND` | server | No | The upload isn't on the server: it never was, it expired, it was deleted, or it was downloaded as many times as it could be (HTTP 404 or 410). For an upload in progress, the server dropped it ("The server dropped this upload"), or couldn't be reached for longer than it waits for one |
+| `REQUEST_REJECTED` | server | No | The server refused the request for another reason (any other 4xx status), and says why: such as a manage token that isn't the upload's (HTTP 403) |
 | `RATE_LIMITED` | server | Yes | The server has had too many requests (HTTP 429) |
 | `SERVER_FULL` | server | Yes | The server is out of space (HTTP 507) |
 | `SERVER_ERROR` | server | Yes | The server ran into an error (HTTP 5xx) |
-| `INVALID_RESPONSE` | server | No | The server's answer wasn't understood, or isn't a Dropgate server's, or it couldn't send the range of bytes asked for |
+| `INVALID_RESPONSE` | server | No | The server's answer wasn't understood, or isn't a Dropgate server's, or it couldn't send the range of bytes asked for, or sent another range than the rest of a download |
 | `SERVER_UNREACHABLE` | network | Yes | No answer came: the server couldn't be reached |
 | `TIMED_OUT` | network | Yes | The server took too long to answer, or a download's next bytes took longer than its `timeoutMs`, or a direct transfer's other device didn't answer in time (origin `peer`) |
-| `CONNECTION_LOST` | network | Yes | A download was cut off part-way, or a direct transfer's connection dropped |
+| `CONNECTION_LOST` | network | Yes | A download was cut off part-way, and couldn't be picked up again before the server stopped holding it, or a direct transfer's connection dropped |
 | `PEER_FAILED` | peer | No | A direct transfer's other device reported an error. What it said isn't passed on, since it could say anything |
 | `UNEXPECTED_ERROR` | local | No | Anything else, with the error underneath as its `cause` |
+
+`retryable` says whether the same request could work later. Core's own retries are narrower, and an upload or a download only fails with one of these once they're over: see [Retries](api-reference.md#retries).

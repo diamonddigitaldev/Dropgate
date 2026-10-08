@@ -84,21 +84,51 @@ Uploads to the server, and downloads from it.
 | `download(opts)` | Download an upload (`id`) into a [sink](#download-sinks), decrypting it with the `secret` from its link if it was encrypted; or a bundle (`bundleId`, with `keyB64`). Gives the download's [handle](#operation-handles) at once |
 | `metadata(opts)` | What the server holds about an upload (`id`, with its `secret`) or a bundle (`bundleId`, with `keyB64`): the files' names and sizes, decrypted if it was encrypted ([below](#metadata)). It takes no lease and counts nothing |
 | `validate(opts)` | Check files and settings against a server's limits (`files`, `lifetimeMs`, `encrypt`, and the `serverInfo` from `client.server.connect()`), as `upload()` does before it starts, and give `true`. Left out, `encrypt` is what `upload()` would do: encrypted where the server supports it |
+| `delete(opts)` | Delete an upload (`id`) from the server at once, with the `manageToken` its upload gave ([below](#clienthosteddeleteopts)) |
 
-`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for unlimited, where the server allows it), and optionally `encrypt` (default: encrypted where the server supports it), `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs` 5000, `initMs` 15000, `chunkMs` 60000 for each chunk, `completeMs` 30000) and `retry` (`retries` 5, `backoffMs` 1000, `maxBackoffMs` 30000, for each chunk). Its completed value, an `UploadResult`, holds `downloadUrl`, the link; `id`, the upload's ID on the server, which is the link's path; `files`, each `name` and `size`; `manageToken`; and `transport`.
+`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for unlimited, where the server allows it), and optionally `encrypt` (default: encrypted where the server supports it), `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs` 5000, `initMs` 15000, `chunkMs` 60000 for each chunk, `completeMs` 30000) and `retry` ([below](#retries)). Its completed value, an `UploadResult`, holds `downloadUrl`, the link; `id`, the upload's ID on the server, which is the link's path; `files`, each `name` and `size`; `manageToken`; and `transport`.
 
 * **The link** is `https://<server>/<id>` for an unencrypted upload. An encrypted one's adds `#` and its **secret**: 32 random bytes, in URL-safe base64 with no `=` (43 characters). The keys that encrypt the upload are made from the secret, which never leaves the device: it's in the link alone. A bundle's link is still `https://<server>/b/<id>#<key>`, as in 3.x.
 * **The manage token** lets whoever has it delete the upload: 32 random bytes, URL-safe base64. Only its SHA-256 is sent, when the upload starts, and the token itself is in this value alone: never in a snapshot, an error, a log or the link. Keep it where only the upload's sender can use it, such as the page or the app that made the upload. A bundle's upload doesn't have one yet.
 * **One file is one encrypted object:** its name and size are sealed in a list only the secret opens, and the file is padded inside it so the stored size says little about the file's (never past the server's maximum upload size, so padding never makes a file too large). Each chunk is sealed once, and a chunk sent again is the same bytes.
 
-`download()` takes `id` (with `secret`, for an encrypted upload) or `bundleId` (with `keyB64`), `sink`, and optionally `files` (which of several files to download, by their index in the upload's list, each once; all of them if left out), `asZip` (several files as one ZIP archive), `signal`, and `timeoutMs`: how long each wait may take, for the server's answer and then for each file's next bytes (default 60000, and 0 for none). A big file never times out for taking long, only if it stalls, and time spent writing to the sink never counts. Its completed value, a `DownloadResult`, holds `filename` (one file) or `filenames` (several), `receivedBytes`, `wasEncrypted` and `transport`.
+`download()` takes `id` (with `secret`, for an encrypted upload) or `bundleId` (with `keyB64`), `sink`, and optionally `files` (which of several files to download, by their index in the upload's list, each once; all of them if left out), `asZip` (several files as one ZIP archive), `signal`, `timeoutMs`: how long each wait may take, for the server's answer and then for each file's next bytes (default 60000, and 0 for none), and `retry` ([below](#retries)). A big file never times out for taking long, only if it stalls, and time spent writing to the sink never counts. Its completed value, a `DownloadResult`, holds `filename` (one file) or `filenames` (several), `receivedBytes`, `wasEncrypted` and `transport`.
 
 * **One download, one lease.** Each `download()` of an upload by `id` takes a lease from the server, and releases it as soon as the download ends, however it ends. A lease that sent any byte is one download against the upload's limit, so at its limit the upload is gone once the download is saved. While other downloads hold every place the limit allows, the download waits, with the snapshot's `text` saying "Someone is downloading this right now.", and starts when one frees.
 * **Everything is checked before it's finished.** An encrypted upload is read to its last chunk, padding included, and every chunk is checked, so a changed, reordered or shortened upload fails with `INTEGRITY_FAILED`; the last file's sink (or the ZIP) is only closed once all of it has been. A download of some of an upload's files reads the whole upload.
+* **A dropped connection is picked up where it stopped,** under the same lease, so it counts once: core asks for the rest with `Range`, from the next whole chunk of an encrypted upload (the next byte of an unencrypted one), and `If-Range`, so it only ever continues the same upload. Nothing is written twice. If the server sends the whole upload again instead of the rest, none of it is written, and the download fails with `INTEGRITY_FAILED`.
 
 `upload()` and `download()` throw `INVALID_ARGUMENT` at once, before anything starts, for no files, something that isn't a file, neither an `id` nor a `bundleId`, a `files` that isn't indexes, or a sink that doesn't fit. After that, they report how they ended in their [outcome](outcomes.md), and never throw. `metadata()` and `validate()` throw a [`DropgateError`](errors.md).
 
-**Changed in 4.0:** an upload of one file is a Dropgate 4 object, under the link `https://<server>/<id>#<secret>`. The completed value's `fileId`, `bundleId`, `uploadId`, `keyB64` and `baseUrl` are gone: `id` is the one ID, the secret is in `downloadUrl`, and the server's address is `client.server.baseUrl`. `download()` and `metadata()` take `id` and `secret` for it, where 3.x took `fileId` and `keyB64`, and the metadata has one shape for one file or several ([below](#metadata)).
+#### Retries
+
+A request that can't succeed now but may soon is made again: one that got no answer (the network, or a timeout), and one answered `408`, `429` or a `5xx` but `507`. Anything else the server says fails at once with its [code](errors.md#codes), since asking again wouldn't change it: a bad request fails in a second, not after a minute of retries. A cancel is never retried.
+
+* **What's retried:** an upload's chunks (each sent again as the same bytes, an encrypted one sealed only once) and its finish; a download's bytes, which continue from where they stopped. The start of an upload, metadata, a download's lease and `delete()` aren't.
+* **How long:** until the server stops waiting, which is 5 minutes after it last heard from the upload or the download. An upload whose server couldn't be reached for longer fails with `NOT_FOUND`, "The server dropped this upload"; a download fails with its last error. Meanwhile, the snapshot's `text` says so ("Chunk upload failed. Retrying in 4.2s...", "The connection was lost. Reconnecting in 4.2s...").
+* **The wait** doubles from `backoffMs`, up to `maxBackoffMs`, each at a random point in its upper half, so clients that failed together don't all come back together. The randomness is the crypto provider's. A server's `Retry-After` is waited instead (up to a minute).
+
+`retry` is optional on both `upload()` and `download()`:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `retries` | None | At most this many retries of one request. Left out, core retries until the server stops waiting |
+| `backoffMs` | 1000 | The first wait, in milliseconds |
+| `maxBackoffMs` | 30000 | The longest wait, in milliseconds. It's never more than 30000 |
+
+#### client.hosted.delete(opts)
+
+```javascript
+await client.hosted.delete({ id: result.id, manageToken: result.manageToken });
+```
+
+Deletes an upload from the server at once: its bytes and its details go, its link stops working, and a download of it under way stops. It takes `id` and `manageToken`, from the completed upload's value, and optionally `timeoutMs` (default 5000) and `signal`. It gives a promise, which resolves once the upload is gone.
+
+* **Only the token's holder can.** The token is sent only in the `Dropgate-Manage-Token` header, to the client's own server: never in a URL, and it's never in an error. No credential is sent, and none is needed.
+* It throws `INVALID_ARGUMENT` before any request without an `id`, or with a `manageToken` that isn't 32 bytes of URL-safe base64; `NOT_FOUND` for an upload that isn't there (it was deleted, expired, or downloaded as many times as it allowed); `REQUEST_REJECTED`, with `status` 403, for a token that isn't this upload's; or a request's error. It isn't retried.
+* A bundle's upload doesn't have a manage token yet, so it can't be deleted this way.
+
+**Changed in 4.0:** an upload of one file is a Dropgate 4 object, under the link `https://<server>/<id>#<secret>`. The completed value's `fileId`, `bundleId`, `uploadId`, `keyB64` and `baseUrl` are gone: `id` is the one ID, the secret is in `downloadUrl`, and the server's address is `client.server.baseUrl`. `download()` and `metadata()` take `id` and `secret` for it, where 3.x took `fileId` and `keyB64`, and the metadata has one shape for one file or several ([below](#metadata)). `delete()` is new. Retries changed: 3.x retried a failed chunk 5 times whatever the error; 4.0 retries only what can recover, until the server stops waiting, and a dropped download continues instead of failing.
 
 ### client.direct
 

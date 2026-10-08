@@ -291,23 +291,39 @@ The SHA-256 hash in `X-Chunk-Hash` MUST be a 64-character lowercase hexadecimal 
 
 ## 7. Retry Strategy
 
-Clients SHOULD implement automatic retries for transient failures.
+A client retries only what can recover, and only while the server is still waiting for it. This is what the core library does, for version 3's chunks and for version 4's ([§19](#19-version-4-uploads), [§20](#20-version-4-downloads)).
 
-### 7.1 Recommended Defaults
+### 7.1 Defaults
 
 | Parameter | Default |
 |-----------|---------|
-| Maximum retries per chunk | 5 |
-| Initial back-off | 1,000 ms |
+| Retries per request | No limit: until the server stops waiting ([§7.3](#73-how-long-a-client-retries)) |
+| First back-off | 1,000 ms |
 | Back-off multiplier | 2× |
-| Maximum back-off | 30,000 ms |
+| Most back-off | 30,000 ms |
+| Jitter | A random point in the back-off's upper half, from the client's cryptographic random source |
 | Per-chunk timeout | 60,000 ms |
 
-### 7.2 Non-Retryable Errors
+- **`Retry-After` is waited instead of the back-off,** up to a minute, wherever the server sends it.
+- **What's retried:** a chunk, and a version 4 finish, which gives the same answer when it's asked again ([§19.6](#196-finish)); and a version 4 download's bytes, which continue where they stopped ([§7.4](#74-reconnecting-downloads)). A chunk is sent again as the same bytes: an encrypted one is sealed once ([§21.2](#212-the-object-a-client-makes)). The start, metadata, a lease and the delete aren't retried.
 
-- **Abort errors** (user cancellation) — fail immediately.
-- **Validation errors** (4xx) — retrying will not help; fail immediately.
-- **Storage quota exceeded** (507) — fail immediately.
+### 7.2 What's Retried, and What Isn't
+
+- **Retried:** no answer (a network error, or a connection dropped), a timeout, and the statuses `408`, `429` and every `5xx` but `507`.
+- **Never retried; the operation fails at once, with its code:** every other `4xx` (`400`, `403`, `404`, `409`, `410`, `413`, `416` and so on) and `507`. Sending the same request again won't change the answer, so a bad request fails in a second instead of after a minute of retries. An expired credential is renewed once and the request made again ([§3.5](#35-credentials)).
+- **A cancel** stops a wait at once, and is never retried.
+
+### 7.3 How Long a Client Retries
+
+Until the server stops waiting: a version 4 upload is dropped 5 minutes after its last request ([§19.8](#198-how-long-an-upload-lasts)), and a lease ends 5 minutes after its last request or byte ([§20.2](#202-leases)). Every answer carries a `deadline`; the client retries until the later of the last `deadline` and 5 minutes after the server last answered, so a clock that's ahead of the server's never cuts it short. Its last wait ends then, for one try more. If that fails too, the upload has gone: the core library fails it as `NOT_FOUND`, "The server dropped this upload", as it does when the server answers `404`. A download fails with its last error.
+
+### 7.4 Reconnecting Downloads
+
+A version 4 download whose connection drops, or stalls past its timeout, is continued under the same lease, so it counts once ([§20.3](#203-leases-and-counting)):
+
+- **It asks for the rest,** with `Range: bytes=<from>-` and `If-Range` set to the upload's `ETag` from the lease ([§20.4](#204-the-bytes)). An encrypted upload's rest starts at the next whole chunk after the last one opened and written; an unencrypted one's at the next byte. Until something has been written, it asks for the whole upload again.
+- **It must get `206`, for exactly that range,** with `Content-Range: bytes <from>-<size − 1>/<size>`. A `200` in answer to a range means the `If-Range` didn't match, so the upload isn't the one the download started: the client adds none of it to what it has, and fails as `INTEGRITY_FAILED`. Any other range is `INVALID_RESPONSE`.
+- **Nothing is written twice:** an encrypted chunk is written only once it has opened whole, so a chunk cut off part-way is asked for again from its start.
 
 ---
 
@@ -874,6 +890,7 @@ If-Range: "<id>"
 - **The `ETag` is the upload's ID:** an object never changes and an ID is never used twice. With `If-Range` naming any other value, the answer is the whole object, `200` ([RFC 9110](https://www.rfc-editor.org/rfc/rfc9110#section-13.1.5)), which a client resuming a download must not add to what it has.
 - **Where an encrypted upload's bytes are:** plaintext byte `p` is in chunk `⌊p / C⌋`, which starts at `60 + ⌊p / C⌋ × (C + 16)`, where `C` is the header's chunk size. A file of a bundle at plaintext `[a, a + s)` needs chunks `⌊a / C⌋` to `⌊(a + s − 1) / C⌋`, one range, and never a chunk that's only padding. A paused or dropped download asks from the next whole chunk after the last one it wrote. An unencrypted upload's file is a plain range: the files are one after another, in the list's order.
 - **`HEAD`** gives the same headers and no bytes, and sends nothing that counts.
+- **A client continuing a dropped download** sends `Range` from where it got to, with `If-Range`, under the same lease, and refuses a `200` ([§7.4](#74-reconnecting-downloads)).
 
 ### 20.5 A Browser's Own Downloads
 
@@ -905,6 +922,8 @@ The manage token is the 32 random bytes whose SHA-256 the upload's start sent as
 | `404` | `NOT_FOUND` | No upload by that ID, or an expired one. |
 
 An encrypted upload can be deleted while the server has E2EE off.
+
+The core library's call is `client.hosted.delete({ id, manageToken })`, with the `manageToken` its upload gave ([Core API](../core/api-reference.md#clienthosteddeleteopts)). The token goes only in this header, to the upload's own server: never in a URL, a log or an error. The delete isn't retried.
 
 ### 20.7 Rate Limits
 
@@ -951,4 +970,13 @@ GET /{id}
 - **One page, served over HTTP and HTTPS alike.** The server sends it for an upload that's there, with no check of how the request came in: the page itself decides whether it can decrypt, from whether the browser gives it a secure context (HTTPS, or `localhost`), which the server can't tell from the request. An unknown, expired or deleted upload, or an encrypted one on a server with E2EE off, gets the not-found page (`404`). A version 3 bundle's ID redirects to `/b/<bundleId>`.
 - **Loading the page takes no lease and counts nothing.** The page holds no file name or size: a link preview, which fetches the page without the `#` part, sees only the server's name and Dropgate's description. The page reads the upload's metadata ([§20.1](#201-metadata)) and opens its file list with the secret, in the browser.
 - **Downloading** is core's: one lease ([§20.2](#202-leases)), released as soon as the download ends, so at its limit the upload is gone once the file is saved. A download that finds every allowed place held waits as `Retry-After` says, and starts when one frees.
+- **A dropped connection** is continued under the same lease, from where it got to ([§7.4](#74-reconnecting-downloads)).
 - **Without a secure context,** an unencrypted file is handed to the browser: the page takes the lease with `fetch()` and sends the browser to `/api/v4/leases/{lease}` ([§20.5](#205-a-browsers-own-downloads)). An encrypted file can't be downloaded there, and the page says why.
+
+### 21.4 Deleting From the Result Screen
+
+The Web UI's result screen, after a single file's upload, has **Delete upload**. Once confirmed, it deletes the upload ([§20.6](#206-the-uploaders-delete)) with the manage token its upload gave, and the link stops working.
+
+- **The token is in the page's memory only:** never in storage, the page itself or a URL. A reload, or **Send more files**, drops it, and the button with it; the upload then stays until it expires or reaches its download limit.
+- **An upload that's already gone** (expired, or downloaded as many times as it allows) is reported as already gone.
+- A bundle's upload has no manage token yet, so its result screen has no Delete.

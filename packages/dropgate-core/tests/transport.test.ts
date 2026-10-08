@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { DropgateClient, DropgateError } from '../src/index.js';
 import type { DownloadSink, PeerConstructor } from '../src/index.js';
 import { FakePeer } from './helpers/fake-peer.js';
-import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
+import { CHUNK_SIZE, MANAGE_TOKEN_HASH, MANAGE_TOKEN, fakeV4 } from './helpers/fake-v4.js';
 
 // The insecure-transport policy (`09` 7.1.1–7.1.6): no automatic fallback to
 // plain HTTP, no redirect followed, an insecure server only with
@@ -39,7 +39,7 @@ interface Seen {
 function fakeServer(opts: { failing?: boolean; infoFails?: boolean; p2p?: boolean } = {}) {
   const requests: Seen[] = [];
   const v4 = fakeV4({ id: FILE_ID });
-  v4.store(FILE_ID, { encrypted: false, size: CHUNK_SIZE, bytes: new Uint8Array(CHUNK_SIZE), files: [{ name: 'notes.txt', size: CHUNK_SIZE }] });
+  v4.store(FILE_ID, { encrypted: false, size: CHUNK_SIZE, bytes: new Uint8Array(CHUNK_SIZE), files: [{ name: 'notes.txt', size: CHUNK_SIZE }], manageTokenHash: MANAGE_TOKEN_HASH });
   const fetchFn = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const url = String(input);
     requests.push({ url, redirect: init.redirect });
@@ -330,6 +330,12 @@ const OPERATIONS: Record<string, (make: Make) => Promise<Collected>> = {
     snapshots: [],
     results: [await make().hosted.metadata({ id: FILE_ID })],
     errors: [await errorFrom(() => make({ failing: true }).hosted.metadata({ id: FILE_ID }))],
+  }),
+  // It resolves to nothing, so only its error has a transport to carry.
+  'hosted.delete': async (make) => ({
+    snapshots: [],
+    results: (await make().hosted.delete({ id: FILE_ID, manageToken: MANAGE_TOKEN }), []),
+    errors: [await errorFrom(() => make({ failing: true }).hosted.delete({ id: FILE_ID, manageToken: MANAGE_TOKEN }))],
   }),
   'hosted.validate': async (make) => ({
     snapshots: [],

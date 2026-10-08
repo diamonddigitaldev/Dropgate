@@ -252,7 +252,7 @@ On plain HTTP, even on `localhost` or `127.0.0.1`, the Web UI encrypts uploads, 
 - Files can be set to expire after a certain period or after a certain number of downloads. An upload is gone the moment it expires: from then on the server answers as if it had never existed, and deletes it within a minute.
 - A Dropgate 4 upload in progress ends 5 minutes after its last request, or, paused, when its pause runs out (`UPLOAD_MAX_PAUSE_MINUTES`). It ends at once: its temporary file and the storage it reserved go. Dropgate 3's incomplete uploads are cleaned up on an interval.
 - A Dropgate 4 download takes a lease, kept in memory only, and counts once when it ends if it sent anything, however many requests or files it took. At its upload's download limit, the upload is deleted at once, a bundle as a whole. While open downloads already make the limit, a new one is asked to wait. `UPLOAD_MAX_PAUSE_MINUTES` is also how long a paused download is kept.
-- The uploader can delete a Dropgate 4 upload at once, with the manage token only their page or app holds. With `UPLOAD_PRESERVE_UPLOADS=true`, a deleted record is overwritten with zeros in the database.
+- The uploader can delete a Dropgate 4 upload at once, with the manage token only their page or app holds: in the Web UI, **Delete upload** on the result screen, while the page is open. With `UPLOAD_PRESERVE_UPLOADS=true`, a deleted record is overwritten with zeros in the database.
 - Storage used, for `UPLOAD_MAX_STORAGE_GB`, is what's stored plus what every upload in progress has reserved.
 
 

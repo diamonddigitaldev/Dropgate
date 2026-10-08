@@ -165,7 +165,7 @@
 
         <div id="shareCard" class="card shadow-sm mt-4 border border-success" hidden>
           <div class="card-body p-4 text-center">
-            <div class="text-success mb-2"><span class="material-icons-round">check_circle</span></div>
+            <div class="text-success mb-2" id="shareIcon"><span class="material-icons-round">check_circle</span></div>
             <h5 class="mb-2" id="shareTitle">Upload Complete</h5>
             <div class="text-body-secondary" id="shareSub">Share this link with your recipient:</div>
 
@@ -179,7 +179,10 @@
               </button>
             </div>
 
-            <button class="btn btn-secondary mt-3" id="newUpload" type="button">Send more files</button>
+            <div class="d-flex flex-wrap justify-content-center gap-2 mt-3">
+              <button class="btn btn-secondary" id="newUpload" type="button">Send more files</button>
+              <button class="btn btn-outline-danger" id="deleteUpload" type="button" hidden>Delete upload</button>
+            </div>
           </div>
         </div>
 
@@ -237,6 +240,28 @@
         <div class="modal-footer border-0">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
           <button type="button" class="btn btn-warning" id="confirmInsecureUpload">Upload Anyway</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Upload Modal -->
+  <div class="modal fade" id="deleteUploadModal" tabindex="-1" aria-labelledby="deleteUploadModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header border-0">
+          <h5 class="modal-title d-flex align-items-center gap-2" id="deleteUploadModalLabel">
+            <span class="material-icons-round text-danger">delete</span>
+            Delete This Upload?
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb-0">It's removed from the server now, and its link stops working for everyone. This can't be undone.</p>
+        </div>
+        <div class="modal-footer border-0">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger" id="confirmDeleteUpload">Delete</button>
         </div>
       </div>
     </div>

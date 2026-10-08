@@ -235,3 +235,191 @@ describe('One file on Dropgate 4, against the real server', { timeout: 60_000 },
     });
   });
 });
+
+/** A copy of `body` that gives its first `bytes` bytes, then drops as a lost connection does. */
+function cutAfter(body: ReadableStream<Uint8Array>, bytes: number): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let left = bytes;
+  return new ReadableStream({
+    async pull(controller) {
+      if (left <= 0) {
+        // The connection goes: the server's answer is never read to its end.
+        await reader.cancel().catch(() => {});
+        controller.error(new TypeError('terminated'));
+        return;
+      }
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.close();
+        return;
+      }
+      const part = value.subarray(0, left);
+      left -= part.byteLength;
+      controller.enqueue(part);
+    },
+  });
+}
+
+/** Numbers from a seed, the same every run, so a failure can be run again. */
+const seeded = (seed: number) => () => {
+  seed = (seed * 1103515245 + 12345) >>> 0;
+  return seed / 2 ** 32;
+};
+
+/** The content requests the server got, as their Range, If-Range and lease. */
+const contentRequests = (requests: ReturnType<Server['requests']>) => requests
+  .filter((r) => r.method === 'GET' && /^\/api\/v4\/objects\/[^/]+\/content$/.test(r.url))
+  .map((r) => ({ range: r.headers.range, ifRange: r.headers['if-range'], lease: r.headers['dropgate-lease'] }));
+
+describe('Retries and reconnecting downloads, against the real server', { timeout: 60_000 }, () => {
+  it('a chunk that gets a 500, a reset, a 429 with Retry-After, no answer in time, or an answer lost on the way back is sent again, the same sealed bytes, and the upload completes intact', async () => {
+    await withServer({}, async (server) => {
+      const faults = ['500', 'reset', '429', 'no answer', 'answer lost'];
+      const fetchFn: typeof fetch = async (input, init = {}) => {
+        const fault = init.method === 'PUT' ? faults.shift() : undefined;
+        if (fault === '500') return new Response(JSON.stringify({ code: 'SERVER_ERROR', error: 'Something went wrong on the server.' }), { status: 500 });
+        if (fault === 'reset') throw new TypeError('fetch failed');
+        if (fault === '429') return new Response(JSON.stringify({ code: 'RATE_LIMITED', error: 'Too many requests.' }), { status: 429, headers: { 'Retry-After': '1' } });
+        if (fault === 'no answer') {
+          return new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true }));
+        }
+        if (fault === 'answer lost') {
+          await (await fetch(input, init)).text();
+          throw new TypeError('terminated');
+        }
+        return fetch(input, init);
+      };
+      const client = new DropgateClient({ server: server.baseUrl, fetchFn });
+      const bytes = fileBytes(CHUNK * 2 + 999, 11);
+      const started = Date.now();
+      const outcome = await client.hosted.upload({
+        files: new File([bytes], 'retried.bin'), lifetimeMs: 60 * 60 * 1000, encrypt: true,
+        timeouts: { chunkMs: 500 }, retry: { backoffMs: 10 },
+      }).result;
+      if (outcome.status !== 'completed') throw outcome.status === 'failed' ? outcome.error : new Error('Cancelled.');
+      expect(Date.now() - started, "the 429's Retry-After was waited").toBeGreaterThanOrEqual(1000);
+
+      // The server got chunk 0 twice (its answer was lost the first time), the same bytes both times, then the rest once.
+      const puts = server.requests().filter((r) => r.method === 'PUT');
+      expect(puts.map((r) => r.url)).toEqual(['/api/v4/upload/chunks/0', '/api/v4/upload/chunks/0', '/api/v4/upload/chunks/1', '/api/v4/upload/chunks/2']);
+      expect(puts[1].body.equals(puts[0].body)).toBe(true);
+      expect(puts[1].headers['content-digest']).toBe(puts[0].headers['content-digest']);
+
+      const got = await download(new DropgateClient({ server: server.baseUrl }), outcome.value.id, new URL(outcome.value.downloadUrl).hash.slice(1));
+      expect(got.bytes.equals(Buffer.from(bytes))).toBe(true);
+    });
+  });
+
+  it('a download cut off at random places continues with Range under the same lease, is byte for byte, and counts once, encrypted or not', async () => {
+    await withServer({ UPLOAD_MAX_FILE_DOWNLOADS: '2' }, async (server) => {
+      const uploader = new DropgateClient({ server: server.baseUrl });
+      const bytes = fileBytes(CHUNK * 5 + 4321, 12);
+      const random = seeded(7);
+      for (const encrypt of [true, false]) {
+        const value = await upload(uploader, new File([bytes], 'cut.bin'), { encrypt, maxDownloads: 2 });
+        const secret = encrypt ? new URL(value.downloadUrl).hash.slice(1) : undefined;
+        const before = server.requests().length;
+        const cuts = Array.from({ length: 4 }, () => Math.floor(random() * CHUNK));
+        const fetchFn: typeof fetch = async (input, init = {}) => {
+          const res = await fetch(input, init);
+          const cut = String(input).endsWith('/content') ? cuts.shift() : undefined;
+          return cut === undefined || !res.body ? res : new Response(cutAfter(res.body, cut), { status: res.status, headers: res.headers });
+        };
+        const { sink, bytes: got } = keeping();
+        const outcome = await new DropgateClient({ server: server.baseUrl, fetchFn }).hosted.download({ id: value.id, secret, sink, retry: { backoffMs: 10 } }).result;
+        expect(outcome.status, `encrypted: ${encrypt}`).toBe('completed');
+        expect(got().equals(Buffer.from(bytes)), `encrypted: ${encrypt}: byte for byte`).toBe(true);
+
+        const asked = contentRequests(server.requests().slice(before));
+        expect(asked.length, `encrypted: ${encrypt}`).toBe(5);
+        expect(new Set(asked.map((a) => a.lease)).size, 'one lease').toBe(1);
+        const leases = server.requests().slice(before).filter((r) => r.url.endsWith('/leases') || r.url === '/api/v4/lease');
+        expect(leases.map((r) => r.method), 'taken once, released once').toEqual(['POST', 'DELETE']);
+        for (const { range, ifRange } of asked.filter((a) => a.range !== undefined)) {
+          expect(ifRange).toBe(`"${value.id}"`);
+          const from = Number(/^bytes=(\d+)-$/.exec(String(range))![1]);
+          // Encrypted, from a whole chunk; unencrypted, from the next byte.
+          if (encrypt) expect((from - 60) % (CHUNK + 16), `${range}`).toBe(0);
+        }
+
+        // It counted once: one more download is allowed, and then the upload is gone.
+        expect((await download(uploader, value.id, secret)).bytes.equals(Buffer.from(bytes))).toBe(true);
+        await expect(uploader.hosted.metadata({ id: value.id, secret })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      }
+    });
+  });
+
+  it("refuses to append the whole upload the server sends when a resumed download's If-Range doesn't match", async () => {
+    await withServer({}, async (server) => {
+      const uploader = new DropgateClient({ server: server.baseUrl });
+      const bytes = fileBytes(CHUNK * 3 + 10, 13);
+      const value = await upload(uploader, new File([bytes], 'changed.bin'), { encrypt: true });
+      let first = true;
+      const fetchFn: typeof fetch = async (input, init = {}) => {
+        const headers = new Headers(init.headers);
+        // As if the upload had changed since the download started.
+        if (headers.has('If-Range')) headers.set('If-Range', '"another upload"');
+        const res = await fetch(input, { ...init, headers });
+        if (!String(input).endsWith('/content') || !first) return res;
+        first = false;
+        return new Response(cutAfter(res.body!, 60 + (CHUNK + 16) + 100), { status: res.status, headers: res.headers });
+      };
+      const { sink, bytes: got } = keeping();
+      const aborted: unknown[] = [];
+      const outcome = await new DropgateClient({ server: server.baseUrl, fetchFn }).hosted.download({
+        id: value.id, secret: new URL(value.downloadUrl).hash.slice(1), sink: { ...sink, abort: (reason) => { aborted.push(reason); } }, retry: { backoffMs: 10 },
+      }).result;
+      expect(outcome.status === 'failed' && outcome.error.code).toBe('INTEGRITY_FAILED');
+      expect(got().equals(Buffer.from(bytes.subarray(0, CHUNK))), 'only the chunk before the cut').toBe(true);
+      expect(aborted).toHaveLength(1);
+      expect(contentRequests(server.requests()).map((a) => a.ifRange)).toEqual([undefined, '"another upload"']);
+    });
+  });
+});
+
+describe("The uploader's delete, against the real server", { timeout: 60_000 }, () => {
+  it('deletes the upload with its manage token, sent only in Dropgate-Manage-Token: its details and bytes are gone, and a download under way stops', async () => {
+    await withServer({}, async (server) => {
+      const client = new DropgateClient({ server: server.baseUrl });
+      // Large enough that the server is still sending when the delete comes.
+      const bytes = fileBytes(8 * MiB, 14);
+      const value = await upload(client, new File([bytes], 'to delete.bin'), { encrypt: true, maxDownloads: 0 });
+      const secret = new URL(value.downloadUrl).hash.slice(1);
+      const token = value.manageToken!;
+
+      // A token that isn't the upload's deletes nothing.
+      const wrong = Buffer.alloc(32, 1).toString('base64url');
+      await expect(client.hosted.delete({ id: value.id, manageToken: wrong })).rejects.toMatchObject({ code: 'REQUEST_REJECTED', status: 403 });
+      expect(server.storedFiles()).toEqual([`objects/${value.id}`]);
+
+      // A download under way, held at its first write.
+      let release = () => {};
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let writes = 0;
+      const downloading = client.hosted.download({
+        id: value.id, secret, retry: { backoffMs: 10 },
+        sink: { write: async () => { if (writes++ === 0) await held; }, close: () => {} },
+      });
+      await expect.poll(() => writes).toBe(1);
+
+      await expect(client.hosted.delete({ id: value.id, manageToken: token })).resolves.toBeUndefined();
+      release();
+      const stopped = await downloading.result;
+      expect(stopped.status === 'failed' && stopped.error.code, 'the download under way').toBe('NOT_FOUND');
+
+      expect(server.storedFiles()).toEqual([]);
+      await expect(client.hosted.metadata({ id: value.id, secret })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      const content = await fetch(`${server.baseUrl}/api/v4/objects/${value.id}/leases`, { method: 'POST' });
+      expect(content.status, 'a new lease').toBe(404);
+      await expect(client.hosted.delete({ id: value.id, manageToken: token })).rejects.toMatchObject({ code: 'NOT_FOUND', status: 404 });
+
+      // The token went in its header, in the deletes, and nowhere else.
+      const withToken = holding(server, spellings(token));
+      expect(withToken).toEqual([`DELETE /api/v4/objects/${value.id}`, `DELETE /api/v4/objects/${value.id}`]);
+      for (const request of server.requests().filter((r) => r.method === 'DELETE' && r.url.startsWith('/api/v4/objects/'))) {
+        expect(request.url.includes(token)).toBe(false);
+        expect(request.headers.authorization).toBeUndefined();
+      }
+    });
+  });
+});

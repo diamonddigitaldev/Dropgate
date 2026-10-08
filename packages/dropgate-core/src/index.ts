@@ -50,6 +50,7 @@ export type {
   RequestOptions,
   ValidateUploadOptions,
   UploadOptions,
+  RetryOptions,
   UploadResult,
   UploadHandle,
   UploadSnapshot,
@@ -70,6 +71,7 @@ export type {
   DownloadPhase,
   DownloadStatus,
   DownloadOutcome,
+  DeleteOptions,
 } from './types.js';
 
 // P2P Types - Consumer-facing types for client.direct

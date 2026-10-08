@@ -63,9 +63,14 @@ if (outcome.status === 'completed') {
 
 // Cancel an in-progress upload (its outcome is then 'cancelled'):
 // upload.cancel();
+
+// Delete a finished one from the server, with the token its upload gave:
+// await client.hosted.delete({ id: outcome.value.id, manageToken: outcome.value.manageToken });
 ```
 
-An encrypted upload's link ends with `#` and its secret, from which the keys that encrypt it are made: it never leaves the device, except in the link you share. The `manageToken` deletes the upload, and only the sender has it: keep it no further than you need, and never in a log.
+An encrypted upload's link ends with `#` and its secret, from which the keys that encrypt it are made: it never leaves the device, except in the link you share. The `manageToken` deletes the upload with [`client.hosted.delete()`](api-reference.md#clienthosteddeleteopts), and only the sender has it: keep it no further than you need, and never in a log.
+
+A chunk that gets no answer, or a `408`, `429` or `5xx` but `507`, is sent again, after a growing wait, until the server stops waiting for the upload; anything else fails at once ([Retries](api-reference.md#retries)).
 
 `upload.snapshot` is where it is now, as a new, frozen object each time it changes. The [API Reference](api-reference.md#operation-handles) lists its fields, and [Outcomes and Cancellation](outcomes.md) has the rest, including cancelling with your own `AbortSignal`, and everything at once with `client.operations.cancelAll()`.
 

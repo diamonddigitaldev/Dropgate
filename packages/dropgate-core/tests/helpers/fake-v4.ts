@@ -11,6 +11,10 @@ import { ObjectLayout } from '../../src/object/index.js';
 /** The smallest chunk size an object may have, which keeps the fakes' files small. */
 export const CHUNK_SIZE = 64 * 1024;
 
+/** A manage token, as an upload's value gives it, and the SHA-256 the server keeps of it. */
+export const MANAGE_TOKEN = Buffer.alloc(32, 7).toString('base64url');
+export const MANAGE_TOKEN_HASH = createHash('sha256').update(Buffer.from(MANAGE_TOKEN, 'base64url')).digest('base64url');
+
 /** A stored upload, as the server's record and object hold it. */
 export interface StoredObject {
   encrypted: boolean;
@@ -53,9 +57,23 @@ const headerOf = (init: RequestInit, name: string): string | undefined => {
 };
 
 /**
+ * The one range a Range header asks for, as the server reads it: `bytes=a-`
+ * or `bytes=a-b` within `size` bytes, or null for anything else.
+ */
+const rangeOf = (header: string, size: number): [number, number] | null => {
+  const match = /^bytes=(\d+)-(\d*)$/.exec(header);
+  if (!match) return null;
+  const first = Number(match[1]);
+  const last = match[2] === '' ? size - 1 : Math.min(Number(match[2]), size - 1);
+  return first < size && first <= last ? [first, last] : null;
+};
+
+/**
  * Dropgate 4's routes, in memory, with `chunkSize` as the server's. `handle()`
  * answers a request to one of them, or gives undefined for any other path.
- * Every finished upload is stored under `id`, when it's given.
+ * Every finished upload is stored under `id`, when it's given. A content
+ * request with `Range` gets that range (206), unless its `If-Range` isn't the
+ * upload's ETag, which gets the whole upload (200), as the server answers.
  */
 export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: number; id?: string } = {}) {
   const uploads = new Map<string, Upload>();
@@ -152,7 +170,28 @@ export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: nu
         if (!headerOf(init, 'Dropgate-Lease')) return json(400, { code: 'LEASE_REQUIRED', error: 'A download needs a lease, in the Dropgate-Lease header.' });
         if (!stored || !lease || lease.id !== id) return notFound();
         lease.served = true;
-        return new Response(stored.bytes as Uint8Array<ArrayBuffer>, { status: 200, headers: { 'Content-Length': String(stored.size), ETag: `"${id}"` } });
+        const etag = `"${id}"`;
+        const range = headerOf(init, 'Range');
+        const ifRange = headerOf(init, 'If-Range');
+        if (range !== undefined && (ifRange === undefined || ifRange === etag)) {
+          const asked = rangeOf(range, stored.size);
+          if (!asked) return json(416, { code: 'RANGE_NOT_SATISFIABLE', error: "The server can't send that range of bytes." }, { 'Content-Range': `bytes */${stored.size}` });
+          const [first, last] = asked;
+          return new Response(stored.bytes.slice(first, last + 1) as Uint8Array<ArrayBuffer>, {
+            status: 206,
+            headers: { 'Content-Length': String(last - first + 1), 'Content-Range': `bytes ${first}-${last}/${stored.size}`, ETag: etag },
+          });
+        }
+        return new Response(stored.bytes as Uint8Array<ArrayBuffer>, { status: 200, headers: { 'Content-Length': String(stored.size), ETag: etag } });
+      }
+      if (method === 'DELETE' && !rest) {
+        if (!stored) return notFound();
+        const token = headerOf(init, 'Dropgate-Manage-Token') ?? '';
+        const hash = createHash('sha256').update(Buffer.from(token, 'base64url')).digest('base64url');
+        if (!token || hash !== stored.manageTokenHash) return json(403, { code: 'MANAGE_DENIED', error: "That manage token isn't this upload's." });
+        objects.delete(id);
+        for (const [key, lease] of leases) if (lease.id === id) leases.delete(key);
+        return new Response(null, { status: 204 });
       }
     }
 
