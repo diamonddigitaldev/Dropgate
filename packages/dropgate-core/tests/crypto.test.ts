@@ -6,6 +6,7 @@ import { createCipheriv, createHmac } from 'node:crypto';
 import { DropgateClient, codes } from '../src/index.js';
 import { cryptoProvider, webCryptoProvider, sha256Hex } from '../src/crypto/index.js';
 import { newOperationId } from '../src/operation.js';
+import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
 
 // The crypto provider: every encrypt, decrypt, key, hash and random number
 // core uses goes through it. WebCrypto today; phase 11 adds the audited
@@ -147,20 +148,21 @@ describe('On a page served over plain HTTP (no crypto.subtle, no randomUUID)', (
     expect(newOperationId()).toMatch(UUID_V4);
 
     const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
-    const fetchFn = async (input: RequestInfo | URL) => {
-      switch (new URL(String(input)).pathname) {
-        case '/api/info': return json({
+    const v4 = fakeV4();
+    const fetchFn = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/api/info') {
+        return json({
           version: '4.0.0', protocols: { dgup: { major: 4, minor: 0 }, dgdtp: { major: 4, minor: 0 } },
-          capabilities: { upload: { enabled: true, maxSizeMB: 0, maxLifetimeHours: 0, e2ee: true, chunkSize: 4 } },
+          capabilities: { upload: { enabled: true, maxSizeMB: 0, maxLifetimeHours: 0, e2ee: true, chunkSize: CHUNK_SIZE } },
         });
-        case '/upload/init': return json({ uploadId: 'upload-1' });
-        case '/upload/complete': return json({ id: 'file-1' });
-        default: return json({});
       }
+      return (await v4.handle(init.method ?? 'GET', path, init)) ?? json({});
     };
     const client = new DropgateClient({ server: 'http://192.168.1.10', allowInsecure: true, fetchFn });
     const files = new File([new Uint8Array(10).fill(1)], 'a.txt');
     expect((await client.hosted.upload({ files, lifetimeMs: 60_000, encrypt: false }).result).status).toBe('completed');
+    expect(v4.objects.size, 'uploads stored').toBe(1);
     const encrypted = await client.hosted.upload({ files, lifetimeMs: 60_000, encrypt: true }).result;
     expect(encrypted.status === 'failed' && encrypted.error.code).toBe('RUNTIME_UNSUPPORTED');
   });

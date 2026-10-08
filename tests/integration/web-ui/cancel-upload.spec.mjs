@@ -14,7 +14,7 @@ test('cancelling an upload part-way says it was cancelled, goes back to the star
 
     // The first chunk goes through; the second waits until the page gives up on it.
     let chunks = 0;
-    await page.route('**/upload/chunk', (route) => {
+    await page.route('**/api/v4/upload/chunks/*', (route) => {
         chunks += 1;
         if (chunks === 1) return route.continue();
         return undefined;
@@ -35,7 +35,7 @@ test('cancelling an upload part-way says it was cancelled, goes back to the star
     await expect(page.getByText(/upload failed/i)).toHaveCount(0);
 
     // The page told the server, which keeps nothing of the upload.
-    await expect.poll(() => server.requests().filter((r) => r.method === 'POST' && new URL(r.url, server.baseUrl).pathname === '/upload/cancel').length)
+    await expect.poll(() => server.requests().filter((r) => r.method === 'DELETE' && new URL(r.url, server.baseUrl).pathname === '/api/v4/upload').length)
         .toBe(1);
     expect(server.storedFiles(), 'files the server holds').toEqual([]);
     expect(chunks, 'no chunk after the cancel').toBe(2);

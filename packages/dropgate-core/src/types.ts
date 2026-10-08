@@ -126,24 +126,32 @@ export interface UploadSnapshot {
   transport: Transport;
 }
 
+/** One file of a hosted upload: its name and its size in bytes. */
+export interface HostedFile {
+  /** The file's name, as it was sent (decrypted, for an encrypted upload). */
+  name: string;
+  /** The file's size in bytes. */
+  size: number;
+}
+
 /**
- * Result of a successful file upload.
+ * What a completed upload gives: its link, and the manage token that deletes
+ * it. Keep the token where only this upload's sender can use it: it's never in
+ * a snapshot, an error, a log or a link.
  */
 export interface UploadResult {
-  /** Full download URL including encryption key fragment if encrypted. */
+  /** The link: `https://<server>/<id>`, and for an encrypted upload `#` and its secret. */
   downloadUrl: string;
-  /** Unique file identifier on the server (set for single-file uploads). */
-  fileId?: string;
-  /** Unique bundle identifier on the server (set for multi-file uploads). */
-  bundleId?: string;
-  /** Upload session identifier (set for single-file uploads). */
-  uploadId?: string;
-  /** Server base URL used for the upload. */
-  baseUrl: string;
-  /** Base64-encoded encryption key (only present if encrypted). */
-  keyB64?: string;
-  /** Per-file results (only present for multi-file uploads). */
-  files?: Array<{ fileId: string; name: string; size: number }>;
+  /** The upload's ID on the server: the link's path. */
+  id: string;
+  /**
+   * The manage token, which only this upload's sender has: 32 random bytes,
+   * URL-safe base64. The server keeps only its SHA-256. A bundle's upload
+   * doesn't have one yet.
+   */
+  manageToken?: string;
+  /** The files uploaded, in order. */
+  files: HostedFile[];
   /** How the client reached its server. */
   transport: Transport;
 }
@@ -369,16 +377,35 @@ export interface ValidateUploadOptions {
   serverInfo: ServerInfo;
 }
 
-/** Which hosted upload: a single file by its ID, or a bundle by its ID. */
-export type HostedTarget = { fileId: string; bundleId?: undefined } | { bundleId: string; fileId?: undefined };
+/**
+ * Which hosted upload: one by its `id`, with the `secret` from its link (after
+ * the #) if it's encrypted; or a bundle's, by its `bundleId` and `keyB64`, as
+ * bundles are still uploaded.
+ */
+export type HostedTarget =
+  | { id: string; secret?: string; bundleId?: undefined; keyB64?: undefined }
+  | { bundleId: string; keyB64?: string; id?: undefined; secret?: undefined };
 
 /** Options for `client.hosted.metadata()`. */
-export type MetadataOptions = HostedTarget & RequestOptions & {
-  /** The key from the link, after its #. Needed to read an encrypted upload's file names. */
-  keyB64?: string;
-};
+export type MetadataOptions = HostedTarget & RequestOptions;
 
-/** One file of a hosted upload, as its metadata describes it. */
+/** What `client.hosted.metadata({ id })` gives: the same shape for one file or several. */
+export interface UploadMetadata {
+  /** `file` for one file, `bundle` for several. */
+  kind: 'file' | 'bundle';
+  /** The upload's ID on the server. */
+  id: string;
+  /** Whether it's end-to-end encrypted. */
+  encrypted: boolean;
+  /** Its files, in order, with their names decrypted and their sizes as they'll be downloaded. */
+  files: HostedFile[];
+  /** The files' sizes added up, in bytes. */
+  totalSize: number;
+  /** How the client reached its server. */
+  transport: Transport;
+}
+
+/** One file of a bundle, as its metadata describes it. */
 export interface HostedFileInfo {
   /** The file's ID on the server. */
   fileId: string;
@@ -388,16 +415,7 @@ export interface HostedFileInfo {
   sizeBytes: number;
 }
 
-/** What `client.hosted.metadata()` gives for a single file. */
-export interface FileMetadata extends HostedFileInfo {
-  kind: 'file';
-  /** Whether the file is end-to-end encrypted. */
-  isEncrypted: boolean;
-  /** How the client reached its server. */
-  transport: Transport;
-}
-
-/** What `client.hosted.metadata()` gives for a bundle. */
+/** What `client.hosted.metadata({ bundleId })` gives for a bundle. */
 export interface BundleMetadata {
   kind: 'bundle';
   /** The bundle's ID on the server. */
@@ -417,7 +435,7 @@ export interface BundleMetadata {
 }
 
 /** What `client.hosted.metadata()` gives. */
-export type HostedMetadata = FileMetadata | BundleMetadata;
+export type HostedMetadata = UploadMetadata | BundleMetadata;
 
 /** The step a download is on. */
 export type DownloadPhase =
@@ -453,20 +471,24 @@ export interface DownloadSnapshot {
 }
 
 /**
- * Options for `client.hosted.download()`: a single file by `fileId`, or a
- * bundle by `bundleId`, and the sink its bytes are written to.
+ * Options for `client.hosted.download()`: an upload by `id` (or a bundle by
+ * `bundleId`), and the sink its bytes are written to.
  */
 export type DownloadOptions = HostedTarget & {
   /**
    * Where the bytes go: a sink, or a function giving one for each file as it
    * starts (it's told the file's name and size). Required. A single file takes
-   * either; a bundle as a ZIP (`asZip`) takes a sink, and a bundle as separate
-   * files takes a function.
+   * either; several files as a ZIP (`asZip`) take a sink, and several files
+   * apart take a function.
    */
   sink: DownloadSinkOption;
-  /** The key from the link, after its #. Required for an encrypted upload. */
-  keyB64?: string;
-  /** For a bundle: write its files into one ZIP archive, to the one sink. */
+  /**
+   * For an upload of several files: which to download, by their index in its
+   * list of files, each once (all of them if left out). They're written in
+   * the list's order.
+   */
+  files?: number[];
+  /** For several files: write them into one ZIP archive, to the one sink. */
   asZip?: boolean;
   /**
    * An AbortSignal that also cancels the download. Aborting it cancels the
@@ -486,9 +508,9 @@ export type DownloadOptions = HostedTarget & {
  * What a completed download gives.
  */
 export interface DownloadResult {
-  /** The file's name, decrypted if it was encrypted (for a single file). */
+  /** The file's name, decrypted if it was encrypted (for one file). */
   filename?: string;
-  /** The files' names, decrypted if they were encrypted (for a bundle). */
+  /** The files' names, decrypted if they were encrypted (for several). */
   filenames?: string[];
   /** Bytes written to the sink, across all the files. */
   receivedBytes: number;

@@ -101,8 +101,8 @@ test.describe('on a server with HTTPS', () => {
         expect(app.eventsOf('window'), 'windows the app opened').toHaveLength(1);
         expect(app.eventsOf('window-shown'), 'windows shown').toEqual([]);
 
-        expect(uploadsStarted(server).map(({ isEncrypted, lifetime }) => ({ isEncrypted, lifetime })),
-            'the upload the server was asked to start').toEqual([{ isEncrypted: true, lifetime: THIRTY_MINUTES }]);
+        expect(uploadsStarted(server).map(({ encrypted, lifetimeMs }) => ({ encrypted, lifetimeMs })),
+            'the upload the server was asked to start').toEqual([{ encrypted: true, lifetimeMs: THIRTY_MINUTES }]);
         const stored = server.storedFiles();
         expect(stored, 'files the server holds').toHaveLength(1);
         const onDisk = fs.readFileSync(path.join(server.uploadsDir, stored[0]));
@@ -134,8 +134,8 @@ test.describe('on a server with HTTPS', () => {
         }
         secrets.addLink(link);
         expect(app.running, 'whether the app is still open').toBe(true);
-        expect(uploadsStarted(server).map(({ isEncrypted, lifetime }) => ({ isEncrypted, lifetime })),
-            'the upload the server was asked to start').toEqual([{ isEncrypted: true, lifetime: THIRTY_MINUTES }]);
+        expect(uploadsStarted(server).map(({ encrypted, lifetimeMs }) => ({ encrypted, lifetimeMs })),
+            'the upload the server was asked to start').toEqual([{ encrypted: true, lifetimeMs: THIRTY_MINUTES }]);
 
         await receive(page, desktop, link, file, { encrypted: true });
     });
@@ -200,8 +200,8 @@ test.describe('on a server without HTTPS', () => {
         const { link, notifications } = expectLinkCopied(app, shared);
         expect(link, 'the link').toMatch(new RegExp(`^${desktop.serverUrl}/[^/#?]+$`));
         expect(notifications.at(-1), 'the last notification').toMatchObject({ title: expect.stringMatching(/success/i), body: expect.stringMatching(/copied/i) });
-        expect(uploadsStarted(server).map(({ isEncrypted, lifetime }) => ({ isEncrypted, lifetime })),
-            'the upload the server was asked to start').toEqual([{ isEncrypted: false, lifetime: THIRTY_MINUTES }]);
+        expect(uploadsStarted(server).map(({ encrypted, lifetimeMs }) => ({ encrypted, lifetimeMs })),
+            'the upload the server was asked to start').toEqual([{ encrypted: false, lifetimeMs: THIRTY_MINUTES }]);
 
         await receive(page, desktop, link, file, { encrypted: false });
     });

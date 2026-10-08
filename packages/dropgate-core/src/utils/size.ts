@@ -1,4 +1,5 @@
 import { DEFAULT_CHUNK_SIZE, ENCRYPTION_OVERHEAD_PER_CHUNK } from '../constants.js';
+import { encryptedSize, isChunkSize, paddedLength } from '../object/layout.js';
 
 // One size rule: every conversion between bytes and KB, MB or GB is in 1024s
 // (a KB is 1024 bytes), as the labels KB, MB and GB are shown.
@@ -12,22 +13,33 @@ export function mbToBytes(mb: number): number {
 }
 
 /**
- * How many bytes an upload of a file sends: its size, plus each chunk's
- * encryption overhead if it's encrypted.
+ * How many bytes the server stores for an upload of one file, the number its
+ * maximum upload size is checked against: the file's size unencrypted; and
+ * encrypted, Dropgate 4's object, with its header, its padding and each
+ * chunk's tag. Padding is clamped to `maxBytes`, so it never makes a file too
+ * large: the result is over `maxBytes` only when the file itself doesn't fit.
  * @param sizeBytes - The file's size in bytes.
  * @param opts.encrypted - Whether the upload is encrypted.
  * @param opts.chunkSize - The server's chunk size in bytes (default: 5 MB, the server's default).
+ * @param opts.maxBytes - The server's maximum upload size in bytes, 0 or left out for none.
  */
-export function estimateUploadBytes(sizeBytes: number, opts: { encrypted: boolean; chunkSize?: number }): number {
+export function estimateUploadBytes(sizeBytes: number, opts: { encrypted: boolean; chunkSize?: number; maxBytes?: number }): number {
   const base = Number(sizeBytes) || 0;
-  if (!opts.encrypted || base <= 0) return base;
-  const chunkSize = Number.isFinite(opts.chunkSize) && opts.chunkSize! > 0 ? opts.chunkSize! : DEFAULT_CHUNK_SIZE;
-  return base + Math.ceil(base / chunkSize) * ENCRYPTION_OVERHEAD_PER_CHUNK;
+  if (!opts.encrypted || base <= 0 || !Number.isSafeInteger(base)) return base;
+  const chunkSize = isChunkSize(Number(opts.chunkSize)) ? Number(opts.chunkSize) : DEFAULT_CHUNK_SIZE;
+  const maxBytes = Number(opts.maxBytes) > 0 ? Number(opts.maxBytes) : 0;
+  try {
+    return encryptedSize(paddedLength(base, chunkSize, maxBytes), chunkSize);
+  } catch {
+    // Too large even unpadded: that's what it would need.
+    return encryptedSize(base, chunkSize);
+  }
 }
 
 /**
- * How many bytes of a file its encrypted upload holds on the server, from the
- * number of bytes the server stored: each chunk's overhead taken off.
+ * How many bytes of a file a Dropgate 3 encrypted upload holds on the server,
+ * from the number of bytes the server stored: each chunk's overhead taken off.
+ * A bundle's files are still stored that way.
  */
 export function plaintextBytes(storedBytes: number, chunkSize: number): number {
   if (!(storedBytes > 0)) return 0;

@@ -32,7 +32,7 @@ const KNOWN_EVENTS = [
     String.raw`Sealed bundle manifest deleted \(\d+\/\d+ downloads\)\. Member files will expire independently\.`,
     String.raw`Bundle downloaded and deleted \(\d+\/\d+ downloads\)\. ${CAPACITY}`,
     String.raw`Bundle downloaded \(\d+\/(\d+|unlimited) downloads\)\.`,
-    String.raw`Blocked access to an encrypted (file|bundle) (over an insecure connection \(HTTP\)|because upload E2EE is disabled)\.`,
+    String.raw`Blocked access to an encrypted bundle (over an insecure connection \(HTTP\)|because upload E2EE is disabled)\.`,
     String.raw`Upload rejected due to insufficient storage\. Current usage: \d+\.\d{2} GB, Reserved: \d+\.\d{2} GB, Requested: \d+\.\d{2} GB\.`,
     String.raw`Upload incomplete: \d+\/\d+ chunks\.`,
     String.raw`Upload size mismatch\. Expected: \d+, Actual: \d+`,

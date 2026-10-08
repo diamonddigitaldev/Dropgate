@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { DropgateClient, DropgateError } from '../src/index.js';
 import type { DownloadSink, PeerConstructor } from '../src/index.js';
 import { FakePeer } from './helpers/fake-peer.js';
+import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
 
 // The insecure-transport policy (`09` 7.1.1–7.1.6): no automatic fallback to
 // plain HTTP, no redirect followed, an insecure server only with
@@ -11,7 +12,6 @@ import { FakePeer } from './helpers/fake-peer.js';
 const SECURE_URL = 'https://files.example';
 const LAN_URL = 'http://192.168.1.10';
 const FILE_ID = '0b7d4c52-5f0e-4d8e-9a57-3c1f2e6b8a90';
-const CHUNK_SIZE = 4;
 
 const INFO = {
   name: 'Test server',
@@ -38,6 +38,8 @@ interface Seen {
  */
 function fakeServer(opts: { failing?: boolean; infoFails?: boolean; p2p?: boolean } = {}) {
   const requests: Seen[] = [];
+  const v4 = fakeV4({ id: FILE_ID });
+  v4.store(FILE_ID, { encrypted: false, size: CHUNK_SIZE, bytes: new Uint8Array(CHUNK_SIZE), files: [{ name: 'notes.txt', size: CHUNK_SIZE }] });
   const fetchFn = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const url = String(input);
     requests.push({ url, redirect: init.redirect });
@@ -50,17 +52,8 @@ function fakeServer(opts: { failing?: boolean; infoFails?: boolean; p2p?: boolea
       if (opts.infoFails) return json(500, { error: 'Broken.' });
       return json(200, opts.p2p === false ? { ...INFO, capabilities: { ...INFO.capabilities, p2p: { enabled: false } } } : INFO);
     }
-    if (opts.failing) return json(500, { error: 'Broken.' });
-    switch (`${method} ${path}`) {
-      case 'POST /api/resolve': return json(200, { valid: true, type: 'file', target: `/${FILE_ID}` });
-      case 'POST /upload/init': return json(200, { uploadId: 'upload-1' });
-      case 'POST /upload/chunk': return json(200, {});
-      case 'POST /upload/complete': return json(200, { id: FILE_ID });
-      case 'POST /upload/cancel': return json(200, {});
-      case `GET /api/file/${FILE_ID}/meta`: return json(200, { isEncrypted: false, sizeBytes: CHUNK_SIZE, filename: 'notes.txt' });
-      case `GET /api/file/${FILE_ID}`: return new Response(new Uint8Array(CHUNK_SIZE));
-      default: return json(404, { error: 'Not found.' });
-    }
+    if (opts.failing) return json(500, { code: 'SERVER_ERROR', error: 'Broken.' });
+    return (await v4.handle(method, path, init)) ?? json(404, { error: 'Not found.' });
   };
   return { fetchFn, requests };
 }
@@ -155,15 +148,15 @@ describe('No redirect is followed (09 7.1.2)', () => {
   it('a redirect during an upload fails it, without sending the chunks anywhere else', async () => {
     const server = fakeServer();
     const fetchFn = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
-      if (new URL(String(input)).pathname === '/upload/init') {
-        return new Response(null, { status: 307, headers: { Location: 'http://files.example/upload/init' } });
+      if (new URL(String(input)).pathname === '/api/v4/uploads') {
+        return new Response(null, { status: 307, headers: { Location: 'http://files.example/api/v4/uploads' } });
       }
       return server.fetchFn(input, init);
     };
     const client = new DropgateClient({ server: SECURE_URL, fetchFn });
     const outcome = await client.hosted.upload({ files: fileNamed('a.txt'), lifetimeMs: 60_000, encrypt: false }).result;
     expect(outcome.status === 'failed' && outcome.error.code).toBe('REDIRECT_NOT_FOLLOWED');
-    expect(server.requests.map((r) => new URL(r.url).pathname)).not.toContain('/upload/chunk');
+    expect(server.requests.map((r) => new URL(r.url).pathname)).not.toContain('/api/v4/upload/chunks/0');
   });
 });
 
@@ -295,7 +288,7 @@ const OPERATIONS: Record<string, (make: Make) => Promise<Collected>> = {
       await make().links.resolve(FILE_ID),
       await make().links.resolve('not a link'),
     ],
-    errors: [await errorFrom(() => make({ failing: true }).links.resolve('ABCD-1234'))],
+    errors: [await errorFrom(() => make({ infoFails: true }).links.resolve('ABCD-1234'))],
   }),
   'hosted.upload': async (make) => {
     const snapshots: unknown[] = [];
@@ -317,11 +310,11 @@ const OPERATIONS: Record<string, (make: Make) => Promise<Collected>> = {
   },
   'hosted.download': async (make) => {
     const snapshots: unknown[] = [];
-    const download = make().hosted.download({ fileId: FILE_ID, sink: nullSink() });
+    const download = make().hosted.download({ id: FILE_ID, sink: nullSink() });
     snapshots.push(download.snapshot);
     download.subscribe((s) => snapshots.push(s));
     const done = await download.result;
-    const failing = make({ failing: true }).hosted.download({ fileId: FILE_ID, sink: nullSink() });
+    const failing = make({ failing: true }).hosted.download({ id: FILE_ID, sink: nullSink() });
     failing.subscribe((s) => snapshots.push(s));
     const failed = await failing.result;
     return {
@@ -329,14 +322,14 @@ const OPERATIONS: Record<string, (make: Make) => Promise<Collected>> = {
       results: [done, done.status === 'completed' && done.value, failed],
       errors: [
         failed.status === 'failed' && failed.error,
-        await errorFrom(() => make().hosted.download({ fileId: FILE_ID } as Parameters<DropgateClient['hosted']['download']>[0])),
+        await errorFrom(() => make().hosted.download({ id: FILE_ID } as Parameters<DropgateClient['hosted']['download']>[0])),
       ],
     };
   },
   'hosted.metadata': async (make) => ({
     snapshots: [],
-    results: [await make().hosted.metadata({ fileId: FILE_ID })],
-    errors: [await errorFrom(() => make({ failing: true }).hosted.metadata({ fileId: FILE_ID }))],
+    results: [await make().hosted.metadata({ id: FILE_ID })],
+    errors: [await errorFrom(() => make({ failing: true }).hosted.metadata({ id: FILE_ID }))],
   }),
   'hosted.validate': async (make) => ({
     snapshots: [],
@@ -385,7 +378,7 @@ const OPERATIONS: Record<string, (make: Make) => Promise<Collected>> = {
   'operations.cancelAll': async (make) => {
     const server = fakeServer();
     const slow = async (input: RequestInfo | URL, init: RequestInit = {}) =>
-      new URL(String(input)).pathname === '/upload/init' ? noAnswer(init) : server.fetchFn(input, init);
+      new URL(String(input)).pathname === '/api/v4/uploads' ? noAnswer(init) : server.fetchFn(input, init);
     const client = make({}, slow);
     const snapshots: unknown[] = [];
     const upload = client.hosted.upload({ files: fileNamed('a.txt'), lifetimeMs: 60_000, encrypt: false });
@@ -399,7 +392,7 @@ const OPERATIONS: Record<string, (make: Make) => Promise<Collected>> = {
 /** A handle's own cancel() is an operation's last step, so it's checked on each handle. */
 const HANDLE_CANCEL: Record<string, (client: DropgateClient) => { cancel(): void; snapshot: unknown; result: Promise<unknown> }> = {
   'hosted.upload': (client) => client.hosted.upload({ files: fileNamed('a.txt'), lifetimeMs: 60_000, encrypt: false }),
-  'hosted.download': (client) => client.hosted.download({ fileId: FILE_ID, sink: nullSink() }),
+  'hosted.download': (client) => client.hosted.download({ id: FILE_ID, sink: nullSink() }),
 };
 
 /** What the client offers that isn't an operation, and so gives no snapshot, result or error of its own. */

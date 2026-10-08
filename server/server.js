@@ -2309,33 +2309,18 @@ if (enableUpload) {
         return res.status(200).render('pages/download-bundle', { serverName, bundleId });
     });
 
-    // Standard single-file download page
-    app.get(`/:fileId`, limiter, async (req, res) => {
-        const fileId = req.params.fileId;
+    // An upload's download page. It's the same over HTTP and HTTPS: the page
+    // reads the upload's metadata itself, and checks for itself whether it can
+    // decrypt here (isSecureContext), which a server can't tell from the
+    // request. An encrypted upload on a server with E2EE off isn't there.
+    app.get('/:id', limiter, async (req, res) => {
+        const id = req.params.id;
 
-        // Check if this ID is actually a bundle
-        const bundleInfo = await getLiveBundle(fileId);
-        if (bundleInfo) {
-            return res.redirect(301, `/b/${fileId}`);
-        }
+        // A Dropgate 3 bundle's ID, typed in, opens its own page.
+        if (await getLiveBundle(id)) return res.redirect(301, `/b/${id}`);
 
-        const fileInfo = await getLiveFile(fileId);
-
-        if (!fileInfo) return res.status(404).render('pages/404', { serverName });
-
-        if (fileInfo.isEncrypted) {
-            if (!uploadEnableE2EE) {
-                log('debug', 'Blocked access to an encrypted file because upload E2EE is disabled.');
-                return res.status(404).render('pages/404', { serverName });
-            }
-
-            if (req.protocol !== 'https') {
-                log('debug', 'Blocked access to an encrypted file over an insecure connection (HTTP).');
-                return res.status(400).render('pages/insecure', { serverName });
-            }
-        }
-
-        return res.status(200).render('pages/download-standard', { serverName, fileId });
+        if (!(await getLiveObject(id))) return res.status(404).render('pages/404', { serverName });
+        return res.status(200).render('pages/download-standard', { serverName });
     });
 }
 

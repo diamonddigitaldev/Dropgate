@@ -81,15 +81,24 @@ Uploads to the server, and downloads from it.
 | Method | Description |
 | --- | --- |
 | `upload(opts)` | Upload one or more files, encrypted if the server supports it unless `encrypt: false`. Several files are uploaded as a bundle, under one link. Gives the upload's [handle](#operation-handles) at once |
-| `download(opts)` | Download a file (`fileId`) or a bundle (`bundleId`) into a [sink](#download-sinks), decrypting it with `keyB64` if it was encrypted. Gives the download's [handle](#operation-handles) at once |
-| `metadata(opts)` | What the server holds about a file (`fileId`) or a bundle (`bundleId`): the files' names and sizes, with the names decrypted with `keyB64` if it was encrypted ([below](#metadata)) |
+| `download(opts)` | Download an upload (`id`) into a [sink](#download-sinks), decrypting it with the `secret` from its link if it was encrypted; or a bundle (`bundleId`, with `keyB64`). Gives the download's [handle](#operation-handles) at once |
+| `metadata(opts)` | What the server holds about an upload (`id`, with its `secret`) or a bundle (`bundleId`, with `keyB64`): the files' names and sizes, decrypted if it was encrypted ([below](#metadata)). It takes no lease and counts nothing |
 | `validate(opts)` | Check files and settings against a server's limits (`files`, `lifetimeMs`, `encrypt`, and the `serverInfo` from `client.server.connect()`), as `upload()` does before it starts, and give `true`. Left out, `encrypt` is what `upload()` would do: encrypted where the server supports it |
 
-`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for unlimited, where the server allows it), and optionally `encrypt` (default: encrypted where the server supports it), `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs` 5000, `initMs` 15000, `chunkMs` 60000 for each chunk, `completeMs` 30000) and `retry` (`retries` 5, `backoffMs` 1000, `maxBackoffMs` 30000, for each chunk). Its completed value, an `UploadResult`, holds `downloadUrl` (with the key after its `#` if it was encrypted), `baseUrl`, `keyB64` if it was encrypted, and `transport`; for one file, `fileId` and `uploadId` (the server's upload session); for a bundle, `bundleId` and `files` (each `fileId`, `name` and `size`).
+`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for unlimited, where the server allows it), and optionally `encrypt` (default: encrypted where the server supports it), `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs` 5000, `initMs` 15000, `chunkMs` 60000 for each chunk, `completeMs` 30000) and `retry` (`retries` 5, `backoffMs` 1000, `maxBackoffMs` 30000, for each chunk). Its completed value, an `UploadResult`, holds `downloadUrl`, the link; `id`, the upload's ID on the server, which is the link's path; `files`, each `name` and `size`; `manageToken`; and `transport`.
 
-`download()` takes `fileId` or `bundleId`, `sink`, and optionally `keyB64`, `asZip` (a bundle as one ZIP archive), `signal`, and `timeoutMs`: how long each wait may take, for the server's answer and then for each file's next bytes (default 60000, and 0 for none). A big file never times out for taking long, only if it stalls, and time spent writing to the sink never counts. Its completed value, a `DownloadResult`, holds `filename` (a file) or `filenames` (a bundle), `receivedBytes`, `wasEncrypted` and `transport`.
+* **The link** is `https://<server>/<id>` for an unencrypted upload. An encrypted one's adds `#` and its **secret**: 32 random bytes, in URL-safe base64 with no `=` (43 characters). The keys that encrypt the upload are made from the secret, which never leaves the device: it's in the link alone. A bundle's link is still `https://<server>/b/<id>#<key>`, as in 3.x.
+* **The manage token** lets whoever has it delete the upload: 32 random bytes, URL-safe base64. Only its SHA-256 is sent, when the upload starts, and the token itself is in this value alone: never in a snapshot, an error, a log or the link. Keep it where only the upload's sender can use it, such as the page or the app that made the upload. A bundle's upload doesn't have one yet.
+* **One file is one encrypted object:** its name and size are sealed in a list only the secret opens, and the file is padded inside it so the stored size says little about the file's (never past the server's maximum upload size, so padding never makes a file too large). Each chunk is sealed once, and a chunk sent again is the same bytes.
 
-`upload()` and `download()` throw `INVALID_ARGUMENT` at once, before anything starts, for no files, something that isn't a file, neither a `fileId` nor a `bundleId`, or a sink that doesn't fit. After that, they report how they ended in their [outcome](outcomes.md), and never throw. `metadata()` and `validate()` throw a [`DropgateError`](errors.md).
+`download()` takes `id` (with `secret`, for an encrypted upload) or `bundleId` (with `keyB64`), `sink`, and optionally `files` (which of several files to download, by their index in the upload's list, each once; all of them if left out), `asZip` (several files as one ZIP archive), `signal`, and `timeoutMs`: how long each wait may take, for the server's answer and then for each file's next bytes (default 60000, and 0 for none). A big file never times out for taking long, only if it stalls, and time spent writing to the sink never counts. Its completed value, a `DownloadResult`, holds `filename` (one file) or `filenames` (several), `receivedBytes`, `wasEncrypted` and `transport`.
+
+* **One download, one lease.** Each `download()` of an upload by `id` takes a lease from the server, and releases it as soon as the download ends, however it ends. A lease that sent any byte is one download against the upload's limit, so at its limit the upload is gone once the download is saved. While other downloads hold every place the limit allows, the download waits, with the snapshot's `text` saying "Someone is downloading this right now.", and starts when one frees.
+* **Everything is checked before it's finished.** An encrypted upload is read to its last chunk, padding included, and every chunk is checked, so a changed, reordered or shortened upload fails with `INTEGRITY_FAILED`; the last file's sink (or the ZIP) is only closed once all of it has been. A download of some of an upload's files reads the whole upload.
+
+`upload()` and `download()` throw `INVALID_ARGUMENT` at once, before anything starts, for no files, something that isn't a file, neither an `id` nor a `bundleId`, a `files` that isn't indexes, or a sink that doesn't fit. After that, they report how they ended in their [outcome](outcomes.md), and never throw. `metadata()` and `validate()` throw a [`DropgateError`](errors.md).
+
+**Changed in 4.0:** an upload of one file is a Dropgate 4 object, under the link `https://<server>/<id>#<secret>`. The completed value's `fileId`, `bundleId`, `uploadId`, `keyB64` and `baseUrl` are gone: `id` is the one ID, the secret is in `downloadUrl`, and the server's address is `client.server.baseUrl`. `download()` and `metadata()` take `id` and `secret` for it, where 3.x took `fileId` and `keyB64`, and the metadata has one shape for one file or several ([below](#metadata)).
 
 ### client.direct
 
@@ -134,9 +143,11 @@ Its session has `peer`, `stop()`, `getStatus()`, `getBytesReceived()`, `getTotal
 
 | Method | Description |
 | --- | --- |
-| `resolve(value, opts?)` | Resolve a sharing code or link someone typed or pasted. A link is read on the device, and only the ID or code in it is sent: never anything after its `#` (the encryption key), which comes back on the end of `target`. A link to another server is refused without a request |
+| `resolve(value, opts?)` | Resolve a sharing code or link someone typed or pasted, into where to open it on this server. It's read on the device, and nothing of it is sent: the server is only asked for its info (as `connect()` does, and kept), to check it works with this client and has direct transfer on. A link to another server is refused without a request |
 
-Its result has `valid`, and `transport`, valid or not. A valid one has `type` (`file`, `bundle` or `p2p`) and `target`, the path to open on the server (such as `/b/<id>#<key>`); one that isn't has `reason`, for people. It throws `VERSION_UNSUPPORTED` if the server's DGUP doesn't work with this client's, or a request's error if the lookup fails.
+Its result has `valid`, and `transport`, valid or not. A valid one has `type` and `target`, the path to open on the server: `hosted` for an upload's link or ID (`/<id>`, with the secret after its `#` still on it), `bundle` for a bundle's 3.x-shaped link (`/b/<id>#<key>`), or `p2p` for a direct transfer's code (`/p2p/<code>`, the code upper case). Whether the upload is there is for the page it opens to find out. One that isn't valid has `reason`, for people. It throws `VERSION_UNSUPPORTED` if the server's DGUP doesn't work with this client's, or `connect()`'s errors.
+
+**Changed in 4.0:** `resolve()` asks the server nothing about the input, where 3.x sent the ID or code to `/api/resolve`; a hosted upload's `type` is `hosted`, where 3.x said `file`.
 
 ### client.server
 
@@ -205,11 +216,11 @@ A download's (`DownloadSnapshot`):
 | Field | Description |
 | --- | --- |
 | `status` | `initializing`, `downloading` or `completing` (the sink is closing) while it runs, then its outcome's status |
-| `phase` | `server-info`, `server-compat`, `metadata`, `file-start` (a bundle's next file), `downloading`, `complete`, then `done` once it has completed |
+| `phase` | `server-info`, `server-compat`, `metadata`, `file-start` (the next of several files), `downloading`, `complete`, then `done` once it has completed |
 | `text` | What it's doing, for people, such as `Downloading file 2 of 3...` |
 | `percent` | 0 to 100 |
-| `processedBytes`, `totalBytes` | Bytes written to the sink so far, and of all the files together (0 until the metadata is in) |
-| `fileIndex`, `totalFiles` | Which of a bundle's files it's on (from 0), and how many |
+| `processedBytes`, `totalBytes` | Bytes written to the sink so far, and of all the files being downloaded together (0 until the metadata is in) |
+| `fileIndex`, `totalFiles` | For several files: which it's on (its index in the upload's list), and how many are being downloaded |
 | `transport` | `{ secure }`, as an upload's |
 
 ## Download Sinks
@@ -220,21 +231,23 @@ A download writes into a **sink**: any object with `write(chunk)` and `close()`,
 * Core calls `close()` once every byte is written, and the download only completes once `close()` has. A `write()` or `close()` that fails fails the download, with `OUTPUT_WRITE_FAILED`.
 * A download that fails or is cancelled calls `abort()`, if the sink has one, and never `close()`, so a partial file isn't finished as if it were whole.
 
-`sink` is either a sink, or a function given each file as its download starts (`{ name, size, index }`, the name decrypted) that returns a sink, or a promise of one:
+`sink` is either a sink, or a function given each file as its download starts (`{ name, size, index }`, the name decrypted, `index` its place in the upload's list) that returns a sink, or a promise of one:
 
 | Download | `sink` |
 | --- | --- |
-| A file | A sink, or a function (called once, so you can name the file) |
-| A bundle as a ZIP (`asZip: true`) | A sink, for the one archive |
-| A bundle as separate files | A function, called for each file |
+| One file | A sink, or a function (called once, so you can name the file) |
+| Several files as a ZIP (`asZip: true`) | A sink, for the one archive |
+| Several files apart | A function, called for each file |
 
-A bundle downloaded as a ZIP is reported to the server as downloaded only once its sink has closed.
+A bundle (by `bundleId`) always takes a function, or a sink with `asZip`. Downloaded as a ZIP of every file, a bundle is reported to the server as downloaded only once its sink has closed; its files downloaded on their own, or a ZIP of some of them, are never counted, as in 3.x.
 
 ## Metadata
 
-`client.hosted.metadata({ fileId })` gives a `FileMetadata`: `kind: 'file'`, `fileId`, `isEncrypted`, `name`, `sizeBytes` and `transport`. `client.hosted.metadata({ bundleId })` gives a `BundleMetadata`: `kind: 'bundle'`, `bundleId`, `isEncrypted`, `sealed`, `files` (each `fileId`, `name` and `sizeBytes`), `fileCount`, `totalSizeBytes` and `transport`.
+`client.hosted.metadata({ id, secret })` gives an `UploadMetadata`, the same shape for one file or several: `kind` (`file` for one, `bundle` for several), `id`, `encrypted`, `files` (each `name` and `size`, in order), `totalSize` and `transport`. Asking takes no lease and counts nothing, so a page can show what's there before anyone downloads it. It never says when the upload expires or how many downloads it has left: the server doesn't give that.
 
-Names are decrypted, and sizes are the files' as they'll be downloaded, so neither needs any crypto of your own. An encrypted upload needs `keyB64`: without it, `metadata()` throws `KEY_REQUIRED`, and with one that doesn't open it, `DECRYPT_FAILED`. Where there's no Web Crypto (a page served over plain HTTP from another machine), it throws `RUNTIME_UNSUPPORTED`. A sealed bundle's list of files is encrypted too, so only the key's holder can read which files belong to it.
+`client.hosted.metadata({ bundleId, keyB64 })` gives a bundle's `BundleMetadata`: `kind: 'bundle'`, `bundleId`, `isEncrypted`, `sealed`, `files` (each `fileId`, `name` and `sizeBytes`), `fileCount`, `totalSizeBytes` and `transport`.
+
+Names are decrypted, and sizes are the files' as they'll be downloaded, so neither needs any crypto of your own. An encrypted upload needs its `secret` (or a bundle its `keyB64`): without it, `metadata()` throws `KEY_REQUIRED`, and with one that doesn't open it, or isn't 32 bytes, `DECRYPT_FAILED`. The upload's header is checked before any of it is downloaded: an upload whose list of files or header was changed throws `INTEGRITY_FAILED`, and one made in a format this version can't read, `VERSION_UNSUPPORTED`. A name that breaks the [file name rule](quick-start.md#file-names) throws `INVALID_FILENAME`, without the name. Where there's no Web Crypto (a page served over plain HTTP from another machine), an encrypted upload throws `RUNTIME_UNSUPPORTED`. An encrypted upload's list of files is sealed too, so only the secret's holder can read its names and sizes.
 
 ## File Sources
 
@@ -257,7 +270,7 @@ An upload reads each file one chunk at a time through a `FileSource`: `name`, `s
 | Helper | Description |
 | --- | --- |
 | `lifetime.toMs(value, unit)` | A lifetime in `minutes`, `hours` or `days` in milliseconds; 0 for `unlimited` or anything invalid |
-| `sizes.estimateUpload(sizeBytes, { encrypted, chunkSize? })` | How many bytes an upload of a file sends: its size, plus each chunk's encryption overhead if it's encrypted. `chunkSize` is the server's (default 5 MB) |
+| `sizes.estimateUpload(sizeBytes, { encrypted, chunkSize?, maxBytes? })` | How many bytes the server stores for an upload of one file, which its maximum upload size is checked against: the file's size, or encrypted, with its 60-byte header, a 16-byte tag for each chunk, and its padding. `chunkSize` is the server's (default 5 MB), and `maxBytes` its maximum upload size in bytes (`maxSizeMB` × 1024², 0 or left out for none): padding stops there, so the result is over `maxBytes` only when the file itself doesn't fit |
 | `filenames.validate(name)` | Throws `INVALID_FILENAME` for a name that's empty, over 255 UTF-8 bytes, or has a control character or path separator in it: the check core makes of every name it sends and receives |
 | `filenames.sanitize(name)` | The name to save a received file under, the same on every OS: NFC, bidi and zero-width characters shown as `[U+XXXX]`, control characters and `< > : " / \ \| ? *` as `_`, no trailing dots or spaces, `_` before a Windows reserved name, within 255 UTF-8 bytes, never empty ([File Names](quick-start.md#file-names)) |
 | `filenames.unique(name, taken)` | `name` if it isn't taken, or else `name (1).ext`, `name (2).ext` and so on. `taken` is the names already used, compared without regard to case, or a function that says whether a name is |

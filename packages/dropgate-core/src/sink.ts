@@ -26,7 +26,7 @@ export interface DownloadFileInfo {
   name: string;
   /** The file's size in bytes, as it will be written. */
   size: number;
-  /** Which file of the download it is (0-based). */
+  /** Which file it is: its index in the upload's list of files (0-based). */
   index: number;
 }
 

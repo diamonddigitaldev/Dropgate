@@ -12,7 +12,7 @@ If you get stuck, turning on debug logs for a minute usually makes the cause obv
   - Hosted uploads: `ENABLE_UPLOAD=true`
   - Direct transfer (P2P): `ENABLE_P2P=true`
   - Web UI: `ENABLE_WEB_UI=true`
-- If you’re using the Web UI in a browser, make sure you’re on **HTTPS** (localhost is the usual exception, though not for downloading encrypted files; see [section 4](#4-encryption--https-issues)).
+- If you’re using the Web UI in a browser, make sure you’re on **HTTPS** (localhost is the usual exception, though not yet for downloading encrypted bundles; see [section 4](#4-encryption--https-issues)).
 - If you’re behind a reverse proxy, make sure it allows request bodies large enough for upload chunks (often called something like “max body size”).
 - Ensure your network/firewall allows traffic on the server port (default `52443`, or the value set by `SERVER_PORT`).
 
@@ -64,7 +64,8 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 
 - Browsers only provide some features Dropgate relies on in a **secure context** (HTTPS or localhost), notably the Web Crypto API used for end-to-end encryption. The Web UI also only enables direct transfer (P2P) in a secure context.
 - If you see missing buttons or “blocked” errors in the Web UI, run the server behind HTTPS.
-- **Known issue in 3.x:** on plain HTTP, even on `localhost` or `127.0.0.1`, the Web UI encrypts uploads, but opening the link shows **"Secure Connection Required"**. The server only serves the download page for an encrypted file or bundle over HTTPS. Unencrypted files aren't affected. To test encrypted downloads locally, put the server behind a TLS-terminating reverse proxy on the same machine.
+- An encrypted file's download page over plain HTTP from another machine says it needs HTTPS: the browser gives the page no Web Crypto there. On `localhost` or `127.0.0.1` it works, since browsers count those as secure.
+- **Known issue in 3.x, which bundles still have:** on plain HTTP, even on `localhost` or `127.0.0.1`, opening an encrypted bundle's link shows **"Secure Connection Required"**. The server only serves an encrypted bundle's page over HTTPS. To test encrypted bundles locally, put the server behind a TLS-terminating reverse proxy on the same machine.
 
 ## 5) P2P issues (Direct transfer)
 

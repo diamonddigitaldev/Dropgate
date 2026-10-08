@@ -24,8 +24,8 @@ test('starts with no server and the default options, then remembers the server a
     await desktop.setUp(window, { lifetime: { value: 30, unit: 'minutes' }, maxDownloads: 3 });
     const first = madeUpFile('Quarterly figures é.bin', 1_500_000, 11);
     const link = await desktop.upload(window, [first], { encrypted: false });
-    expect(uploadsStarted(server).map(({ lifetime, maxDownloads }) => ({ lifetime, maxDownloads })),
-        'the upload the server was asked to start').toEqual([{ lifetime: THIRTY_MINUTES, maxDownloads: 3 }]);
+    expect(uploadsStarted(server).map(({ lifetimeMs, maxDownloads }) => ({ lifetimeMs, maxDownloads })),
+        'the upload the server was asked to start').toEqual([{ lifetimeMs: THIRTY_MINUTES, maxDownloads: 3 }]);
 
     // Someone receiving it gets it intact.
     await page.goto(link);
@@ -44,7 +44,7 @@ test('starts with no server and the default options, then remembers the server a
     await expect(window.locator('#file-lifetime-unit'), 'File Lifetime after a restart').toHaveValue('minutes');
 
     await desktop.upload(window, [madeUpFile('Quarterly figures, again.bin', 20_000, 12)], { encrypted: false });
-    expect(uploadsStarted(server).at(-1).lifetime, 'the file lifetime of an upload after a restart').toBe(THIRTY_MINUTES);
+    expect(uploadsStarted(server).at(-1).lifetimeMs, 'the file lifetime of an upload after a restart').toBe(THIRTY_MINUTES);
 });
 
 // v3 saved Max Downloads, but never read it back, so it started at 1 again.

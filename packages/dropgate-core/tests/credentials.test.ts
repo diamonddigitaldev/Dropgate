@@ -3,6 +3,7 @@ import { inspect } from 'node:util';
 import { DropgateClient } from '../src/index.js';
 import type { CredentialProvider, CredentialRequest, DownloadSink } from '../src/index.js';
 import { errorFromStatus } from '../src/errors.js';
+import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
 
 // The credential boundary (08 §7.3; 09 §14): how core asks for a credential
 // for a server that needs one, and where one may and may not go. Against a
@@ -11,7 +12,6 @@ import { errorFromStatus } from '../src/errors.js';
 const BASE_URL = 'https://files.example';
 const FILE_ID = '0b7d4c52-5f0e-4d8e-9a57-3c1f2e6b8a90';
 const BUNDLE_ID = '6a1e9f3b-2c4d-4b7a-8e5f-9d0c1b2a3e4f';
-const CHUNK_SIZE = 4;
 // Tokens that would be noticed anywhere they turned up.
 const TOKEN = 'zq7TOKENaaaa.bbbb-cccc_dddd~eeee';
 const RENEWED = 'zq7RENEWEDffff.gggg';
@@ -22,18 +22,31 @@ interface Seen {
   path: string;
   headers: Record<string, string>;
   body: string;
+  init: RequestInit;
 }
 
+// One file's upload, on Dropgate 4's routes.
+const START = '/api/v4/uploads';
+const CHUNK = '/api/v4/upload/chunks/0';
+const FINISH = '/api/v4/upload/complete';
+const CANCEL = '/api/v4/upload';
+const isUpload = (path: string) => path.startsWith('/upload/') || path.startsWith('/api/v4/upload');
+
 /**
- * A fake Dropgate server. With `credentialRequired`, it says so in its info,
- * and answers any upload request without `Authorization: Bearer <accept>`
- * with 401. `answer` replaces a route's answer.
+ * A fake Dropgate server: Dropgate 4's routes for one file, version 3's for a
+ * bundle. With `credentialRequired`, it says so in its info, and answers any
+ * upload request without `Authorization: Bearer <accept>` with 401. `answer`
+ * replaces a route's answer (a chunk's as `PUT /api/v4/upload/chunks/:index`),
+ * and `pass` gives the usual one.
  */
 function fakeServer({ credentialRequired = false, accept = TOKEN }: { credentialRequired?: boolean; accept?: string } = {}) {
   const seen: Seen[] = [];
   const answers = new Map<string, (request: Seen) => Response | Promise<Response>>();
   const state = { accept };
   const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
+  const v4 = fakeV4({ id: FILE_ID });
+  v4.store(FILE_ID, { encrypted: false, size: CHUNK_SIZE, bytes: new Uint8Array(CHUNK_SIZE), files: [{ name: 'notes.txt', size: CHUNK_SIZE }] });
+  const pass = async (request: Seen) => (await v4.handle(request.method, request.path, request.init)) ?? json(404, { error: 'Not found.' });
 
   const fetchFn = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const url = String(input);
@@ -41,14 +54,14 @@ function fakeServer({ credentialRequired = false, accept = TOKEN }: { credential
     const method = init.method ?? 'GET';
     const headers = { ...(init.headers as Record<string, string> | undefined) };
     const body = typeof init.body === 'string' ? init.body : init.body instanceof Blob ? await init.body.text() : '';
-    const request = { method, url, path, headers, body };
+    const request = { method, url, path, headers, body, init };
     seen.push(request);
     await new Promise((resolve) => setTimeout(resolve, 0));
     if (init.signal?.aborted) throw init.signal.reason;
 
-    const answer = answers.get(`${method} ${path}`);
+    const answer = answers.get(`${method} ${path.replace(/\/chunks\/\d+$/, '/chunks/:index')}`);
     if (answer) return answer(request);
-    if (credentialRequired && path.startsWith('/upload/') && headers.Authorization !== `Bearer ${state.accept}`) {
+    if (credentialRequired && isUpload(path) && headers.Authorization !== `Bearer ${state.accept}`) {
       return json(401, { error: 'Sign in first.', code: 'AUTH_REQUIRED' });
     }
     switch (`${method} ${path}`) {
@@ -58,16 +71,12 @@ function fakeServer({ credentialRequired = false, accept = TOKEN }: { credential
           protocols: { dgup: { major: 4, minor: 0 }, dgdtp: { major: 4, minor: 0 } },
           capabilities: { upload: { enabled: true, maxSizeMB: 0, maxLifetimeHours: 0, e2ee: true, chunkSize: CHUNK_SIZE, credentialRequired } },
         });
-      case 'POST /api/resolve': return json(200, { valid: true, type: 'file', target: `/${FILE_ID}` });
-      case 'POST /upload/init': return json(200, { uploadId: 'upload-1' });
       case 'POST /upload/init-bundle': return json(200, { bundleUploadId: 'bundle-1', fileUploadIds: ['upload-1', 'upload-2'] });
       case 'POST /upload/chunk': return json(200, {});
       case 'POST /upload/complete': return json(200, { id: FILE_ID });
       case 'POST /upload/complete-bundle': return json(200, { bundleId: BUNDLE_ID });
       case 'POST /upload/cancel': return json(200, {});
-      case `GET /api/file/${FILE_ID}/meta`: return json(200, { isEncrypted: false, sizeBytes: CHUNK_SIZE, filename: 'notes.txt' });
-      case `GET /api/file/${FILE_ID}`: return new Response(new Uint8Array(CHUNK_SIZE));
-      default: return json(404, { error: 'Not found.' });
+      default: return pass(request);
     }
   };
 
@@ -76,8 +85,9 @@ function fakeServer({ credentialRequired = false, accept = TOKEN }: { credential
     seen,
     state,
     json,
+    pass,
     answer: (route: string, respond: (request: Seen) => Response | Promise<Response>) => { answers.set(route, respond); },
-    uploads: () => seen.filter((r) => r.path.startsWith('/upload/')),
+    uploads: () => seen.filter((r) => isUpload(r.path)),
     withAuth: () => seen.filter((r) => Object.keys(r.headers).some((h) => h.toLowerCase() === 'authorization')),
   };
 }
@@ -114,8 +124,8 @@ describe('Nothing is sent unless the server asks and a provider gives one (09 14
     const client = make(server);
     await client.server.info();
     expect((await upload(client).result).status).toBe('completed');
-    expect((await client.hosted.download({ fileId: FILE_ID, sink: nullSink() }).result).status).toBe('completed');
-    await client.hosted.metadata({ fileId: FILE_ID });
+    expect((await client.hosted.download({ id: FILE_ID, sink: nullSink() }).result).status).toBe('completed');
+    await client.hosted.metadata({ id: FILE_ID });
     await client.links.resolve(`${BASE_URL}/${FILE_ID}`);
     expect(server.seen.length).toBeGreaterThan(6);
     expect(server.withAuth()).toEqual([]);
@@ -127,7 +137,7 @@ describe('Nothing is sent unless the server asks and a provider gives one (09 14
     const client = make(server, auth);
     expect((await upload(client).result).status).toBe('completed');
     expect((await upload(client, [file('a.txt'), file('b.txt')]).result).status).toBe('completed');
-    expect((await client.hosted.download({ fileId: FILE_ID, sink: nullSink() }).result).status).toBe('completed');
+    expect((await client.hosted.download({ id: FILE_ID, sink: nullSink() }).result).status).toBe('completed');
     expect(auth).not.toHaveBeenCalled();
     expect(server.withAuth()).toEqual([]);
     expect(server.seen.map((r) => r.body + r.url).join('\n')).not.toContain(TOKEN);
@@ -145,17 +155,17 @@ describe('Asked once per operation, sent with every request of it (09 14.3)', ()
     expect({ ...request, signal: undefined }).toEqual({ operation: 'hosted.upload', reason: 'required', baseUrl: BASE_URL, signal: undefined });
     expect(request.signal).toBeInstanceOf(AbortSignal);
     expect(server.uploads().map((r) => `${r.path} ${r.headers.Authorization}`)).toEqual([
-      '/upload/init Bearer ' + TOKEN,
-      '/upload/chunk Bearer ' + TOKEN,
-      '/upload/chunk Bearer ' + TOKEN,
-      '/upload/chunk Bearer ' + TOKEN,
-      '/upload/complete Bearer ' + TOKEN,
+      `${START} Bearer ${TOKEN}`,
+      `/api/v4/upload/chunks/0 Bearer ${TOKEN}`,
+      `/api/v4/upload/chunks/1 Bearer ${TOKEN}`,
+      `/api/v4/upload/chunks/2 Bearer ${TOKEN}`,
+      `${FINISH} Bearer ${TOKEN}`,
     ]);
 
     // The same client's receiving never asks, nor sends it: links and IDs are bearer capabilities.
     const before = server.seen.length;
-    expect((await client.hosted.download({ fileId: FILE_ID, sink: nullSink() }).result).status).toBe('completed');
-    await client.hosted.metadata({ fileId: FILE_ID });
+    expect((await client.hosted.download({ id: FILE_ID, sink: nullSink() }).result).status).toBe('completed');
+    await client.hosted.metadata({ id: FILE_ID });
     await client.links.resolve(FILE_ID);
     await client.server.info();
     expect(server.seen.slice(before).filter((r) => r.headers.Authorization)).toEqual([]);
@@ -184,14 +194,14 @@ describe('Asked once per operation, sent with every request of it (09 14.3)', ()
   it("sends the credential with an upload's cancel", async () => {
     const server = fakeServer({ credentialRequired: true });
     let handle!: ReturnType<typeof upload>;
-    server.answer('POST /upload/chunk', () => {
+    server.answer('PUT /api/v4/upload/chunks/:index', (request) => {
       handle.cancel();
-      return server.json(200, {});
+      return server.pass(request);
     });
     handle = upload(make(server, giving(TOKEN)));
     expect((await handle.result).status).toBe('cancelled');
-    await vi.waitFor(() => expect(server.seen.map((r) => r.path)).toContain('/upload/cancel'));
-    expect(server.seen.find((r) => r.path === '/upload/cancel')!.headers.Authorization).toBe(`Bearer ${TOKEN}`);
+    await vi.waitFor(() => expect(server.seen.map((r) => `${r.method} ${r.path}`)).toContain(`DELETE ${CANCEL}`));
+    expect(server.seen.find((r) => r.method === 'DELETE' && r.path === CANCEL)!.headers.Authorization).toBe(`Bearer ${TOKEN}`);
   });
 });
 
@@ -243,13 +253,13 @@ describe('An expired credential is renewed once (09 14.5)', () => {
   it('asks once more after AUTH_EXPIRED, and sends the request again with the new token', async () => {
     const server = fakeServer({ credentialRequired: true });
     let expired = false;
-    server.answer('POST /upload/chunk', (r) => {
+    server.answer('PUT /api/v4/upload/chunks/:index', (r) => {
       if (!expired) {
         expired = true;
         server.state.accept = RENEWED;
         return server.json(401, { error: 'Expired.', code: 'AUTH_EXPIRED' });
       }
-      return r.headers.Authorization === `Bearer ${RENEWED}` ? server.json(200, {}) : server.json(401, { code: 'AUTH_REQUIRED' });
+      return r.headers.Authorization === `Bearer ${RENEWED}` ? server.pass(r) : server.json(401, { code: 'AUTH_REQUIRED' });
     });
     const auth = giving(TOKEN, RENEWED);
     const outcome = await upload(make(server, auth)).result;
@@ -257,16 +267,16 @@ describe('An expired credential is renewed once (09 14.5)', () => {
     expect(auth).toHaveBeenCalledTimes(2);
     expect((auth.mock.calls[1][0] as CredentialRequest).reason).toBe('expired');
     expect(server.uploads().map((r) => `${r.path} ${r.headers.Authorization.slice(7)}`)).toEqual([
-      `/upload/init ${TOKEN}`, `/upload/chunk ${TOKEN}`, `/upload/chunk ${RENEWED}`, `/upload/chunk ${RENEWED}`, `/upload/complete ${RENEWED}`,
+      `${START} ${TOKEN}`, `/api/v4/upload/chunks/0 ${TOKEN}`, `/api/v4/upload/chunks/0 ${RENEWED}`, `/api/v4/upload/chunks/1 ${RENEWED}`, `${FINISH} ${RENEWED}`,
     ]);
   });
 
-  it('renews on a JSON request too (init)', async () => {
+  it('renews on a JSON request too (the start)', async () => {
     const server = fakeServer({ credentialRequired: true });
     let first = true;
-    server.answer('POST /upload/init', (r) => {
+    server.answer(`POST ${START}`, (r) => {
       if (first) { first = false; return server.json(401, { code: 'AUTH_EXPIRED' }); }
-      return r.headers.Authorization === `Bearer ${RENEWED}` ? server.json(200, { uploadId: 'upload-1' }) : server.json(401, {});
+      return r.headers.Authorization === `Bearer ${RENEWED}` ? server.pass(r) : server.json(401, {});
     });
     server.state.accept = RENEWED;
     const auth = giving(TOKEN, RENEWED);
@@ -276,12 +286,12 @@ describe('An expired credential is renewed once (09 14.5)', () => {
 
   it('fails AUTH_EXPIRED if it expires again, having asked only twice', async () => {
     const server = fakeServer({ credentialRequired: true });
-    server.answer('POST /upload/chunk', () => server.json(401, { code: 'AUTH_EXPIRED' }));
+    server.answer('PUT /api/v4/upload/chunks/:index', () => server.json(401, { code: 'AUTH_EXPIRED' }));
     const auth = giving(TOKEN, RENEWED);
     const outcome = await upload(make(server, auth)).result;
     expect(outcome.status === 'failed' && outcome.error.code).toBe('AUTH_EXPIRED');
     expect(auth).toHaveBeenCalledTimes(2);
-    expect(server.uploads().filter((r) => r.path === '/upload/chunk')).toHaveLength(2);
+    expect(server.uploads().filter((r) => r.path === CHUNK)).toHaveLength(2);
   });
 });
 
@@ -302,12 +312,12 @@ describe('Typed outcomes, never retried as they are (09 14.6)', () => {
   for (const [status, code] of [[401, 'AUTH_REQUIRED'], [403, 'AUTH_DENIED'], [403, 'QUOTA_EXCEEDED']] as const) {
     it(`fails an upload ${code} on a chunk's ${status}, without retrying it`, async () => {
       const server = fakeServer({ credentialRequired: true });
-      server.answer('POST /upload/chunk', () => server.json(status, { code }));
+      server.answer('PUT /api/v4/upload/chunks/:index', () => server.json(status, { code }));
       const auth = giving(TOKEN);
       const outcome = await upload(make(server, auth)).result;
       expect(outcome.status === 'failed' && outcome.error.code).toBe(code);
       expect(outcome.status === 'failed' && outcome.error.status).toBe(status);
-      expect(server.uploads().filter((r) => r.path === '/upload/chunk')).toHaveLength(1);
+      expect(server.uploads().filter((r) => r.path === CHUNK)).toHaveLength(1);
       expect(auth).toHaveBeenCalledTimes(1);
     });
   }
@@ -317,9 +327,16 @@ describe('Never in a snapshot, result, error, log or URL (09 14.7, hard requirem
   it('a completed upload, encrypted: only the Authorization header carries it', async () => {
     const server = fakeServer({ credentialRequired: true });
     const client = make(server, giving(TOKEN));
-    const { outcome, text } = await everythingSeen(client, upload(client, [file('a.txt'), file('b.txt')], true));
-    expect(outcome.status).toBe('completed');
-    expect(text).not.toContain(TOKEN);
+    const runs = [
+      await everythingSeen(client, upload(client, [file('a.txt'), file('b.txt')], true)),
+      await everythingSeen(client, upload(client, file('a.txt'), true)),
+    ];
+    for (const { outcome, text } of runs) {
+      expect(outcome.status).toBe('completed');
+      expect(text).not.toContain(TOKEN);
+      // The link, the secret and the manage token are this upload's own: none holds the credential.
+      expect(outcome.status === 'completed' && JSON.stringify(outcome.value)).not.toContain(TOKEN);
+    }
     for (const r of server.seen) {
       expect(r.url, r.path).not.toContain(TOKEN);
       expect(r.body, r.path).not.toContain(TOKEN);
@@ -327,13 +344,11 @@ describe('Never in a snapshot, result, error, log or URL (09 14.7, hard requirem
       expect(JSON.stringify(rest), r.path).not.toContain(TOKEN);
       if (Authorization) expect(Authorization).toBe(`Bearer ${TOKEN}`);
     }
-    // The link, the key and the manifest are encryption secrets: none holds the credential.
-    expect(outcome.status === 'completed' && outcome.value.downloadUrl).not.toContain(TOKEN);
   });
 
   it('a failed upload: its error, however it is printed', async () => {
     const server = fakeServer({ credentialRequired: true });
-    server.answer('POST /upload/chunk', () => server.json(401, { code: 'AUTH_EXPIRED', error: `Expired: ${TOKEN}` }));
+    server.answer('PUT /api/v4/upload/chunks/:index', () => server.json(401, { code: 'AUTH_EXPIRED', error: `Expired: ${TOKEN}` }));
     const client = make(server, giving(TOKEN, TOKEN));
     const { outcome, text } = await everythingSeen(client, upload(client));
     expect(outcome.status === 'failed' && outcome.error.code).toBe('AUTH_EXPIRED');
@@ -375,10 +390,10 @@ describe('Only what a credential may be, and only to its own server (09 14.8)', 
 
   it('follows no redirect, so the credential never goes anywhere else', async () => {
     const server = fakeServer({ credentialRequired: true });
-    server.answer('POST /upload/init', () => new Response(null, { status: 307, headers: { Location: 'https://elsewhere.example/upload/init' } }));
+    server.answer(`POST ${START}`, () => new Response(null, { status: 307, headers: { Location: `https://elsewhere.example${START}` } }));
     const outcome = await upload(make(server, giving(TOKEN))).result;
     expect(outcome.status === 'failed' && outcome.error.code).toBe('REDIRECT_NOT_FOLLOWED');
     expect(server.seen.every((r) => new URL(r.url).origin === BASE_URL)).toBe(true);
-    expect(server.withAuth().map((r) => r.path)).toEqual(['/upload/init']);
+    expect(server.withAuth().map((r) => r.path)).toEqual([START]);
   });
 });

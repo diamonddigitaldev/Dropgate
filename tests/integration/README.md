@@ -7,7 +7,7 @@ End-to-end tests that drive Dropgate's web UI in real browsers (Chromium, Firefo
 
 Each test sends files through the web UI the way a person would, then receives them on the page a recipient would use, and compares every byte and file name with what was sent:
 
-* **A single file**, unencrypted and end-to-end encrypted, from the home page to the standard download page.
+* **A single file**, unencrypted and end-to-end encrypted, from the home page to the standard download page. Its link is the upload's ID, and for an encrypted one a 43-character secret after the `#`; fetched without the `#`, as a chat preview does, its page shows only the server's name and Dropgate's description, and takes no download lease. On a plain-HTTP localhost server with no proxy, an encrypted file downloads too, since browsers count localhost as secure. In Chromium, a page with no secure context (plain HTTP to a name that isn't this machine's, which Chromium is told is `127.0.0.1` without asking the network) hands an unencrypted file to the browser, under one lease.
 * **A bundle of three files**, unencrypted and end-to-end encrypted, from the home page to the bundle page: each file on its own, then all of them with "Download All as ZIP".
 * **File lifetime.** A single file and a bundle, uploaded with a five-minute lifetime set on the home page, are still there after three minutes. After six, the link shows "not found" and the server holds none of their files. Bundles are checked unencrypted and end-to-end encrypted.
 * **Max downloads.** With a limit of 2 set on the home page, a single file downloads twice, and then its link shows "not found". A bundle's files can each be downloaded on their own without using up the limit, because only "Download All as ZIP" counts, so it gives two ZIPs and then its link is gone. Each is checked unencrypted and end-to-end encrypted.
@@ -36,11 +36,9 @@ Once a test has passed, it also checks what its browsers kept and what the serve
 * **Nothing is kept in the browser.** The server's origin has no cookies, localStorage, sessionStorage, IndexedDB or Cache Storage. At most one service worker is registered: the one the download pages use to stream files to disk.
 * **The server never gets a file name or a key.** No request that reaches the server has a file name, or the key from a link's `#`, in its URL, headers or body, and no WebSocket message a page sends has either. The one exception is a file uploaded without encryption: the server stores its name, so the upload sends it in a request body. The download pages' own download URLs carry the file name too, but their service worker answers them inside the browser, and this checks that none gets through.
 
-Tests for known issues use `test.fail()`, and each one's name says what fixes it. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. Each one only counts the failure its issue causes: if it fails for any other reason, it's reported as a failure. Today there is one:
+Tests for known issues use `test.fail()`, and each one's name says what fixes it. They pass while the issue exists, and fail once it's fixed, so the marker can't be forgotten. Each one only counts the failure its issue causes: if it fails for any other reason, it's reported as a failure. Today there are none.
 
-* **An encrypted upload on a plain-HTTP localhost server can't be downloaded.** Browsers count localhost as a secure context, so the web UI encrypts the upload, but the server only serves encrypted download pages to requests that came in over HTTPS, so the link shows "Secure Connection Required".
-
-Pasting an end-to-end encrypted link into "Enter Sharing Code" used to send its key to the server and open its download page without it. Both are fixed, and tested as plain tests (`web-ui/pasted-link.spec.mjs`).
+Pasting an end-to-end encrypted link into "Enter Sharing Code" used to send its key to the server and open its download page without it. Both are fixed, and tested as plain tests (`web-ui/pasted-link.spec.mjs`): the link is read in the page, and nothing of it is sent. An encrypted file on a plain-HTTP localhost server couldn't be downloaded, because the server refused its page unless the request came in over HTTPS; the page now decides for itself, and that's a plain test too (`web-ui/plain-http-localhost.spec.mjs`).
 
 
 ## Running the Tests

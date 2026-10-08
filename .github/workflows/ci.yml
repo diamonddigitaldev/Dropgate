@@ -161,6 +161,11 @@ jobs:
           npm --version
           npm ci
 
+      # hosted.test.ts runs the real server, through the server suite's harness.
+      - name: Install the server's dependencies
+        working-directory: server
+        run: npm ci
+
       - name: Typecheck
         run: npm run typecheck
 

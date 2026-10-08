@@ -8,7 +8,7 @@ An upload or a download doesn't throw when it goes wrong: it ends with a `failed
 import { DropgateError } from '@dropgate/core';
 
 try {
-  const file = await client.hosted.metadata({ fileId, keyB64 });
+  const upload = await client.hosted.metadata({ id, secret });
 } catch (err) {
   if (DropgateError.is(err, 'VERSION_UNSUPPORTED')) showUpdateRequired(err.message, err.details.update);
   else if (DropgateError.is(err) && err.retryable) showTryAgain(err.message);
@@ -38,23 +38,23 @@ When the server answers with an error, the message is the server's own, if it se
 
 | Code | Origin | Retryable | When |
 | --- | --- | --- | --- |
-| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, or one that isn't an address; an `appInfo` that isn't `{ name, version? }`; an `auth` that isn't a function, or a credential it gives that isn't `{ token }`; no files, or something that isn't a file; no `fileId` or `bundleId`; a download without a sink that fits it; a lifetime that isn't a whole number of milliseconds; or an event `client.server.on()` doesn't have |
+| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, or one that isn't an address; an `appInfo` that isn't `{ name, version? }`; an `auth` that isn't a function, or a credential it gives that isn't `{ token }`; no files, or something that isn't a file; no `id` or `bundleId`; a download's `files` that isn't indexes, each once, or names a file the upload doesn't have; a download without a sink that fits it; a lifetime that isn't a whole number of milliseconds; or an event `client.server.on()` doesn't have |
 | `RUNTIME_UNSUPPORTED` | local | No | There's no `fetch()`, or no secure random numbers (`crypto.getRandomValues()`), or encryption was asked for where the browser gives no `crypto.subtle` (a page not served over HTTPS or from `localhost`), or a download's answer can't be read as a stream |
 | `OPERATION_CANCELLED` | local | No | A call was given an `AbortSignal`, and it was aborted. An upload or download that's cancelled ends with a `cancelled` outcome instead |
 | `SOURCE_UNAVAILABLE` | local | No | A file being uploaded couldn't be read |
 | `OUTPUT_WRITE_FAILED` | local | No | A download's sink failed a `write()` or its `close()`, or a function giving a sink failed; a direct transfer's `onData` threw or rejected, or its receiver couldn't keep up |
-| `ENCRYPT_FAILED` | local | No | The encryption key couldn't be made, or a file name or chunk couldn't be encrypted |
-| `KEY_REQUIRED` | local | No | The upload is encrypted, and there's no key |
-| `DECRYPT_FAILED` | local | No | A file name or a bundle's manifest couldn't be decrypted: usually the wrong key |
-| `INTEGRITY_FAILED` | server | No | Downloaded data didn't decrypt, or a direct transfer's sender sent data that didn't match what it declared (origin `peer`) |
+| `ENCRYPT_FAILED` | local | No | The encryption keys couldn't be made, or a file name, list of files or chunk couldn't be encrypted |
+| `KEY_REQUIRED` | local | No | The upload is encrypted, and there's no secret (or, for a bundle, no key) |
+| `DECRYPT_FAILED` | local | No | An upload's list of files, a file name or a bundle's manifest couldn't be decrypted: usually the wrong link. A secret that isn't 32 bytes of URL-safe base64 is refused the same way |
+| `INTEGRITY_FAILED` | server | No | Downloaded data didn't decrypt, or an upload's header, list of files or chunks were changed, reordered or cut short, or its files don't fit it; the server already held different bytes for a chunk, or a chunk's `Content-Digest` didn't match it; or a direct transfer's sender sent data that didn't match what it declared (origin `peer`) |
 | `INVALID_MANIFEST` | peer | No | A direct transfer's list of files didn't add up |
 | `INVALID_FILENAME` | local, or `server` or `peer` for a name received | No | A file name sent or received, encrypted or not, is empty, longer than 255 bytes in UTF-8, or has a control character or path separator in it ([File Names](quick-start.md#file-names)) |
 | `INVALID_CODE` | local | No | A direct transfer code isn't the shape of one |
 | `FILE_EMPTY` | local | No | A file to upload is empty (0 bytes) |
 | `FILE_TOO_LARGE` | server | No | The upload is larger than the server's limit (`details.index` says which file, when core finds it before asking the server) |
 | `LIFETIME_NOT_ALLOWED` | server | No | The server doesn't allow that file lifetime: too long, or unlimited |
-| `CAPABILITY_UNSUPPORTED` | server | No | The server has uploads, end-to-end encryption or direct transfer turned off (`details.capability`) |
-| `VERSION_UNSUPPORTED` | server | No | The server speaks another major version of the protocol the call needs (DGUP for hosted calls, DGDTP for direct ones), or none (it's older than Dropgate 4); or a direct transfer's other device uses another protocol version (origin `peer`). The message says "Update required" and which side needs it |
+| `CAPABILITY_UNSUPPORTED` | server | No | The server has uploads, end-to-end encryption or direct transfer turned off (`details.capability`, when core finds it before asking the server) |
+| `VERSION_UNSUPPORTED` | server | No | The server speaks another major version of the protocol the call needs (DGUP for hosted calls, DGDTP for direct ones), or none (it's older than Dropgate 4); or a direct transfer's other device uses another protocol version (origin `peer`). The message says "Update required" and which side needs it. An upload made in a format this version of Dropgate can't read is refused the same way |
 | `INSECURE_TRANSPORT_NOT_ALLOWED` | local | No | The server is on plain `http://` on another machine, and the client wasn't made with `allowInsecure: true`. Thrown by the constructor, before any request |
 | `REDIRECT_NOT_FOLLOWED` | server | No | The server answered with a redirect, which core never follows: use the address it redirects to. `status` is the redirect's, where the runtime gives it (a browser doesn't) |
 | `AUTH_REQUIRED` | server | No | The server needs a [credential](api-reference.md#credentials) for this, and the client has no `auth`, it gave none or it failed (origin `local` for the last), or the server didn't accept the one sent (HTTP 401) |
@@ -66,7 +66,7 @@ When the server answers with an error, the message is the server's own, if it se
 | `RATE_LIMITED` | server | Yes | The server has had too many requests (HTTP 429) |
 | `SERVER_FULL` | server | Yes | The server is out of space (HTTP 507) |
 | `SERVER_ERROR` | server | Yes | The server ran into an error (HTTP 5xx) |
-| `INVALID_RESPONSE` | server | No | The server's answer wasn't understood, or isn't a Dropgate server's |
+| `INVALID_RESPONSE` | server | No | The server's answer wasn't understood, or isn't a Dropgate server's, or it couldn't send the range of bytes asked for |
 | `SERVER_UNREACHABLE` | network | Yes | No answer came: the server couldn't be reached |
 | `TIMED_OUT` | network | Yes | The server took too long to answer, or a download's next bytes took longer than its `timeoutMs`, or a direct transfer's other device didn't answer in time (origin `peer`) |
 | `CONNECTION_LOST` | network | Yes | A download was cut off part-way, or a direct transfer's connection dropped |

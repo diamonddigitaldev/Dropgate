@@ -61,7 +61,7 @@ export class ObjectWriter {
   }
 
   /** Seals chunk `index` from its plaintext, once only (see `ChunkSealer`). */
-  seal(index: number, plaintext: Uint8Array): Promise<Uint8Array> {
+  seal(index: number, plaintext: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
     return this.#sealer.seal(index, plaintext);
   }
 

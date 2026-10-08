@@ -55,7 +55,8 @@ upload.subscribe(({ status, phase, text, percent }) => {
 // The upload's one outcome: completed, cancelled or failed. It never rejects.
 const outcome = await upload.result;
 if (outcome.status === 'completed') {
-  console.log('Download URL:', outcome.value.downloadUrl);
+  console.log('Download URL:', outcome.value.downloadUrl); // https://<server>/<id>#<secret>
+  keepForDeleting(outcome.value.id, outcome.value.manageToken); // only the sender has it
 } else if (outcome.status === 'failed') {
   console.error('Upload failed:', outcome.error.code, outcome.error.message);
 }
@@ -63,6 +64,8 @@ if (outcome.status === 'completed') {
 // Cancel an in-progress upload (its outcome is then 'cancelled'):
 // upload.cancel();
 ```
+
+An encrypted upload's link ends with `#` and its secret, from which the keys that encrypt it are made: it never leaves the device, except in the link you share. The `manageToken` deletes the upload, and only the sender has it: keep it no further than you need, and never in a log.
 
 `upload.snapshot` is where it is now, as a new, frozen object each time it changes. The [API Reference](api-reference.md#operation-handles) lists its fields, and [Outcomes and Cancellation](outcomes.md) has the rest, including cancelling with your own `AbortSignal`, and everything at once with `client.operations.cancelAll()`.
 
@@ -97,29 +100,36 @@ A source must be able to read any range, more than once: a stream that can only 
 
 ## Reading Metadata
 
-`client.hosted.metadata()` gives what the server holds about an upload, with the file names decrypted for an encrypted one. The key is the part of the link after its `#`, and it never leaves the device.
+`client.hosted.metadata()` gives what the server holds about an upload, with the file names decrypted for an encrypted one. The secret is the part of the link after its `#`, and it never leaves the device. Reading metadata takes no lease and counts as no download.
 
 ```javascript
-const file = await client.hosted.metadata({ fileId: 'file-id-123', keyB64: 'key-from-the-link' });
-console.log(file.name, file.sizeBytes, file.isEncrypted);
+const link = new URL('https://dropgate.example/f5aa7a2f-ce3a-4deb-b92f-2da74b6b9bae#CPuytR72dDo2WhXGdB6x6aXlPcJu7Ec0tYvcUn5GL0k');
+const id = link.pathname.slice(1);
+const secret = link.hash.slice(1) || undefined; // an unencrypted upload's link has none
 
+const upload = await client.hosted.metadata({ id, secret });
+console.log(upload.kind, upload.encrypted, `${upload.totalSize} bytes`);
+for (const { name, size } of upload.files) console.log(`- ${name}: ${size} bytes`);
+
+// A bundle's link is still https://<server>/b/<id>#<key>:
 const bundle = await client.hosted.metadata({ bundleId: 'bundle-id-456', keyB64: 'key-from-the-link' });
 console.log(`${bundle.fileCount} files, ${bundle.totalSizeBytes} bytes`);
-for (const { name, sizeBytes } of bundle.files) console.log(`- ${name}: ${sizeBytes} bytes`);
 ```
 
-A sealed bundle's list of files is encrypted as well, so only the key's holder can read it. An encrypted upload without its key throws `KEY_REQUIRED`, and a key that doesn't open it, `DECRYPT_FAILED`.
+An encrypted upload's list of files is sealed as well, so only the secret's holder can read it. An encrypted upload without its secret throws `KEY_REQUIRED`, and a secret that doesn't open it, `DECRYPT_FAILED`.
 
 ## Downloading Files
 
 `client.hosted.download()` writes the file into a **sink**, which it needs: anything with `write(chunk)` and `close()`, and ideally `abort()`. Core awaits each write, and the download only completes once the sink has closed; a failed or cancelled download aborts it instead. Like an upload, it gives its handle at once, and ends with one outcome. It only times out if the server's answer, or the next bytes, take longer than `timeoutMs` (60 seconds unless you give another), so a big file never times out for taking long.
 
+Each download is one download against the upload's limit: core takes a lease for it from the server, and gives it back the moment the download ends, so an upload at its limit is gone as soon as it's saved. While someone else is downloading the last copy the limit allows, the download waits ("Someone is downloading this right now.") and starts when it can.
+
 In a browser, a `WritableStream`'s writer is a sink, such as [StreamSaver](https://github.com/jimmywarting/StreamSaver.js)'s:
 
 ```javascript
 const download = client.hosted.download({
-  fileId: 'abc123',
-  keyB64: 'key-from-the-link', // for an encrypted file
+  id,
+  secret, // for an encrypted file
   sink: streamSaver.createWriteStream('report.pdf').getWriter(),
 });
 
@@ -144,8 +154,8 @@ import { filenames } from '@dropgate/core';
 
 let path;
 const download = client.hosted.download({
-  fileId: 'abc123',
-  keyB64: 'key-from-the-link',
+  id,
+  secret,
   sink: async ({ name }) => {
     const safe = filenames.unique(filenames.sanitize(name), (n) => existsSync(join('/downloads', n)));
     return open((path = join('/downloads', safe)), 'wx');
@@ -155,11 +165,12 @@ const outcome = await download.result;
 if (outcome.status !== 'completed' && path) await rm(path, { force: true }); // a FileHandle has no abort()
 ```
 
-A bundle downloads as one ZIP archive into one sink with `asZip: true`, or as its separate files, with a function giving a sink for each:
+Several files download as one ZIP archive into one sink with `asZip: true`, or as separate files, with a function giving a sink for each; `files` picks some of them, by their index in the list:
 
 ```javascript
 const zipped = client.hosted.download({ bundleId, keyB64, asZip: true, sink: zipWriter });
 const separate = client.hosted.download({ bundleId, keyB64, sink: ({ name }) => sinkFor(name) });
+const second = client.hosted.download({ bundleId, keyB64, files: [1], sink: ({ name }) => sinkFor(name) });
 ```
 
 ## File Names
@@ -202,11 +213,11 @@ An operation leaves the list the moment it ends, and nothing about it is kept, s
 
 ```javascript
 const result = await client.links.resolve(pastedText);
-if (result.valid) location.href = result.target; // an encrypted link's key is back on the end
+if (result.valid) location.href = result.target; // an encrypted link's secret is back on the end
 else console.log(result.reason);
 ```
 
-The text is read on the device first, and only the ID or code in it is sent to the server: never the key after a link's `#`.
+The text is read on the device, and nothing of it is sent to the server: the page it opens finds out whether the upload is there.
 
 ## P2P File Transfer (Sender)
 

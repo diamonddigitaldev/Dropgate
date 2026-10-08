@@ -132,7 +132,9 @@ For each chunk:
 
 The encryption key is appended to the download URL as a fragment identifier (`#<keyBase64>`). URL fragments are not included in HTTP requests and are therefore invisible to the server and any intermediate proxies.
 
-A whole encrypted link pasted into the Web UI's "enter a sharing code" box, or passed to the core library's `client.links.resolve()`, is read on the device. Only the file or bundle ID in its path is sent to `POST /api/resolve`; the key after the `#` never is, and the download page then opens with the key still on its address. A link to another server is refused without asking this one.
+A whole encrypted link pasted into the Web UI's "enter a sharing code" box, or passed to the core library's `client.links.resolve()`, is read on the device, and nothing of it is sent: the download page opens with the key still on its address, and that page asks the server about the upload. A link to another server is refused without asking this one. Version 3's clients sent the ID or code to `POST /api/resolve`, which version 4's core no longer calls.
+
+A version 4 upload's link carries a secret rather than a key, and its keys are made from it ([§21.1](#211-links)).
 
 ### 4.6 Secure Context Requirement
 
@@ -148,13 +150,13 @@ So a server, or anyone able to modify stored files, cannot read or change the co
 - reorder or duplicate chunks;
 - swap member files of the same size within a bundle.
 
-The result would still decrypt without an error. Size checks during download catch some of these changes, but not all of them.
+The result would still decrypt without an error. Size checks during download catch some of these changes, but not all of them. A version 4 upload has none of these limitations: each chunk's place and whether it's the last are in its nonce, and each upload has keys of its own ([§21.2](#212-the-object-a-client-makes)).
 
 ### 4.8 Chunk Framing on Download
 
 Encrypted files do not record the chunk size they were uploaded with. Clients split the downloaded stream using the chunk size the server currently advertises (`capabilities.upload.chunkSize` in `/api/info`).
 
-If `UPLOAD_CHUNK_SIZE_BYTES` changes on a server that keeps uploads across restarts (`UPLOAD_PRESERVE_UPLOADS=true`), encrypted files uploaded before the change can no longer be decrypted. Unencrypted files are not affected.
+If `UPLOAD_CHUNK_SIZE_BYTES` changes on a server that keeps uploads across restarts (`UPLOAD_PRESERVE_UPLOADS=true`), encrypted files uploaded before the change can no longer be decrypted. Unencrypted files are not affected. A version 4 upload records its own chunk size in its header ([§19.1](#191-the-object)), so it's always read as it was written.
 
 ---
 
@@ -393,12 +395,12 @@ The server deletes the temporary file, releases the storage reservation, and rem
 
 | Upload Type | URL Format |
 |-------------|------------|
-| Single file (unencrypted) | `https://<host>/<fileId>` |
-| Single file (encrypted) | `https://<host>/<fileId>#<keyBase64>` |
+| Single file (unencrypted) | `https://<host>/<id>`, a version 4 upload ([§21.1](#211-links)) |
+| Single file (encrypted) | `https://<host>/<id>#<secret>`, a version 4 upload ([§21.1](#211-links)) |
 | Bundle (unencrypted) | `https://<host>/b/<bundleId>` |
 | Bundle (encrypted) | `https://<host>/b/<bundleId>#<keyBase64>` |
 
-The fragment identifier (`#<keyBase64>`) is processed exclusively by the client. Browsers never include it in requests. The one case where it does reach the server is described in [§4.5](#45-key-transmission).
+The fragment identifier (`#<keyBase64>`, or a version 4 upload's `#<secret>`) is processed exclusively by the client. Browsers never include it in requests, and the clients never send it ([§4.5](#45-key-transmission)).
 
 ---
 
@@ -909,3 +911,44 @@ An encrypted upload can be deleted while the server has E2EE off.
 - **Metadata and taking a lease skip the rate limit for an upload that's there** ([§14.1](#141-rate-limits)), as version 3's downloads do; asking about one that isn't is limited.
 - **Every request under a lease skips it while the lease is open,** its bytes and the browser's own downloads included; one naming a lease the server doesn't have is limited.
 - **The delete is always rate-limited.**
+
+---
+
+## 21. Version 4 Links and Pages
+
+A single file is uploaded as a version 4 upload ([§19](#19-version-4-uploads)) by the Web UI, the desktop app and the core library; a bundle is still uploaded as in §5.2 to §9. This section is what a client does with the routes of §19 and §20: the link it gives, the object it makes, and the download page.
+
+### 21.1 Links
+
+| Upload | Link |
+|--------|------|
+| Encrypted | `https://<host>/<id>#<secret>` |
+| Unencrypted | `https://<host>/<id>` |
+
+- **`id`** is the upload's ID, as the finish gives it ([§19.6](#196-finish)): the only thing in the path.
+- **The secret** is 32 random bytes, in URL-safe base64 with no `=`: 43 characters of `A–Z a–z 0–9 - _`. It isn't a key: the upload's keys are made from it ([§21.2](#212-the-object-a-client-makes)). It's never sent, in a request, a log or an error; only the link carries it.
+- **A version 3 single-file link** (`/<fileId>#` and 44 characters of standard base64) names an upload a version 4 server doesn't have, so its page says it isn't there.
+
+### 21.2 The Object a Client Makes
+
+The server stores an object without reading it ([§19.1](#191-the-object)). A client makes an encrypted one like this, and only the secret's holder can open it:
+
+- **Three keys, one per purpose,** each HKDF-SHA256 of the secret, with the object's random 16-byte salt as the salt: the header's (info `dropgate/4 header`), the chunks' (`dropgate/4 payload`) and the file list's (`dropgate/4 meta`). Nothing from one upload opens under another's keys.
+- **The header** ends with HMAC-SHA256 of its first 28 bytes under the header key. A client checks the header's fields before making any key from it, and its MAC once it has: a header that fails, with a file list that doesn't open either, is most likely the wrong link; with one that opens, the header was changed.
+- **The chunks** are AES-256-GCM under the payload key, with no associated data. Chunk `i`'s 12-byte nonce is `i` as an 11-byte big-endian number, then `01` for the last chunk and `00` for any other, so a chunk moved, repeated, dropped, taken from another upload or cut short fails to open. A client seals each chunk once, and sends a chunk again as the same bytes: sealing one index twice over different bytes would reuse a nonce.
+- **Padding (Padmé):** the plaintext is the file, then zero bytes up to a length that shows only the top bits of the file's size (about 1% more on average). The padding stops at the server's maximum upload size (`capabilities.upload.maxSizeMB` × 1024²), so it never makes a file too large: the object is then exactly the limit. A file whose object is over the limit unpadded is refused before the upload starts.
+- **The file list** (`meta`) is UTF-8 JSON, `{"files":[{"name","size"}]}`, after its 4-byte big-endian length, padded with zero bytes to 4 KiB, 8 KiB and so on up to 1 MiB, then sealed under the meta key with a random 12-byte nonce before it. Names follow the file name rule (§5.1), checked when sent and when received.
+- **The manage token** is 32 more random bytes. Only its SHA-256 goes with the start (`manageTokenHash`); the client keeps the token for the uploader's delete ([§20.6](#206-the-uploaders-delete)), and gives it nowhere else.
+
+An unencrypted object is the file's bytes, with its name and size sent in plain at the start.
+
+### 21.3 The Download Page
+
+```
+GET /{id}
+```
+
+- **One page, served over HTTP and HTTPS alike.** The server sends it for an upload that's there, with no check of how the request came in: the page itself decides whether it can decrypt, from whether the browser gives it a secure context (HTTPS, or `localhost`), which the server can't tell from the request. An unknown, expired or deleted upload, or an encrypted one on a server with E2EE off, gets the not-found page (`404`). A version 3 bundle's ID redirects to `/b/<bundleId>`.
+- **Loading the page takes no lease and counts nothing.** The page holds no file name or size: a link preview, which fetches the page without the `#` part, sees only the server's name and Dropgate's description. The page reads the upload's metadata ([§20.1](#201-metadata)) and opens its file list with the secret, in the browser.
+- **Downloading** is core's: one lease ([§20.2](#202-leases)), released as soon as the download ends, so at its limit the upload is gone once the file is saved. A download that finds every allowed place held waits as `Retry-After` says, and starts when one frees.
+- **Without a secure context,** an unencrypted file is handed to the browser: the page takes the lease with `fetch()` and sends the browser to `/api/v4/leases/{lease}` ([§20.5](#205-a-browsers-own-downloads)). An encrypted file can't be downloaded there, and the page says why.

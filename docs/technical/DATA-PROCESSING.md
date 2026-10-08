@@ -132,13 +132,27 @@ Even with E2EE active, the following metadata is visible to the server:
 
 Encryption also protects each chunk only on its own. A chunk's position and whether it is the last one are not authenticated, so someone able to modify stored files could remove, reorder or duplicate chunks without the download failing to decrypt. See [DGUP §4.7](./DGUP.md#47-integrity-limitations).
 
+A single file is now uploaded as a Dropgate 4 upload, which shows less, and keeps none of those weaknesses ([DGUP §21.2](./DGUP.md#212-the-object-a-client-makes)): the size the server stores is padded (Padmé, to within about 1%, and never past the maximum upload size); the file's name and size are only in a sealed list, padded to 4 KiB or more, so the server learns neither the name's length nor how many files there are, up to dozens; and each chunk's position, and whether it's the last, are authenticated, so a changed, reordered or shortened upload fails to download. What it still shows: the padded size, whether it's encrypted, its expiry and download limit, and when its chunks arrive.
+
 ### 3.3 Key Lifecycle
+
+For a single file (a Dropgate 4 upload):
+
+1. **A secret is generated** by the client: 32 bytes from the browser's or the system's secure random numbers.
+2. **Keys are made from it**, one for the upload's header, one for its chunks and one for its list of files, each with HKDF-SHA256 and the upload's own random salt. They can't be exported, and are never stored.
+3. **The secret is appended** to the download URL as a fragment, in URL-safe Base64 (`#<secret>`, 43 characters).
+4. **Not transmitted to the server.** URL fragments are not included in HTTP requests. A whole link pasted into the Web UI's "enter a sharing code" box, or given to the core library's `client.links.resolve()`, is read on the device, and nothing of it is sent: the download page it opens asks about the upload. See [DGUP §4.5](./DGUP.md#45-key-transmission).
+5. **Not persisted** by the client. The secret exists only in the download link. If the link is lost, the file cannot be decrypted.
+
+The upload's **manage token**, which deletes it ([DGUP §20.6](./DGUP.md#206-the-uploaders-delete)), is 32 more random bytes, made with the secret. The server is sent only its SHA-256, and the token itself stays in the memory of the page or app that uploaded the file: neither the Web UI nor the desktop app writes it anywhere, and it's gone when the page or the app closes.
+
+For a bundle (still uploaded as in Dropgate 3), the key is:
 
 1. **Generated** by the client using `crypto.subtle.generateKey`.
 2. **Used** to encrypt all chunks and the filename.
 3. **Exported** to URL-safe Base64 and appended to the download URL as a fragment (`#<keyBase64>`).
-4. **Not transmitted to the server.** URL fragments are not included in HTTP requests. A whole link pasted into the Web UI's "enter a sharing code" box is read on the device, and only its file or bundle ID is sent to `POST /api/resolve`. See [DGUP §4.5](./DGUP.md#45-key-transmission).
-5. **Not persisted** by the client. The key exists only in the download link. If the link is lost, the file cannot be decrypted.
+4. **Not transmitted to the server**, as a single file's secret isn't.
+5. **Not persisted** by the client. The key exists only in the download link. If the link is lost, the files cannot be decrypted.
 
 ### 3.4 Server's Cryptographic Capabilities
 

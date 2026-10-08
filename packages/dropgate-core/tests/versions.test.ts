@@ -24,15 +24,14 @@ function serverGiving(info: Record<string, unknown>) {
     requests.push({ url, headers: JSON.stringify(init.headers ?? {}), body: typeof init.body === 'string' ? init.body : '' });
     const path = new URL(url).pathname;
     if (path === '/api/info') return json(200, info);
-    if (path === `/api/file/${FILE_ID}/meta`) return json(200, { isEncrypted: false, sizeBytes: 4, filename: 'notes.txt' });
-    if (path === '/api/resolve') return json(200, { valid: true, type: 'file', target: `/${FILE_ID}` });
+    if (path === `/api/v4/objects/${FILE_ID}`) return json(200, { encrypted: false, size: 4, files: [{ name: 'notes.txt', size: 4 }] });
     return json(404, { error: 'Not found.' });
   };
   return { fetchFn, requests };
 }
 
 const CAPABILITIES = {
-  upload: { enabled: true, maxSizeMB: 0, maxLifetimeHours: 0, e2ee: true, chunkSize: 4 },
+  upload: { enabled: true, maxSizeMB: 0, maxLifetimeHours: 0, e2ee: true, chunkSize: 64 * 1024 },
   p2p: { enabled: true, peerjsPath: '/peerjs', iceServers: [] },
 };
 const v = (major: number, minor = 0) => ({ major, minor });
@@ -71,7 +70,7 @@ describe('Version negotiation', () => {
     expect(connection.dgup).toEqual({ compatible: true, client: v(4), server: v(4), message: expect.any(String) });
     expect(connection.dgdtp).toEqual({ compatible: true, client: v(4), server: v(4), message: expect.any(String) });
     expect(connection.serverVersion).toBe('4.0.0');
-    await expect(client.hosted.metadata({ fileId: FILE_ID })).resolves.toMatchObject({ name: 'notes.txt' });
+    await expect(client.hosted.metadata({ id: FILE_ID })).resolves.toMatchObject({ files: [{ name: 'notes.txt', size: 4 }] });
   });
 
   it('a different minor still works, newer or older', async () => {
@@ -101,7 +100,7 @@ describe('Version negotiation', () => {
       });
     }
 
-    const err = await client.hosted.metadata({ fileId: FILE_ID }).catch((e: unknown) => e);
+    const err = await client.hosted.metadata({ id: FILE_ID }).catch((e: unknown) => e);
     expect(DropgateError.is(err, 'VERSION_UNSUPPORTED')).toBe(true);
     expect((err as DropgateError).details).toEqual({ component: 'dgup', update: 'server', client: v(4), server: null });
     expect((err as DropgateError).message).toBe(connection.dgup.message);
@@ -123,7 +122,7 @@ describe('Version negotiation', () => {
     const newer = new DropgateClient({ server: BASE_URL, fetchFn: serverGiving(infoWith({ dgup: v(5), dgdtp: v(5) })).fetchFn });
     const connection = await newer.server.connect();
     expect(connection.dgup).toMatchObject({ compatible: false, server: v(5), update: 'client', message: expect.stringMatching(/^Update required: .*Update this app/) });
-    await expect(newer.hosted.metadata({ fileId: FILE_ID })).rejects.toMatchObject({
+    await expect(newer.hosted.metadata({ id: FILE_ID })).rejects.toMatchObject({
       code: 'VERSION_UNSUPPORTED', details: { component: 'dgup', update: 'client' },
     });
   });
@@ -134,7 +133,7 @@ describe('Version negotiation', () => {
     expect(connection.dgup.compatible).toBe(true);
     expect(connection.dgdtp).toMatchObject({ compatible: false, update: 'client' });
 
-    await expect(client.hosted.metadata({ fileId: FILE_ID })).resolves.toMatchObject({ name: 'notes.txt' });
+    await expect(client.hosted.metadata({ id: FILE_ID })).resolves.toMatchObject({ files: [{ name: 'notes.txt', size: 4 }] });
     await expect(client.direct.receive({ code: 'ABCD-1234', Peer: class {} as unknown as PeerConstructor }))
       .rejects.toMatchObject({ code: 'VERSION_UNSUPPORTED', details: { component: 'dgdtp' } });
   });
@@ -163,7 +162,7 @@ describe('appInfo', () => {
     expect(Object.isFrozen(client.appInfo)).toBe(true);
 
     await client.server.connect();
-    await client.hosted.metadata({ fileId: FILE_ID });
+    await client.hosted.metadata({ id: FILE_ID });
     await client.links.resolve(FILE_ID);
     const sent = server.requests.map((r) => r.url + r.headers + r.body).join('\n');
     expect(sent).not.toContain('Zebra');

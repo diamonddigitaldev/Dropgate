@@ -122,7 +122,7 @@ export function secretsSent(server, secrets) {
         const request = `${method} ${new URL(url, 'http://server').pathname}`;
         const inUrl = withDecoded(url);
         const inHeaders = Object.values(headers).flat().flatMap((v) => withDecoded(String(v)));
-        const isUpload = method === 'POST' && url.startsWith('/upload/');
+        const isUpload = method === 'POST' && (url.startsWith('/upload/') || url === '/api/v4/uploads');
         for (const secret of all) {
             if (found(inUrl, secret)) leaks.push(`${secret.what}, in the URL of ${request}`);
             if (found(inHeaders, secret)) leaks.push(`${secret.what}, in a header of ${request}`);

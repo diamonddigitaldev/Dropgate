@@ -29,11 +29,11 @@ switch (outcome.status) {
 }
 ```
 
-A failed or cancelled outcome never holds a file name or a key, so it's safe to show and to log, serialised or not. A completed one holds what you asked for, which may: an encrypted upload's link carries its key, and a download's result its file names.
+A failed or cancelled outcome never holds a file name, a secret or a manage token, so it's safe to show and to log, serialised or not. A completed one holds what you asked for, which may: an encrypted upload's link carries its secret, the upload's value its manage token, and a download's result its file names.
 
 Work that ends after a cancel, however it ends, is `cancelled`, even if a request then fails on the way out. Work that had already finished when the cancel came is `completed`: an upload the server has already saved can't be taken back by cancelling it.
 
-Calling an upload or a download with nothing to do (no files, or neither a `fileId` nor a `bundleId`), or a download without a sink that fits it, throws `INVALID_ARGUMENT` at once, since there's no operation for an outcome to describe.
+Calling an upload or a download with nothing to do (no files, or neither an `id` nor a `bundleId`), or a download without a sink that fits it, throws `INVALID_ARGUMENT` at once, since there's no operation for an outcome to describe.
 
 A download only completes once its sink has closed. A sink's `write()` or `close()` that fails fails the download, with `OUTPUT_WRITE_FAILED`, and a download that fails or is cancelled aborts its sink, so nothing half-written is finished as if it were whole.
 
@@ -63,11 +63,11 @@ client.operations.cancelAll();
 
 // Cancel an upload or a download with your own signal:
 const controller = new AbortController();
-const download = client.hosted.download({ fileId, sink, signal: controller.signal });
+const download = client.hosted.download({ id, secret, sink, signal: controller.signal });
 controller.abort();
 // (await download.result) is { status: 'cancelled', cancellation: { by: 'signal', source: 'hosted.download' } }
 ```
 
 The client stays usable after `cancelAll()`: operations started afterwards run as normal. Once an operation has ended, cancelling it does nothing.
 
-When an upload is cancelled, however that happens, core stops sending chunks and tells the server to discard what it has, without waiting for it. An operation given a signal that's already aborted is cancelled before it asks the server anything.
+When an upload is cancelled, however that happens, core stops sending chunks and tells the server to discard what it has, without waiting for it. When a download ends, however it ends, core gives its lease back to the server, so a download cancelled after its first bytes counts as one, and one cancelled before them doesn't. An operation given a signal that's already aborted is cancelled before it asks the server anything.

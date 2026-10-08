@@ -193,11 +193,13 @@ async function downloadSingleFile(index, dlBtn) {
 
   // Stream download via dropgate-core (both plaintext and encrypted)
   try {
+    // This file alone, which the bundle's download limit doesn't count.
     const download = client.hosted.download({
-      fileId,
+      bundleId: bundleState.bundleId,
       keyB64: bundleState.keyB64,
+      files: [index],
       timeoutMs: 0,
-      sink: streamSaver.createWriteStream(name, size ? { size } : undefined).getWriter(),
+      sink: () => streamSaver.createWriteStream(name, size ? { size } : undefined).getWriter(),
     });
     download.subscribe(({ percent, processedBytes, totalBytes }) => {
       if (fileProgressBar) fileProgressBar.style.width = `${percent}%`;

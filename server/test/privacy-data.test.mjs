@@ -209,9 +209,10 @@ describe('responses, and what is left after the download limit', () => {
         },
     }, async () => {
         const { bundle } = fixture.uploads;
-        assert.equal((await fetch(`${server.baseUrl}/api/bundle/${bundle.bundleId}/meta`)).status, 404, 'the bundle is gone');
+        assert.equal((await fetch(`${server.baseUrl}/api/bundle/${bundle.id}/meta`)).status, 404, 'the bundle is gone');
+        assert.equal(fixture.memberIds.length, bundle.files.length, "the bundle's files were finished");
         const reachable = [];
-        for (const { fileId } of bundle.files) {
+        for (const fileId of fixture.memberIds) {
             const res = await fetch(`${server.baseUrl}/api/file/${fileId}`);
             await res.arrayBuffer();
             if (res.status !== 404) reachable.push(fileId);

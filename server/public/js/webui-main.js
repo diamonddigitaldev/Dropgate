@@ -283,7 +283,7 @@ function areFilesTooLargeForStandard(files) {
   // Check total estimated size across all files
   let totalEstimated = 0;
   for (const file of files) {
-    totalEstimated += sizes.estimateUpload(file.size, { encrypted: Boolean(state.encrypt), chunkSize: state.info?.capabilities?.upload?.chunkSize });
+    totalEstimated += sizes.estimateUpload(file.size, { encrypted: Boolean(state.encrypt), chunkSize: state.info?.capabilities?.upload?.chunkSize, maxBytes });
   }
   return totalEstimated > maxBytes;
 }
@@ -779,7 +779,7 @@ async function startStandardUpload() {
   if (maxBytes) {
     let totalEstimated = 0;
     for (const f of files) {
-      totalEstimated += sizes.estimateUpload(f.size, { encrypted: encrypt, chunkSize: state.info?.capabilities?.upload?.chunkSize });
+      totalEstimated += sizes.estimateUpload(f.size, { encrypted: encrypt, chunkSize: state.info?.capabilities?.upload?.chunkSize, maxBytes });
     }
     if (totalEstimated > maxBytes) {
       if (state.p2pEnabled && state.p2pSecureOk) {

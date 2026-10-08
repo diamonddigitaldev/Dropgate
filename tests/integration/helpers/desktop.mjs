@@ -485,7 +485,7 @@ export const securityWarning = (window) => window.getByRole('alertdialog', { nam
  * @param {{ requests: () => { method: string, url: string, body: Buffer }[] }} server
  */
 export const uploadsStarted = (server) => server.requests()
-    .filter(({ method, url }) => method === 'POST' && /^\/upload\/init(-bundle)?$/.test(url))
+    .filter(({ method, url }) => method === 'POST' && /^\/(upload\/init-bundle|api\/v4\/uploads)$/.test(url))
     .map(({ body }) => JSON.parse(body.toString('utf8')));
 
 export const test = base.extend({

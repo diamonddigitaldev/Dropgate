@@ -21,9 +21,9 @@ const encryptionStatement = document.getElementById('encryption-statement');
 const client = pageClient();
 
 const downloadState = {
-  fileId: null,
+  id: null,
   isEncrypted: false,
-  keyB64: null,
+  secret: null,
   fileName: null,
   sizeBytes: 0,
 };
@@ -88,10 +88,20 @@ async function startDownload() {
     }
   }
 
-  // For plain files in non-secure context, fall back to direct download
+  // For plain files in non-secure context, the browser downloads the file
+  // itself, under a lease the page takes first: the lease is in that one URL,
+  // so the browser's own resume stays under it, and counts once.
   if (!downloadState.isEncrypted && (!window.isSecureContext || !window.streamSaver?.createWriteStream)) {
+    let lease;
+    try {
+      lease = await takeLease(downloadState.id);
+    } catch (error) {
+      console.error(error);
+      showError('Download Failed', error.message || 'The download could not start.');
+      return;
+    }
     progressContainer.style.display = 'none';
-    window.location.href = `/api/file/${downloadState.fileId}`;
+    window.location.href = `/api/v4/leases/${encodeURIComponent(lease)}`;
     setStatusSuccess({
       card,
       iconContainer,
@@ -113,8 +123,8 @@ async function startDownload() {
     // The file's writer is the download's sink: core writes each piece to it,
     // closes it once the whole file is in, and aborts it if the download fails.
     const download = client.hosted.download({
-      fileId: downloadState.fileId,
-      keyB64: downloadState.keyB64,
+      id: downloadState.id,
+      secret: downloadState.secret,
       timeoutMs: 0, // No timeout for large file downloads
       sink: streamSaver.createWriteStream(downloadState.fileName).getWriter(),
     });
@@ -160,25 +170,52 @@ async function startDownload() {
   }
 }
 
+/**
+ * Takes a lease for one download, for the browser to download the file
+ * itself. While others are downloading every copy the upload allows, the
+ * server says to wait, and the page asks again when it says to.
+ */
+async function takeLease(id) {
+  for (;;) {
+    const res = await fetch(`/api/v4/objects/${encodeURIComponent(id)}/leases`, {
+      method: 'POST',
+      credentials: 'omit',
+      headers: { Accept: 'application/json' },
+    });
+    const body = await res.json().catch(() => null);
+    if (res.status === 423) {
+      statusTitle.textContent = 'Waiting';
+      statusMessage.textContent = 'Someone is downloading this right now.';
+      const seconds = Number(res.headers.get('Retry-After'));
+      await new Promise((resolve) => setTimeout(resolve, (Number.isFinite(seconds) ? Math.min(seconds, 60) : 5) * 1000));
+      continue;
+    }
+    if (!res.ok || typeof body?.lease !== 'string') {
+      throw new Error(body?.error || 'The download could not start.');
+    }
+    return body.lease;
+  }
+}
+
 async function loadMetadata() {
-  const fileId = window.location.pathname.split('/').pop();
-  if (!fileId) {
+  const id = window.location.pathname.split('/').pop();
+  if (!id) {
     showError('Invalid Link', 'The file ID is missing from this link.');
     return;
   }
 
-  downloadState.fileId = fileId;
-  fileIdEl.textContent = fileId;
+  downloadState.id = id;
+  fileIdEl.textContent = id;
 
   try {
-    // The key is after the #, and never leaves this page. Core decrypts the
+    // The secret is after the #, and never leaves this page. Core opens the
     // file's name with it, and gives the file's size as it will be saved.
-    const hash = window.location.hash.substring(1);
+    const secret = window.location.hash.substring(1);
     let metadata;
     try {
-      metadata = await client.hosted.metadata({ fileId, keyB64: hash || undefined });
+      metadata = await client.hosted.metadata({ id, secret: secret || undefined });
     } catch (error) {
-      // Only an encrypted file needs the key, and Web Crypto to read it.
+      // Only an encrypted file needs the secret, and Web Crypto to read it.
       if (DropgateError.is(error, 'KEY_REQUIRED') || DropgateError.is(error, 'RUNTIME_UNSUPPORTED')) {
         fileEncryptionEl.textContent = 'End-to-End Encrypted';
         trustStatement.style.display = 'block';
@@ -193,17 +230,22 @@ async function loadMetadata() {
       throw error;
     }
 
-    downloadState.isEncrypted = metadata.isEncrypted;
-    downloadState.sizeBytes = metadata.sizeBytes;
-    downloadState.keyB64 = metadata.isEncrypted ? hash : null;
+    if (metadata.files.length !== 1) {
+      showError('Download Error', "This upload has several files, which this page can't download.");
+      return;
+    }
+    const [file] = metadata.files;
+    downloadState.isEncrypted = metadata.encrypted;
+    downloadState.sizeBytes = file.size;
+    downloadState.secret = metadata.encrypted ? secret : null;
     // Shown and saved under its safe name: the one file name rule.
-    downloadState.fileName = filenames.sanitize(metadata.name);
-    fileEncryptionEl.textContent = metadata.isEncrypted ? 'End-to-End Encrypted' : 'None';
-    fileSizeEl.textContent = formatBytes(metadata.sizeBytes);
+    downloadState.fileName = filenames.sanitize(file.name);
+    fileEncryptionEl.textContent = metadata.encrypted ? 'End-to-End Encrypted' : 'None';
+    fileSizeEl.textContent = formatBytes(file.size);
 
     trustStatement.style.display = 'block';
 
-    if (metadata.isEncrypted) {
+    if (metadata.encrypted) {
       encryptionStatement.style.display = 'block';
 
       if (!window.isSecureContext) {
@@ -221,7 +263,13 @@ async function loadMetadata() {
   } catch (error) {
     console.error(error);
     resetTitleProgress();
-    showError('Download Error', 'We could not load the file details. Please try again later.');
+    if (DropgateError.is(error, 'DECRYPT_FAILED')) {
+      showError('Wrong Link', "This link's key doesn't open the file. Check that the whole link was copied.");
+    } else if (DropgateError.is(error, 'NOT_FOUND')) {
+      showError('File Not Found', 'This file may have expired, been downloaded, or been deleted.');
+    } else {
+      showError('Download Error', 'We could not load the file details. Please try again later.');
+    }
   }
 }
 

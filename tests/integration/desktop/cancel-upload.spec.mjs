@@ -19,7 +19,7 @@ test('cancelling an upload says it was cancelled, not that it failed, and the se
 
     // The first chunk goes through; the second waits until the app gives up on it.
     let chunks = 0;
-    await window.route('**/upload/chunk', (route) => {
+    await window.route('**/api/v4/upload/chunks/*', (route) => {
         chunks += 1;
         if (chunks === 1) return route.continue();
         return undefined;
@@ -38,7 +38,7 @@ test('cancelling an upload says it was cancelled, not that it failed, and the se
         { message: 'how the upload finished' }).toEqual([{ status: 'cancelled', error: undefined }]);
     expect(app.eventsOf('notification'), 'notifications').toEqual([]);
 
-    await expect.poll(() => server.requests().filter((r) => r.method === 'POST' && r.url === '/upload/cancel').length)
+    await expect.poll(() => server.requests().filter((r) => r.method === 'DELETE' && r.url === '/api/v4/upload').length)
         .toBe(1);
     expect(server.storedFiles(), 'files the server holds').toEqual([]);
     expect(chunks, 'no chunk after the cancel').toBe(2);

@@ -140,6 +140,20 @@ export function withTransport(err: unknown, transport: Transport): DropgateError
 const SERVER_CREDENTIAL_CODES = new Set<DropgateErrorCode>(['AUTH_REQUIRED', 'AUTH_EXPIRED', 'AUTH_DENIED', 'QUOTA_EXCEEDED']);
 
 /**
+ * The codes a Dropgate 4 server names in its errors, as core's own, where
+ * they're more than the status says. Any other is read from the status.
+ */
+const SERVER_CODES: Readonly<Record<string, DropgateErrorCode>> = Object.freeze({
+  E2EE_DISABLED: 'CAPABILITY_UNSUPPORTED',
+  PAUSE_DISABLED: 'CAPABILITY_UNSUPPORTED',
+  UNSUPPORTED_OBJECT: 'VERSION_UNSUPPORTED',
+  LIFETIME_NOT_ALLOWED: 'LIFETIME_NOT_ALLOWED',
+  DIGEST_MISMATCH: 'INTEGRITY_FAILED',
+  CHUNK_CONFLICT: 'INTEGRITY_FAILED',
+  RANGE_NOT_SATISFIABLE: 'INVALID_RESPONSE',
+});
+
+/**
  * The error for a server's error status. The server's own message is kept,
  * because the server writes it for people (it never knows a key, nor an
  * encrypted upload's file names), but only a short one. A credential error
@@ -155,7 +169,8 @@ export function errorFromStatus(status: number, json: unknown, fallback?: string
   const said = json && typeof json === 'object' && 'error' in json ? (json as { error?: unknown }).error : undefined;
   const serverMessage = typeof said === 'string' && said.trim() && said.length <= 200 ? said.trim() : undefined;
   const code: DropgateErrorCode =
-    status === 404 || status === 410 ? 'NOT_FOUND'
+    typeof named === 'string' && Object.prototype.hasOwnProperty.call(SERVER_CODES, named) ? SERVER_CODES[named]
+    : status === 404 || status === 410 ? 'NOT_FOUND'
       : status === 413 ? 'FILE_TOO_LARGE'
         : status === 429 ? 'RATE_LIMITED'
           : status === 507 ? 'SERVER_FULL'

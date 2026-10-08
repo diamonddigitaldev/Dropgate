@@ -27,7 +27,12 @@ export const lifetime = Object.freeze({
 
 /** Sizes. */
 export const sizes = Object.freeze({
-  /** How many bytes an upload of a file sends: its size, plus each chunk's encryption overhead if it's encrypted. */
+  /**
+   * How many bytes the server stores for an upload of one file, which its
+   * maximum upload size is checked against: encrypted, with the header, each
+   * chunk's tag, and the bytes added to hide the file's size, never past
+   * `maxBytes` (so it's over that only when the file itself doesn't fit).
+   */
   estimateUpload: estimateUploadBytes,
 });
 
