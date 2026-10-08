@@ -87,7 +87,7 @@ Uploads to the server, and downloads from it.
 | `validate(opts)` | Check files and settings against a server's limits (`files`, `lifetimeMs`, `encrypt`, and the `serverInfo` from `client.server.connect()`), as `upload()` does before it starts, and give `true`. Left out, `encrypt` is what `upload()` would do: encrypted where the server supports it |
 | `delete(opts)` | Delete an upload (`id`) from the server at once, with the `manageToken` its upload gave ([below](#clienthosteddeleteopts)) |
 
-`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for unlimited, where the server allows it), and optionally `encrypt` (default: encrypted where the server supports it), `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs` 5000, `initMs` 15000, `chunkMs` 60000 for each chunk, `completeMs` 30000) and `retry` ([below](#retries)). Its completed value, an `UploadResult`, holds `downloadUrl`, the link; `id`, the upload's ID on the server, which is the link's path; `files`, each `name` and `size`; `manageToken`; and `transport`.
+`upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for unlimited, where the server allows it), and optionally `encrypt` (default: encrypted where the server supports it), `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs` 5000, `initMs` 15000 for the start and for a pause or resume, `chunkMs` 60000 for each chunk, `completeMs` 30000) and `retry` ([below](#retries)). Its completed value, an `UploadResult`, holds `downloadUrl`, the link; `id`, the upload's ID on the server, which is the link's path; `files`, each `name` and `size`; `manageToken`; and `transport`.
 
 * **The link** is `https://<server>/<id>` for an unencrypted upload. An encrypted one's adds `#` and its **secret**: 32 random bytes, in URL-safe base64 with no `=` (43 characters). The keys that encrypt the upload are made from the secret, which never leaves the device: it's in the link alone. One file and several have links of the same shape.
 * **The manage token** lets whoever has it delete the upload: 32 random bytes, URL-safe base64. Only its SHA-256 is sent, when the upload starts, and the token itself is in this value alone: never in a snapshot, an error, a log or the link. Keep it where only the upload's sender can use it, such as the page or the app that made the upload.
@@ -106,7 +106,7 @@ Uploads to the server, and downloads from it.
 A request that can't succeed now but may soon is made again: one that got no answer (the network, or a timeout), and one answered `408`, `429` or a `5xx` but `507`. Anything else the server says fails at once with its [code](errors.md#codes), since asking again wouldn't change it: a bad request fails in a second, not after a minute of retries. A cancel is never retried.
 
 * **What's retried:** an upload's chunks (each sent again as the same bytes, an encrypted one sealed only once) and its finish; a download's bytes, which continue from where they stopped. The start of an upload, metadata, a download's lease and `delete()` aren't.
-* **How long:** until the server stops waiting, which is 5 minutes after it last heard from the upload or the download. An upload whose server couldn't be reached for longer fails with `NOT_FOUND`, "The server dropped this upload"; a download fails with its last error. Meanwhile, the snapshot's `text` says so ("Chunk upload failed. Retrying in 4.2s...", "The connection was lost. Reconnecting in 4.2s...").
+* **How long:** until the server stops waiting, which is 5 minutes after it last heard from the upload or the download. An upload whose server couldn't be reached for longer fails with `NOT_FOUND`, "The server dropped this upload"; a download fails with its last error. Meanwhile, the snapshot's `text` says so ("Chunk upload failed. Retrying in 4.2s...", "The connection was lost. Reconnecting in 4.2s..."), and its `deadline` is when the server stops waiting: `null` again once it answers.
 * **The wait** doubles from `backoffMs`, up to `maxBackoffMs`, each at a random point in its upper half, so clients that failed together don't all come back together. The randomness is the crypto provider's. A server's `Retry-After` is waited instead (up to a minute).
 
 `retry` is optional on both `upload()` and `download()`:
@@ -116,6 +116,28 @@ A request that can't succeed now but may soon is made again: one that got no ans
 | `retries` | None | At most this many retries of one request. Left out, core retries until the server stops waiting |
 | `backoffMs` | 1000 | The first wait, in milliseconds |
 | `maxBackoffMs` | 30000 | The longest wait, in milliseconds. It's never more than 30000 |
+
+#### Pausing
+
+```javascript
+const upload = client.hosted.upload({ files: myFile, lifetimeMs: 3600000 });
+// Later, while upload.snapshot.canPause is true:
+await upload.pause();
+// upload.snapshot: { status: 'paused', pausedBy: 'self', deadline: 1759770300000, ... }
+await upload.resume();
+```
+
+An upload or a download can pause, and later resume from where it stopped, with its handle's `pause()` and `resume()` ([Operation Handles](#operation-handles)), where the server allows it: for as long as its `maxPauseMinutes` (`UPLOAD_MAX_PAUSE_MINUTES`, 60 by default; 0 turns pausing off). The snapshot's `canPause` says whether `pause()` can be called now.
+
+* **An upload** stops the chunk it's sending, and asks the server to hold the upload. Resumed, it asks the server to go on, which says which chunks it holds, and sends only the rest. The chunk stopped by the pause goes again exactly as it was: an encrypted chunk is sealed once, never again. A file that changed while the upload was paused can't be read on, and the upload fails with `SOURCE_UNAVAILABLE`: a browser's `File` can't be read once its file has changed, and nor can [`sources.fileHandle()`](#file-sources)'s.
+* **A download** closes its request and holds its sink as it is: no `write()`, `close()` or `abort()` while it's paused, and nothing times out. The server holds its lease for the pause. Resumed, it renews the lease, which ends the pause, and asks for the rest under it with `Range`, from the next whole chunk of an encrypted upload (the next byte of an unencrypted one), so it still counts as one download. The Web UI's download pages leave pausing to the browser's own download manager.
+* **A download of an [opened upload](#clienthostedopenopts)** holds the opened upload's one lease: while none of its downloads runs, the lease is no longer renewed and the server holds it for the pause. While another download under it runs, a paused one has no `deadline`, since nothing ends it; once the last one running ends, the paused ones are given the server's.
+* **It settles once the server has answered:** `pause()` resolves once the server holds it, and `resume()` once it's running again. Meanwhile `canPause` is `false`. If the server refuses the pause, nothing changes, and `pause()` rejects; if the server no longer has the upload, or the lease, the operation fails with `NOT_FOUND`, and so does the call. A resume the server can't be asked about stays paused. Each request is retried as a chunk is ([Retries](#retries)).
+* **The deadline:** paused, the snapshot's `deadline` is when the server stops holding it, in milliseconds since 1970: the server's own deadline, or its pause length from when it answered if that's later, so a server clock behind this one never ends a pause early. Pausing again while paused renews it from then. **Nothing resumes by itself:** still paused at the deadline, the operation fails with `NOT_FOUND`, "The server dropped this paused upload." (or download).
+* `cancel()` works while paused: an upload's server is told to discard it, and a download's sink is aborted and its lease released.
+* **What a pause holds is in memory only:** the operation's own state, an upload's sealed chunk that was stopped, and nothing more than the server already holds for the upload or the lease ([DGUP §19.5](../technical/DGUP.md#195-pause-and-resume)).
+
+`pause()` rejects with `PAUSE_UNAVAILABLE` before the server has taken the upload or given the download its lease, once it's finishing or has ended, or while a pause or resume is settling, and `CAPABILITY_UNSUPPORTED` on a server with pausing turned off; `resume()` rejects with `PAUSE_UNAVAILABLE` when it isn't paused. Neither changes anything then.
 
 #### client.hosted.delete(opts)
 
@@ -142,11 +164,12 @@ Opens an upload for a page that may download it several times, its files one by 
 
 * **One lease for all of them.** Opening reads the metadata and takes no lease. The first download takes one, every download after shares it, and it's renewed every 2 minutes while the upload is open. `close()` releases it: then, if anything was downloaded, it counts as one download, however many there were; opened and closed with none, it counts nothing. While other downloads hold every place the upload's limit allows, a download waits, as `client.hosted.download()`'s does.
 * **`download(opts)`** takes `download()`'s options but `id` and `secret` (`sink`, `files`, `asZip`, `signal`, `timeoutMs`, `retry`), and gives the download's [handle](#operation-handles) at once. Once the upload has been closed, it throws `INVALID_ARGUMENT`.
-* **`close()`** cancels its downloads still running, and releases the lease. It makes its request before it waits for anything, with `keepalive`, so a page can call it from `pagehide` as it goes. Calling it again does nothing.
+* **A download of it can pause,** holding the one lease ([Pausing](#pausing)).
+* **`close()`** cancels its downloads still running, paused ones too, and releases the lease. It makes its request before it waits for anything, with `keepalive`, so a page can call it from `pagehide` as it goes. Calling it again does nothing.
 * Printed, logged or serialised, an opened upload shows nothing of its secret or its lease.
 * It throws as `metadata()` does.
 
-**Changed in 4.0:** every upload, one file or several, is a Dropgate 4 object, under the link `https://<server>/<id>#<secret>`. The completed value's `fileId`, `bundleId`, `uploadId`, `keyB64` and `baseUrl` are gone: `id` is the one ID, the secret is in `downloadUrl`, the server's address is `client.server.baseUrl`, and `manageToken` is always there. `download()` and `metadata()` take `id` and `secret`, where 3.x took `fileId` or `bundleId`, and `keyB64`; `BundleMetadata` and `HostedFileInfo` are gone, and the metadata has one shape for one file or several ([below](#metadata)). A file of several downloads by its own chunks, and counts against the upload's limit: 3.x never counted a bundle's files downloaded one by one. `open()` and `delete()` are new. Retries changed: 3.x retried a failed chunk 5 times whatever the error; 4.0 retries only what can recover, until the server stops waiting, and a dropped download continues instead of failing.
+**Changed in 4.0:** every upload, one file or several, is a Dropgate 4 object, under the link `https://<server>/<id>#<secret>`. The completed value's `fileId`, `bundleId`, `uploadId`, `keyB64` and `baseUrl` are gone: `id` is the one ID, the secret is in `downloadUrl`, the server's address is `client.server.baseUrl`, and `manageToken` is always there. `download()` and `metadata()` take `id` and `secret`, where 3.x took `fileId` or `bundleId`, and `keyB64`; `BundleMetadata` and `HostedFileInfo` are gone, and the metadata has one shape for one file or several ([below](#metadata)). A file of several downloads by its own chunks, and counts against the upload's limit: 3.x never counted a bundle's files downloaded one by one. `open()` and `delete()` are new, and so are the handles' `pause()` and `resume()`, with the snapshot's `canPause`, `pausedBy` and `deadline`. Retries changed: 3.x retried a failed chunk 5 times whatever the error; 4.0 retries only what can recover, until the server stops waiting, and a dropped download continues instead of failing.
 
 ### client.direct
 
@@ -217,7 +240,7 @@ The server's info (`ServerInfo`) is what it gives in `/api/info`:
 | --- | --- |
 | `name`, `version` | The server's name, and its own version, for display |
 | `protocols` | `{ dgup, dgdtp }`, each `{ major, minor }` ([Versions](#versions)) |
-| `capabilities.upload` | `enabled`, `maxSizeMB` (0 for no limit), `maxLifetimeHours` (0 for unlimited), `maxFileDownloads` (the most an upload's `maxDownloads` may be, and what it is when left out; 0 for no limit), `e2ee`, `chunkSize` in bytes, and `credentialRequired` ([Credentials](#credentials)) |
+| `capabilities.upload` | `enabled`, `maxSizeMB` (0 for no limit), `maxLifetimeHours` (0 for unlimited), `maxFileDownloads` (the most an upload's `maxDownloads` may be, and what it is when left out; 0 for no limit), `e2ee`, `chunkSize` in bytes, `maxPauseMinutes` (how long a paused upload or download is held; 0 when pausing is off, [Pausing](#pausing)), and `credentialRequired` ([Credentials](#credentials)) |
 | `capabilities.p2p` | `enabled`, `peerjsPath` and `iceServers`, for direct transfers |
 | `capabilities.webUI` | `enabled` |
 
@@ -244,32 +267,40 @@ An operation is listed from the moment it starts until the moment it ends, howev
 | `result` | A promise of the operation's one [outcome](outcomes.md). It never rejects |
 | `snapshot` | Where it is now (below). A new, frozen object each time it changes |
 | `subscribe(listener)` | Calls `listener` with each new snapshot until it has ended, the last with its outcome's status. Returns a function that unsubscribes. A listener that throws doesn't stop the operation or the others |
-| `cancel()` | Cancels it: its outcome is then `cancelled`, `by: 'self'`. Does nothing once it has ended |
+| `cancel()` | Cancels it: its outcome is then `cancelled`, `by: 'self'`. Does nothing once it has ended. It cancels a paused one too |
+| `pause()` | Pauses it, where `snapshot.canPause` says it can: a promise that resolves once the server holds it. Paused already, it renews the server's deadline ([Pausing](#pausing)) |
+| `resume()` | Resumes it from where it stopped: a promise that resolves once it's running again |
 
 A snapshot never holds a file name or a key. An upload's (`UploadSnapshot`):
 
 | Field | Description |
 | --- | --- |
-| `status` | `initializing`, `uploading` or `completing` while it runs, then its outcome's status: `completed`, `cancelled` or `failed` |
+| `status` | `initializing`, `uploading`, `paused` or `completing` while it runs, then its outcome's status: `completed`, `cancelled` or `failed` |
 | `phase` | The step it's on: `server-info`, `server-compat`, `crypto`, `init`, `file-start`, `chunk`, `file-complete`, `retry-wait`, `retry`, `complete`, then `done` once it has completed. A cancelled or failed upload keeps the step it stopped at |
 | `text` | What it's doing, for people, such as `Uploading chunk 2 of 5...`. A failed upload's is its error's message |
 | `percent` | 0 to 100 |
 | `processedBytes`, `totalBytes` | Bytes of the files sent so far, and of all the files together |
 | `fileIndex`, `totalFiles` | Which of the files given it's on (from 0), and how many, for an upload of several files |
 | `chunkIndex`, `totalChunks` | Which chunk of the current file it's on (from 0), and how many it has |
+| `canPause` | Whether `pause()` can be called now: `false` until the server has taken the upload, while a pause or resume is settling, once it's finishing or has ended, and on a server with pausing off. `true` while paused, since pausing again renews the deadline |
+| `pausedBy` | `self` while it's paused, `null` while it isn't |
+| `deadline` | When it ends unless something changes, in milliseconds since 1970: paused, when the server stops holding it; reconnecting, when the server stops waiting for it. `null` otherwise |
 | `transport` | `{ secure }`: `false` for an [insecure server](#insecure-servers) |
 
 A download's (`DownloadSnapshot`):
 
 | Field | Description |
 | --- | --- |
-| `status` | `initializing`, `downloading` or `completing` (the sink is closing) while it runs, then its outcome's status |
+| `status` | `initializing`, `downloading`, `paused` or `completing` (the sink is closing) while it runs, then its outcome's status |
 | `phase` | `server-info`, `server-compat`, `metadata`, `file-start` (the next of several files), `downloading`, `complete`, then `done` once it has completed |
 | `text` | What it's doing, for people, such as `Downloading file 2 of 3...` |
 | `percent` | 0 to 100 |
 | `processedBytes`, `totalBytes` | Bytes written to the sink so far, and of all the files being downloaded together (0 until the metadata is in) |
 | `fileIndex`, `totalFiles` | For several files: which it's on (its index in the upload's list), and how many are being downloaded |
+| `canPause`, `pausedBy`, `deadline` | As an upload's, from the moment the server gives the download its lease. A paused download of an opened upload has no `deadline` while another under its lease runs |
 | `transport` | `{ secure }`, as an upload's |
+
+`pausedBy` is `self` for every hosted operation: a later 4.x version's direct transfers can be paused by the other device too (`peer`), or both (`both`).
 
 ## Download Sinks
 
@@ -301,7 +332,7 @@ An upload reads each file one chunk at a time through a `FileSource`: `name`, `s
 
 | Helper | Description |
 | --- | --- |
-| `sources.fileHandle(handle, { name, type? })` | A promise of a FileSource reading a Node.js `FileHandle` (from `fs/promises`' `open()`). Its size is the file's when called. Closing the handle once the upload has ended is yours to do |
+| `sources.fileHandle(handle, { name, type? })` | A promise of a FileSource reading a Node.js `FileHandle` (from `fs/promises`' `open()`). Its size is the file's when called. Like a browser's `File`, it can't be read once the file changes: each read checks the file's size and modification time are still what they were, and fails `SOURCE_UNAVAILABLE` if not, so a file edited during an upload, or while it's paused, is never sent part old, part new. Closing the handle once the upload has ended is yours to do |
 | `sources.blob(blob, name?)` | A FileSource reading a browser `File` or `Blob`. `upload()` does this itself |
 
 ## Errors

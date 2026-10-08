@@ -24,6 +24,7 @@ export type { Cancellation, CancelledBy } from './cancel.js';
 
 // Operation handles, and client.operations
 export type { OperationHandle, OperationKind } from './operation.js';
+export type { PausedBy } from './pause.js';
 export type { Operations, OperationInfo } from './operations.js';
 
 // File sources, and download sinks

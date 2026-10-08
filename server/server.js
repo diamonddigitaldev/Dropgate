@@ -1594,6 +1594,9 @@ if (enableUpload) {
         const upload = requestedUpload(req);
         if (!upload) return uploadNotFound(res);
         renew(upload);
+        // Only a chunk sent while paused resumes the upload: one already on its
+        // way when the pause came was stopped by it, and leaves it paused.
+        const sentWhilePaused = upload.paused;
 
         const index = /^\d{1,6}$/.test(req.params.index) ? Number(req.params.index) : -1;
         if (index < 0 || index >= upload.chunks) {
@@ -1681,7 +1684,7 @@ if (enableUpload) {
         }
 
         // A chunk sent while paused resumes the upload.
-        if (upload.paused) {
+        if (upload.paused && sentWhilePaused) {
             upload.paused = false;
             log('debug', 'Upload resumed.');
         }

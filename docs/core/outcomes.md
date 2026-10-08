@@ -35,6 +35,8 @@ Work that ends after a cancel, however it ends, is `cancelled`, even if a reques
 
 Calling an upload or a download with nothing to do (no files, or no `id`), or a download without a sink that fits it, throws `INVALID_ARGUMENT` at once, since there's no operation for an outcome to describe.
 
+A paused upload or download hasn't ended: its outcome comes once it's resumed and finishes, it's cancelled, or it's still paused at the server's deadline, when it fails with `NOT_FOUND`, "The server dropped this paused upload." (or download). Nothing resumes by itself ([Pausing](api-reference.md#pausing)).
+
 A download only completes once its sink has closed. A sink's `write()` or `close()` that fails fails the download, with `OUTPUT_WRITE_FAILED`, and a download that fails or is cancelled aborts its sink, so nothing half-written is finished as if it were whole.
 
 ## Cancellation
@@ -70,4 +72,4 @@ controller.abort();
 
 The client stays usable after `cancelAll()`: operations started afterwards run as normal. Once an operation has ended, cancelling it does nothing.
 
-When an upload is cancelled, however that happens, core stops sending chunks and tells the server to discard what it has, without waiting for it. When a download ends, however it ends, core gives its lease back to the server, so a download cancelled after its first bytes counts as one, and one cancelled before them doesn't. An operation given a signal that's already aborted is cancelled before it asks the server anything.
+When an upload is cancelled, however that happens, paused or not, core stops sending chunks and tells the server to discard what it has, without waiting for it. When a download ends, however it ends, core gives its lease back to the server, so a download cancelled after its first bytes counts as one, and one cancelled before them doesn't. An operation given a signal that's already aborted is cancelled before it asks the server anything.

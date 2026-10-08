@@ -36,7 +36,7 @@ console.log('P2P enabled:', serverInfo.capabilities?.p2p?.enabled);
 
 ## Uploading Files
 
-`client.hosted.upload()` starts the upload and gives its **handle** straight away: `id`, `result`, `snapshot`, `subscribe()` and `cancel()`.
+`client.hosted.upload()` starts the upload and gives its **handle** straight away: `id`, `result`, `snapshot`, `subscribe()`, `cancel()`, `pause()` and `resume()`.
 
 ```javascript
 const upload = client.hosted.upload({
@@ -71,6 +71,15 @@ if (outcome.status === 'completed') {
 An encrypted upload's link ends with `#` and its secret, from which the keys that encrypt it are made: it never leaves the device, except in the link you share. The `manageToken` deletes the upload with [`client.hosted.delete()`](api-reference.md#clienthosteddeleteopts), and only the sender has it: keep it no further than you need, and never in a log.
 
 A chunk that gets no answer, or a `408`, `429` or `5xx` but `507`, is sent again, after a growing wait, until the server stops waiting for the upload; anything else fails at once ([Retries](api-reference.md#retries)).
+
+An upload can pause, and resume from where it stopped, on a server that allows it ([Pausing](api-reference.md#pausing)):
+
+```javascript
+if (upload.snapshot.canPause) await upload.pause();
+// The server holds it until upload.snapshot.deadline (ms since 1970); still paused then, it fails.
+console.log('Paused until', new Date(upload.snapshot.deadline));
+await upload.resume(); // sends only what the server doesn't have
+```
 
 `upload.snapshot` is where it is now, as a new, frozen object each time it changes. The [API Reference](api-reference.md#operation-handles) lists its fields, and [Outcomes and Cancellation](outcomes.md) has the rest, including cancelling with your own `AbortSignal`, and everything at once with `client.operations.cancelAll()`.
 
@@ -123,7 +132,7 @@ One file and several are read the same way, from links of the same shape: `kind`
 
 `client.hosted.download()` writes the file into a **sink**, which it needs: anything with `write(chunk)` and `close()`, and ideally `abort()`. Core awaits each write, and the download only completes once the sink has closed; a failed or cancelled download aborts it instead. Like an upload, it gives its handle at once, and ends with one outcome. It only times out if the server's answer, or the next bytes, take longer than `timeoutMs` (60 seconds unless you give another), so a big file never times out for taking long.
 
-Each download is one download against the upload's limit: core takes a lease for it from the server, and gives it back the moment the download ends, so an upload at its limit is gone as soon as it's saved. While someone else is downloading the last copy the limit allows, the download waits ("Someone is downloading this right now.") and starts when it can.
+Each download is one download against the upload's limit: core takes a lease for it from the server, and gives it back the moment the download ends, so an upload at its limit is gone as soon as it's saved. A download pauses and resumes as an upload does, under the same lease, so it still counts once. While someone else is downloading the last copy the limit allows, the download waits ("Someone is downloading this right now.") and starts when it can.
 
 In a browser, a `WritableStream`'s writer is a sink, such as [StreamSaver](https://github.com/jimmywarting/StreamSaver.js)'s:
 

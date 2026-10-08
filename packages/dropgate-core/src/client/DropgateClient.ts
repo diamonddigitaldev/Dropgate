@@ -8,6 +8,7 @@ import type { RetryPolicy } from '../retry.js';
 import type { ProtocolName, ProtocolVersion, Protocols } from '../version.js';
 import { startOperation } from '../operation.js';
 import type { OperationContext } from '../operation.js';
+import type { PauseControl, PauseHooks } from '../pause.js';
 import { OperationRegistry } from '../operations.js';
 import type { Operations } from '../operations.js';
 import { SinkWriter, isDownloadSink } from '../sink.js';
@@ -326,6 +327,51 @@ function droppedUpload(cause: DropgateError): DropgateError {
   return new DropgateError({ code: 'NOT_FOUND', status: cause.status, message: 'The server dropped this upload.', cause });
 }
 
+/** The error for a paused upload the server no longer holds: its pause ran out. */
+function droppedPausedUpload(cause?: DropgateError): DropgateError {
+  return new DropgateError({ code: 'NOT_FOUND', status: cause?.status, message: 'The server dropped this paused upload.', ...(cause ? { cause } : {}) });
+}
+
+/** The error for a download whose lease the server no longer holds, paused or not. */
+function droppedDownload(paused: boolean, cause?: DropgateError): DropgateError {
+  return new DropgateError({
+    code: 'NOT_FOUND',
+    status: cause?.status,
+    message: paused ? 'The server dropped this paused download.' : 'The server dropped this download.',
+    ...(cause ? { cause } : {}),
+  });
+}
+
+/** How long the server holds a paused upload or download, in ms: 0 when it has pausing turned off. */
+function pauseLength(serverInfo: ServerInfo): number {
+  const minutes = serverInfo?.capabilities?.upload?.maxPauseMinutes;
+  return typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? minutes * 60 * 1000 : 0;
+}
+
+/**
+ * When a pause the server holds until `deadline` ends, in this device's time:
+ * that deadline, or the server's pause length from now if that's later, so a
+ * clock ahead of the server's never ends a pause the server still holds.
+ */
+function pausedUntil(deadline: unknown, pauseMs: number): number {
+  if (typeof deadline !== 'number' || !Number.isFinite(deadline)) {
+    throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server's answer to the pause wasn't understood." });
+  }
+  return Math.max(deadline, Date.now() + pauseMs);
+}
+
+/**
+ * The chunks an upload's server holds, as it gives them: ranges of chunk
+ * indexes, first and last included, each within the upload's `count` chunks.
+ * @throws {DropgateError} INVALID_RESPONSE for anything else.
+ */
+function chunkRanges(value: unknown, count: number): Array<[number, number]> {
+  const valid = Array.isArray(value) && value.every((range) => Array.isArray(range) && range.length === 2
+    && Number.isSafeInteger(range[0]) && Number.isSafeInteger(range[1]) && range[0] >= 0 && range[0] <= range[1] && range[1] < count);
+  if (!valid) throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server's list of the chunks it holds wasn't understood." });
+  return value as Array<[number, number]>;
+}
+
 /** The error for an upload whose server couldn't be reached for as long as it waits for one. */
 function unreachableTooLong(cause: DropgateError): DropgateError {
   if (cause.code === 'NOT_FOUND') return cause;
@@ -346,13 +392,31 @@ interface TakenLease {
   deadline: unknown;
 }
 
+/** What a lease's pause and resume requests run with: the download's window, signal and snapshot. */
+interface LeaseRun {
+  policy: RetryPolicy;
+  window: RetryWindow;
+  signal: AbortSignal;
+  progress: (patch: Partial<DownloadSnapshot>) => void;
+  /** Told a paused download's new deadline, from the server (null for none), when downloads sharing its lease change it. */
+  deadline: (deadline: number | null) => void;
+}
+
 /** Where a download gets its upload's metadata, and the lease it's downloaded under. */
 interface DownloadSource {
   read(compat: ServerConnection, signal: AbortSignal): Promise<{ meta: UploadMetadata; opened?: OpenedObject }>;
   lease: {
     take(baseUrl: string, opts: { timeoutMs: number; signal: AbortSignal; progress: (patch: Partial<DownloadSnapshot>) => void }): Promise<TakenLease>;
-    /** The download has ended, however it ended. */
-    done(baseUrl: string, taken: TakenLease): Promise<void>;
+    /**
+     * The download has paused: the server holds the lease for its pause length,
+     * unless other downloads under it go on. Gives the server's deadline, or
+     * null if nothing ends it.
+     */
+    pause(baseUrl: string, taken: TakenLease, run: LeaseRun): Promise<number | null>;
+    /** The download goes on: the lease is renewed, which ends its pause. */
+    resume(baseUrl: string, taken: TakenLease, run: LeaseRun): Promise<void>;
+    /** The download has ended, however it ended, paused or not. */
+    done(baseUrl: string, taken: TakenLease, run: LeaseRun | null, paused: boolean): Promise<void>;
   };
 }
 
@@ -892,7 +956,7 @@ export class DropgateClient {
       // One file or several: one Dropgate 4 object.
       return this._uploadObject({
         files, names: filenames, encrypted: effectiveEncrypt, lifetimeMs, maxDownloads,
-        compat, progress, signal: effectiveSignal, send, credentials, timeouts, policy,
+        compat, progress, signal: effectiveSignal, pausing: ctx.pausing, send, credentials, timeouts, policy,
         started: (uploadId) => { currentObjectUpload = uploadId; },
         finished: () => { currentObjectUpload = null; },
       });
@@ -942,6 +1006,7 @@ export class DropgateClient {
     compat: ServerConnection;
     progress: (patch: Partial<UploadSnapshot>) => void;
     signal: AbortSignal;
+    pausing: PauseControl;
     send: (url: string, init: FetchJsonOptions) => Promise<FetchJsonResult>;
     credentials: OperationCredentials;
     timeouts: NonNullable<UploadOptions['timeouts']>;
@@ -1017,12 +1082,77 @@ export class DropgateClient {
     // How long the server waits for the next request: every answer moves it on.
     const window = new RetryWindow();
     window.heard(deadline);
-    progress({ status: 'uploading', ...(several ? { totalFiles: files.length } : {}) });
 
     const sizes = files.map((f) => f.size);
     const totalChunks = layout.chunkCount;
-    for (let i = 0; i < totalChunks; i++) {
-      if (signal.aborted) throw signal.reason || new DropgateError({ code: 'OPERATION_CANCELLED' });
+    // The chunks the server holds, as it last said, and every chunk it has ever
+    // said it holds: those are never read or sealed again.
+    let held = new Uint8Array(totalChunks);
+    const taken = new Uint8Array(totalChunks);
+    // The chunk being sent, with its bytes and their digest, until the server
+    // has it: a retry, or a resume after a pause, sends exactly these again.
+    let sending = null as { index: number; body: Uint8Array<ArrayBuffer>; digest: string } | null;
+
+    // A pause stops the chunk being sent and asks the server to hold the
+    // upload; a resume asks it to go on, and which chunks it holds.
+    const pauseMs = pauseLength(serverInfo);
+    const pauseRequest = (route: 'pause' | 'resume', dropped: (err: DropgateError) => DropgateError) => retrying(async () => {
+      const out = await send(`${baseUrl}/api/v4/upload/${route}`, {
+        method: 'POST', timeoutMs: timeouts.initMs ?? 15000, signal,
+        headers: { Accept: 'application/json', 'Dropgate-Upload': uploadId },
+      });
+      if (out.res.ok) return (out.json ?? {}) as { deadline?: unknown; received?: unknown };
+      const err = errorFromStatus(out.res.status, out.json, `The upload couldn't be ${route === 'pause' ? 'paused' : 'resumed'}.`);
+      throw err.code === 'NOT_FOUND' ? dropped(err) : withRetryAfter(err, out.res);
+    }, {
+      policy: p.policy, window, signal,
+      random: (length) => this._crypto.randomBytes(length),
+      waiting: ({ remainingMs }) => progress({
+        text: `${route === 'pause' ? 'Pausing' : 'Resuming'} failed. Retrying in ${(remainingMs / 1000).toFixed(1)}s...`,
+        deadline: window.end,
+      }),
+      expired: unreachableTooLong,
+    });
+    const hooks: PauseHooks = {
+      pause: async () => {
+        const said = await pauseRequest('pause', droppedUpload);
+        const until = pausedUntil(said.deadline, pauseMs);
+        window.heard(until);
+        return until;
+      },
+      resume: async () => {
+        const said = await pauseRequest('resume', droppedPausedUpload);
+        const received = chunkRanges(said.received, totalChunks);
+        // What the server holds now is what it said: the rest is sent from where the upload stopped.
+        held = new Uint8Array(totalChunks);
+        for (const [first, last] of received) held.fill(1, first, last + 1);
+        for (let i = 0; i < totalChunks; i++) {
+          if (held[i]) {
+            taken[i] = 1;
+            writer?.confirm(i);
+          }
+        }
+        window.heard(said.deadline);
+      },
+      expired: () => droppedPausedUpload(),
+    };
+    if (pauseMs > 0) p.pausing.allow(hooks);
+    else p.pausing.turnedOff();
+    progress({ status: 'uploading', ...(several ? { totalFiles: files.length } : {}) });
+
+    for (let next = 0; ;) {
+      // Paused here, it goes on once resumed, from the first chunk the server lacks.
+      if (await p.pausing.checkpoint()) next = 0;
+      while (next < totalChunks && held[next]) next++;
+      if (next === totalChunks) {
+        // Every chunk is there: nothing can pause the finish, but a pause that came just before it holds.
+        p.pausing.allow(null);
+        if (!(await p.pausing.checkpoint())) break;
+        if (pauseMs > 0) p.pausing.allow(hooks);
+        next = 0;
+        continue;
+      }
+      const i = next;
 
       // The parts of the files the chunk holds, in order; an encrypted one's last may end in padding.
       const { parts } = layout.chunkParts(i, sizes);
@@ -1033,40 +1163,59 @@ export class DropgateClient {
         percent: (processedBytes / totalSize) * 100,
         processedBytes,
         chunkIndex: i, totalChunks,
+        deadline: null,
         // The file the chunk starts in; a chunk of padding alone is still the last file's.
         ...(several ? { fileIndex: parts[0]?.file ?? files.length - 1 } : {}),
       });
 
-      // Bounded reads: each file's part of the chunk, and no more of it.
-      let body: Uint8Array<ArrayBuffer>;
-      if (parts.length === 1 && !writer) {
-        body = await readRange(sources[parts[0].file], parts[0].offset, parts[0].offset + parts[0].length);
-      } else {
-        // The rest of an encrypted chunk is padding, which is zero bytes.
-        const plaintext = new Uint8Array(layout.chunkLength(i));
-        let at = 0;
-        for (const part of parts) {
-          plaintext.set(await readRange(sources[part.file], part.offset, part.offset + part.length), at);
-          at += part.length;
+      if (sending?.index !== i) {
+        // A chunk the server said it held, and no longer does: its bytes were
+        // let go, and an encrypted chunk is never sealed twice.
+        if (taken[i]) {
+          throw new DropgateError({ code: 'INVALID_RESPONSE', message: 'The server no longer holds part of this upload that it had taken.' });
         }
-        body = writer ? await writer.seal(i, plaintext) : plaintext;
+        // Bounded reads: each file's part of the chunk, and no more of it.
+        let body: Uint8Array<ArrayBuffer>;
+        if (parts.length === 1 && !writer) {
+          body = await readRange(sources[parts[0].file], parts[0].offset, parts[0].offset + parts[0].length);
+        } else {
+          // The rest of an encrypted chunk is padding, which is zero bytes.
+          const plaintext = new Uint8Array(layout.chunkLength(i));
+          let at = 0;
+          for (const part of parts) {
+            plaintext.set(await readRange(sources[part.file], part.offset, part.offset + part.length), at);
+            at += part.length;
+          }
+          body = writer ? await writer.seal(i, plaintext) : plaintext;
+        }
+        sending = { index: i, body, digest: this.base64.encode(await this._crypto.sha256(body)) };
       }
 
-      const digest = this.base64.encode(await this._crypto.sha256(body));
-      await this._attemptChunkUpload(
-        `${baseUrl}/api/v4/upload/chunks/${i}`,
-        {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'Content-Digest': `sha-256=:${digest}:`,
-            'Dropgate-Upload': uploadId,
+      const { body, digest } = sending;
+      try {
+        await this._attemptChunkUpload(
+          `${baseUrl}/api/v4/upload/chunks/${i}`,
+          {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/octet-stream',
+              'Content-Digest': `sha-256=:${digest}:`,
+              'Dropgate-Upload': uploadId,
+            },
+            body: new Blob([body]),
           },
-          body: new Blob([body]),
-        },
-        { policy: p.policy, window, timeoutMs: timeouts.chunkMs ?? 60000, signal, progress, chunkIndex: i, credentials: p.credentials },
-      );
+          { policy: p.policy, window, timeoutMs: timeouts.chunkMs ?? 60000, signal: p.pausing.signal, progress, chunkIndex: i, credentials: p.credentials },
+        );
+      } catch (err) {
+        // Stopped for a pause: the same bytes go once it's resumed, if the server hasn't got them.
+        if (p.pausing.interrupted) continue;
+        throw err;
+      }
+      held[i] = 1;
+      taken[i] = 1;
       writer?.confirm(i);
+      sending = null;
+      next = i + 1;
     }
 
     progress({ status: 'completing', phase: 'complete', text: 'Finalising upload...', percent: 100, processedBytes: totalSize });
@@ -1084,7 +1233,7 @@ export class DropgateClient {
     }, {
       policy: p.policy, window, signal,
       random: (length) => this._crypto.randomBytes(length),
-      waiting: ({ remainingMs }) => progress({ text: `Finalising failed. Retrying in ${(remainingMs / 1000).toFixed(1)}s...` }),
+      waiting: ({ remainingMs }) => progress({ text: `Finalising failed. Retrying in ${(remainingMs / 1000).toFixed(1)}s...`, deadline: window.end }),
       retrying: () => progress({ text: 'Finalising upload...' }),
       expired: unreachableTooLong,
     });
@@ -1107,9 +1256,11 @@ export class DropgateClient {
     const { id, secret } = hostedTarget(opts);
     return this._startDownload(opts, {
       read: async (compat, signal) => this._readObject(id, secret, compat, { timeoutMs: opts.timeoutMs ?? 60000, signal }),
-      // One lease for this download alone, released as it ends.
+      // One lease for this download alone, paused with it, and released as it ends.
       lease: {
         take: (baseUrl, waitOpts) => this._takeLease(baseUrl, id, waitOpts),
+        pause: (baseUrl, taken, run) => this._pauseLease(baseUrl, taken, run),
+        resume: (baseUrl, taken, run) => this._renewLease(baseUrl, taken, run),
         done: (baseUrl, taken) => this._releaseLease(baseUrl, taken.lease),
       },
     });
@@ -1185,9 +1336,55 @@ export class DropgateClient {
     const closing = new AbortController();
     const running = new Set<DownloadHandle>();
 
+    // The downloads under the lease that are running, and the ones paused, told
+    // their deadline as it changes; and whether the server holds it paused.
+    let active = 0;
+    const paused = new Set<LeaseRun>();
+    let leasePaused = false;
+
     const stopRenewing = () => {
       if (renewTimer !== null) clearInterval(renewTimer);
       renewTimer = null;
+    };
+    const startRenewing = () => {
+      if (renewTimer !== null || !lease) return;
+      renewTimer = setInterval(() => { renew().catch(() => { }); }, LEASE_RENEW_MS);
+      // A page or app that never closes it doesn't keep Node.js running for it.
+      (renewTimer as { unref?: () => void }).unref?.();
+    };
+    // Nothing under the lease runs, and a download is paused: it's no longer
+    // renewed, and the server holds it for its pause length, which each paused
+    // download is told. Without `run`, best effort: if the server can't be
+    // asked, it's renewed as before.
+    const pauseLease = async (held: TakenLease, run: LeaseRun | null): Promise<number | null> => {
+      stopRenewing();
+      leasePaused = true;
+      let deadline: number | null;
+      if (run) {
+        deadline = await this._pauseLease(baseUrl, held, run);
+      } else {
+        try {
+          const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/v4/lease/pause`, {
+            method: 'POST', timeoutMs: 5000, headers: { Accept: 'application/json', 'Dropgate-Lease': held.lease },
+          });
+          const said = (json as { deadline?: unknown } | null)?.deadline;
+          if (!res.ok || typeof said !== 'number') throw new DropgateError({ code: 'INVALID_RESPONSE' });
+          deadline = said;
+        } catch {
+          leasePaused = false;
+          startRenewing();
+          return null;
+        }
+      }
+      for (const other of paused) if (other !== run) other.deadline(deadline);
+      return deadline;
+    };
+    // A download under the lease runs again: it's renewed again, and nothing ends the paused ones.
+    const unpauseLease = () => {
+      if (!leasePaused) return;
+      leasePaused = false;
+      startRenewing();
+      for (const other of paused) other.deadline(null);
     };
     const renew = async () => {
       const held = lease;
@@ -1209,21 +1406,54 @@ export class DropgateClient {
     const shared: DownloadSource['lease'] = {
       take: async (leaseUrl, waitOpts) => {
         if (closed) throw new DropgateError({ code: 'OPERATION_CANCELLED' });
-        if (lease) return lease;
-        taking ??= this._takeLease(leaseUrl, id, { ...waitOpts, signal: closing.signal })
-          .then((taken) => {
-            lease = taken;
-            renewTimer = setInterval(() => { renew().catch(() => { }); }, LEASE_RENEW_MS);
-            // A page or app that never closes it doesn't keep Node.js running for it.
-            (renewTimer as { unref?: () => void }).unref?.();
-            return taken;
-          })
-          .finally(() => { taking = null; });
-        // A download cancelled while the take waits stops waiting; the take goes on for the others.
-        return untilAborted(taking, waitOpts.signal);
+        let taken = lease;
+        if (!taken) {
+          taking ??= this._takeLease(leaseUrl, id, { ...waitOpts, signal: closing.signal })
+            .then((got) => {
+              lease = got;
+              startRenewing();
+              return got;
+            })
+            .finally(() => { taking = null; });
+          // A download cancelled while the take waits stops waiting; the take goes on for the others.
+          taken = await untilAborted(taking, waitOpts.signal);
+        }
+        // Its bytes end the server's pause of the lease, if it was paused.
+        active++;
+        unpauseLease();
+        return taken;
       },
-      // Downloads share the lease: only close() releases it.
-      done: async () => { },
+      // One download paused holds the lease paused only once none under it runs.
+      pause: async (_leaseUrl, taken, run) => {
+        active--;
+        paused.add(run);
+        if (active > 0) return null;
+        try {
+          return await pauseLease(taken, run);
+        } catch (err) {
+          active++;
+          paused.delete(run);
+          leasePaused = false;
+          startRenewing();
+          throw err;
+        }
+      },
+      resume: async (_leaseUrl, taken, run) => {
+        await this._renewLease(baseUrl, taken, run);
+        paused.delete(run);
+        active++;
+        unpauseLease();
+      },
+      // Downloads share the lease: only close() releases it. The last one
+      // running to end, with another paused, leaves the lease paused.
+      done: async (_leaseUrl, taken, run, wasPaused) => {
+        if (wasPaused) {
+          if (run) paused.delete(run);
+          return;
+        }
+        active--;
+        if (active === 0 && paused.size > 0 && lease === taken && !closed) await pauseLease(taken, null);
+      },
     };
 
     const hidden = '[DropgateOpenedUpload]';
@@ -1283,6 +1513,9 @@ export class DropgateClient {
     const { sink, zipped, timeoutMs } = o;
     let baseUrl = this.baseUrl;
     let taken: TakenLease | null = null;
+    // What the lease's pause and resume run with, and whether this download is paused.
+    let leaseRun: LeaseRun | null = null;
+    let paused = false;
     // The sink being written, to abort if the download doesn't complete.
     let open: SinkWriter | null = null;
 
@@ -1316,6 +1549,31 @@ export class DropgateClient {
       // How long the server holds the lease for a download that has stopped: every answer, and every byte, moves it on.
       const window = new RetryWindow();
       window.heard(lease.deadline);
+
+      // A pause closes the request and holds the sink as it is, written to the
+      // last whole chunk; the server holds the lease for its pause length. A
+      // resume renews the lease, and asks for the rest from there.
+      const pausing = ctx.pausing;
+      const pauseMs = pauseLength(compat.serverInfo);
+      const run: LeaseRun = {
+        policy: o.policy, window, signal: downloadSignal, progress,
+        deadline: (deadline) => pausing.extend(deadline === null ? null : pausedUntil(deadline, pauseMs)),
+      };
+      leaseRun = run;
+      const hooks: PauseHooks = {
+        pause: async () => {
+          const deadline = await o.how.lease.pause(baseUrl, lease, run);
+          paused = true;
+          return deadline === null ? null : pausedUntil(deadline, pauseMs);
+        },
+        resume: async () => {
+          await o.how.lease.resume(baseUrl, lease, run);
+          paused = false;
+        },
+        expired: () => droppedDownload(true),
+      };
+      if (pauseMs > 0) pausing.allow(hooks);
+      else pausing.turnedOff();
 
       // Where each file goes: a sink of its own, or its place in one ZIP.
       const zipOut = zipped ? await SinkWriter.open(sink, { name: '', size: totalSize, index: 0 }) : null;
@@ -1423,15 +1681,19 @@ export class DropgateClient {
         const lastChunk = opened ? (span ? span.last : opened.layout.chunkCount - 1) : 0;
         let nextChunk = span ? span.first : 0;
         let plainAt = run.start;
+        // Whether the snapshot gives the deadline of a reconnect.
+        let reconnecting = false;
 
-        await retrying(async () => {
+        // One try for the rest of the run, from where it has got.
+        const fetchRest = async (): Promise<void> => {
           // The stored bytes asked for, `from` to `to` included; and whether that's a range, or the whole upload.
           const from = opened ? (whole && nextChunk === 0 ? 0 : opened.layout.range(nextChunk, lastChunk).start) : plainAt;
           const to = opened ? opened.layout.range(nextChunk, lastChunk).end - 1 : run.end - 1;
           const ranged = from > 0 || to < size - 1;
           // The timeout is on each wait, for an answer and then for the next bytes,
           // so a big file never times out just for taking long, and a slow sink never counts.
-          const { signal: waitSignal, waiting, cleanup } = makeWaitSignal(downloadSignal, timeoutMs);
+          // A pause ends the wait too, closing the request; nothing times out while paused.
+          const { signal: waitSignal, waiting, cleanup } = makeWaitSignal(pausing.signal, timeoutMs);
           let stopWatching = (): void => { };
           // Only what the server sends goes wrong in a way that may recover; what's written stays as it went.
           const failed = (err: unknown, code: 'SERVER_UNREACHABLE' | 'CONNECTION_LOST') => (waitSignal.aborted ? waitSignal.reason : toDropgateError(err, code));
@@ -1452,6 +1714,10 @@ export class DropgateClient {
             }
             if (!res.ok) throw withRetryAfter(errorFromStatus(res.status, await res.json().catch(() => null), 'Download failed.'), res);
             window.heard();
+            if (reconnecting) {
+              reconnecting = false;
+              progress({ deadline: null });
+            }
             if (ranged) {
               if (res.status === 200) {
                 throw new DropgateError({
@@ -1511,14 +1777,36 @@ export class DropgateClient {
             stopWatching();
             cleanup();
           }
-        }, {
-          policy: o.policy, window, signal: downloadSignal,
-          random: (length) => this._crypto.randomBytes(length),
-          waiting: ({ remainingMs }) => progress({ text: `The connection was lost. Reconnecting in ${(remainingMs / 1000).toFixed(1)}s...` }),
-          retrying: () => progress({ text: 'Reconnecting...' }),
-        });
+        };
+
+        for (;;) {
+          // Paused here, it goes on once resumed, from where it stopped.
+          if (await pausing.checkpoint()) {
+            progress({ text: several ? `Downloading file ${indexes.indexOf(started) + 1} of ${indexes.length}...` : 'Downloading...' });
+          }
+          try {
+            await retrying(fetchRest, {
+              policy: o.policy, window, signal: pausing.signal,
+              random: (length) => this._crypto.randomBytes(length),
+              // While it waits, the snapshot gives when the server stops holding the lease.
+              waiting: ({ remainingMs }) => {
+                reconnecting = true;
+                progress({ text: `The connection was lost. Reconnecting in ${(remainingMs / 1000).toFixed(1)}s...`, deadline: window.end });
+              },
+              retrying: () => progress({ text: 'Reconnecting...' }),
+            });
+            break;
+          } catch (err) {
+            // Stopped for a pause: once resumed, it asks for the rest.
+            if (pausing.interrupted) continue;
+            throw err;
+          }
+        }
       }
       if (finished !== indexes.length) throw new DropgateError({ code: 'INTEGRITY_FAILED', message: 'The data ended before the last file did.' });
+      // Everything has come: nothing can pause the finish, but a pause that came just before it holds.
+      pausing.allow(null);
+      await pausing.checkpoint();
 
       // Everything has come, and been checked: the last file, or the ZIP, is finished.
       progress({ status: 'completing', phase: 'complete', text: 'Finishing the download...' });
@@ -1541,7 +1829,7 @@ export class DropgateClient {
       await open?.abort(downloadSignal.aborted ? downloadSignal.reason : err);
       throw toDropgateError(err, 'CONNECTION_LOST');
     } finally {
-      if (taken) await o.how.lease.done(baseUrl, taken);
+      if (taken) await o.how.lease.done(baseUrl, taken, leaseRun, paused);
     }
   }
 
@@ -1586,6 +1874,51 @@ export class DropgateClient {
         method: 'DELETE', timeoutMs: 5000, keepalive: true, headers: { 'Dropgate-Lease': lease },
       });
     } catch { /* The lease runs out by itself. */ }
+  }
+
+  /**
+   * Asks the server to hold a paused download's lease for its pause length,
+   * not its 5 minutes. Gives the server's deadline.
+   */
+  private async _pauseLease(baseUrl: string, taken: TakenLease, run: LeaseRun): Promise<number> {
+    const said = await this._leaseRequest(baseUrl, taken, 'pause', run);
+    if (typeof said.deadline !== 'number' || !Number.isFinite(said.deadline)) {
+      throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server's answer to the pause wasn't understood." });
+    }
+    taken.deadline = said.deadline;
+    run.window.heard(said.deadline);
+    return said.deadline;
+  }
+
+  /** Renews a download's lease, which ends a pause: the server holds it 5 more minutes. */
+  private async _renewLease(baseUrl: string, taken: TakenLease, run: LeaseRun): Promise<void> {
+    const said = await this._leaseRequest(baseUrl, taken, 'renew', run);
+    taken.deadline = said.deadline;
+    run.window.heard(said.deadline);
+  }
+
+  /**
+   * A pause or a renew of a download's lease, retried as its bytes are, until
+   * the server stops holding the lease. A lease the server no longer has is
+   * NOT_FOUND: the download was dropped.
+   */
+  private _leaseRequest(baseUrl: string, taken: TakenLease, route: 'pause' | 'renew', run: LeaseRun): Promise<{ deadline?: unknown }> {
+    const pausing = route === 'pause';
+    return retrying(async () => {
+      const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/v4/lease/${route}`, {
+        method: 'POST', timeoutMs: 15000, signal: run.signal, headers: { Accept: 'application/json', 'Dropgate-Lease': taken.lease },
+      });
+      if (res.ok) return (json ?? {}) as { deadline?: unknown };
+      const err = errorFromStatus(res.status, json, pausing ? "The download couldn't be paused." : "The download couldn't be resumed.");
+      throw err.code === 'NOT_FOUND' ? droppedDownload(!pausing, err) : withRetryAfter(err, res);
+    }, {
+      policy: run.policy, window: run.window, signal: run.signal,
+      random: (length) => this._crypto.randomBytes(length),
+      waiting: ({ remainingMs }) => run.progress({
+        text: `${pausing ? 'Pausing' : 'Resuming'} failed. Retrying in ${(remainingMs / 1000).toFixed(1)}s...`,
+        deadline: run.window.end,
+      }),
+    });
   }
 
   private async _directSend(opts: P2PSendFileOptions): Promise<P2PSendSession> {
@@ -1675,6 +2008,8 @@ export class DropgateClient {
 
     await retrying(async () => {
       for (;;) {
+        // A pause or a cancel that came before the try sends nothing.
+        if (signal.aborted) throw signal.reason;
         const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
         try {
           let res: Response;
@@ -1705,9 +2040,11 @@ export class DropgateClient {
     }, {
       policy, window, signal,
       random: (length) => this._crypto.randomBytes(length),
+      // While it waits, the snapshot gives when the server stops waiting for the upload.
       waiting: ({ attempt, remainingMs }) => progress({
         phase: 'retry-wait',
         text: `Chunk upload failed. Retrying in ${(remainingMs / 1000).toFixed(1)}s... ${counted(attempt)}`,
+        deadline: window.end,
       }),
       retrying: (attempt) => progress({ phase: 'retry', text: `Chunk upload failed. Retrying now... ${counted(attempt)}` }),
       expired: unreachableTooLong,

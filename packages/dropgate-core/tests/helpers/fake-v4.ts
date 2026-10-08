@@ -38,7 +38,30 @@ interface Upload {
   maxDownloads: number;
   manageTokenHash: string;
   received: Map<number, Uint8Array>;
+  paused: boolean;
+  deadline: number;
 }
+
+/** A download's lease: its upload, whether it has sent anything, and whether it's paused. */
+interface Lease {
+  id: string;
+  served: boolean;
+  paused: boolean;
+}
+
+/** How long the fake holds an upload or a lease with no request. */
+const QUIET_MS = 300_000;
+
+/** The chunks an upload holds, as the server gives them: ranges of indexes, first and last included. */
+const rangesOf = (indexes: Iterable<number>): Array<[number, number]> => {
+  const ranges: Array<[number, number]> = [];
+  for (const i of [...indexes].sort((a, b) => a - b)) {
+    const last = ranges[ranges.length - 1];
+    if (last && last[1] === i - 1) last[1] = i;
+    else ranges.push([i, i]);
+  }
+  return ranges;
+};
 
 const json = (status: number, value: unknown, headers: Record<string, string> = {}): Response =>
   new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json', ...headers } });
@@ -78,14 +101,20 @@ const rangeOf = (header: string, size: number): [number, number] | null => {
  * upload's ETag, which gets the whole upload (200), as the server answers.
  * A lease counts as one download when it's released, if it sent anything; at
  * its limit, with no other lease open, the upload goes. A new lease waits
- * (423) while open leases and counted downloads make the limit.
+ * (423) while open leases and counted downloads make the limit. An upload or
+ * a lease pauses for `maxPauseMinutes` (409 PAUSE_DISABLED at 0); a chunk the
+ * upload already holds is taken again only with the same bytes (409
+ * CHUNK_CONFLICT for others), and one sent while paused resumes it.
  */
-export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: number; id?: string } = {}) {
+export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId, maxPauseMinutes = 60 }: { chunkSize?: number; id?: string; maxPauseMinutes?: number } = {}) {
   const uploads = new Map<string, Upload>();
   const objects = new Map<string, StoredObject>();
-  const leases = new Map<string, { id: string; served: boolean }>();
+  const leases = new Map<string, Lease>();
   /** Every renew asked for, by lease. */
   const renewals: string[] = [];
+  /** Every pause asked for, of an upload (`upload`) or a lease (`lease`), in order. */
+  const pauses: string[] = [];
+  const pauseDisabled = () => json(409, { code: 'PAUSE_DISABLED', error: 'Pausing is turned off on this server.' });
   const openLeases = (id: string) => [...leases.values()].filter((lease) => lease.id === id).length;
   /** Ends a lease: one download, if it sent anything; the upload goes at its limit, once no other lease is open. */
   const endLease = (key: string) => {
@@ -128,8 +157,10 @@ export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: nu
         encrypted, size: size as number, chunks, maxDownloads: Number(maxDownloads ?? 0), manageTokenHash,
         ...(encrypted ? { header: new Uint8Array(Buffer.from(header as string, 'base64url')), meta: meta as string } : { files: files as Upload['files'] }),
         received: new Map(),
+        paused: false,
+        deadline: Date.now() + QUIET_MS,
       });
-      return json(201, { uploadId, chunks, chunkSize, deadline: Date.now() + 300_000 });
+      return json(201, { uploadId, chunks, chunkSize, deadline: Date.now() + QUIET_MS });
     }
 
     const chunk = /^\/api\/v4\/upload\/chunks\/(\d+)$/.exec(path);
@@ -143,8 +174,40 @@ export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: nu
       if (digest !== createHash('sha256').update(bytes).digest('base64')) {
         return json(400, { code: 'DIGEST_MISMATCH', error: "The chunk's Content-Digest is missing, or doesn't match its bytes." });
       }
+      const held = found.received.get(index);
+      if (held && createHash('sha256').update(held).digest('base64') !== digest) {
+        return json(409, { code: 'CHUNK_CONFLICT', error: 'The server already holds different bytes for that chunk.' });
+      }
       found.received.set(index, bytes);
-      return json(200, { deadline: Date.now() + 300_000 });
+      // A chunk sent while paused resumes the upload.
+      found.paused = false;
+      found.deadline = Date.now() + QUIET_MS;
+      return json(200, { deadline: found.deadline });
+    }
+
+    if (method === 'GET' && path === '/api/v4/upload') {
+      const found = upload(init);
+      if (!found) return notFound();
+      if (!found.paused) found.deadline = Date.now() + QUIET_MS;
+      return json(200, { chunks: found.chunks, received: rangesOf(found.received.keys()), paused: found.paused, deadline: found.deadline });
+    }
+
+    if (method === 'POST' && path === '/api/v4/upload/pause') {
+      const found = upload(init);
+      if (!found) return notFound();
+      if (maxPauseMinutes === 0) return pauseDisabled();
+      pauses.push('upload');
+      found.paused = true;
+      found.deadline = Date.now() + maxPauseMinutes * 60_000;
+      return json(200, { paused: true, deadline: found.deadline });
+    }
+
+    if (method === 'POST' && path === '/api/v4/upload/resume') {
+      const found = upload(init);
+      if (!found) return notFound();
+      found.paused = false;
+      found.deadline = Date.now() + QUIET_MS;
+      return json(200, { paused: false, deadline: found.deadline, received: rangesOf(found.received.keys()) });
     }
 
     if (method === 'POST' && path === '/api/v4/upload/complete') {
@@ -185,14 +248,15 @@ export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: nu
           return json(423, { code: 'DOWNLOADS_BUSY', error: 'Someone is downloading this right now. Try again shortly.' }, { 'Retry-After': '5' });
         }
         const lease = randomBytes(32).toString('base64url');
-        leases.set(lease, { id, served: false });
-        return json(201, { lease, deadline: Date.now() + 300_000, etag: `"${id}"` });
+        leases.set(lease, { id, served: false, paused: false });
+        return json(201, { lease, deadline: Date.now() + QUIET_MS, etag: `"${id}"` });
       }
       if (method === 'GET' && rest === '/content') {
         const lease = leases.get(headerOf(init, 'Dropgate-Lease') ?? '');
         if (!headerOf(init, 'Dropgate-Lease')) return json(400, { code: 'LEASE_REQUIRED', error: 'A download needs a lease, in the Dropgate-Lease header.' });
         if (!stored || !lease || lease.id !== id) return notFound();
         lease.served = true;
+        lease.paused = false;
         const etag = `"${id}"`;
         const range = headerOf(init, 'Range');
         const ifRange = headerOf(init, 'If-Range');
@@ -223,9 +287,19 @@ export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: nu
     }
     if (method === 'POST' && path === '/api/v4/lease/renew') {
       const key = headerOf(init, 'Dropgate-Lease') ?? '';
-      if (!leases.has(key)) return notFound();
+      const lease = leases.get(key);
+      if (!lease) return notFound();
       renewals.push(key);
-      return json(200, { deadline: Date.now() + 300_000 });
+      lease.paused = false;
+      return json(200, { deadline: Date.now() + QUIET_MS });
+    }
+    if (method === 'POST' && path === '/api/v4/lease/pause') {
+      const lease = leases.get(headerOf(init, 'Dropgate-Lease') ?? '');
+      if (!lease) return notFound();
+      if (maxPauseMinutes === 0) return pauseDisabled();
+      pauses.push('lease');
+      lease.paused = true;
+      return json(200, { paused: true, deadline: Date.now() + maxPauseMinutes * 60_000 });
     }
     return undefined;
   }
@@ -236,6 +310,7 @@ export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: nu
     objects,
     leases,
     renewals,
+    pauses,
     /** Gives the next finished upload this ID. */
     nextId: (id: string) => { next.id = id; },
     /** Stores an upload as if it had been sent, by its ID. */

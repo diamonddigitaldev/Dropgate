@@ -1,6 +1,9 @@
 import { CancelScope } from './cancel.js';
 import { cryptoProvider } from './crypto/provider.js';
+import { DropgateError, withTransport } from './errors.js';
 import { settle } from './outcome.js';
+import { PauseControl } from './pause.js';
+import type { PausedBy } from './pause.js';
 import type { Outcome } from './outcome.js';
 import type { Transport } from './transport.js';
 
@@ -29,8 +32,27 @@ export interface OperationHandle<T, S> {
    * for where it is when you subscribe. Returns a function that unsubscribes.
    */
   subscribe(listener: (snapshot: S) => void): () => void;
-  /** Cancels the operation: its outcome is then `cancelled`, `by: 'self'`. Does nothing once it has ended. */
+  /** Cancels the operation: its outcome is then `cancelled`, `by: 'self'`. Does nothing once it has ended. Paused, it's cancelled too. */
   cancel(): void;
+  /**
+   * Pauses the operation, where `snapshot.canPause` says it can. Resolves once
+   * it's paused: a hosted one once the server has said how long it holds it,
+   * which `snapshot.deadline` then gives, with `status: 'paused'`. Paused
+   * already, it asks the server again, which renews that deadline from now.
+   * Nothing resumes by itself: still paused at its deadline, the operation
+   * fails. If the server refuses the pause, nothing changes.
+   * @throws {DropgateError} (rejects) PAUSE_UNAVAILABLE if it can't pause now; CAPABILITY_UNSUPPORTED
+   * if the server has pausing turned off; NOT_FOUND if the server no longer has it (the operation
+   * fails too); or the request's error.
+   */
+  pause(): Promise<void>;
+  /**
+   * Resumes a paused operation, from where it stopped. Resolves once the
+   * server has said it goes on, and it's running again.
+   * @throws {DropgateError} (rejects) PAUSE_UNAVAILABLE if it isn't paused; NOT_FOUND if the server
+   * no longer has it (the operation fails too); or the request's error, and it stays paused.
+   */
+  resume(): Promise<void>;
 }
 
 /** What an operation's work is given. */
@@ -41,6 +63,18 @@ export interface OperationContext<S> {
   readonly signal: AbortSignal;
   /** Merges `patch` into the snapshot, and tells the subscribers. */
   update(patch: Partial<S>): void;
+  /** The operation's pause and resume: the work says when it can pause, and stops for one at its checkpoints. */
+  readonly pausing: PauseControl;
+}
+
+/** The fields every operation's snapshot has. */
+export interface OperationSnapshot {
+  status: string;
+  text: string;
+  canPause: boolean;
+  pausedBy: PausedBy | null;
+  deadline: number | null;
+  transport: Transport;
 }
 
 /**
@@ -58,20 +92,22 @@ export function newOperationId(): string {
  * `finalSnapshot` gives the last snapshot, from the outcome. `onEnd` runs as
  * the operation ends, before its outcome or its last snapshot reaches anyone.
  */
-export function startOperation<T, S extends { transport: Transport }>(opts: {
+export function startOperation<T, S extends OperationSnapshot>(opts: {
   kind: OperationKind;
   parent: CancelScope;
   signal?: AbortSignal;
   /** How the client reaches its server: in every snapshot, and on the outcome. */
   transport: Transport;
-  initial: Omit<S, 'transport'>;
+  initial: Omit<S, 'transport' | 'canPause' | 'pausedBy' | 'deadline'>;
   work: (ctx: OperationContext<S>) => Promise<T>;
   finalSnapshot: (outcome: Outcome<T>, last: S) => S;
   onEnd?: (handle: OperationHandle<T, S>) => void;
 }): OperationHandle<T, S> {
   const scope = new CancelScope(opts.kind, { parent: opts.parent, signal: opts.signal });
   const listeners = new Set<(snapshot: S) => void>();
-  let snapshot: S = Object.freeze({ ...opts.initial, transport: opts.transport } as S);
+  // Nothing can pause until its work says it can.
+  const idle = { canPause: false, pausedBy: null, deadline: null };
+  let snapshot: S = Object.freeze({ ...opts.initial, ...idle, transport: opts.transport } as unknown as S);
   let ended = false;
 
   const publish = (next: S): void => {
@@ -81,12 +117,12 @@ export function startOperation<T, S extends { transport: Transport }>(opts: {
     }
   };
 
-  const ctx: OperationContext<S> = {
-    scope,
-    signal: scope.signal,
-    // A patch can't change the transport.
-    update: (patch) => { if (!ended) publish({ ...snapshot, ...patch, transport: opts.transport }); },
+  // A patch can't change the transport, and every snapshot says whether it can pause now.
+  const update = (patch: Partial<S>): void => {
+    if (!ended) publish({ ...snapshot, ...patch, canPause: pausing.canPause, transport: opts.transport });
   };
+  const pausing: PauseControl = new PauseControl(scope.signal, (patch) => update(patch as Partial<S>), () => snapshot);
+  const ctx: OperationContext<S> = { scope, signal: scope.signal, update, pausing };
 
   // The work starts on a later turn, so a caller can subscribe first, and not
   // at all if the operation was cancelled by then.
@@ -97,8 +133,12 @@ export function startOperation<T, S extends { transport: Transport }>(opts: {
   };
   const result = settle(scope, run, opts.transport).then((outcome) => {
     ended = true;
+    // A pause or resume still settling is refused: the operation has ended.
+    pausing.end(withTransport(outcome.status === 'failed'
+      ? outcome.error
+      : new DropgateError({ code: outcome.status === 'cancelled' ? 'OPERATION_CANCELLED' : 'PAUSE_UNAVAILABLE', message: 'It has ended.' }), opts.transport));
     try { opts.onEnd?.(handle); } catch { /* Ending can't fail the outcome. */ }
-    publish({ ...opts.finalSnapshot(outcome, snapshot), transport: opts.transport });
+    publish({ ...opts.finalSnapshot(outcome, snapshot), ...idle, transport: opts.transport });
     listeners.clear();
     return outcome;
   });
@@ -114,6 +154,8 @@ export function startOperation<T, S extends { transport: Transport }>(opts: {
       return () => { listeners.delete(listener); };
     },
     cancel() { scope.cancel(); },
+    pause: () => pausing.pause().catch((err: unknown) => { throw withTransport(err, opts.transport); }),
+    resume: () => pausing.resume().catch((err: unknown) => { throw withTransport(err, opts.transport); }),
   };
   return handle;
 }

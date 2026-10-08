@@ -41,7 +41,8 @@ When the server answers with an error, the message is the server's own, if it se
 | `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, or one that isn't an address; an `appInfo` that isn't `{ name, version? }`; an `auth` that isn't a function, or a credential it gives that isn't `{ token }`; no files, or something that isn't a file; no `id`; a download from an opened upload that has been closed; a download's `files` that isn't indexes, each once, or names a file the upload doesn't have; a download without a sink that fits it; a delete without an `id`, or with a `manageToken` that isn't one; a lifetime that isn't a whole number of milliseconds; or an event `client.server.on()` doesn't have |
 | `RUNTIME_UNSUPPORTED` | local | No | There's no `fetch()`, or no secure random numbers (`crypto.getRandomValues()`), or encryption was asked for where the browser gives no `crypto.subtle` (a page not served over HTTPS or from `localhost`), or a download's answer can't be read as a stream |
 | `OPERATION_CANCELLED` | local | No | A call was given an `AbortSignal`, and it was aborted. An upload or download that's cancelled ends with a `cancelled` outcome instead |
-| `SOURCE_UNAVAILABLE` | local | No | A file being uploaded couldn't be read |
+| `PAUSE_UNAVAILABLE` | local | No | `pause()` was called on an upload or download that can't pause now (the server hasn't taken it or given its lease yet, it's finishing or has ended, or a pause or resume is settling), or `resume()` on one that isn't paused. Nothing changes ([Pausing](api-reference.md#pausing)) |
+| `SOURCE_UNAVAILABLE` | local | No | A file being uploaded couldn't be read, or changed since the upload started (such as while it was paused) |
 | `OUTPUT_WRITE_FAILED` | local | No | A download's sink failed a `write()` or its `close()`, or a function giving a sink failed; a direct transfer's `onData` threw or rejected, or its receiver couldn't keep up |
 | `ENCRYPT_FAILED` | local | No | The encryption keys couldn't be made, or a file name, list of files or chunk couldn't be encrypted |
 | `KEY_REQUIRED` | local | No | The upload is encrypted, and there's no secret |
@@ -53,7 +54,7 @@ When the server answers with an error, the message is the server's own, if it se
 | `FILE_EMPTY` | local | No | A file to upload is empty (0 bytes) |
 | `FILE_TOO_LARGE` | server | No | The upload is larger than the server's limit (`details.index` says which file, when core finds it before asking the server) |
 | `LIFETIME_NOT_ALLOWED` | server | No | The server doesn't allow that file lifetime: too long, or unlimited |
-| `CAPABILITY_UNSUPPORTED` | server | No | The server has uploads, end-to-end encryption or direct transfer turned off (`details.capability`, when core finds it before asking the server) |
+| `CAPABILITY_UNSUPPORTED` | server | No | The server has uploads, end-to-end encryption, pausing or direct transfer turned off (`details.capability`, when core finds it before asking the server) |
 | `VERSION_UNSUPPORTED` | server | No | The server speaks another major version of the protocol the call needs (DGUP for hosted calls, DGDTP for direct ones), or none (it's older than Dropgate 4); or a direct transfer's other device uses another protocol version (origin `peer`). The message says "Update required" and which side needs it. An upload made in a format this version of Dropgate can't read is refused the same way |
 | `INSECURE_TRANSPORT_NOT_ALLOWED` | local | No | The server is on plain `http://` on another machine, and the client wasn't made with `allowInsecure: true`. Thrown by the constructor, before any request |
 | `REDIRECT_NOT_FOLLOWED` | server | No | The server answered with a redirect, which core never follows: use the address it redirects to. `status` is the redirect's, where the runtime gives it (a browser doesn't) |
@@ -61,7 +62,7 @@ When the server answers with an error, the message is the server's own, if it se
 | `AUTH_EXPIRED` | server | No | The credential has expired, and did again after `auth` was asked for a new one (HTTP 401) |
 | `AUTH_DENIED` | server | No | The credential doesn't allow this |
 | `QUOTA_EXCEEDED` | server | No | This would go over the quota the server allows the credential's holder |
-| `NOT_FOUND` | server | No | The upload isn't on the server: it never was, it expired, it was deleted, or it was downloaded as many times as it could be (HTTP 404 or 410). For an upload in progress, the server dropped it ("The server dropped this upload"), or couldn't be reached for longer than it waits for one |
+| `NOT_FOUND` | server | No | The upload isn't on the server: it never was, it expired, it was deleted, or it was downloaded as many times as it could be (HTTP 404 or 410). For an upload in progress, the server dropped it ("The server dropped this upload"), or couldn't be reached for longer than it waits for one. For a paused upload or download, it was still paused at the server's deadline, or the server had dropped it by the time it was resumed ("The server dropped this paused upload.") |
 | `REQUEST_REJECTED` | server | No | The server refused the request for another reason (any other 4xx status), and says why: such as a manage token that isn't the upload's (HTTP 403) |
 | `RATE_LIMITED` | server | Yes | The server has had too many requests (HTTP 429) |
 | `SERVER_FULL` | server | Yes | The server is out of space (HTTP 507) |

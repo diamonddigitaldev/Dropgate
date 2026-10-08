@@ -8,7 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { startServer } from './helpers/harness.mjs';
 import {
-    MINUTE_MS, QUIET_MS, SMALL_CHUNKS, answer, fileBytes, plainObject, sendChunks, startBody, startUpload, uploads,
+    MINUTE_MS, QUIET_MS, SMALL_CHUNKS, answer, contentDigest, fileBytes, plainObject, sendChunks, startBody, startUpload, uploads,
 } from './helpers/dgup4.mjs';
 
 const BASE = { ENABLE_UPLOAD: 'true', UPLOAD_CHUNK_SIZE_BYTES: SMALL_CHUNKS, RATE_LIMIT_MAX_REQUESTS: '0' };
@@ -88,6 +88,40 @@ test('resume answers with the chunks held and a deadline 5 minutes on', async (t
 
     await server.advanceClock(QUIET_MS + SLACK);
     assert.deepEqual(await answer(await uploads.status(server, uploadId)), NOT_FOUND, 'and it goes quiet like any other');
+});
+
+test('a chunk already on its way when a pause comes is kept and leaves the upload paused; one sent while paused resumes it', async (t) => {
+    const server = await startServer({ env: BASE });
+    t.after(server.stop);
+    const object = threeChunks();
+    const uploadId = await startUpload(server, object);
+
+    // Chunk 0's first half reaches the server, then the pause, then the rest of it.
+    const chunk = object.chunks[0];
+    let more;
+    const body = new ReadableStream({
+        start(controller) {
+            controller.enqueue(chunk.subarray(0, 1000));
+            more = () => { controller.enqueue(chunk.subarray(1000)); controller.close(); };
+        },
+    });
+    const sent = fetch(`${server.baseUrl}/api/v4/upload/chunks/0`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(chunk.length), 'Content-Digest': contentDigest(chunk), 'Dropgate-Upload': uploadId },
+        body,
+        duplex: 'half',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const paused = await answer(await uploads.pause(server, uploadId));
+    assert.equal(paused.status, 200);
+    more();
+    assert.equal((await sent).status, 200);
+
+    const status = await answer(await uploads.status(server, uploadId));
+    assert.deepEqual(status.body, { chunks: 3, received: [[0, 0]], paused: true, deadline: paused.body.deadline }, 'still paused, with its deadline');
+
+    await sendChunks(server, uploadId, object, 1, 2);
+    assert.equal((await answer(await uploads.status(server, uploadId))).body.paused, false, 'a chunk sent while paused resumes it');
 });
 
 test('an upload that goes quiet ends 5 minutes after its last request, not before; a paused one beside it is kept', async (t) => {

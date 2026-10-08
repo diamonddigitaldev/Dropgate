@@ -22,6 +22,7 @@ export const ERROR_CODES = {
   INVALID_ARGUMENT: { origin: 'local', retryable: false, message: 'An option passed to Dropgate is missing or invalid.' },
   RUNTIME_UNSUPPORTED: { origin: 'local', retryable: false, message: 'This environment lacks something Dropgate needs.' },
   OPERATION_CANCELLED: { origin: 'local', retryable: false, message: 'The operation was cancelled.' },
+  PAUSE_UNAVAILABLE: { origin: 'local', retryable: false, message: "It can't be paused or resumed now." },
   SOURCE_UNAVAILABLE: { origin: 'local', retryable: false, message: "A file couldn't be read." },
   OUTPUT_WRITE_FAILED: { origin: 'local', retryable: false, message: "Received data couldn't be written." },
   ENCRYPT_FAILED: { origin: 'local', retryable: false, message: "The upload couldn't be encrypted." },

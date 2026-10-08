@@ -305,7 +305,7 @@ A client retries only what can recover, and only while the server is still waiti
 | Per-chunk timeout | 60,000 ms |
 
 - **`Retry-After` is waited instead of the back-off,** up to a minute, wherever the server sends it.
-- **What's retried:** a chunk, and a version 4 finish, which gives the same answer when it's asked again ([§19.6](#196-finish)); and a version 4 download's bytes, which continue where they stopped ([§7.4](#74-reconnecting-downloads)). A chunk is sent again as the same bytes: an encrypted one is sealed once ([§21.2](#212-the-object-a-client-makes)). The start, metadata, a lease and the delete aren't retried.
+- **What's retried:** a chunk, and a version 4 finish, which gives the same answer when it's asked again ([§19.6](#196-finish)); and a version 4 download's bytes, which continue where they stopped ([§7.4](#74-reconnecting-downloads)). A chunk is sent again as the same bytes: an encrypted one is sealed once ([§21.2](#212-the-object-a-client-makes)). A version 4 pause or resume, of an upload or a lease, is retried the same way ([§19.5](#195-pause-and-resume), [§20.2](#202-leases)). The start, metadata, taking a lease and the delete aren't retried.
 
 ### 7.2 What's Retried, and What Isn't
 
@@ -315,7 +315,7 @@ A client retries only what can recover, and only while the server is still waiti
 
 ### 7.3 How Long a Client Retries
 
-Until the server stops waiting: a version 4 upload is dropped 5 minutes after its last request ([§19.8](#198-how-long-an-upload-lasts)), and a lease ends 5 minutes after its last request or byte ([§20.2](#202-leases)). Every answer carries a `deadline`; the client retries until the later of the last `deadline` and 5 minutes after the server last answered, so a clock that's ahead of the server's never cuts it short. Its last wait ends then, for one try more. If that fails too, the upload has gone: the core library fails it as `NOT_FOUND`, "The server dropped this upload", as it does when the server answers `404`. A download fails with its last error.
+Until the server stops waiting: a version 4 upload is dropped 5 minutes after its last request ([§19.8](#198-how-long-an-upload-lasts)), and a lease ends 5 minutes after its last request or byte ([§20.2](#202-leases)). Every answer carries a `deadline`; the client retries until the later of the last `deadline` and 5 minutes after the server last answered, so a clock that's ahead of the server's never cuts it short. Its last wait ends then, for one try more. Meanwhile the core library gives that time as its snapshots' `deadline`. If that fails too, the upload has gone: the core library fails it as `NOT_FOUND`, "The server dropped this upload", as it does when the server answers `404`. A download fails with its last error.
 
 ### 7.4 Reconnecting Downloads
 
@@ -324,6 +324,7 @@ A version 4 download whose connection drops, or stalls past its timeout, is cont
 - **It asks for the rest,** with `Range: bytes=<from>-` and `If-Range` set to the upload's `ETag` from the lease ([§20.4](#204-the-bytes)). An encrypted upload's rest starts at the next whole chunk after the last one opened and written; an unencrypted one's at the next byte. Until something has been written, it asks for the whole upload again.
 - **It must get `206`, for exactly that range,** with `Content-Range: bytes <from>-<size − 1>/<size>`. A `200` in answer to a range means the `If-Range` didn't match, so the upload isn't the one the download started: the client adds none of it to what it has, and fails as `INTEGRITY_FAILED`. Any other range is `INVALID_RESPONSE`.
 - **Nothing is written twice:** an encrypted chunk is written only once it has opened whole, so a chunk cut off part-way is asked for again from its start.
+- **A paused download continues the same way** once it's resumed ([§20.2](#202-leases)).
 
 ---
 
@@ -735,7 +736,7 @@ Dropgate-Upload: <uploadId>
 The body is chunk `index`'s bytes, from 0, exactly its length. `Content-Digest` is the SHA-256 of the body ([RFC 9530](https://www.rfc-editor.org/rfc/rfc9530)); another algorithm may sit beside it. Chunks can come in any order, and each is written where it goes in the object.
 
 - **The same chunk again,** with the same digest, is `200` and isn't written again, so a retry is always safe. With different bytes it's refused: the server compares the digest it kept.
-- **A chunk sent while the upload is paused resumes it.**
+- **A chunk sent while the upload is paused resumes it.** One already on its way when the pause came doesn't: it's kept if it all arrives, and the upload stays paused.
 - The server reads no more than the chunk's length. A request it refuses before reading its body closes the connection.
 
 | Status | Code | When |
@@ -757,7 +758,7 @@ Dropgate-Upload: <uploadId>
 { "chunks": 20, "received": [[0, 11], [13, 13]], "paused": false, "deadline": 1759766700000 }
 ```
 
-`received` gives the chunks the server holds, as inclusive ranges. A client resuming an upload asks for it, then sends the rest.
+`received` gives the chunks the server holds, as inclusive ranges. A client resuming an upload needs it, then sends the rest; the resume's own answer gives it too ([§19.5](#195-pause-and-resume)). Asking doesn't renew a pause.
 
 ### 19.5 Pause and Resume
 
@@ -770,6 +771,10 @@ Each names the upload in `Dropgate-Upload`, with no body.
 
 - **Pause** responds `{ "paused": true, "deadline": … }`: the server keeps the upload for `UPLOAD_MAX_PAUSE_MINUTES` (`capabilities.upload.maxPauseMinutes`) from now, and pausing again renews that from then. With pausing off (`0`), it's `409`, `PAUSE_DISABLED`, and the upload goes on unpaused.
 - **Resume** responds `{ "paused": false, "deadline": …, "received": [...] }`, with the chunks held, as the status gives them, and a quiet upload's deadline.
+
+**The core library's pause** (`pause()` on an upload's handle, [Core API](../core/api-reference.md#pausing)) stops the chunk it's sending, then asks for the pause; its `resume()` asks for the resume, and sends only the chunks the answer's `received` lacks. The chunk the pause stopped goes again exactly as it was sealed: a chunk is never sealed twice, since its index is its nonce ([§21.2](#212-the-object-a-client-makes)). A chunk the server said it held is never read again. A file that changed while the upload was paused fails it (`SOURCE_UNAVAILABLE`) rather than be sent part old, part new. The client shows the server's `deadline`, or the pause length from its answer if that's later, so a server clock behind the client's never ends it early; still paused then, the upload has gone, and the client says "The server dropped this paused upload.", as it does when the resume is `404`. Nothing resumes by itself.
+
+**What a pause holds:** on the server, what it already holds for the upload in progress, its temporary file, its session in memory and its reservation, for at most `UPLOAD_MAX_PAUSE_MINUTES` ([§19.8](#198-how-long-an-upload-lasts)); on the client, in memory, the upload's own state and the sealed chunk the pause stopped. Nothing of it is written to disk.
 
 ### 19.6 Finish
 
@@ -856,6 +861,7 @@ The lease is 32 random bytes, base64url with no padding (43 characters). The las
 
 - **A lease ends 5 minutes after its last request,** unless it's paused: any request under it renews it, and while its bytes are being sent it isn't quiet. **Paused, it ends when the pause runs out.** A request for its bytes, or a renew, ends a pause.
 - **Leases are in the server's memory only:** each holds the upload's ID, its own, whether it has sent any bytes, whether it's paused, and its deadline. Nothing about who took it. **None survives a restart.**
+- **The core library's pause** (`pause()` on a download's handle, [Core API](../core/api-reference.md#pausing)) closes the request for the bytes and holds what it has written, then pauses the lease; its `resume()` renews the lease, which ends the pause, and asks for the rest under it from the next whole chunk ([§7.4](#74-reconnecting-downloads)), so it's still one download. A lease the server no longer has, or one still paused at its deadline, fails the download: "The server dropped this paused download." A page's one lease ([§21.3](#213-the-download-page)) is paused only once none of its downloads runs, and isn't renewed meanwhile, since a renew ends a pause.
 
 ### 20.3 Leases and Counting
 

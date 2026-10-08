@@ -36,7 +36,7 @@ export type UploadSource = FileSource | BlobLike;
  * `stat()` and positional `read()`.
  */
 export interface FileHandleLike {
-  stat(): Promise<{ size: number }>;
+  stat(): Promise<{ size: number; mtimeMs?: number }>;
   read(buffer: Uint8Array, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
 }
 
@@ -52,17 +52,29 @@ export function blobSource(blob: BlobLike, name?: string): FileSource {
   };
 }
 
+/** The error for a file that changed after it was chosen, as a browser's File gives one too. */
+const fileChanged = () => new DropgateError({
+  code: 'SOURCE_UNAVAILABLE',
+  message: "A file changed after the upload started, so the rest of it can't be read as it was.",
+});
+
 /**
  * A FileSource that reads an open Node.js file handle. Its size is the file's
  * size now; closing the handle once the upload has ended is the caller's job.
+ * Like a browser's File, it can't be read once the file changes: each read
+ * checks the file's size and modification time are still what they were when
+ * it was opened, and fails SOURCE_UNAVAILABLE if not. So a file edited while
+ * its upload is paused is never sent part old, part new.
  */
 export async function fileHandleSource(handle: FileHandleLike, opts: { name: string; type?: string }): Promise<FileSource> {
-  const { size } = await handle.stat();
+  const { size, mtimeMs } = await handle.stat();
   return {
     name: opts.name,
     size,
     ...(opts.type ? { type: opts.type } : {}),
     async read(start, end) {
+      const now = await handle.stat();
+      if (now.size !== size || now.mtimeMs !== mtimeMs) throw fileChanged();
       const buffer = new Uint8Array(end - start);
       let filled = 0;
       while (filled < buffer.length) {
@@ -108,6 +120,7 @@ export async function readRange(source: FileSource, start: number, end: number):
   try {
     bytes = await source.read(start, end);
   } catch (err) {
+    if (DropgateError.is(err, 'SOURCE_UNAVAILABLE')) throw err;
     throw new DropgateError({ code: 'SOURCE_UNAVAILABLE', cause: err });
   }
   if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== end - start) {

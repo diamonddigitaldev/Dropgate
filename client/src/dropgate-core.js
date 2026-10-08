@@ -29,6 +29,7 @@ var ERROR_CODES = {
   INVALID_ARGUMENT: { origin: "local", retryable: false, message: "An option passed to Dropgate is missing or invalid." },
   RUNTIME_UNSUPPORTED: { origin: "local", retryable: false, message: "This environment lacks something Dropgate needs." },
   OPERATION_CANCELLED: { origin: "local", retryable: false, message: "The operation was cancelled." },
+  PAUSE_UNAVAILABLE: { origin: "local", retryable: false, message: "It can't be paused or resumed now." },
   SOURCE_UNAVAILABLE: { origin: "local", retryable: false, message: "A file couldn't be read." },
   OUTPUT_WRITE_FAILED: { origin: "local", retryable: false, message: "Received data couldn't be written." },
   ENCRYPT_FAILED: { origin: "local", retryable: false, message: "The upload couldn't be encrypted." },
@@ -796,6 +797,259 @@ async function settle(scope, work, transport) {
   }
 }
 
+// src/pause.ts
+var PAUSE_REASON = new DropgateError({ code: "OPERATION_CANCELLED", message: "Paused." });
+var unavailable = (message) => new DropgateError({ code: "PAUSE_UNAVAILABLE", message });
+var _state, _hooks, _allowed, _turnedOff, _operation, _update, _snapshot, _segment, _unlink, _stopped, _waiting, _timer, _deadline, _status, _text, _pending, _PauseControl_instances, pauseAgain_fn, ending_fn, paused_fn, run_fn, arm_fn, disarm_fn, newSegment_fn, untilEnded_fn;
+var PauseControl = class {
+  constructor(operation, update, snapshot) {
+    __privateAdd(this, _PauseControl_instances);
+    __privateAdd(this, _state, "running");
+    __privateAdd(this, _hooks, null);
+    __privateAdd(this, _allowed, false);
+    __privateAdd(this, _turnedOff, false);
+    __privateAdd(this, _operation);
+    __privateAdd(this, _update);
+    __privateAdd(this, _snapshot);
+    __privateAdd(this, _segment, new AbortController());
+    __privateAdd(this, _unlink, () => {
+    });
+    /** Told when the work has stopped at its checkpoint. */
+    __privateAdd(this, _stopped, null);
+    /** The work waiting at its checkpoint: lets it go on, or fails it. */
+    __privateAdd(this, _waiting, null);
+    __privateAdd(this, _timer, null);
+    __privateAdd(this, _deadline, null);
+    /** The status and text the operation goes back to when it goes on. */
+    __privateAdd(this, _status, "");
+    __privateAdd(this, _text, "");
+    /** Pauses and resumes still settling, rejected if the operation ends first. */
+    __privateAdd(this, _pending, /* @__PURE__ */ new Set());
+    __privateSet(this, _operation, operation);
+    __privateSet(this, _update, update);
+    __privateSet(this, _snapshot, snapshot);
+    __privateMethod(this, _PauseControl_instances, newSegment_fn).call(this);
+  }
+  /**
+   * Whether the operation can pause now, and how: with `hooks` once the server
+   * has taken it, and `null` once it's finishing. The next snapshot says so.
+   */
+  allow(hooks) {
+    if (hooks) __privateSet(this, _hooks, hooks);
+    __privateSet(this, _allowed, hooks !== null);
+  }
+  /** What every snapshot's `canPause` is: whether `pause()` can be called now. Paused, pausing again renews the deadline. */
+  get canPause() {
+    return __privateGet(this, _state) === "paused" || __privateGet(this, _state) === "running" && __privateGet(this, _allowed);
+  }
+  /** The server has pausing turned off, so a pause is refused with CAPABILITY_UNSUPPORTED. */
+  turnedOff() {
+    __privateSet(this, _turnedOff, true);
+    this.allow(null);
+  }
+  /** Aborts when a pause stops the work, or the operation is cancelled: each step a pause should stop uses it. */
+  get signal() {
+    return __privateGet(this, _segment).signal;
+  }
+  /** Whether `signal` aborted for a pause, and not a cancel: the work then goes to its checkpoint. */
+  get interrupted() {
+    return __privateGet(this, _segment).signal.aborted && __privateGet(this, _state) !== "running" && !__privateGet(this, _operation).aborted;
+  }
+  /**
+   * Where the work can stop, between steps. While running, it goes on at once
+   * and gives false. Paused, it waits until the operation goes on, then gives
+   * true; it rejects if the operation is cancelled, or a pause ends it.
+   */
+  async checkpoint() {
+    if (__privateGet(this, _state) === "running" || __privateGet(this, _state) === "ended") return false;
+    const operation = __privateGet(this, _operation);
+    if (operation.aborted) throw operation.reason;
+    await new Promise((resolve, reject) => {
+      var _a;
+      const onAbort = () => reject(operation.reason);
+      operation.addEventListener("abort", onAbort, { once: true });
+      __privateSet(this, _waiting, {
+        go: () => {
+          operation.removeEventListener("abort", onAbort);
+          resolve();
+        },
+        fail: (err) => {
+          operation.removeEventListener("abort", onAbort);
+          reject(err);
+        }
+      });
+      (_a = __privateGet(this, _stopped)) == null ? void 0 : _a.call(this);
+    }).finally(() => {
+      __privateSet(this, _waiting, null);
+    });
+    return true;
+  }
+  /**
+   * Pauses: stops the step under way, waits for the work to stop, and asks the
+   * server to hold it. Paused already, it asks again, which renews the
+   * server's deadline from now. If the server refuses, nothing changes; if it
+   * no longer has the operation, the operation fails.
+   */
+  async pause() {
+    if (__privateGet(this, _state) === "paused") return __privateMethod(this, _PauseControl_instances, pauseAgain_fn).call(this);
+    if (__privateGet(this, _state) !== "running" || !__privateGet(this, _allowed) || !__privateGet(this, _hooks)) {
+      if (__privateGet(this, _turnedOff) && __privateGet(this, _state) === "running") {
+        throw new DropgateError({ code: "CAPABILITY_UNSUPPORTED", message: "Pausing is turned off on this server.", details: { capability: "pause" } });
+      }
+      throw unavailable(__privateGet(this, _state) === "ended" ? "It has ended, so it can't be paused." : "It can't be paused now.");
+    }
+    const hooks = __privateGet(this, _hooks);
+    __privateSet(this, _state, "pausing");
+    ({ status: __privateWrapper(this, _status)._, text: __privateWrapper(this, _text)._ } = __privateGet(this, _snapshot).call(this));
+    __privateGet(this, _update).call(this, { text: "Pausing..." });
+    const stopped = new Promise((resolve) => {
+      __privateSet(this, _stopped, resolve);
+    });
+    __privateGet(this, _segment).abort(PAUSE_REASON);
+    try {
+      await __privateMethod(this, _PauseControl_instances, untilEnded_fn).call(this, stopped);
+      __privateSet(this, _stopped, null);
+      __privateMethod(this, _PauseControl_instances, paused_fn).call(this, await __privateMethod(this, _PauseControl_instances, untilEnded_fn).call(this, hooks.pause()));
+    } catch (err) {
+      __privateSet(this, _stopped, null);
+      if (__privateMethod(this, _PauseControl_instances, ending_fn).call(this, err)) throw err;
+      __privateMethod(this, _PauseControl_instances, run_fn).call(this);
+      throw err;
+    }
+  }
+  /**
+   * Resumes: asks the server to go on, then lets the work go on. If the server
+   * no longer has it, the operation fails; if it can't be asked, it stays paused.
+   */
+  async resume() {
+    if (__privateGet(this, _state) !== "paused" || !__privateGet(this, _hooks)) {
+      throw unavailable(__privateGet(this, _state) === "ended" ? "It has ended, so it can't be resumed." : "It isn't paused.");
+    }
+    const hooks = __privateGet(this, _hooks);
+    const deadline = __privateGet(this, _deadline);
+    __privateSet(this, _state, "resuming");
+    __privateMethod(this, _PauseControl_instances, disarm_fn).call(this);
+    __privateGet(this, _update).call(this, { text: "Resuming..." });
+    try {
+      await __privateMethod(this, _PauseControl_instances, untilEnded_fn).call(this, hooks.resume());
+    } catch (err) {
+      if (__privateMethod(this, _PauseControl_instances, ending_fn).call(this, err)) throw err;
+      __privateMethod(this, _PauseControl_instances, paused_fn).call(this, deadline);
+      throw err;
+    }
+    __privateMethod(this, _PauseControl_instances, run_fn).call(this);
+  }
+  /**
+   * A new deadline for a pause already made, as the server said (null for
+   * none): for a lease shared with downloads that go on, or stop.
+   */
+  extend(deadline) {
+    if (__privateGet(this, _state) !== "paused") return;
+    __privateSet(this, _deadline, deadline);
+    __privateGet(this, _update).call(this, { deadline });
+    __privateMethod(this, _PauseControl_instances, arm_fn).call(this);
+  }
+  /** The operation has ended: nothing more pauses, and a pause or resume still settling rejects with `reason`. */
+  end(reason) {
+    __privateSet(this, _state, "ended");
+    __privateMethod(this, _PauseControl_instances, disarm_fn).call(this);
+    __privateGet(this, _unlink).call(this);
+    for (const reject of [...__privateGet(this, _pending)]) reject(reason);
+    __privateGet(this, _pending).clear();
+  }
+};
+_state = new WeakMap();
+_hooks = new WeakMap();
+_allowed = new WeakMap();
+_turnedOff = new WeakMap();
+_operation = new WeakMap();
+_update = new WeakMap();
+_snapshot = new WeakMap();
+_segment = new WeakMap();
+_unlink = new WeakMap();
+_stopped = new WeakMap();
+_waiting = new WeakMap();
+_timer = new WeakMap();
+_deadline = new WeakMap();
+_status = new WeakMap();
+_text = new WeakMap();
+_pending = new WeakMap();
+_PauseControl_instances = new WeakSet();
+pauseAgain_fn = async function() {
+  const hooks = __privateGet(this, _hooks);
+  const deadline = __privateGet(this, _deadline);
+  __privateSet(this, _state, "pausing");
+  __privateMethod(this, _PauseControl_instances, disarm_fn).call(this);
+  __privateGet(this, _update).call(this, {});
+  try {
+    __privateMethod(this, _PauseControl_instances, paused_fn).call(this, await __privateMethod(this, _PauseControl_instances, untilEnded_fn).call(this, hooks.pause()));
+  } catch (err) {
+    if (__privateMethod(this, _PauseControl_instances, ending_fn).call(this, err)) throw err;
+    __privateMethod(this, _PauseControl_instances, paused_fn).call(this, deadline);
+    throw err;
+  }
+};
+/**
+ * Whether an error from the server, or a cancel, ends the operation: a
+ * cancel, or the server no longer having it (NOT_FOUND), which the
+ * operation then fails with.
+ */
+ending_fn = function(err) {
+  if (__privateGet(this, _state) === "ended" || __privateGet(this, _operation).aborted) return true;
+  if (!DropgateError.is(err, "NOT_FOUND")) return false;
+  __privateSet(this, _state, "ending");
+  __privateMethod(this, _PauseControl_instances, disarm_fn).call(this);
+  __privateGet(this, _waiting)?.fail(err);
+  return true;
+};
+paused_fn = function(deadline) {
+  __privateSet(this, _state, "paused");
+  __privateSet(this, _deadline, deadline);
+  __privateGet(this, _update).call(this, { status: "paused", pausedBy: "self", deadline, text: "Paused." });
+  __privateMethod(this, _PauseControl_instances, arm_fn).call(this);
+};
+/** Back to running: a new segment for the steps from here, and the work goes on. */
+run_fn = function() {
+  __privateSet(this, _state, "running");
+  __privateSet(this, _deadline, null);
+  __privateMethod(this, _PauseControl_instances, newSegment_fn).call(this);
+  __privateGet(this, _update).call(this, { status: __privateGet(this, _status), text: __privateGet(this, _text), pausedBy: null, deadline: null });
+  __privateGet(this, _waiting)?.go();
+};
+/** At the deadline, a paused operation fails: the server no longer holds it, and nothing resumes by itself. */
+arm_fn = function() {
+  __privateMethod(this, _PauseControl_instances, disarm_fn).call(this);
+  const deadline = __privateGet(this, _deadline);
+  if (deadline === null) return;
+  __privateSet(this, _timer, setTimeout(() => {
+    __privateSet(this, _timer, null);
+    if (__privateGet(this, _state) !== "paused") return;
+    __privateSet(this, _state, "ending");
+    __privateGet(this, _waiting)?.fail(__privateGet(this, _hooks).expired());
+  }, Math.max(0, deadline - Date.now())));
+};
+disarm_fn = function() {
+  if (__privateGet(this, _timer) !== null) clearTimeout(__privateGet(this, _timer));
+  __privateSet(this, _timer, null);
+};
+newSegment_fn = function() {
+  __privateGet(this, _unlink).call(this);
+  const segment = new AbortController();
+  const operation = __privateGet(this, _operation);
+  const onAbort = () => segment.abort(operation.reason);
+  if (operation.aborted) segment.abort(operation.reason);
+  else operation.addEventListener("abort", onAbort, { once: true });
+  __privateSet(this, _segment, segment);
+  __privateSet(this, _unlink, () => operation.removeEventListener("abort", onAbort));
+};
+/** `promise`, or a rejection if the operation ends first. */
+untilEnded_fn = function(promise) {
+  return new Promise((resolve, reject) => {
+    __privateGet(this, _pending).add(reject);
+    promise.then(resolve, reject).finally(() => __privateGet(this, _pending).delete(reject));
+  });
+};
+
 // src/operation.ts
 function newOperationId() {
   return cryptoProvider().randomUUID();
@@ -803,7 +1057,8 @@ function newOperationId() {
 function startOperation(opts) {
   const scope = new CancelScope(opts.kind, { parent: opts.parent, signal: opts.signal });
   const listeners = /* @__PURE__ */ new Set();
-  let snapshot = Object.freeze({ ...opts.initial, transport: opts.transport });
+  const idle = { canPause: false, pausedBy: null, deadline: null };
+  let snapshot = Object.freeze({ ...opts.initial, ...idle, transport: opts.transport });
   let ended = false;
   const publish = (next) => {
     snapshot = Object.freeze(next);
@@ -814,14 +1069,11 @@ function startOperation(opts) {
       }
     }
   };
-  const ctx = {
-    scope,
-    signal: scope.signal,
-    // A patch can't change the transport.
-    update: (patch) => {
-      if (!ended) publish({ ...snapshot, ...patch, transport: opts.transport });
-    }
+  const update = (patch) => {
+    if (!ended) publish({ ...snapshot, ...patch, canPause: pausing.canPause, transport: opts.transport });
   };
+  const pausing = new PauseControl(scope.signal, (patch) => update(patch), () => snapshot);
+  const ctx = { scope, signal: scope.signal, update, pausing };
   const run = async () => {
     await Promise.resolve();
     scope.throwIfCancelled();
@@ -829,11 +1081,12 @@ function startOperation(opts) {
   };
   const result = settle(scope, run, opts.transport).then((outcome) => {
     ended = true;
+    pausing.end(withTransport(outcome.status === "failed" ? outcome.error : new DropgateError({ code: outcome.status === "cancelled" ? "OPERATION_CANCELLED" : "PAUSE_UNAVAILABLE", message: "It has ended." }), opts.transport));
     try {
       opts.onEnd?.(handle);
     } catch {
     }
-    publish({ ...opts.finalSnapshot(outcome, snapshot), transport: opts.transport });
+    publish({ ...opts.finalSnapshot(outcome, snapshot), ...idle, transport: opts.transport });
     listeners.clear();
     return outcome;
   });
@@ -854,7 +1107,13 @@ function startOperation(opts) {
     },
     cancel() {
       scope.cancel();
-    }
+    },
+    pause: () => pausing.pause().catch((err) => {
+      throw withTransport(err, opts.transport);
+    }),
+    resume: () => pausing.resume().catch((err) => {
+      throw withTransport(err, opts.transport);
+    })
   };
   return handle;
 }
@@ -949,13 +1208,19 @@ function blobSource(blob, name) {
     }
   };
 }
+var fileChanged = () => new DropgateError({
+  code: "SOURCE_UNAVAILABLE",
+  message: "A file changed after the upload started, so the rest of it can't be read as it was."
+});
 async function fileHandleSource(handle, opts) {
-  const { size } = await handle.stat();
+  const { size, mtimeMs } = await handle.stat();
   return {
     name: opts.name,
     size,
     ...opts.type ? { type: opts.type } : {},
     async read(start, end) {
+      const now = await handle.stat();
+      if (now.size !== size || now.mtimeMs !== mtimeMs) throw fileChanged();
       const buffer = new Uint8Array(end - start);
       let filled = 0;
       while (filled < buffer.length) {
@@ -982,6 +1247,7 @@ async function readRange(source, start, end) {
   try {
     bytes = await source.read(start, end);
   } catch (err) {
+    if (DropgateError.is(err, "SOURCE_UNAVAILABLE")) throw err;
     throw new DropgateError({ code: "SOURCE_UNAVAILABLE", cause: err });
   }
   if (!ArrayBuffer.isView(bytes) || bytes.byteLength !== end - start) {
@@ -1340,17 +1606,17 @@ function base64urlToBytes(value, length, adapter) {
 // src/credentials.ts
 var TOKEN68 = /^[A-Za-z0-9\-._~+/]+=*$/;
 var MAX_TOKEN_LENGTH = 8192;
-var _provider2, _operation, _baseUrl, _token, _renewed, _OperationCredentials_instances, ask_fn;
+var _provider2, _operation2, _baseUrl, _token, _renewed, _OperationCredentials_instances, ask_fn;
 var _OperationCredentials = class _OperationCredentials {
   constructor(provider, operation, baseUrl) {
     __privateAdd(this, _OperationCredentials_instances);
     __privateAdd(this, _provider2);
-    __privateAdd(this, _operation);
+    __privateAdd(this, _operation2);
     __privateAdd(this, _baseUrl);
     __privateAdd(this, _token, null);
     __privateAdd(this, _renewed, false);
     __privateSet(this, _provider2, provider);
-    __privateSet(this, _operation, operation);
+    __privateSet(this, _operation2, operation);
     __privateSet(this, _baseUrl, baseUrl);
   }
   /**
@@ -1396,14 +1662,14 @@ var _OperationCredentials = class _OperationCredentials {
   }
 };
 _provider2 = new WeakMap();
-_operation = new WeakMap();
+_operation2 = new WeakMap();
 _baseUrl = new WeakMap();
 _token = new WeakMap();
 _renewed = new WeakMap();
 _OperationCredentials_instances = new WeakSet();
 ask_fn = async function(reason, signal) {
   if (signal.aborted) throw signal.reason;
-  const request = Object.freeze({ operation: __privateGet(this, _operation), reason, baseUrl: __privateGet(this, _baseUrl), signal });
+  const request = Object.freeze({ operation: __privateGet(this, _operation2), reason, baseUrl: __privateGet(this, _baseUrl), signal });
   let given;
   let stopWatching = () => {
   };
@@ -3348,6 +3614,32 @@ function chooseFiles(picked, count) {
 function droppedUpload(cause) {
   return new DropgateError({ code: "NOT_FOUND", status: cause.status, message: "The server dropped this upload.", cause });
 }
+function droppedPausedUpload(cause) {
+  return new DropgateError({ code: "NOT_FOUND", status: cause?.status, message: "The server dropped this paused upload.", ...cause ? { cause } : {} });
+}
+function droppedDownload(paused, cause) {
+  return new DropgateError({
+    code: "NOT_FOUND",
+    status: cause?.status,
+    message: paused ? "The server dropped this paused download." : "The server dropped this download.",
+    ...cause ? { cause } : {}
+  });
+}
+function pauseLength(serverInfo) {
+  const minutes = serverInfo?.capabilities?.upload?.maxPauseMinutes;
+  return typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0 ? minutes * 60 * 1e3 : 0;
+}
+function pausedUntil(deadline, pauseMs) {
+  if (typeof deadline !== "number" || !Number.isFinite(deadline)) {
+    throw new DropgateError({ code: "INVALID_RESPONSE", message: "The server's answer to the pause wasn't understood." });
+  }
+  return Math.max(deadline, Date.now() + pauseMs);
+}
+function chunkRanges(value, count) {
+  const valid = Array.isArray(value) && value.every((range) => Array.isArray(range) && range.length === 2 && Number.isSafeInteger(range[0]) && Number.isSafeInteger(range[1]) && range[0] >= 0 && range[0] <= range[1] && range[1] < count);
+  if (!valid) throw new DropgateError({ code: "INVALID_RESPONSE", message: "The server's list of the chunks it holds wasn't understood." });
+  return value;
+}
 function unreachableTooLong(cause) {
   if (cause.code === "NOT_FOUND") return cause;
   return new DropgateError({
@@ -3799,6 +4091,7 @@ var DropgateClient = class {
         compat,
         progress,
         signal: effectiveSignal,
+        pausing: ctx.pausing,
         send,
         credentials,
         timeouts,
@@ -3907,11 +4200,69 @@ var DropgateClient = class {
     p.started(uploadId);
     const window2 = new RetryWindow();
     window2.heard(deadline);
-    progress({ status: "uploading", ...several ? { totalFiles: files.length } : {} });
     const sizes2 = files.map((f) => f.size);
     const totalChunks = layout.chunkCount;
-    for (let i = 0; i < totalChunks; i++) {
-      if (signal.aborted) throw signal.reason || new DropgateError({ code: "OPERATION_CANCELLED" });
+    let held = new Uint8Array(totalChunks);
+    const taken = new Uint8Array(totalChunks);
+    let sending = null;
+    const pauseMs = pauseLength(serverInfo);
+    const pauseRequest = (route, dropped) => retrying(async () => {
+      const out = await send(`${baseUrl}/api/v4/upload/${route}`, {
+        method: "POST",
+        timeoutMs: timeouts.initMs ?? 15e3,
+        signal,
+        headers: { Accept: "application/json", "Dropgate-Upload": uploadId }
+      });
+      if (out.res.ok) return out.json ?? {};
+      const err = errorFromStatus(out.res.status, out.json, `The upload couldn't be ${route === "pause" ? "paused" : "resumed"}.`);
+      throw err.code === "NOT_FOUND" ? dropped(err) : withRetryAfter(err, out.res);
+    }, {
+      policy: p.policy,
+      window: window2,
+      signal,
+      random: (length) => this._crypto.randomBytes(length),
+      waiting: ({ remainingMs }) => progress({
+        text: `${route === "pause" ? "Pausing" : "Resuming"} failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s...`,
+        deadline: window2.end
+      }),
+      expired: unreachableTooLong
+    });
+    const hooks = {
+      pause: async () => {
+        const said = await pauseRequest("pause", droppedUpload);
+        const until = pausedUntil(said.deadline, pauseMs);
+        window2.heard(until);
+        return until;
+      },
+      resume: async () => {
+        const said = await pauseRequest("resume", droppedPausedUpload);
+        const received = chunkRanges(said.received, totalChunks);
+        held = new Uint8Array(totalChunks);
+        for (const [first, last] of received) held.fill(1, first, last + 1);
+        for (let i = 0; i < totalChunks; i++) {
+          if (held[i]) {
+            taken[i] = 1;
+            writer?.confirm(i);
+          }
+        }
+        window2.heard(said.deadline);
+      },
+      expired: () => droppedPausedUpload()
+    };
+    if (pauseMs > 0) p.pausing.allow(hooks);
+    else p.pausing.turnedOff();
+    progress({ status: "uploading", ...several ? { totalFiles: files.length } : {} });
+    for (let next = 0; ; ) {
+      if (await p.pausing.checkpoint()) next = 0;
+      while (next < totalChunks && held[next]) next++;
+      if (next === totalChunks) {
+        p.pausing.allow(null);
+        if (!await p.pausing.checkpoint()) break;
+        if (pauseMs > 0) p.pausing.allow(hooks);
+        next = 0;
+        continue;
+      }
+      const i = next;
       const { parts } = layout.chunkParts(i, sizes2);
       const processedBytes = Math.min(totalSize, i * chunkSize);
       progress({
@@ -3921,36 +4272,52 @@ var DropgateClient = class {
         processedBytes,
         chunkIndex: i,
         totalChunks,
+        deadline: null,
         // The file the chunk starts in; a chunk of padding alone is still the last file's.
         ...several ? { fileIndex: parts[0]?.file ?? files.length - 1 } : {}
       });
-      let body;
-      if (parts.length === 1 && !writer) {
-        body = await readRange(sources2[parts[0].file], parts[0].offset, parts[0].offset + parts[0].length);
-      } else {
-        const plaintext = new Uint8Array(layout.chunkLength(i));
-        let at = 0;
-        for (const part of parts) {
-          plaintext.set(await readRange(sources2[part.file], part.offset, part.offset + part.length), at);
-          at += part.length;
+      if (sending?.index !== i) {
+        if (taken[i]) {
+          throw new DropgateError({ code: "INVALID_RESPONSE", message: "The server no longer holds part of this upload that it had taken." });
         }
-        body = writer ? await writer.seal(i, plaintext) : plaintext;
+        let body2;
+        if (parts.length === 1 && !writer) {
+          body2 = await readRange(sources2[parts[0].file], parts[0].offset, parts[0].offset + parts[0].length);
+        } else {
+          const plaintext = new Uint8Array(layout.chunkLength(i));
+          let at = 0;
+          for (const part of parts) {
+            plaintext.set(await readRange(sources2[part.file], part.offset, part.offset + part.length), at);
+            at += part.length;
+          }
+          body2 = writer ? await writer.seal(i, plaintext) : plaintext;
+        }
+        sending = { index: i, body: body2, digest: this.base64.encode(await this._crypto.sha256(body2)) };
       }
-      const digest = this.base64.encode(await this._crypto.sha256(body));
-      await this._attemptChunkUpload(
-        `${baseUrl}/api/v4/upload/chunks/${i}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/octet-stream",
-            "Content-Digest": `sha-256=:${digest}:`,
-            "Dropgate-Upload": uploadId
+      const { body, digest } = sending;
+      try {
+        await this._attemptChunkUpload(
+          `${baseUrl}/api/v4/upload/chunks/${i}`,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/octet-stream",
+              "Content-Digest": `sha-256=:${digest}:`,
+              "Dropgate-Upload": uploadId
+            },
+            body: new Blob([body])
           },
-          body: new Blob([body])
-        },
-        { policy: p.policy, window: window2, timeoutMs: timeouts.chunkMs ?? 6e4, signal, progress, chunkIndex: i, credentials: p.credentials }
-      );
+          { policy: p.policy, window: window2, timeoutMs: timeouts.chunkMs ?? 6e4, signal: p.pausing.signal, progress, chunkIndex: i, credentials: p.credentials }
+        );
+      } catch (err) {
+        if (p.pausing.interrupted) continue;
+        throw err;
+      }
+      held[i] = 1;
+      taken[i] = 1;
       writer?.confirm(i);
+      sending = null;
+      next = i + 1;
     }
     progress({ status: "completing", phase: "complete", text: "Finalising upload...", percent: 100, processedBytes: totalSize });
     const finish = await retrying(async () => {
@@ -3968,7 +4335,7 @@ var DropgateClient = class {
       window: window2,
       signal,
       random: (length) => this._crypto.randomBytes(length),
-      waiting: ({ remainingMs }) => progress({ text: `Finalising failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s...` }),
+      waiting: ({ remainingMs }) => progress({ text: `Finalising failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s...`, deadline: window2.end }),
       retrying: () => progress({ text: "Finalising upload..." }),
       expired: unreachableTooLong
     });
@@ -3989,9 +4356,11 @@ var DropgateClient = class {
     const { id, secret } = hostedTarget(opts);
     return this._startDownload(opts, {
       read: async (compat, signal) => this._readObject(id, secret, compat, { timeoutMs: opts.timeoutMs ?? 6e4, signal }),
-      // One lease for this download alone, released as it ends.
+      // One lease for this download alone, paused with it, and released as it ends.
       lease: {
         take: (baseUrl, waitOpts) => this._takeLease(baseUrl, id, waitOpts),
+        pause: (baseUrl, taken, run) => this._pauseLease(baseUrl, taken, run),
+        resume: (baseUrl, taken, run) => this._renewLease(baseUrl, taken, run),
         done: (baseUrl, taken) => this._releaseLease(baseUrl, taken.lease)
       }
     });
@@ -4051,9 +4420,51 @@ var DropgateClient = class {
     let closed = false;
     const closing = new AbortController();
     const running = /* @__PURE__ */ new Set();
+    let active = 0;
+    const paused = /* @__PURE__ */ new Set();
+    let leasePaused = false;
     const stopRenewing = () => {
       if (renewTimer !== null) clearInterval(renewTimer);
       renewTimer = null;
+    };
+    const startRenewing = () => {
+      if (renewTimer !== null || !lease) return;
+      renewTimer = setInterval(() => {
+        renew().catch(() => {
+        });
+      }, LEASE_RENEW_MS);
+      renewTimer.unref?.();
+    };
+    const pauseLease = async (held, run) => {
+      stopRenewing();
+      leasePaused = true;
+      let deadline;
+      if (run) {
+        deadline = await this._pauseLease(baseUrl, held, run);
+      } else {
+        try {
+          const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/v4/lease/pause`, {
+            method: "POST",
+            timeoutMs: 5e3,
+            headers: { Accept: "application/json", "Dropgate-Lease": held.lease }
+          });
+          const said = json?.deadline;
+          if (!res.ok || typeof said !== "number") throw new DropgateError({ code: "INVALID_RESPONSE" });
+          deadline = said;
+        } catch {
+          leasePaused = false;
+          startRenewing();
+          return null;
+        }
+      }
+      for (const other of paused) if (other !== run) other.deadline(deadline);
+      return deadline;
+    };
+    const unpauseLease = () => {
+      if (!leasePaused) return;
+      leasePaused = false;
+      startRenewing();
+      for (const other of paused) other.deadline(null);
     };
     const renew = async () => {
       const held = lease;
@@ -4076,22 +4487,51 @@ var DropgateClient = class {
     const shared = {
       take: async (leaseUrl, waitOpts) => {
         if (closed) throw new DropgateError({ code: "OPERATION_CANCELLED" });
-        if (lease) return lease;
-        taking ?? (taking = this._takeLease(leaseUrl, id, { ...waitOpts, signal: closing.signal }).then((taken) => {
-          lease = taken;
-          renewTimer = setInterval(() => {
-            renew().catch(() => {
-            });
-          }, LEASE_RENEW_MS);
-          renewTimer.unref?.();
-          return taken;
-        }).finally(() => {
-          taking = null;
-        }));
-        return untilAborted(taking, waitOpts.signal);
+        let taken = lease;
+        if (!taken) {
+          taking ?? (taking = this._takeLease(leaseUrl, id, { ...waitOpts, signal: closing.signal }).then((got) => {
+            lease = got;
+            startRenewing();
+            return got;
+          }).finally(() => {
+            taking = null;
+          }));
+          taken = await untilAborted(taking, waitOpts.signal);
+        }
+        active++;
+        unpauseLease();
+        return taken;
       },
-      // Downloads share the lease: only close() releases it.
-      done: async () => {
+      // One download paused holds the lease paused only once none under it runs.
+      pause: async (_leaseUrl, taken, run) => {
+        active--;
+        paused.add(run);
+        if (active > 0) return null;
+        try {
+          return await pauseLease(taken, run);
+        } catch (err) {
+          active++;
+          paused.delete(run);
+          leasePaused = false;
+          startRenewing();
+          throw err;
+        }
+      },
+      resume: async (_leaseUrl, taken, run) => {
+        await this._renewLease(baseUrl, taken, run);
+        paused.delete(run);
+        active++;
+        unpauseLease();
+      },
+      // Downloads share the lease: only close() releases it. The last one
+      // running to end, with another paused, leaves the lease paused.
+      done: async (_leaseUrl, taken, run, wasPaused) => {
+        if (wasPaused) {
+          if (run) paused.delete(run);
+          return;
+        }
+        active--;
+        if (active === 0 && paused.size > 0 && lease === taken && !closed) await pauseLease(taken, null);
       }
     };
     const hidden2 = "[DropgateOpenedUpload]";
@@ -4145,6 +4585,8 @@ var DropgateClient = class {
     const { sink, zipped, timeoutMs } = o;
     let baseUrl = this.baseUrl;
     let taken = null;
+    let leaseRun = null;
+    let paused = false;
     let open = null;
     try {
       const compat = await this._connect({ timeoutMs, signal: downloadSignal });
@@ -4173,12 +4615,36 @@ var DropgateClient = class {
       const lease = taken;
       const window2 = new RetryWindow();
       window2.heard(lease.deadline);
+      const pausing = ctx.pausing;
+      const pauseMs = pauseLength(compat.serverInfo);
+      const run = {
+        policy: o.policy,
+        window: window2,
+        signal: downloadSignal,
+        progress,
+        deadline: (deadline) => pausing.extend(deadline === null ? null : pausedUntil(deadline, pauseMs))
+      };
+      leaseRun = run;
+      const hooks = {
+        pause: async () => {
+          const deadline = await o.how.lease.pause(baseUrl, lease, run);
+          paused = true;
+          return deadline === null ? null : pausedUntil(deadline, pauseMs);
+        },
+        resume: async () => {
+          await o.how.lease.resume(baseUrl, lease, run);
+          paused = false;
+        },
+        expired: () => droppedDownload(true)
+      };
+      if (pauseMs > 0) pausing.allow(hooks);
+      else pausing.turnedOff();
       const zipOut = zipped ? await SinkWriter.open(sink, { name: "", size: totalSize, index: 0 }) : null;
       open = zipOut;
       const zip2 = zipOut ? new StreamingZipWriter((chunk) => zipOut.write(chunk)) : null;
-      const zipStep = async (run) => {
+      const zipStep = async (run2) => {
         try {
-          await run();
+          await run2();
         } catch (err) {
           if (err instanceof DropgateError && err.code === "INVALID_ARGUMENT") {
             throw new DropgateError({ code: "INTEGRITY_FAILED", message: "A file's bytes didn't match its size.", cause: err });
@@ -4253,16 +4719,17 @@ var DropgateClient = class {
           else runs.push({ start: offsets[index], end: offsets[index] + files[index].size });
         }
       }
-      for (const run of runs) {
-        const span = opened && !whole ? opened.layout.span(run.start, run.end - run.start) : null;
+      for (const run2 of runs) {
+        const span = opened && !whole ? opened.layout.span(run2.start, run2.end - run2.start) : null;
         const lastChunk = opened ? span ? span.last : opened.layout.chunkCount - 1 : 0;
         let nextChunk = span ? span.first : 0;
-        let plainAt = run.start;
-        await retrying(async () => {
+        let plainAt = run2.start;
+        let reconnecting = false;
+        const fetchRest = async () => {
           const from = opened ? whole && nextChunk === 0 ? 0 : opened.layout.range(nextChunk, lastChunk).start : plainAt;
-          const to = opened ? opened.layout.range(nextChunk, lastChunk).end - 1 : run.end - 1;
+          const to = opened ? opened.layout.range(nextChunk, lastChunk).end - 1 : run2.end - 1;
           const ranged = from > 0 || to < size - 1;
-          const { signal: waitSignal, waiting, cleanup } = makeWaitSignal(downloadSignal, timeoutMs);
+          const { signal: waitSignal, waiting, cleanup } = makeWaitSignal(pausing.signal, timeoutMs);
           let stopWatching = () => {
           };
           const failed = (err, code) => waitSignal.aborted ? waitSignal.reason : toDropgateError(err, code);
@@ -4283,6 +4750,10 @@ var DropgateClient = class {
             }
             if (!res.ok) throw withRetryAfter(errorFromStatus(res.status, await res.json().catch(() => null), "Download failed."), res);
             window2.heard();
+            if (reconnecting) {
+              reconnecting = false;
+              progress({ deadline: null });
+            }
             if (ranged) {
               if (res.status === 200) {
                 throw new DropgateError({
@@ -4327,28 +4798,46 @@ var DropgateClient = class {
               }
             } else {
               for await (const piece of received()) {
-                if (plainAt + piece.byteLength > run.end) {
+                if (plainAt + piece.byteLength > run2.end) {
                   throw new DropgateError({ code: "INTEGRITY_FAILED", message: "More data came than the upload holds." });
                 }
                 await deliver(plainAt, piece);
                 plainAt += piece.byteLength;
               }
-              if (plainAt !== run.end) throw new DropgateError({ code: "INTEGRITY_FAILED", message: "The data ended before the last file did." });
+              if (plainAt !== run2.end) throw new DropgateError({ code: "INTEGRITY_FAILED", message: "The data ended before the last file did." });
             }
           } finally {
             stopWatching();
             cleanup();
           }
-        }, {
-          policy: o.policy,
-          window: window2,
-          signal: downloadSignal,
-          random: (length) => this._crypto.randomBytes(length),
-          waiting: ({ remainingMs }) => progress({ text: `The connection was lost. Reconnecting in ${(remainingMs / 1e3).toFixed(1)}s...` }),
-          retrying: () => progress({ text: "Reconnecting..." })
-        });
+        };
+        for (; ; ) {
+          if (await pausing.checkpoint()) {
+            progress({ text: several ? `Downloading file ${indexes.indexOf(started) + 1} of ${indexes.length}...` : "Downloading..." });
+          }
+          try {
+            await retrying(fetchRest, {
+              policy: o.policy,
+              window: window2,
+              signal: pausing.signal,
+              random: (length) => this._crypto.randomBytes(length),
+              // While it waits, the snapshot gives when the server stops holding the lease.
+              waiting: ({ remainingMs }) => {
+                reconnecting = true;
+                progress({ text: `The connection was lost. Reconnecting in ${(remainingMs / 1e3).toFixed(1)}s...`, deadline: window2.end });
+              },
+              retrying: () => progress({ text: "Reconnecting..." })
+            });
+            break;
+          } catch (err) {
+            if (pausing.interrupted) continue;
+            throw err;
+          }
+        }
       }
       if (finished !== indexes.length) throw new DropgateError({ code: "INTEGRITY_FAILED", message: "The data ended before the last file did." });
+      pausing.allow(null);
+      await pausing.checkpoint();
       progress({ status: "completing", phase: "complete", text: "Finishing the download..." });
       if (zip2) {
         await zipStep(() => zip2.finalize());
@@ -4367,7 +4856,7 @@ var DropgateClient = class {
       await open?.abort(downloadSignal.aborted ? downloadSignal.reason : err);
       throw toDropgateError(err, "CONNECTION_LOST");
     } finally {
-      if (taken) await o.how.lease.done(baseUrl, taken);
+      if (taken) await o.how.lease.done(baseUrl, taken, leaseRun, paused);
     }
   }
   /**
@@ -4412,6 +4901,53 @@ var DropgateClient = class {
       });
     } catch {
     }
+  }
+  /**
+   * Asks the server to hold a paused download's lease for its pause length,
+   * not its 5 minutes. Gives the server's deadline.
+   */
+  async _pauseLease(baseUrl, taken, run) {
+    const said = await this._leaseRequest(baseUrl, taken, "pause", run);
+    if (typeof said.deadline !== "number" || !Number.isFinite(said.deadline)) {
+      throw new DropgateError({ code: "INVALID_RESPONSE", message: "The server's answer to the pause wasn't understood." });
+    }
+    taken.deadline = said.deadline;
+    run.window.heard(said.deadline);
+    return said.deadline;
+  }
+  /** Renews a download's lease, which ends a pause: the server holds it 5 more minutes. */
+  async _renewLease(baseUrl, taken, run) {
+    const said = await this._leaseRequest(baseUrl, taken, "renew", run);
+    taken.deadline = said.deadline;
+    run.window.heard(said.deadline);
+  }
+  /**
+   * A pause or a renew of a download's lease, retried as its bytes are, until
+   * the server stops holding the lease. A lease the server no longer has is
+   * NOT_FOUND: the download was dropped.
+   */
+  _leaseRequest(baseUrl, taken, route, run) {
+    const pausing = route === "pause";
+    return retrying(async () => {
+      const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/v4/lease/${route}`, {
+        method: "POST",
+        timeoutMs: 15e3,
+        signal: run.signal,
+        headers: { Accept: "application/json", "Dropgate-Lease": taken.lease }
+      });
+      if (res.ok) return json ?? {};
+      const err = errorFromStatus(res.status, json, pausing ? "The download couldn't be paused." : "The download couldn't be resumed.");
+      throw err.code === "NOT_FOUND" ? droppedDownload(!pausing, err) : withRetryAfter(err, res);
+    }, {
+      policy: run.policy,
+      window: run.window,
+      signal: run.signal,
+      random: (length) => this._crypto.randomBytes(length),
+      waiting: ({ remainingMs }) => run.progress({
+        text: `${pausing ? "Pausing" : "Resuming"} failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s...`,
+        deadline: run.window.end
+      })
+    });
   }
   async _directSend(opts) {
     const compat = await this._connect();
@@ -4478,6 +5014,7 @@ var DropgateClient = class {
     const counted = (attempt) => policy.retries !== void 0 ? `(${attempt}/${policy.retries})` : `(retry ${attempt})`;
     await retrying(async () => {
       for (; ; ) {
+        if (signal.aborted) throw signal.reason;
         const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
         try {
           let res;
@@ -4510,9 +5047,11 @@ var DropgateClient = class {
       window: window2,
       signal,
       random: (length) => this._crypto.randomBytes(length),
+      // While it waits, the snapshot gives when the server stops waiting for the upload.
       waiting: ({ attempt, remainingMs }) => progress({
         phase: "retry-wait",
-        text: `Chunk upload failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s... ${counted(attempt)}`
+        text: `Chunk upload failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s... ${counted(attempt)}`,
+        deadline: window2.end
       }),
       retrying: (attempt) => progress({ phase: "retry", text: `Chunk upload failed. Retrying now... ${counted(attempt)}` }),
       expired: unreachableTooLong

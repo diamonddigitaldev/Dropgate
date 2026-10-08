@@ -1,5 +1,6 @@
 import type { Outcome } from './outcome.js';
 import type { OperationHandle } from './operation.js';
+import type { PausedBy } from './pause.js';
 import type { UploadSource } from './source.js';
 import type { DownloadSinkOption } from './sink.js';
 import type { Transport } from './transport.js';
@@ -22,6 +23,11 @@ export interface UploadCapabilities {
   e2ee?: boolean;
   /** Expected upload chunk size in bytes (server-configured). */
   chunkSize?: number;
+  /**
+   * How long the server holds a paused upload or download, in minutes: 0 when
+   * it has pausing turned off, and then nothing can pause.
+   */
+  maxPauseMinutes?: number;
   /**
    * Whether an upload needs a credential, which the client's `auth` provider
    * is asked for. A server that doesn't say needs none, and is sent none.
@@ -122,6 +128,21 @@ export interface UploadSnapshot {
   chunkIndex?: number;
   /** How many chunks the current file has. */
   totalChunks?: number;
+  /**
+   * Whether `pause()` can be called now. False until the server has taken the upload,
+   * while a pause or resume is settling, once it's finishing or has ended, and
+   * on a server with pausing turned off (its `maxPauseMinutes` is 0). True
+   * while paused, since pausing again renews the server's deadline.
+   */
+  canPause: boolean;
+  /** Who paused it, while it's paused: always `'self'` for an upload. `null` while it isn't paused. */
+  pausedBy: PausedBy | null;
+  /**
+   * When it ends unless something changes, in milliseconds since 1970: while
+   * paused, when the server stops holding it; while reconnecting, when the
+   * server stops waiting for it. `null` while neither.
+   */
+  deadline: number | null;
   /** How the client reaches its server. */
   transport: Transport;
 }
@@ -158,8 +179,8 @@ export interface UploadResult {
 /** How an upload ended: `completed` with its UploadResult, `cancelled`, or `failed`. */
 export type UploadOutcome = Outcome<UploadResult>;
 
-/** Where an upload is: one of the steps while it runs, then its outcome's status. */
-export type UploadStatus = 'initializing' | 'uploading' | 'completing' | Outcome<unknown>['status'];
+/** Where an upload is: one of the steps while it runs (or `paused`), then its outcome's status. */
+export type UploadStatus = 'initializing' | 'uploading' | 'paused' | 'completing' | Outcome<unknown>['status'];
 
 /**
  * The handle `client.hosted.upload()` gives: the upload's one outcome as
@@ -421,8 +442,8 @@ export interface UploadMetadata {
 export type DownloadPhase =
   | 'server-info' | 'server-compat' | 'metadata' | 'file-start' | 'downloading' | 'complete' | 'done';
 
-/** Where a download is: one of the steps while it runs, then its outcome's status. */
-export type DownloadStatus = 'initializing' | 'downloading' | 'completing' | Outcome<unknown>['status'];
+/** Where a download is: one of the steps while it runs (or `paused`), then its outcome's status. */
+export type DownloadStatus = 'initializing' | 'downloading' | 'paused' | 'completing' | Outcome<unknown>['status'];
 
 /**
  * Where a download is: what `handle.snapshot` holds and `subscribe()` gives.
@@ -446,6 +467,21 @@ export interface DownloadSnapshot {
   fileIndex?: number;
   /** How many files, for a bundle. */
   totalFiles?: number;
+  /**
+   * Whether `pause()` can be called now. False until the server has given it its lease,
+   * while a pause or resume is settling, once it's finishing or has ended, and
+   * on a server with pausing turned off (its `maxPauseMinutes` is 0). True
+   * while paused, since pausing again renews the server's deadline.
+   */
+  canPause: boolean;
+  /** Who paused it, while it's paused: always `'self'` for a download. `null` while it isn't paused. */
+  pausedBy: PausedBy | null;
+  /**
+   * When it ends unless something changes, in milliseconds since 1970: while
+   * paused, when the server stops holding it; while reconnecting, when the
+   * server stops waiting for it. `null` while neither.
+   */
+  deadline: number | null;
   /** How the client reaches its server. */
   transport: Transport;
 }
