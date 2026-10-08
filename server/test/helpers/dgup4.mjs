@@ -10,7 +10,7 @@
 //   keys   = HKDF-SHA256(secret, salt, "dropgate/4 header" | "dropgate/4 payload" | "dropgate/4 meta"), 32 bytes
 //   chunk i = AES-256-GCM(payloadKey, i as 11 bytes BE || 01 if last else 00, padded plaintext [iC, (i+1)C))
 //   meta   = nonce (12) || AES-256-GCM(metaKey, nonce, u32 BE length || {"files":[...]} || zeros to 4 KiB, 8 KiB, ... 1 MiB)
-import { createCipheriv, createHash, createHmac, hkdfSync, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BODY_MARKER } from './fixture.mjs';
@@ -110,6 +110,13 @@ export function encryptedObject({
     return { encrypted: true, keys, header, chunks, meta, bytes, padded, size: bytes.length };
 }
 
+/** Opens chunk `index` of an encrypted object from its sealed bytes, as a downloader would. Throws if they don't open. */
+export function openChunk(object, index, sealed) {
+    const decipher = createDecipheriv('aes-256-gcm', object.keys.payload, chunkNonce(index, index === object.chunks.length - 1));
+    decipher.setAuthTag(sealed.subarray(sealed.length - TAG_BYTES));
+    return Buffer.concat([decipher.update(sealed.subarray(0, sealed.length - TAG_BYTES)), decipher.final()]);
+}
+
 /** An unencrypted object: the files' bytes one after another, in chunks of `chunkSize`. */
 export function plainObject({ files, chunkSize = Number(SMALL_CHUNKS) }) {
     const bytes = Buffer.concat(files.map((f) => Buffer.from(f.bytes)));
@@ -162,6 +169,42 @@ export const uploads = {
     complete: (server, uploadId) => fetch(`${server.baseUrl}/api/v4/upload/complete`, { method: 'POST', headers: naming(uploadId) }),
     cancel: (server, uploadId) => fetch(`${server.baseUrl}/api/v4/upload`, { method: 'DELETE', headers: naming(uploadId) }),
 };
+
+const withLease = (lease) => (lease === undefined ? {} : { 'Dropgate-Lease': lease });
+
+/** The download routes, and the uploader's delete, called as a client would. Each gives the fetch Response. */
+export const downloads = {
+    metadata: (server, id) => fetch(`${server.baseUrl}/api/v4/objects/${id}`),
+    take: (server, id) => fetch(`${server.baseUrl}/api/v4/objects/${id}/leases`, { method: 'POST' }),
+    renew: (server, lease) => fetch(`${server.baseUrl}/api/v4/lease/renew`, { method: 'POST', headers: withLease(lease) }),
+    pause: (server, lease) => fetch(`${server.baseUrl}/api/v4/lease/pause`, { method: 'POST', headers: withLease(lease) }),
+    release: (server, lease) => fetch(`${server.baseUrl}/api/v4/lease`, { method: 'DELETE', headers: withLease(lease) }),
+    /** The upload's bytes under `lease`, with any other request headers (Range, If-Range). */
+    content: (server, id, lease, headers = {}) => fetch(`${server.baseUrl}/api/v4/objects/${id}/content`, { headers: { ...withLease(lease), ...headers } }),
+    /** A browser's own download: the whole upload, or file `index` of it. */
+    browser: (server, lease, index, headers = {}) => fetch(
+        `${server.baseUrl}/api/v4/leases/${lease}${index === undefined ? '' : `/files/${index}`}`, { headers },
+    ),
+    delete: (server, id, token) => fetch(`${server.baseUrl}/api/v4/objects/${id}`, {
+        method: 'DELETE', headers: token === undefined ? {} : { 'Dropgate-Manage-Token': token },
+    }),
+};
+
+/** Takes a lease on the upload `id`, and gives it. Fails the test if the server refuses. */
+export async function takeLease(server, id) {
+    const { status, body } = await answer(await downloads.take(server, id));
+    if (status !== 201) throw new Error(`Taking a lease answered ${status}: ${JSON.stringify(body)}`);
+    return body.lease;
+}
+
+/** An answer's status, the headers named, and its bytes. */
+export async function bytesOf(res, ...headers) {
+    return {
+        status: res.status,
+        ...Object.fromEntries(headers.map((h) => [h, res.headers.get(h)])),
+        bytes: Buffer.from(await res.arrayBuffer()),
+    };
+}
 
 /** An answer's status and its JSON body, or null when it has none. */
 export async function answer(res) {
@@ -251,4 +294,57 @@ export async function runUploads(server, { faults = false } = {}) {
         await uploads.chunk(server, broken, 0, plain.chunks[0]);
     }
     return { secrets };
+}
+
+/**
+ * A run of Dropgate 4 downloads, for the privacy tests, on a server whose
+ * download limit is 1: an encrypted bundle's metadata, one file of it by its
+ * range and then all of it under one lease, paused and renewed, a second lease
+ * refused while that one is open, then released, so the bundle goes at its
+ * limit; an unencrypted file fetched as a browser does, by a range and as its
+ * one file, then released; and a third upload whose lease is released having
+ * served nothing, then deleted by its uploader after a wrong token. Gives
+ * every ID, lease, token and name it used, none of which may reach the
+ * server's output, and each upload's ID and lease. Needs the server's chunk
+ * size to be SMALL_CHUNKS.
+ */
+export async function runDownloads(server) {
+    const secrets = new Set();
+    const note = (value) => { if (typeof value === 'string' && value.length >= 4) secrets.add(value); };
+    const drain = async (res) => { await res.arrayBuffer(); };
+
+    const bundle = encryptedObject({
+        files: [{ name: 'Lease report – été.pdf', bytes: fileBytes(70_000, 6) }, { name: 'lease notes.txt', bytes: fileBytes(20_000, 7) }],
+    });
+    for (const name of ['Lease report – été.pdf', 'lease notes.txt']) note(name);
+    const stored = await uploadObject(server, bundle);
+    for (const value of [stored.uploadId, stored.id, stored.manageToken]) note(value);
+    await drain(await downloads.metadata(server, stored.id));
+    const lease = await takeLease(server, stored.id);
+    note(lease);
+    await drain(await downloads.content(server, stored.id, lease, { Range: `bytes=60-${60 + 65536 + 16 - 1}` }));
+    await drain(await downloads.pause(server, lease));
+    await drain(await downloads.renew(server, lease));
+    await drain(await downloads.take(server, stored.id));
+    await drain(await downloads.content(server, stored.id, lease));
+    await drain(await downloads.release(server, lease));
+
+    const plain = plainObject({ files: [{ name: 'lease-plain-name-visible.txt', bytes: fileBytes(70_000, 8) }] });
+    note('lease-plain-name-visible.txt');
+    const plainStored = await uploadObject(server, plain);
+    for (const value of [plainStored.uploadId, plainStored.id, plainStored.manageToken]) note(value);
+    const browserLease = await takeLease(server, plainStored.id);
+    note(browserLease);
+    await drain(await downloads.browser(server, browserLease, undefined, { Range: 'bytes=0-99' }));
+    await drain(await downloads.browser(server, browserLease, 0, { Range: 'bytes=100-' }));
+    await drain(await downloads.release(server, browserLease));
+
+    const deleted = await uploadObject(server, plain);
+    for (const value of [deleted.uploadId, deleted.id, deleted.manageToken]) note(value);
+    const unused = await takeLease(server, deleted.id);
+    note(unused);
+    await drain(await downloads.release(server, unused));
+    await drain(await downloads.delete(server, deleted.id, manageToken().token));
+    await drain(await downloads.delete(server, deleted.id, deleted.manageToken));
+    return { secrets, bundle: { id: stored.id, lease }, plain: { id: plainStored.id, lease: browserLease }, deleted: { id: deleted.id } };
 }

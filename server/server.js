@@ -69,7 +69,7 @@ const helmet = require('helmet').default;
 const cors = require('cors');
 const { ExpressPeerServer } = require('peer');
 const { create: contentDisposition } = require('content-disposition');
-const { QuickDB, MemoryDriver } = require('quick.db');
+const { QuickDB, MemoryDriver, SqliteDriver } = require('quick.db');
 const { v4: uuidv4 } = require('uuid');
 
 const port = process.env.SERVER_PORT || 52443;
@@ -237,6 +237,11 @@ let v4Uploads = null;
 // A finished upload's answer, by upload ID, kept a few minutes so that
 // finishing again gets the same answer.
 let v4Finished = null;
+// Dropgate 4's download leases, by lease ID, and each stored upload's open
+// leases, in memory only. A lease says which upload it's for and how far it
+// has got, never who holds it, and none survives a restart.
+let v4Leases = null;
+let v4LeasesByObject = null;
 
 // Security: Mutex for atomic quota checking (prevents TOCTOU race condition)
 let quotaLock = Promise.resolve();
@@ -354,11 +359,22 @@ if (enableUpload) {
 
     fileDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'file-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
     bundleDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'bundle-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
-    objectDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'objects.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
+    if (preserveUploads) {
+        const driver = new SqliteDriver(path.join(uploadDir, 'db', 'objects.sqlite'));
+        // SQLite leaves a deleted record's bytes in the file until something
+        // overwrites them. This writes zeros over them as it deletes, so an
+        // upload that's gone leaves nothing behind.
+        driver.database.pragma('secure_delete = ON');
+        objectDatabase = new QuickDB({ driver });
+    } else {
+        objectDatabase = new QuickDB({ driver: new MemoryDriver() });
+    }
     ongoingUploads = new Map();
     ongoingBundles = new Map();
     v4Uploads = new Map();
     v4Finished = new Map();
+    v4Leases = new Map();
+    v4LeasesByObject = new Map();
     log('info', `File database is ready. (${preserveUploads ? 'persistent' : 'in-memory'})`);
 } else {
     log('info', 'Upload protocol disabled. Cleaning up upload directory...');
@@ -1391,6 +1407,10 @@ const receivedRanges = (upload) => {
     return ranges;
 };
 
+// Every unknown, ended, dropped or deleted upload, and every unknown or ended
+// download, gets the same answer, so nothing says which.
+const uploadNotFound = (res) => res.status(404).json({ code: 'NOT_FOUND', error: 'The server has no such upload.' });
+
 if (enableUpload) {
     // An upload's credential is checked here, on every upload route, once the
     // server can ask for one (capabilities.upload.credentialRequired). It asks
@@ -1406,9 +1426,6 @@ if (enableUpload) {
     };
 
     const sizeInMB = (bytes) => (bytes / MIB).toFixed(2);
-
-    // Every unknown, ended or dropped upload gets the same answer, so nothing says which.
-    const uploadNotFound = (res) => res.status(404).json({ code: 'NOT_FOUND', error: 'The server has no such upload.' });
 
     const invalidRequest = (res, field) => res.status(400).json({
         code: 'INVALID_REQUEST',
@@ -1767,6 +1784,349 @@ if (enableUpload) {
     });
 }
 
+// ===== Dropgate 4's downloads =====
+// A stored upload's metadata takes nothing and counts nothing. Its bytes are
+// sent under a lease, named in the Dropgate-Lease header, and one lease is one
+// download: it counts once, when it ends, if it served any byte, whether it was
+// released or ran out. At its download limit the upload goes at once.
+
+// A lease with no request for this long ends, unless it's paused.
+const LEASE_QUIET_MS = 5 * 60 * 1000;
+// How long a download that has to wait for another to end is asked to wait before trying again.
+const DOWNLOADS_BUSY_RETRY_SECONDS = 5;
+const OBJECT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const capacityNote = () => (maxStorageGB !== 0 ? ` Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.` : '');
+
+// A stored upload's count, its leases being taken and ended, and its removal
+// happen one at a time, so two downloads can't both take a limit's last place.
+let objectQueue = Promise.resolve();
+const withObjectLock = (fn) => {
+    const run = objectQueue.then(fn);
+    objectQueue = run.catch(() => { });
+    return run;
+};
+
+/**
+ * A stored upload's record, if it's there and live. An encrypted one is only
+ * served while the server has E2EE on; `anyEncryption` finds it either way.
+ */
+const getLiveObject = async (id, { anyEncryption = false } = {}) => {
+    if (typeof id !== 'string' || !OBJECT_ID.test(id)) return null;
+    const record = await objectDatabase.get(id);
+    if (!isLive(record)) return null;
+    return record.encrypted && !uploadEnableE2EE && !anyEncryption ? null : record;
+};
+
+const openLeases = (objectId) => v4LeasesByObject.get(objectId)?.size ?? 0;
+
+/** A new lease on a stored upload: which one, how far it has got, and its deadline. Nothing about who took it. */
+const newLease = (objectId) => ({
+    id: crypto.randomBytes(32).toString('base64url'),
+    objectId,
+    served: false,
+    paused: false,
+    deadline: 0,
+    timer: null,
+    // The answers sending its bytes now, each with the stream it reads.
+    sending: new Set(),
+});
+
+/** The lease ends `ms` from now, unless something renews it. */
+const setLeaseDeadline = (lease, ms) => {
+    clearTimeout(lease.timer);
+    lease.deadline = Date.now() + ms;
+    lease.timer = setTimeout(() => leaseAtDeadline(lease), ms);
+};
+
+const leaseAtDeadline = (lease) => {
+    if (v4Leases.get(lease.id) !== lease) return undefined;
+    // A lease whose bytes are being sent isn't quiet.
+    if (lease.sending.size > 0) return setLeaseDeadline(lease, LEASE_QUIET_MS);
+    return endLease(lease);
+};
+
+/** A request for a lease's bytes, or to renew it, keeps it 5 more minutes, unpaused. */
+const renewLease = (lease) => {
+    lease.paused = false;
+    setLeaseDeadline(lease, LEASE_QUIET_MS);
+};
+
+/** Takes a lease out of memory, and stops anything it's sending. It counts nothing. */
+const forgetLease = (lease) => {
+    clearTimeout(lease.timer);
+    v4Leases.delete(lease.id);
+    const leases = v4LeasesByObject.get(lease.objectId);
+    leases?.delete(lease);
+    if (leases?.size === 0) v4LeasesByObject.delete(lease.objectId);
+    for (const { res, stream } of lease.sending) {
+        stream.destroy();
+        res.destroy();
+    }
+    lease.sending.clear();
+};
+
+/** Removes a stored upload at once: its bytes, its record, its storage, and every lease on it, uncounted. */
+const removeObject = async (id, record) => {
+    for (const lease of [...(v4LeasesByObject.get(id) ?? [])]) forgetLease(lease);
+    fs.rmSync(path.join(objectsDir, id), { force: true, maxRetries: 3 });
+    await objectDatabase.delete(id);
+    currentDiskUsage = Math.max(0, currentDiskUsage - record.size);
+};
+
+/** Ends a lease, released or run out. If it served any byte, that's one download. */
+const endLease = (lease) => {
+    if (v4Leases.get(lease.id) !== lease) return Promise.resolve();
+    forgetLease(lease);
+    if (!lease.served) return Promise.resolve();
+    return withObjectLock(async () => {
+        const record = await getLiveObject(lease.objectId, { anyEncryption: true });
+        if (!record) return;
+        if (!(record.maxDownloads > 0)) {
+            log('debug', 'Download counted (unlimited downloads).');
+            return;
+        }
+        const count = (record.downloadCount || 0) + 1;
+        if (count >= record.maxDownloads && openLeases(lease.objectId) === 0) {
+            await removeObject(lease.objectId, record);
+            log('debug', `Upload deleted at its download limit (${count}/${record.maxDownloads} downloads).${capacityNote()}`);
+        } else {
+            await objectDatabase.set(lease.objectId, { ...record, downloadCount: count });
+            log('debug', `Download counted (${count}/${record.maxDownloads} downloads).`);
+        }
+    });
+};
+
+/** The lease a request names, if it's open and its upload is still there, with the upload's record. */
+const requestedLease = async (leaseId) => {
+    const lease = typeof leaseId === 'string' ? v4Leases.get(leaseId) : undefined;
+    if (!lease) return null;
+    if (lease.deadline <= Date.now()) await leaseAtDeadline(lease);
+    if (v4Leases.get(lease.id) !== lease) return null;
+    const record = await getLiveObject(lease.objectId);
+    if (v4Leases.get(lease.id) !== lease) return null;
+    if (!record) {
+        // Expired, or encrypted on a server that has turned E2EE off: nothing more is sent under it.
+        forgetLease(lease);
+        return null;
+    }
+    return { lease, record };
+};
+
+/**
+ * The one byte range a Range header asks for, as [first, last] within `length`
+ * bytes, or null when it's anything else or past the end. A last byte past the
+ * end is the end, and `bytes=-n` is the last n bytes.
+ */
+const byteRange = (header, length) => {
+    const match = /^bytes=(\d{0,16})-(\d{0,16})$/.exec(header.trim());
+    if (!match || (match[1] === '' && match[2] === '')) return null;
+    if (match[1] === '') {
+        const suffix = Number(match[2]);
+        return suffix > 0 ? [Math.max(0, length - suffix), length - 1] : null;
+    }
+    const first = Number(match[1]);
+    const last = match[2] === '' ? length - 1 : Math.min(Number(match[2]), length - 1);
+    return first < length && first <= last ? [first, last] : null;
+};
+
+// The headers an answer carrying bytes has, which an error answer mustn't.
+const BYTES_HEADERS = ['Accept-Ranges', 'ETag', 'Content-Type', 'Content-Length', 'Content-Range', 'Content-Disposition'];
+
+/**
+ * Sends `length` bytes of a lease's upload from `offset` (all of it, or one
+ * file of a bundle), whole or the one range the request asks for. An If-Range
+ * that isn't the upload's ETag gets the whole of them. `name`, when given, is
+ * the name the browser saves it under.
+ */
+const sendObjectBytes = (req, res, lease, { offset, length, name }) => {
+    // An object never changes and its ID is never reused, so the ID is its ETag.
+    const etag = `"${lease.objectId}"`;
+    let first = 0;
+    let last = length - 1;
+    const range = req.get('Range');
+    const ifRange = req.get('If-Range');
+    if (range !== undefined && (ifRange === undefined || ifRange === etag)) {
+        const asked = byteRange(range, length);
+        if (!asked) {
+            res.set('Content-Range', `bytes */${length}`);
+            return res.status(416).json({ code: 'RANGE_NOT_SATISFIABLE', error: 'The server can\'t send that range of bytes.' });
+        }
+        [first, last] = asked;
+        res.status(206);
+        res.set('Content-Range', `bytes ${first}-${last}/${length}`);
+    }
+    res.set({
+        'Accept-Ranges': 'bytes',
+        ETag: etag,
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(last - first + 1),
+        'Content-Disposition': name ? contentDisposition(name) : 'attachment',
+    });
+    renewLease(lease);
+    if (req.method === 'HEAD') return res.end();
+
+    const stream = fs.createReadStream(path.join(objectsDir, lease.objectId), { start: offset + first, end: offset + last });
+    const sending = { res, stream };
+    lease.sending.add(sending);
+    stream.once('data', () => { lease.served = true; });
+    stream.on('error', () => {
+        if (res.headersSent) return res.destroy();
+        // Gone from disk since it was found.
+        for (const header of BYTES_HEADERS) res.removeHeader(header);
+        return uploadNotFound(res);
+    });
+    res.on('close', () => {
+        stream.destroy();
+        lease.sending.delete(sending);
+        // Its 5 minutes start again once the bytes stop.
+        if (v4Leases.get(lease.id) === lease && !lease.paused) setLeaseDeadline(lease, LEASE_QUIET_MS);
+    });
+    stream.pipe(res);
+    return undefined;
+};
+
+if (enableUpload) {
+    // An upload's metadata and its leases skip the rate limiter while it's
+    // there, as Dropgate 3's downloads did; asking about one that isn't is limited.
+    const v4ObjectAuth = async (req, res, next) => ((await getLiveObject(req.params.id)) ? next() : limiter(req, res, next));
+
+    // The requests under a lease skip the rate limiter while it's open.
+    const v4LeaseAuth = (req, res, next) => {
+        const leaseId = req.params.lease ?? req.get('Dropgate-Lease');
+        if (leaseId && v4Leases.has(leaseId)) return next();
+        return limiter(req, res, next);
+    };
+
+    v4Router.get('/objects/:id', v4ObjectAuth, async (req, res) => {
+        const id = req.params.id;
+        const record = await getLiveObject(id);
+        if (!record) return uploadNotFound(res);
+        if (!record.encrypted) return res.status(200).json({ encrypted: false, size: record.size, files: record.files });
+
+        // The header is the object's first 60 bytes, so a client can check it before asking for any of the rest.
+        const header = Buffer.alloc(OBJECT_HEADER_BYTES);
+        try {
+            const file = await fs.promises.open(path.join(objectsDir, id), 'r');
+            try {
+                const { bytesRead } = await file.read(header, 0, OBJECT_HEADER_BYTES, 0);
+                if (bytesRead !== OBJECT_HEADER_BYTES) return uploadNotFound(res);
+            } finally {
+                await file.close();
+            }
+        } catch (err) {
+            if (err.code === 'ENOENT') return uploadNotFound(res);
+            throw err;
+        }
+        return res.status(200).json({ encrypted: true, size: record.size, header: header.toString('base64url'), meta: record.meta });
+    });
+
+    v4Router.post('/objects/:id/leases', v4ObjectAuth, async (req, res) => {
+        const id = req.params.id;
+        const taken = await withObjectLock(async () => {
+            const record = await getLiveObject(id);
+            if (!record) return null;
+            // Every open lease may yet count, so a new one waits while they and the counted downloads make the limit.
+            if (record.maxDownloads > 0 && openLeases(id) + (record.downloadCount || 0) >= record.maxDownloads) return { busy: true };
+            const lease = newLease(id);
+            v4Leases.set(lease.id, lease);
+            if (!v4LeasesByObject.has(id)) v4LeasesByObject.set(id, new Set());
+            v4LeasesByObject.get(id).add(lease);
+            setLeaseDeadline(lease, LEASE_QUIET_MS);
+            return { lease };
+        });
+        if (!taken) return uploadNotFound(res);
+        if (taken.busy) {
+            res.set('Retry-After', String(DOWNLOADS_BUSY_RETRY_SECONDS));
+            return res.status(423).json({ code: 'DOWNLOADS_BUSY', error: 'Someone is downloading this right now. Try again shortly.' });
+        }
+        log('debug', 'Download lease taken.');
+        return res.status(201).json({ lease: taken.lease.id, deadline: taken.lease.deadline, etag: `"${id}"` });
+    });
+
+    v4Router.post('/lease/renew', v4LeaseAuth, async (req, res) => {
+        const found = await requestedLease(req.get('Dropgate-Lease'));
+        if (!found) return uploadNotFound(res);
+        renewLease(found.lease);
+        return res.status(200).json({ deadline: found.lease.deadline });
+    });
+
+    v4Router.post('/lease/pause', v4LeaseAuth, async (req, res) => {
+        const found = await requestedLease(req.get('Dropgate-Lease'));
+        if (!found) return uploadNotFound(res);
+        if (maxPauseMinutes === 0) {
+            renewLease(found.lease);
+            return res.status(409).json({ code: 'PAUSE_DISABLED', error: 'Pausing is turned off on this server.' });
+        }
+        // Pausing again renews the pause from now.
+        found.lease.paused = true;
+        setLeaseDeadline(found.lease, maxPauseMinutes * 60 * 1000);
+        log('debug', 'Download lease paused.');
+        return res.status(200).json({ paused: true, deadline: found.lease.deadline });
+    });
+
+    v4Router.delete('/lease', v4LeaseAuth, async (req, res) => {
+        const found = await requestedLease(req.get('Dropgate-Lease'));
+        if (!found) return uploadNotFound(res);
+        await endLease(found.lease);
+        return res.status(204).end();
+    });
+
+    v4Router.get('/objects/:id/content', v4LeaseAuth, async (req, res) => {
+        const leaseId = req.get('Dropgate-Lease');
+        if (!leaseId) return res.status(400).json({ code: 'LEASE_REQUIRED', error: 'A download needs a lease, in the Dropgate-Lease header.' });
+        const found = await requestedLease(leaseId);
+        if (!found || found.lease.objectId !== req.params.id) return uploadNotFound(res);
+        const { record } = found;
+        // Only an unencrypted single file's name is known to the server, so only it is named.
+        const name = !record.encrypted && record.files.length === 1 ? record.files[0].name : null;
+        return sendObjectBytes(req, res, found.lease, { offset: 0, length: record.size, name });
+    });
+
+    // A page with no secure context hands an unencrypted download to the
+    // browser itself, which can't send a header, so these put the lease in the
+    // URL. The browser's own resume asks again under the same lease. They never
+    // serve an encrypted upload.
+    v4Router.get('/leases/:lease', v4LeaseAuth, async (req, res) => {
+        const found = await requestedLease(req.params.lease);
+        if (!found || found.record.encrypted) return uploadNotFound(res);
+        const { record } = found;
+        const name = record.files.length === 1 ? record.files[0].name : null;
+        return sendObjectBytes(req, res, found.lease, { offset: 0, length: record.size, name });
+    });
+
+    v4Router.get('/leases/:lease/files/:index', v4LeaseAuth, async (req, res) => {
+        const found = await requestedLease(req.params.lease);
+        if (!found || found.record.encrypted) return uploadNotFound(res);
+        const { files } = found.record;
+        const index = /^\d{1,4}$/.test(req.params.index) ? Number(req.params.index) : -1;
+        if (index < 0 || index >= files.length) return uploadNotFound(res);
+        // A file of an unencrypted upload is a plain byte range of it, after the files before it.
+        const offset = files.slice(0, index).reduce((total, file) => total + file.size, 0);
+        return sendObjectBytes(req, res, found.lease, { offset, length: files[index].size, name: files[index].name });
+    });
+
+    // The uploader's own delete, with the manage token only the uploader's page
+    // or app holds. The record keeps only the token's SHA-256.
+    v4Router.delete('/objects/:id', limiter, async (req, res) => {
+        const id = req.params.id;
+        const token = fromBase64url(req.get('Dropgate-Manage-Token') ?? '', 32);
+        const outcome = await withObjectLock(async () => {
+            const record = await getLiveObject(id, { anyEncryption: true });
+            if (!record) return 'not found';
+            const given = crypto.createHash('sha256').update(token ?? Buffer.alloc(0)).digest();
+            const matches = crypto.timingSafeEqual(given, Buffer.from(record.manageTokenHash, 'base64url'));
+            if (!token || !matches) return 'denied';
+            await removeObject(id, record);
+            return 'deleted';
+        });
+        if (outcome === 'not found') return uploadNotFound(res);
+        if (outcome === 'denied') return res.status(403).json({ code: 'MANAGE_DENIED', error: 'That manage token isn\'t this upload\'s.' });
+        log('debug', 'Upload deleted by its uploader.');
+        return res.status(204).end();
+    });
+}
+
 apiRouter.get('/info', limiter, (req, res) => {
     // The limits are what the operator set. maxSizeMB counts in 1024s, and
     // maxPauseMinutes is 0 when pausing is off. Nothing asks for a credential yet.
@@ -2025,13 +2385,15 @@ if (enableUpload) {
             }
         }
 
-        // Dropgate 4's uploads: each is one object, a file or a bundle alike.
+        // Dropgate 4's uploads: each is one object, a file or a bundle alike. Its open leases end with it, uncounted.
         for (const record of await objectDatabase.all()) {
             if (record.value?.expiresAt && record.value.expiresAt < now) {
                 log('debug', 'Upload expired. Deleting...');
-                currentDiskUsage = Math.max(0, currentDiskUsage - record.value.size);
-                fs.rmSync(path.join(objectsDir, record.id), { force: true });
-                await objectDatabase.delete(record.id);
+                await withObjectLock(async () => {
+                    // Unless a download or its uploader removed it meanwhile.
+                    const current = await objectDatabase.get(record.id);
+                    if (current) await removeObject(record.id, current);
+                });
             }
         }
 

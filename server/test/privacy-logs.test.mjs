@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { startServer, waitFor } from './helpers/harness.mjs';
 import { runFixture } from './helpers/fixture.mjs';
 import { PAST_SESSION_EXPIRY_MS, initUpload, postJson, sendChunk } from './helpers/uploads.mjs';
-import { QUIET_MS, SMALL_CHUNKS, plainObject, fileBytes, runUploads, sendChunks, startUpload } from './helpers/dgup4.mjs';
+import { QUIET_MS, SMALL_CHUNKS, plainObject, fileBytes, runDownloads, runUploads, sendChunks, startUpload } from './helpers/dgup4.mjs';
 
 // Each run does Dropgate 3's transfers and Dropgate 4's uploads: within the rate limit, which stays on.
 const UPLOADS = { ENABLE_UPLOAD: 'true', UPLOAD_CHUNK_SIZE_BYTES: SMALL_CHUNKS, RATE_LIMIT_MAX_REQUESTS: '100' };
@@ -49,6 +49,10 @@ const KNOWN_EVENTS = [
     String.raw`Upload finished\.( ${CAPACITY})?`,
     String.raw`Upload ended at its deadline( while paused)?\. Released \d+\.\d{2} MB\.`,
     String.raw`Upload expired\. Deleting\.\.\.`,
+    String.raw`Download lease (taken|paused)\.`,
+    String.raw`Download counted \((\d+\/\d+|unlimited) downloads\)\.`,
+    String.raw`Upload deleted at its download limit \(\d+\/\d+ downloads\)\.( ${CAPACITY})?`,
+    String.raw`Upload deleted by its uploader\.`,
     String.raw`Refused a request whose body could not be read\.`,
     String.raw`Unexpected error while answering a request( to [A-Z]+ [\w/:.-]+)?( \([A-Za-z]+(, [A-Z][A-Z0-9_]+)?\))?\.`,
 ].map((source) => new RegExp(`^${source}$`));
@@ -61,6 +65,7 @@ test('the default log level writes nothing per transfer', async () => {
         const mark = server.mark();
         await runFixture(server);
         await runUploads(server);
+        await runDownloads(server);
         await sleep(500);
         assert.deepEqual(linesOf(server.since(mark)), [], 'Lines written after startup at the default level');
     } finally {
@@ -77,6 +82,7 @@ describe('at every log level, with a malformed request and a missing stored file
             try {
                 const { secrets } = await runFixture(server, { faults: true });
                 for (const secret of (await runUploads(server, { faults: true })).secrets) secrets.add(secret);
+                for (const secret of (await runDownloads(server)).secrets) secrets.add(secret);
                 const info = await (await fetch(`${server.baseUrl}/api/info`)).json();
                 await sleep(500);
                 runs.push({
@@ -135,6 +141,7 @@ describe('what DEBUG logs', () => {
             const mark = server.mark();
             await runFixture(server);
             await runUploads(server, { faults: true });
+            await runDownloads(server);
 
             // A Dropgate 4 upload left quiet, which ends at its deadline.
             const quiet = plainObject({ files: [{ name: 'quiet.bin', bytes: fileBytes(70_000) }] });
@@ -169,6 +176,12 @@ describe('what DEBUG logs', () => {
 
     test('a Dropgate 4 upload\'s start, pause, resume, finish, cancel and deadline are each one of them', () => {
         for (const expected of [/^Upload started\./, /^Upload paused\.$/, /^Upload resumed\.$/, /^Upload finished\./, /^Upload cancelled by client\./, /^Upload ended at its deadline\./]) {
+            assert.ok(messages.some((m) => expected.test(m)), `no message like ${expected}`);
+        }
+    });
+
+    test('a Dropgate 4 download\'s lease, its pause, the upload going at its limit, and the uploader\'s delete are each one of them', () => {
+        for (const expected of [/^Download lease taken\.$/, /^Download lease paused\.$/, /^Upload deleted at its download limit \(1\/1 downloads\)\./, /^Upload deleted by its uploader\.$/]) {
             assert.ok(messages.some((m) => expected.test(m)), `no message like ${expected}`);
         }
     });

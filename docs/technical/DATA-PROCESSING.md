@@ -39,11 +39,13 @@ The following tables enumerate every category of data processed by Dropgate, gro
 | **Received chunk indices** | Temporarily | In-memory (Set within upload session) | Detects duplicate chunks and validates completeness. | On each chunk upload. | When the upload session ends. |
 | **Reserved storage bytes** | Temporarily | In-memory (quota counter) | Prevents TOCTOU race conditions during concurrent uploads. | On upload initialisation (under mutex). | Released on completion, cancellation, or zombie cleanup. |
 | **Chunk hash** (SHA-256) | No | — | Verified on receipt and discarded. Not persisted. | — | — |
-| **Dropgate 4 object** (a file or a bundle, ciphertext or plaintext) | Yes | Filesystem: `data/uploads/objects/<id>` | As **File content** above: one per upload, a bundle's files in one object. Encrypted, it holds a header the server reads only for its format and chunk size, then the chunks, with the files padded inside them. | On finishing (`POST /api/v4/upload/complete`). | On expiry, or server restart (unless `UPLOAD_PRESERVE_UPLOADS=true`). |
+| **Dropgate 4 object** (a file or a bundle, ciphertext or plaintext) | Yes | Filesystem: `data/uploads/objects/<id>` | As **File content** above: one per upload, a bundle's files in one object. Encrypted, it holds a header the server reads only for its format and chunk size, then the chunks, with the files padded inside them. | On finishing (`POST /api/v4/upload/complete`). | On expiry, at its download limit, by its uploader's delete, or server restart (unless `UPLOAD_PRESERVE_UPLOADS=true`). |
 | **Dropgate 4 upload in progress** | Temporarily | Filesystem: `data/uploads/tmp/<uploadId>`; in memory: its ID, `encrypted`, size, chunk size and count, the file list (below), lifetime, download limit, manage-token hash, each chunk held with its SHA-256, paused or not, and its deadline | The chunks are written to disk as they arrive. Each chunk's digest is kept, so the same chunk sent again is recognised and different bytes for it refused. No IP address, account or time it started. | On starting (`POST /api/v4/uploads`). | On finishing (renamed), cancellation, its deadline (5 minutes after its last request, or, paused, when the pause runs out), or server restart, persistent mode included: never written to a database. |
 | **Sealed file list** (`meta`) | Yes | Database | An encrypted Dropgate 4 upload's file names and sizes, encrypted by the client and padded to a size from 4 KiB to 1 MiB. The server can't read it, and its size says little about how many files there are. | On starting (in memory); on finishing (record). | When the record is deleted. |
 | **File list** (`files`, unencrypted) | Yes | Database | An unencrypted Dropgate 4 upload's file names and sizes, for its download pages, as version 3 keeps an unencrypted file's name. | On starting (in memory); on finishing (record). | When the record is deleted. |
-| **Manage-token hash** | Yes | Database | The SHA-256 of a random token only the uploader's page or app holds, so the uploader can delete their own upload. The token itself is never sent at the start, or stored. | On starting (in memory); on finishing (record). | When the record is deleted. |
+| **Manage-token hash** | Yes | Database | The SHA-256 of a random token only the uploader's page or app holds, so the uploader can delete their own upload. The token itself is sent only with the delete (`DELETE /api/v4/objects/{id}`), compared with the hash, and never stored or logged. | On starting (in memory); on finishing (record). | When the record is deleted. |
+| **Dropgate 4 download count** (`downloadCount`) | Yes | Database | Enforces the upload's download limit. Only stored when it has one. One download is one lease that sent any bytes, counted when the lease ends. | On finishing, at 0. | When the record is deleted. |
+| **Dropgate 4 download lease** | Temporarily | In memory: a random lease ID, the upload's ID, whether it has sent any bytes, paused or not, its deadline, and the answers sending its bytes now | So a download's retries, ranges and files count once, and two downloads can't both take a limit's last place. No IP address, account or time it was taken. | On taking a lease (`POST /api/v4/objects/{id}/leases`). | When it's released, at its deadline (5 minutes after its last request, or, paused, when the pause runs out), when its upload is removed, or server restart. |
 | **A finished upload's answer** | Temporarily | In memory: upload ID → the object's ID | So that finishing again gets the same answer. | On finishing. | 5 minutes later, or server restart. |
 | **Storage format marker** | Yes | Filesystem: `data/uploads/dropgate-storage.json` | Says which version's layout the uploads folder holds (`{"format": 4}`), so a later version can tell. It holds nothing about any upload. | At every start with uploads on. | With the rest of the uploads folder: at shutdown and the next start in the default mode. |
 
@@ -178,6 +180,7 @@ data/
 | `ongoingBundles` (Map) | Active bundle sessions. | Until bundle completion or zombie cleanup. |
 | Dropgate 4's uploads in progress | Each upload's session ([§2.1](#21-dropgate-server--upload-protocol-dgup)), with a timer for its deadline. | Until it's finished, cancelled, reaches its deadline, or the server restarts. |
 | Dropgate 4's finished answers | Upload ID → the object's ID. | 5 minutes. |
+| Dropgate 4's download leases | Each lease ([§2.1](#21-dropgate-server--upload-protocol-dgup)), with a timer for its deadline, by lease ID and by upload. | Until it's released, reaches its deadline, its upload is removed, or the server restarts. |
 | Rate limiter store | IP → request count mappings. | Sliding window (default 60 s). |
 | File/bundle database | File/bundle metadata. | Persistent (SQLite) or until restart (in-memory). |
 | PeerJS state | Peer connections, ICE candidates, SDP. | Until peer disconnection. |
@@ -188,6 +191,8 @@ data/
 |---------------------------|-----------------|----------------------|
 | `false` (default) | In-memory | All metadata lost. All files in `data/uploads/` deleted. |
 | `true` | SQLite (`data/uploads/db/`) | Metadata and files preserved. Only `data/uploads/tmp/` is cleaned. |
+
+With SQLite, `objects.sqlite` writes zeros over a Dropgate 4 record as it deletes it (SQLite's `secure_delete`), so an upload that's gone leaves nothing of itself, such as its ID or an unencrypted file's name, in the file. Version 3's two databases don't: SQLite leaves a deleted record's bytes until something overwrites them.
 
 ---
 
@@ -202,7 +207,9 @@ data/
 | **Max downloads reached** | Single file: file + record. Unsealed bundle: all member files + manifest. Sealed bundle: manifest record only; the member files stay on disk, and can still be downloaded by file ID, until they expire. A bundle download only counts when every file is downloaded together (**Download All as ZIP**); downloading files one at a time never counts. See [DGUP §11.3](./DGUP.md#113-download-counting). | Immediately after the triggering download. |
 | **Zombie upload cleanup** | Temporary file + storage reservation + session state. **Known issue in 3.x:** when a bundle upload is cancelled or abandoned part-way, files that had already finished uploading stay on disk with no database record, so expiry never removes them. They're deleted at the next restart in the default mode, and kept indefinitely with `UPLOAD_PRESERVE_UPLOADS=true`. | Every **5 minutes** (configurable via `UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS`). |
 | **Dropgate 4 upload's deadline** | Temporary file + storage reservation + session state. Quiet: 5 minutes after its last request. Paused: when the pause runs out (`UPLOAD_MAX_PAUSE_MINUTES`). | At once, at the deadline. |
-| **Dropgate 4 upload's expiry** (`expiresAt`) | The object from disk + its record. | Deleted at the next check, every **60 seconds**. |
+| **Dropgate 4 upload's expiry** (`expiresAt`) | The object from disk + its record; its open leases end, uncounted. | Gone the moment it expires. Deleted at the next check, every **60 seconds**. |
+| **Dropgate 4 upload's download limit** | The object from disk + its record + its storage. A file and a bundle alike: a bundle is one object, so nothing of it is left. One download is one lease that sent any bytes, counted when it ends, however many ranges or files it fetched. See [DGUP §20.3](./DGUP.md#203-leases-and-counting). | At once, when the last download's lease ends. |
+| **Dropgate 4 download lease's deadline** | The lease. If it sent any bytes, it counts as one download. | At once: 5 minutes after its last request, or, paused, when the pause runs out. |
 | **Server restart** (non-persistent mode) | All files, temporary files, and in-memory data. | On process start. |
 | **Server restart** (persistent mode) | Only temporary files in `data/uploads/tmp/`. | On process start. |
 
@@ -211,6 +218,8 @@ data/
 | Action | What Is Deleted |
 |--------|-----------------|
 | **Upload cancellation** (`POST /upload/cancel`; Dropgate 4: `DELETE /api/v4/upload`) | Temporary file, storage reservation, session state. |
+| **The uploader's delete** (Dropgate 4: `DELETE /api/v4/objects/{id}`, with the manage token) | The object from disk + its record + its storage, at once. Its open leases end, uncounted, and any of its bytes being sent stop. |
+| **A download released** (Dropgate 4: `DELETE /api/v4/lease`) | The lease. If it sent any bytes, it counts as one download, and at the limit the upload goes. |
 | **P2P transfer cancellation** (either peer calls `stop()`) | Connection resources. No server data to delete (DGDTP stores nothing on the server). |
 
 ### 5.3 What Is NOT Automatically Deleted
@@ -307,6 +316,7 @@ Data in transit peer-to-peer: File content + metadata (DTLS-encrypted)
 **At `DEBUG` level, in addition:**
 
 - Upload lifecycle events: "Initialised upload", "File received", "File expired", and Dropgate 4's "Upload started", "Upload paused", "Upload resumed", "Upload finished", "Upload ended at its deadline" and "Upload expired", with sizes and storage capacity.
+- Dropgate 4's downloads: "Download lease taken", "Download lease paused", "Download counted" with the count and limit, "Upload deleted at its download limit" and "Upload deleted by its uploader".
 - Chunk-level reception details (index, size).
 - Bundle creation and deletion, including the number of files and the total size.
 - Downloads, with the download count and limit.

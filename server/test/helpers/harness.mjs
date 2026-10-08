@@ -51,6 +51,8 @@ export async function startServer({ env = {}, clock = false, requests = false, p
     // A junction on Windows, a plain symlink elsewhere. fs.rmSync removes the link, never the target.
     fs.symlinkSync(path.join(SERVER_DIR, 'node_modules'), path.join(dir, 'node_modules'), 'junction');
 
+    // The server's settings, which restart() can change; the caller's object stays as it was.
+    const settings = { ...env };
     const preloads = ['--require', LISTENING_PRELOAD];
     if (clock) preloads.push('--require', CLOCK_PRELOAD);
     if (requests) preloads.push('--require', REQUESTS_PRELOAD);
@@ -60,7 +62,7 @@ export async function startServer({ env = {}, clock = false, requests = false, p
 
     const launch = (port) => {
         const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !SERVER_ENV.test(k)));
-        Object.assign(childEnv, { SERVER_PORT: String(port) }, env);
+        Object.assign(childEnv, { SERVER_PORT: String(port) }, settings);
         const child = spawn(process.execPath, [...preloads, 'server.js'], {
             cwd: dir,
             env: childEnv,
@@ -202,8 +204,11 @@ export async function startServer({ env = {}, clock = false, requests = false, p
          * Stop the server and start it again in the same folder, as an operator's
          * restart would, on a port that may differ: baseUrl follows it. The output
          * goes on. The test clock, if any, starts again at the real time.
+         * @param {object} [opts]
+         * @param {Record<string, string>} [opts.env] - Settings changed for this run and the ones after it.
          */
-        restart: async () => {
+        restart: async ({ env: changed = {} } = {}) => {
+            Object.assign(settings, changed);
             await kill();
             await start();
             server.baseUrl = `http://127.0.0.1:${run.port}`;

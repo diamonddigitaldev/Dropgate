@@ -1,9 +1,11 @@
 // What the server stores and sends back: the privacy floor for data.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { startServer } from './helpers/harness.mjs';
 import { CLIENT_IP, USER_AGENT, createClient, createRecorder, fixtureFiles, runFixture } from './helpers/fixture.mjs';
-import { HOUR_MS, SMALL_CHUNKS, runUploads } from './helpers/dgup4.mjs';
+import { HOUR_MS, SMALL_CHUNKS, runDownloads, runUploads } from './helpers/dgup4.mjs';
 
 // Every field a stored record may have. A new field has to be added here deliberately.
 const FILE_FIELDS = new Set(['name', 'path', 'expiresAt', 'isEncrypted', 'maxDownloads', 'downloadCount', 'bundleId']);
@@ -112,6 +114,56 @@ describe('what Dropgate 4\'s uploads store, paused and resumed part-way', () => 
         assert.match(value.meta, /^[A-Za-z0-9_-]+$/);
         assert.equal(Buffer.from(value.meta, 'base64url').length, 12 + 4096 + 16, 'the sealed list, in its smallest bucket');
         assert.equal(value.downloadCount, 0, 'the server\'s default limit of 1 is counted');
+    });
+});
+
+describe('what Dropgate 4\'s downloads leave, with a download limit of 1', () => {
+    let server;
+    let run;
+
+    before(async () => {
+        server = await startServer({
+            env: { ENABLE_UPLOAD: 'true', UPLOAD_PRESERVE_UPLOADS: 'true', UPLOAD_CHUNK_SIZE_BYTES: SMALL_CHUNKS, RATE_LIMIT_MAX_REQUESTS: '0' },
+        });
+        run = await runDownloads(server);
+    });
+
+    after(() => server?.stop());
+
+    test('an encrypted bundle downloaded once can\'t be fetched at all afterwards, and nothing of it is stored', async () => {
+        const { id, lease } = run.bundle;
+        assert.equal((await fetch(`${server.baseUrl}/api/v4/objects/${id}`)).status, 404, 'its metadata');
+        assert.equal((await fetch(`${server.baseUrl}/api/v4/objects/${id}/leases`, { method: 'POST' })).status, 404, 'a new lease');
+        const content = await fetch(`${server.baseUrl}/api/v4/objects/${id}/content`, { headers: { 'Dropgate-Lease': lease, Range: 'bytes=0-' } });
+        assert.equal(content.status, 404, 'its bytes, under the lease that downloaded it');
+        await content.arrayBuffer();
+        assert.deepEqual(server.storedFiles(), [], 'nothing on disk');
+        assert.deepEqual(server.records('objects.sqlite'), [], 'no record');
+    });
+
+    test('no stored byte holds a lease, a manage token, an ID, a name or an address', () => {
+        const dbDir = path.join(server.uploadsDir, 'db');
+        const problems = [];
+        for (const file of fs.readdirSync(dbDir)) {
+            const text = fs.readFileSync(path.join(dbDir, file)).toString('latin1');
+            const utf8 = fs.readFileSync(path.join(dbDir, file)).toString('utf8');
+            for (const secret of ['127.0.0.1', '::1', ...run.secrets]) {
+                if (text.includes(secret) || utf8.includes(secret)) problems.push(`${file} holds "${secret}"`);
+            }
+        }
+        assert.deepEqual(problems, []);
+    });
+
+    test('a lease holds only its upload\'s ID, its own, how far it has got and its deadline: nothing from the request', () => {
+        // The server makes every lease in one place, from the upload's ID alone.
+        const source = fs.readFileSync(path.join(server.dir, 'server.js'), 'utf8');
+        const made = /const newLease = \((\w*)\) => \(\{([\s\S]*?)\n\}\);/.exec(source);
+        assert.ok(made, 'newLease() is where the server makes a lease');
+        assert.equal(made[1], 'objectId', 'it\'s made from the upload\'s ID alone');
+        const fields = [...made[2].matchAll(/^\s{4}(\w+)[:,]/gm)].map((m) => m[1]);
+        assert.deepEqual(fields, ['id', 'objectId', 'served', 'paused', 'deadline', 'timer', 'sending']);
+        assert.equal(source.match(/\bnewLease\(/g).length, 1, 'and it\'s called in one place');
+        assert.match(source, /const lease = newLease\(id\);/, 'with the upload\'s ID');
     });
 });
 

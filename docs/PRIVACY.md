@@ -17,6 +17,8 @@ By design, Dropgate's own log messages **never** include:
 - File names
 - Encryption keys / URL fragments
 - Upload session IDs
+- Download leases
+- Manage tokens, or their hashes
 - File IDs
 - Bundle IDs
 - Client IP addresses
@@ -44,11 +46,16 @@ At `DEBUG` level you may also see:
 
 - Upload/download lifecycle events (init/chunk/complete/download)
 - An upload paused or resumed, and one that ended at its deadline, with its size
+- A download lease taken or paused, a download counted against its limit, and an upload deleted at its download limit or by its uploader
 - Chunk counts and chunk sizes
 - The number of files in a bundle
 - Cleanup of expired or incomplete uploads
 
 **A paused upload** is kept only in the server's memory, with its temporary file and the storage it reserved, until its pause runs out (`UPLOAD_MAX_PAUSE_MINUTES`): then it goes at once. Nothing about it, not even that it exists, is written to a database, so a restart ends it, with `UPLOAD_PRESERVE_UPLOADS=true` too. No upload in progress, paused or not, records an IP address or when it started.
+
+**A download** of a Dropgate 4 upload takes a lease: a random ID, held only in the server's memory with the upload's ID, whether it has sent any bytes, whether it's paused, and when it runs out. It holds no IP address and nothing else about who asked, and none survives a restart. When it ends, it counts as one download if it sent anything; at the upload's download limit, the upload is deleted at once. Its metadata (what a link preview or a download page reads first) takes no lease and counts nothing.
+
+**An uploader can delete their own upload** with its manage token, a random value only the page or app that uploaded it holds. The server keeps only its SHA-256, and deleting removes the upload's bytes and record at once. Downloads in progress stop. With `UPLOAD_PRESERVE_UPLOADS=true`, Dropgate 4's database writes zeros over a record as it deletes it, so an upload that's gone leaves nothing of itself in the file.
 
 File sizes and capacity values may appear in logs because they’re necessary for understanding limits and diagnosing issues.
 

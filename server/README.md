@@ -164,7 +164,7 @@ Images are built for `linux/amd64` and `linux/arm64`. Each release's image is ta
 | `UPLOAD_MAX_FILE_LIFETIME_HOURS` | `24` | Max file lifetime in hours (`0` = unlimited). |
 | `UPLOAD_MAX_FILE_DOWNLOADS` | `1` | Max downloads before file is deleted (`0` = unlimited). |
 | `UPLOAD_CHUNK_SIZE_BYTES` | `5242880` | Upload chunk size in bytes (default 5MB). Minimum `65536` (64KB), maximum `67108864` (64MB): outside that, the server doesn't start. Smaller values increase per-chunk overhead; larger values may need proxy body-size adjustments. |
-| `UPLOAD_MAX_PAUSE_MINUTES` | `60` | How long an upload can stay paused before the server drops it, in whole minutes from `1` to `1440` (a day), or `0` to turn pausing off. Anything else stops the server at startup. `GET /api/info` gives it as `maxPauseMinutes`. A paused upload ends at once when its pause runs out, and a restart ends it sooner. |
+| `UPLOAD_MAX_PAUSE_MINUTES` | `60` | How long an upload or a download can stay paused before the server drops it, in whole minutes from `1` to `1440` (a day), or `0` to turn pausing off. Anything else stops the server at startup. `GET /api/info` gives it as `maxPauseMinutes`. A paused upload ends at once when its pause runs out, and a restart ends it sooner. |
 | `UPLOAD_BUNDLE_SIZE_MODE` | — | **Removed in 4.0.** The size limit always applies to the whole upload. Set to `per-file`, the server stops at startup and says why; any other value is ignored, with a warning. |
 | `UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS` | `300000` | Cleanup interval for Dropgate 3's incomplete uploads (`0` = disabled). Dropgate 4's uploads don't use it: each ends at its own deadline (see [Storage and Lifecycle](#storage-and-lifecycle)). |
 
@@ -251,6 +251,8 @@ Run the server behind a reverse proxy that terminates TLS:
 - The rest of `data/` is the server's own data. It's never cleaned, and nothing uses it yet.
 - Files can be set to expire after a certain period or after a certain number of downloads. An upload is gone the moment it expires: from then on the server answers as if it had never existed, and deletes it within a minute.
 - A Dropgate 4 upload in progress ends 5 minutes after its last request, or, paused, when its pause runs out (`UPLOAD_MAX_PAUSE_MINUTES`). It ends at once: its temporary file and the storage it reserved go. Dropgate 3's incomplete uploads are cleaned up on an interval.
+- A Dropgate 4 download takes a lease, kept in memory only, and counts once when it ends if it sent anything, however many requests or files it took. At its upload's download limit, the upload is deleted at once, a bundle as a whole. While open downloads already make the limit, a new one is asked to wait. `UPLOAD_MAX_PAUSE_MINUTES` is also how long a paused download is kept.
+- The uploader can delete a Dropgate 4 upload at once, with the manage token only their page or app holds. With `UPLOAD_PRESERVE_UPLOADS=true`, a deleted record is overwritten with zeros in the database.
 - Storage used, for `UPLOAD_MAX_STORAGE_GB`, is what's stored plus what every upload in progress has reserved.
 
 

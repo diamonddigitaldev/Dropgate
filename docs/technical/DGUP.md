@@ -1,6 +1,6 @@
 # DGUP — Dropgate Upload Protocol
 
-**Protocol Version:** 4.0, in development. Until it's finished, §4 to §12 and §16 to §18 describe version 3's requests, with `/api/info` giving version 4's fields. Version 4's routes go under `/api/v4/` as they're built: its uploads are in [§19](#19-version-4-uploads)
+**Protocol Version:** 4.0, in development. Until it's finished, §4 to §12 and §16 to §18 describe version 3's requests, with `/api/info` giving version 4's fields. Version 4's routes go under `/api/v4/` as they're built: its uploads are in [§19](#19-version-4-uploads), and its downloads and the uploader's delete in [§20](#20-version-4-downloads)
 **Status:** In development
 **Last Updated:** October 2026
 
@@ -475,11 +475,15 @@ A message never holds an ID, a name, a key, a token, or anything from the reques
 | `400` | `DOWNLOADS_NOT_ALLOWED` | A version 4 upload's download limit over the server's, or none where it has one. |
 | `400` | `INVALID_CHUNK` | A chunk index out of range, or a chunk of the wrong length ([§19.3](#193-chunks)). |
 | `400` | `DIGEST_MISMATCH` | A chunk with no SHA-256 `Content-Digest`, or one that doesn't match it. |
-| `404` | `NOT_FOUND` | Anything under `/api/v4/` that isn't a route, and a version 4 upload that's unknown, ended or dropped: one answer, so nothing says which. |
+| `400` | `LEASE_REQUIRED` | A version 4 upload's bytes asked for with no `Dropgate-Lease` ([§20.4](#204-the-bytes)). |
+| `403` | `MANAGE_DENIED` | The uploader's delete with a manage token that isn't the upload's ([§20.6](#206-the-uploaders-delete)). |
+| `404` | `NOT_FOUND` | Anything under `/api/v4/` that isn't a route; a version 4 upload that's unknown, ended, dropped, expired, deleted or at its limit; and a download lease that's unknown or ended: one answer, so nothing says which. |
 | `409` | `CHUNK_CONFLICT` | Different bytes for a chunk the server already holds. |
 | `409` | `UPLOAD_INCOMPLETE` | A finish before every chunk is held, with `details.received`. |
-| `409` | `PAUSE_DISABLED` | A pause, on a server with pausing off. |
+| `409` | `PAUSE_DISABLED` | A pause of an upload or a download, on a server with pausing off. |
 | `413` | `TOO_LARGE` | A JSON request body over its limit (1 MiB, or 2 MiB for a version 4 upload's start), or a version 4 upload over the maximum upload size. |
+| `416` | `RANGE_NOT_SATISFIABLE` | A `Range` the server can't send, with `Content-Range: bytes */<size>` ([§20.4](#204-the-bytes)). |
+| `423` | `DOWNLOADS_BUSY` | A new download while open leases and counted downloads make the upload's limit, with `Retry-After` ([§20.3](#203-leases-and-counting)). |
 | `429` | `RATE_LIMITED` | Too many requests ([§14.1](#141-rate-limits)). |
 | `500` | `SERVER_ERROR` | Anything unexpected while answering. The server logs the error's kind and the route's pattern, never its message, which can hold a path or part of the request ([PRIVACY.md](../PRIVACY.md)). |
 | `507` | `SERVER_FULL` | Not enough storage for a version 4 upload. |
@@ -489,13 +493,17 @@ A message never holds an ID, a name, a key, a token, or anything from the reques
 | Code | Context |
 |------|---------|
 | `200` | Success. |
-| `201` | A version 4 upload started, or finished. |
-| `204` | A version 4 upload cancelled. |
-| `400` | Validation failure (malformed request, invalid parameters). |
-| `404` | File, bundle, or upload session not found. |
+| `201` | A version 4 upload started, or finished; a download lease taken. |
+| `204` | A version 4 upload cancelled, or deleted by its uploader; a download lease released. |
+| `206` | One range of a version 4 upload's bytes. |
+| `400` | Validation failure (malformed request, invalid parameters), or a download with no lease. |
+| `403` | The uploader's delete with the wrong manage token. |
+| `404` | File, bundle, upload session, upload or download lease not found. |
 | `409` | A version 4 chunk conflict, a finish too soon, or pausing off. |
 | `410` | Upload session expired. |
 | `413` | File or chunk exceeds size limit. |
+| `416` | A range the server can't send. |
+| `423` | A download waiting for others to end. |
 | `429` | Rate limit exceeded. |
 | `500` | Internal server error. |
 | `507` | Insufficient storage quota. |
@@ -513,7 +521,7 @@ The server enforces a request rate limit to protect against abuse. The defaults 
 | Window | 60,000 ms |
 | Maximum requests per window | 25 |
 
-Rate limits are applied per IP address. When triggered, the server responds with HTTP 429, `RATE_LIMITED`, and `Retry-After` gives the seconds until the window resets.
+Rate limits are applied per IP address. When triggered, the server responds with HTTP 429, `RATE_LIMITED`, and `Retry-After` gives the seconds until the window resets. Version 4's uploads and downloads skip the limit for an upload in progress, a stored upload that's there, and an open download lease ([§19.9](#199-rate-limits-and-credentials), [§20.7](#207-rate-limits)).
 
 ### 14.2 Cross-Origin Requests
 
@@ -539,6 +547,8 @@ Everything under `/api/` answers any origin (`Access-Control-Allow-Origin: *`), 
 | Version 4 upload, quiet | 5 minutes | After its last request, unless paused. |
 | Version 4 upload, paused | 60 minutes | `UPLOAD_MAX_PAUSE_MINUTES`, 1 to 1,440, or 0 to turn pausing off. |
 | Version 4 finish kept | 5 minutes | A repeated finish gets the same answer. |
+| Version 4 download lease, quiet | 5 minutes | After its last request, unless paused; paused, `UPLOAD_MAX_PAUSE_MINUTES`. |
+| Version 4 download waiting | 5 seconds | `Retry-After` on `423`, `DOWNLOADS_BUSY`. |
 | IV size | 12 bytes | AES-GCM standard. |
 | Authentication tag size | 16 bytes | AES-GCM standard. |
 | Key size | 256 bits | AES-256. |
@@ -637,7 +647,7 @@ Download URL: https://<host>/b/<bundleId>#<keyBase64>
 
 ## 19. Version 4 Uploads
 
-Version 4's upload routes are under `/api/v4/`, beside version 3's while version 4 is built. They replace §5 to §9: one upload is one **object**, a single file or a bundle alike, started, sent in chunks that can be sent again, then finished. Downloads, and the uploader's own delete, come with the next routes.
+Version 4's upload routes are under `/api/v4/`, beside version 3's while version 4 is built. They replace §5 to §9: one upload is one **object**, a single file or a bundle alike, started, sent in chunks that can be sent again, then finished. Its downloads, and the uploader's own delete, are in [§20](#20-version-4-downloads).
 
 - **The upload's ID** is given by the start, and every request after it names the upload in the `Dropgate-Upload` header, never in its URL.
 - **Every answer to an upload in progress carries its `deadline`**: when the server ends it unless something renews it, in milliseconds since 1970 ([§19.8](#198-how-long-an-upload-lasts)).
@@ -781,6 +791,121 @@ Responds `204`, with no body: the temporary file, the reservation and the upload
 
 ### 19.10 The Record
 
-A finished upload's record holds only what serving and ending it needs: `encrypted`, `size`, `meta` (encrypted) or `files` (unencrypted), `expiresAt`, `maxDownloads`, `downloadCount` (only with a limit) and `manageTokenHash`. Its ID is the object's file name. There's no creation time, address, account or upload ID. Records are in memory, or with `UPLOAD_PRESERVE_UPLOADS=true` in `data/uploads/db/objects.sqlite`. An expired upload's object and record are deleted at the next check, every 60 seconds.
+A finished upload's record holds only what serving and ending it needs: `encrypted`, `size`, `meta` (encrypted) or `files` (unencrypted), `expiresAt`, `maxDownloads`, `downloadCount` (only with a limit, [§20.3](#203-leases-and-counting)) and `manageTokenHash`. Its ID is the object's file name. There's no creation time, address, account or upload ID. Records are in memory, or with `UPLOAD_PRESERVE_UPLOADS=true` in `data/uploads/db/objects.sqlite`, which writes zeros over a record as it deletes it. An expired upload's object and record are deleted at the next check, every 60 seconds.
 
 Storage used is the stored objects (and version 3's files) and what every upload in progress has reserved: not temporary files, the databases or the format marker.
+
+---
+
+## 20. Version 4 Downloads
+
+A version 4 upload's metadata takes and counts nothing. Its bytes are sent under a **lease**: a client takes one for each download, names it in the `Dropgate-Lease` header of every request for the bytes, and releases it when the download ends. One lease is one download, however many requests it makes. They replace §11 and the download counting of §12.
+
+- **Every answer about a lease carries its `deadline`,** in milliseconds since 1970, as an upload's does.
+- **Every error is JSON** with a `code` ([§13](#13-error-model)). An upload that's unknown, expired, deleted or at its limit, and a lease that's unknown or ended, are all `404`, `NOT_FOUND`: one answer, so nothing says which.
+- **An encrypted upload is only served while the server has E2EE on.** With it off, every download route answers for one as for an upload that isn't there.
+
+### 20.1 Metadata
+
+```
+GET /api/v4/objects/{id}
+```
+
+Encrypted:
+
+```json
+{ "encrypted": true, "size": 104857980, "header": "<base64url>", "meta": "<base64url>" }
+```
+
+Unencrypted:
+
+```json
+{ "encrypted": false, "size": 104857600, "files": [{ "name": "report.pdf", "size": 104857600 }] }
+```
+
+`size` is the stored object's bytes. An encrypted upload's `header` is its object's first 60 bytes ([§19.1](#191-the-object)), so a client can check it and learn the chunk size before asking for anything else, and `meta` is its sealed file list. It never gives when the upload expires, how many times it has been downloaded, or its limit. **Asking takes no lease and counts nothing,** so a link preview or a download page can look before anyone downloads.
+
+### 20.2 Leases
+
+| Route | Does |
+|-------|------|
+| `POST /api/v4/objects/{id}/leases` | Takes a lease. `201`: `{ "lease": "<base64url>", "deadline": …, "etag": "\"<id>\"" }`. |
+| `POST /api/v4/lease/renew` | Keeps it 5 more minutes. `200`: `{ "deadline": … }`. |
+| `POST /api/v4/lease/pause` | Keeps it for `UPLOAD_MAX_PAUSE_MINUTES` (`capabilities.upload.maxPauseMinutes`) from now. `200`: `{ "paused": true, "deadline": … }`. With pausing off (`0`), `409`, `PAUSE_DISABLED`, and the lease goes on. |
+| `DELETE /api/v4/lease` | Releases it. `204`, with no body. |
+
+The lease is 32 random bytes, base64url with no padding (43 characters). The last three routes name it in `Dropgate-Lease`, with no body. `etag` is the upload's `ETag` ([§20.4](#204-the-bytes)).
+
+- **A lease ends 5 minutes after its last request,** unless it's paused: any request under it renews it, and while its bytes are being sent it isn't quiet. **Paused, it ends when the pause runs out.** A request for its bytes, or a renew, ends a pause.
+- **Leases are in the server's memory only:** each holds the upload's ID, its own, whether it has sent any bytes, whether it's paused, and its deadline. Nothing about who took it. **None survives a restart.**
+
+### 20.3 Leases and Counting
+
+- **A lease counts as one download once, when it ends, if it sent any byte:** released, or run out. So a finished download counts, and so does one cancelled or abandoned part-way, when its lease ends; a lease that sent nothing counts nothing.
+- **Under one lease, everything is one download:** retries, ranges, a download resumed after a pause, and every file of a bundle.
+- **At the limit, the upload goes at once:** when a lease's count reaches `maxDownloads`, the object, its record and its storage are removed. A bundle is one object, so nothing of it is left.
+- **A new download waits while others hold the limit's places:** when the open leases and the downloads counted already make `maxDownloads`, taking a lease is `423`, `DOWNLOADS_BUSY`, with `Retry-After` (5 seconds). The client asks again then; once a lease ends having sent nothing, its place is free again.
+- **An upload with no limit** (`maxDownloads` `0`) keeps no count, and downloads never remove it.
+- A lease that had sent bytes when the server stopped never counts, since no lease survives a restart.
+
+### 20.4 The Bytes
+
+```
+GET /api/v4/objects/{id}/content
+Dropgate-Lease: <lease>
+Range: bytes=<first>-<last>
+If-Range: "<id>"
+```
+
+`Range` and `If-Range` are optional. The whole object comes as stored: for an encrypted upload, the header, then every chunk to the one marked last, padding included, so a client can tell nothing was cut off.
+
+| Status | Code | When |
+|--------|------|------|
+| `200` | — | The whole object: no `Range`, or an `If-Range` that isn't the upload's `ETag`. |
+| `206` | — | The one range asked for, with `Content-Range: bytes <first>-<last>/<size>`. |
+| `400` | `LEASE_REQUIRED` | No `Dropgate-Lease`. |
+| `404` | `NOT_FOUND` | A lease that's unknown, ended, or another upload's; or the upload's gone. |
+| `416` | `RANGE_NOT_SATISFIABLE` | A range starting past the end, more than one range, or anything that isn't one byte range. `Content-Range: bytes */<size>` gives the size. |
+
+- **Every answer with bytes has** `Accept-Ranges: bytes`, `ETag: "<id>"`, `Content-Length`, `Content-Type: application/octet-stream`, `Cache-Control: no-store`, and `Content-Disposition: attachment`, which names the file ([RFC 6266](https://www.rfc-editor.org/rfc/rfc6266)) only for an unencrypted single file, as version 3 does.
+- **A range** is `bytes=<first>-<last>`, `bytes=<first>-` (to the end) or `bytes=-<n>` (the last `n` bytes); a last byte past the end means the end.
+- **The `ETag` is the upload's ID:** an object never changes and an ID is never used twice. With `If-Range` naming any other value, the answer is the whole object, `200` ([RFC 9110](https://www.rfc-editor.org/rfc/rfc9110#section-13.1.5)), which a client resuming a download must not add to what it has.
+- **Where an encrypted upload's bytes are:** plaintext byte `p` is in chunk `⌊p / C⌋`, which starts at `60 + ⌊p / C⌋ × (C + 16)`, where `C` is the header's chunk size. A file of a bundle at plaintext `[a, a + s)` needs chunks `⌊a / C⌋` to `⌊(a + s − 1) / C⌋`, one range, and never a chunk that's only padding. A paused or dropped download asks from the next whole chunk after the last one it wrote. An unencrypted upload's file is a plain range: the files are one after another, in the list's order.
+- **`HEAD`** gives the same headers and no bytes, and sends nothing that counts.
+
+### 20.5 A Browser's Own Downloads
+
+```
+GET /api/v4/leases/{lease}
+GET /api/v4/leases/{lease}/files/{index}
+```
+
+A page with no secure context (plain HTTP to a LAN address) hands an unencrypted download to the browser itself, which can't send a header. It takes the lease with `fetch()`, then sends the browser here, with the lease in the URL, so the browser's own resume asks again under the same lease and doesn't count again.
+
+- **The first** gives the whole upload, named for a single file, and only `attachment` for a bundle. **The second** gives file `index` (from 0) of the file list, named, with ranges counted from the file's own first byte.
+- **Ranges, `If-Range` and the headers are as [§20.4](#204-the-bytes).**
+- **Only unencrypted uploads:** an encrypted one, a file index that isn't in the list, or a lease that's unknown or ended, is `404`, `NOT_FOUND`. An encrypted upload's bytes are always asked for with the lease in its header.
+- On HTTPS a lease is never in a URL. These are for the pages where the page, the request and the file already cross the network unencrypted, and a proxy's log may then hold the lease.
+
+### 20.6 The Uploader's Delete
+
+```
+DELETE /api/v4/objects/{id}
+Dropgate-Manage-Token: <base64url>
+```
+
+The manage token is the 32 random bytes whose SHA-256 the upload's start sent as `manageTokenHash` ([§19.2](#192-start)), base64url. No account is needed. The server compares the token's SHA-256 with the record's in constant time.
+
+| Status | Code | When |
+|--------|------|------|
+| `204` | — | Deleted, with no body: the object, its record and its storage go at once. Its open leases end, uncounted, any of its bytes being sent stop, and each lease is `404` at its next request. |
+| `403` | `MANAGE_DENIED` | The token is wrong, empty, malformed, missing, or another upload's. Nothing changes. |
+| `404` | `NOT_FOUND` | No upload by that ID, or an expired one. |
+
+An encrypted upload can be deleted while the server has E2EE off.
+
+### 20.7 Rate Limits
+
+- **Metadata and taking a lease skip the rate limit for an upload that's there** ([§14.1](#141-rate-limits)), as version 3's downloads do; asking about one that isn't is limited.
+- **Every request under a lease skips it while the lease is open,** its bytes and the browser's own downloads included; one naming a lease the server doesn't have is limited.
+- **The delete is always rate-limited.**
