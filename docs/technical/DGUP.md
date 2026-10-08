@@ -952,7 +952,7 @@ Every upload, one file or several, is a version 4 upload ([§19](#19-version-4-u
 
 - **`id`** is the upload's ID, as the finish gives it ([§19.6](#196-finish)): the only thing in the path.
 - **The secret** is 32 random bytes, in URL-safe base64 with no `=`: 43 characters of `A–Z a–z 0–9 - _`. It isn't a key: the upload's keys are made from it ([§21.2](#212-the-object-a-client-makes)). It's never sent, in a request, a log or an error; only the link carries it.
-- **A version 3 single-file link** (`/<fileId>#` and 44 characters of standard base64) names an upload a version 4 server doesn't have, so its page says it isn't there. **A version 3 bundle's link** (`/b/<bundleId>`) gets a page saying it was made with an older version ([§21.3](#213-the-download-page)).
+- **A version 3 single-file link** (`/<fileId>#` and 44 characters of standard base64, ending in `=`) names an upload a version 4 server never has, so the server answers with its not-found page (`404`); that page reads the `#` part in the browser, sees a version 3 key, and says the link was made with an older version and the sender needs to update. **A version 3 bundle's link** (`/b/<bundleId>`) gets the same wording, from the server ([§21.3](#213-the-download-page)). Any other link to an upload that isn't there says it isn't there.
 
 ### 21.2 The Object a Client Makes
 
@@ -976,7 +976,8 @@ GET /{id}
 ```
 
 - **One page for one file and several, served over HTTP and HTTPS alike.** The server sends it for an upload that's there, with no check of how the request came in: the page itself decides whether it can decrypt, from whether the browser gives it a secure context (HTTPS, or `localhost`), which the server can't tell from the request, and, from the metadata (once its list is opened, for an encrypted one), whether it shows one file or several. An unknown, expired or deleted upload, or an encrypted one on a server with E2EE off, gets the not-found page (`404`).
-- **`GET /b/{bundleId}`,** a version 3 bundle's link, is always `410`, with a page saying the link was made with an older version and the sender needs to update.
+- **`GET /b/{bundleId}`,** a version 3 bundle's link, is always `410`, with a page saying the link was made with an older version and the sender needs to update. A version 3 single file's link gets the not-found page, which says the same once it has read the link's `#` part ([§21.1](#211-links)); the key is never sent.
+- **No Pause.** The download pages leave pausing a download to the browser's own download manager, and core reconnects a dropped one underneath ([§7.4](#74-reconnecting-downloads)). Only the home page's upload pauses ([§21.5](#215-pausing-an-upload-from-the-home-page)).
 - **Loading the page takes no lease and counts nothing.** The page holds no file name or size: a link preview, which fetches the page without the `#` part, sees only the server's name and Dropgate's description. The page reads the upload's metadata ([§20.1](#201-metadata)) and opens its file list with the secret, in the browser.
 - **Downloading one file** is core's: one lease ([§20.2](#202-leases)), released as soon as the download ends, so at its limit the upload is gone once the file is saved. A download that finds every allowed place held waits as `Retry-After` says, and starts when one frees.
 - **Several files** are opened with core's `client.hosted.open()`: the page's downloads, each file on its own and **Download All as ZIP**, share one lease, taken at the first, renewed every 2 minutes (`POST /api/v4/lease/renew`) and released as the page goes (`pagehide`), so they count as one download. Each file asks only for its own part of the upload ([§21.2](#212-the-object-a-client-makes)).
@@ -989,3 +990,12 @@ The Web UI's result screen, after an upload of one file or several, has **Delete
 
 - **The token is in the page's memory only:** never in storage, the page itself or a URL. A reload, or **Send more files**, drops it, and the button with it; the upload then stays until it expires or reaches its download limit.
 - **An upload that's already gone** (expired, or downloaded as many times as it allows) is reported as already gone.
+
+### 21.5 Pausing an Upload From the Home Page
+
+The Web UI's upload, of one file or several, has **Pause Upload** beside **Cancel Upload** while it runs, through the core library's `pause()` and `resume()` ([§19.5](#195-pause-and-resume)).
+
+- **Pause is there only where the server allows it,** and can only be pressed once the server has taken the upload (the snapshot's `canPause`). With pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`, `maxPauseMinutes` `0`), there's no Pause at all.
+- **Paused,** the card says "Paused. The server keeps this upload until 14:32.", the server's deadline as a local time (and "tomorrow" if it is), with **Resume Upload** and **Cancel Upload**. Resumed, the upload carries on from what the server holds.
+- **Nothing resumes by itself.** Still paused at the deadline, the upload ends, and the card says "The server dropped this paused upload."
+- **What a pause holds is in the page's memory only,** as an upload's state always is: nothing in storage or a URL. Closing or reloading the page ends the upload; the server drops it at its deadline.

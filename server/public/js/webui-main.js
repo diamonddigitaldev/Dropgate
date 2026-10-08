@@ -1,4 +1,4 @@
-import { hosts, lifetime, sizes } from './dropgate-core.js';
+import { DropgateError, hosts, lifetime, sizes } from './dropgate-core.js';
 import { pageClient } from './page-common.js';
 
 const $ = (id) => document.getElementById(id);
@@ -49,6 +49,8 @@ const els = {
   progressSub: $('progressSub'),
   progressFill: $('progressFill'),
   progressBytes: $('progressBytes'),
+  pauseStandardUpload: $('pauseStandardUpload'),
+  resumeStandardUpload: $('resumeStandardUpload'),
   cancelStandardUpload: $('cancelStandardUpload'),
   cancelP2PSend: $('cancelP2PSend'),
 
@@ -874,53 +876,55 @@ async function startStandardUpload() {
 
     // Where the upload is. Core's snapshots never name a file, so the name of
     // the one an upload of several is on comes from this page's own list.
-    upload.subscribe(({ phase, text, percent, fileIndex }) => {
+    upload.subscribe((snapshot) => {
+      const { phase, text, percent, fileIndex, status, deadline } = snapshot;
       const p = (typeof percent === 'number') ? percent : 0;
+      const paused = status === 'paused';
       const onFile = files.length > 1 && phase === 'chunk';
       const currentFileName = onFile ? files[fileIndex]?.name : null;
-      const sub = currentFileName ? `${text || phase} — ${currentFileName}` : (text || phase);
+      let sub = currentFileName ? `${text || phase} — ${currentFileName}` : (text || phase);
+      // Paused, the server holds the upload until its deadline, and nothing resumes it but Resume.
+      if (paused && text === 'Paused.' && deadline) sub = `Paused. The server keeps this upload until ${formatDeadline(deadline)}.`;
+      const view = paused
+        ? { title: 'Upload Paused', icon: 'pause_circle', iconColor: 'text-secondary' }
+        : { title: 'Uploading', icon: 'cloud_upload', iconColor: 'text-primary' };
 
       // Update title and store progress for visibility handler
-      updateTitleProgress(p);
+      if (paused) document.title = `Paused - ${originalTitle}`;
+      else updateTitleProgress(p);
       currentTransferProgress = {
         percent: p,
         doneBytes: Math.floor((p / 100) * totalSize),
         totalBytes: totalSize,
         showProgress: (pct, done, total) => {
-          showProgress({
-            title: 'Uploading',
-            sub,
-            percent: pct,
-            doneBytes: done,
-            totalBytes: total,
-            icon: 'cloud_upload',
-            iconColor: 'text-primary',
-          });
+          showProgress({ ...view, sub, percent: pct, doneBytes: done, totalBytes: total });
         }
       };
 
       showProgress({
-        title: 'Uploading',
+        ...view,
         sub,
         percent: p,
         doneBytes: Math.floor((p / 100) * totalSize),
         totalBytes: totalSize,
-        icon: 'cloud_upload',
-        iconColor: 'text-primary',
       });
+      showPauseControls(snapshot);
     });
 
     // Store the upload and show cancel button
     state.upload = upload;
     els.cancelStandardUpload.style.display = 'inline-block';
 
-    // Wire up cancel button
+    // Wire up the progress card's buttons
     els.cancelStandardUpload.onclick = () => upload.cancel();
+    els.pauseStandardUpload.onclick = () => pauseOrResume(upload, 'pause');
+    els.resumeStandardUpload.onclick = () => pauseOrResume(upload, 'resume');
 
     // The upload's one outcome: completed, cancelled or failed.
     const outcome = await upload.result;
 
     els.cancelStandardUpload.style.display = 'none';
+    hidePauseControls();
     state.upload = null;
     resetTitleProgress();
 
@@ -939,10 +943,64 @@ async function startStandardUpload() {
   } catch (err) {
     // Only an upload that never started gets here, such as one with no files.
     els.cancelStandardUpload.style.display = 'none';
+    hidePauseControls();
     state.upload = null;
     resetTitleProgress();
     showUploadFailed(err, totalSize);
   }
+}
+
+/** Whether the server lets an upload pause: its pause length is 0 when the operator has turned pausing off. */
+function pausingOn() {
+  return (state.info?.capabilities?.upload?.maxPauseMinutes ?? 0) > 0;
+}
+
+/**
+ * Pause while the upload runs, and Resume while it's paused, each usable only
+ * when core's snapshot says it can pause (or, paused, go on) now. Neither is
+ * there on a server with pausing turned off.
+ */
+function showPauseControls({ status, canPause }) {
+  const paused = status === 'paused';
+  const running = status === 'initializing' || status === 'uploading';
+  setHidden(els.pauseStandardUpload, !pausingOn() || !running);
+  setDisabled(els.pauseStandardUpload, !canPause);
+  setHidden(els.resumeStandardUpload, !paused);
+  setDisabled(els.resumeStandardUpload, !(paused && canPause));
+}
+
+function hidePauseControls() {
+  setHidden(els.pauseStandardUpload, true);
+  setHidden(els.resumeStandardUpload, true);
+}
+
+/** Pauses or resumes the upload. Its snapshots show the result; an upload that ends meanwhile shows its outcome. */
+async function pauseOrResume(upload, action) {
+  setDisabled(action === 'pause' ? els.pauseStandardUpload : els.resumeStandardUpload, true);
+  try {
+    await upload[action]();
+  } catch (err) {
+    const { status } = upload.snapshot;
+    const ended = !['initializing', 'uploading', 'paused', 'completing'].includes(status);
+    // It moved on before the click landed (it's finishing, or a pause is already settling).
+    if (ended || DropgateError.is(err, 'PAUSE_UNAVAILABLE')) return;
+    // The server refused the pause, or couldn't be asked to resume: nothing changed.
+    console.error(err);
+    showToast(err?.message || (action === 'pause' ? "The upload couldn't be paused." : "The upload couldn't be resumed."), 'warning');
+  } finally {
+    if (state.upload === upload) showPauseControls(upload.snapshot);
+  }
+}
+
+/** When a paused upload's server stops holding it, as a local time: "14:32", or "14:32 tomorrow". */
+function formatDeadline(ms) {
+  const at = new Date(ms);
+  const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const today = new Date();
+  if (at.toDateString() === today.toDateString()) return time;
+  const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  if (at.toDateString() === tomorrow.toDateString()) return `${time} tomorrow`;
+  return at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 }
 
 function showUploadFailed(err, totalSize) {
@@ -1265,9 +1323,10 @@ function wireUI() {
   // Initial state
   setDisabled(els.codeGo, true);
 
-  // Reset on ESC
+  // Reset on ESC, but never under an upload, whose card (and, paused, its
+  // Resume) would go while it carries on.
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') resetToMain();
+    if (e.key === 'Escape' && !state.upload) resetToMain();
   });
 }
 

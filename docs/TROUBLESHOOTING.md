@@ -49,6 +49,11 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - The server didn't answer, took too long, or answered `408`, `429` or a `5xx` other than `507`. The upload or the download tries again by itself, waiting a little longer each time, up to 30 seconds, for as long as the server keeps it: 5 minutes after it last heard from it. A download picks up where it stopped, and counts once. Any other error fails at once, since trying again wouldn't change it. See [DGUP §7](./technical/DGUP.md#7-retry-strategy).
 - If it keeps happening behind a reverse proxy, check the proxy's timeouts and body size limit, and that it passes `Range` and `If-Range` through to the server.
 
+**"The server dropped this paused upload."**
+- The upload was paused for longer than the server keeps a paused upload: `UPLOAD_MAX_PAUSE_MINUTES` (60 by default) from the pause, the time the Web UI showed ("The server keeps this upload until …"). Nothing resumes by itself, so the server deleted what it had. Upload the files again; to allow longer pauses, raise `UPLOAD_MAX_PAUSE_MINUTES` (at most `1440`, a day).
+- A restart drops every upload in progress, paused ones too.
+- No **Pause Upload** button: the server has pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`).
+
 **Tuning chunk size**
 - The upload chunk size is controlled by `UPLOAD_CHUNK_SIZE_BYTES` (default `5242880` / 5MB, minimum `65536` / 64KB, maximum `67108864` / 64MB).
 - If you're behind a reverse proxy with a body size limit, make sure the proxy allows at least `UPLOAD_CHUNK_SIZE_BYTES + 1024` bytes per request (the extra 1024 accounts for encryption overhead and request framing).
@@ -70,7 +75,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - If you see missing buttons or “blocked” errors in the Web UI, run the server behind HTTPS.
 - An encrypted upload's download page over plain HTTP from another machine says it needs HTTPS, for one file or several: the browser gives the page no Web Crypto there. On `localhost` or `127.0.0.1` it works, since browsers count those as secure. (In 3.x, an encrypted bundle's page said **"Secure Connection Required"** on localhost too; that's fixed in 4.0.)
 - An unencrypted upload's page over plain HTTP from another machine hands each file to the browser to download itself, so several files come as separate downloads, with no ZIP.
-- **A link that says it's from an older version** (`/b/<id>`) was made by Dropgate 3. A Dropgate 4 server can't open it: the sender needs to update and send the files again.
+- **A link that says it's from an older version** was made by Dropgate 3: a bundle's (`/b/<id>`), or a single file's whose key after the `#` is 44 characters ending in `=`. A Dropgate 4 server can't open it: the sender needs to update and send the files again.
 
 ## 5) P2P issues (Direct transfer)
 

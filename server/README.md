@@ -240,7 +240,9 @@ Run the server behind a reverse proxy that terminates TLS:
 * [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)
 * [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/)
 
-On plain HTTP, even on `localhost` or `127.0.0.1`, the Web UI encrypts uploads, since browsers count localhost as secure. An upload's download page, `https://<host>/<id>`, one file or several, is served over HTTP and HTTPS alike: the page itself checks whether the browser can decrypt there, so on localhost an encrypted upload downloads, and over plain HTTP from another machine the page says it needs HTTPS. (In 3.x, an encrypted bundle's page needed HTTPS even on localhost; that's fixed in 4.0.) A Dropgate 3 bundle's link, `https://<host>/b/<id>`, answers 410 with a page saying it was made with an older version.
+On plain HTTP, even on `localhost` or `127.0.0.1`, the Web UI encrypts uploads, since browsers count localhost as secure. An upload's download page, `https://<host>/<id>`, one file or several, is served over HTTP and HTTPS alike: the page itself checks whether the browser can decrypt there, so on localhost an encrypted upload downloads, and over plain HTTP from another machine the page says it needs HTTPS. (In 3.x, an encrypted bundle's page needed HTTPS even on localhost; that's fixed in 4.0.) A Dropgate 3 bundle's link, `https://<host>/b/<id>`, answers 410 with a page saying it was made with an older version. A Dropgate 3 single file's link, `https://<host>/<id>#<key>`, names an upload the server doesn't have, so it answers 404, and the page, reading the key's older shape in the browser, says the same.
+
+The Web UI's upload can pause: **Pause Upload** stops it part-way, the card says until when the server keeps it (`UPLOAD_MAX_PAUSE_MINUTES` from the pause, as a local time), and **Resume Upload** carries it on. Nothing resumes by itself: still paused then, the upload ends. With `UPLOAD_MAX_PAUSE_MINUTES=0` there's no Pause. The download pages have no Pause: the browser's own download manager does that.
 
 
 ## Storage and Lifecycle

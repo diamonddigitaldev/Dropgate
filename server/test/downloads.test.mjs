@@ -93,13 +93,16 @@ describe('the download page', () => {
     before(async () => { server = await startServer({ env: BASE }); });
     after(() => server?.stop());
 
-    /** A page's status, and whether it's the download page, the older-version page or the 404 page. */
+    /**
+     * A page's status, and whether it's the download page, the older-version page or the 404 page.
+     * The 404 page also carries the older-version wording, for its script to show for a Dropgate 3 link.
+     */
     const page = async (route) => {
         const res = await fetch(server.baseUrl + route, { redirect: 'manual' });
         const html = await res.text();
         const which = html.includes('src="/js/download.js"') ? 'download'
-            : html.includes('Link From an Older Version') ? 'older version'
-                : html.includes('File Not Found') ? '404' : 'something else';
+            : html.includes('File Not Found') ? '404'
+                : html.includes('Link From an Older Version') ? 'older version' : 'something else';
         return { status: res.status, which };
     };
 
