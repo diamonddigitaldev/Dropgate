@@ -26,8 +26,6 @@ export function createRecorder() {
     const responses = [];
     // Every request that carried a credential, by URL.
     const authorized = [];
-    // The ID of each file of a bundle, as the server gave it when the file was finished.
-    const memberIds = [];
     const note = (value) => { if (typeof value === 'string' && value.length >= 4) secrets.add(value); };
 
     const recordingFetch = async (url, init = {}) => {
@@ -42,15 +40,15 @@ export function createRecorder() {
             for (const [id] of text.matchAll(UUID_RE)) note(id);
             try {
                 const json = JSON.parse(text);
-                note(json.encryptedFilename);
-                note(json.encryptedManifest);
-                if (new URL(String(url)).pathname === '/upload/complete' && json.id) memberIds.push(json.id);
+                // An encrypted upload's sealed list, and a download's lease.
+                note(json.meta);
+                note(json.lease);
             } catch { /* not JSON after all */ }
         }
         return res;
     };
 
-    return { fetch: recordingFetch, secrets, responses, note, authorized, memberIds };
+    return { fetch: recordingFetch, secrets, responses, note, authorized };
 }
 
 /** The value of an operation's completed outcome. Any other outcome fails the test, with its error. */
@@ -76,7 +74,7 @@ export async function createClient(server, recorder) {
         for (const f of [files].flat()) recorder.note(f.name);
         const handle = client.hosted.upload({ files, encrypt, lifetimeMs: 60 * 60 * 1000, maxDownloads: 1 });
         const result = completed(await handle.result);
-        // The link's secret (or a bundle's key), after its #.
+        // The link's secret, after its #.
         const secret = new URL(result.downloadUrl).hash.slice(1) || undefined;
         for (const value of [result.id, result.downloadUrl, result.manageToken, secret]) recorder.note(value);
         return { ...result, secret };
@@ -111,15 +109,20 @@ export async function runFixture(server, { faults = false } = {}) {
     // A pasted link, fragment and all, as someone would paste it.
     await client.links.resolve(encrypted.downloadUrl);
 
-    for (const page of ['/', `/${encrypted.id}`, `/${plain.id}`, `/b/${bundle.id}`, `/p2p/${P2P_CODE}`]) {
+    // A Dropgate 3 bundle's link, too, for its older-version page.
+    for (const page of ['/', `/${encrypted.id}`, `/${plain.id}`, `/${bundle.id}`, `/b/${bundle.id}`, `/p2p/${P2P_CODE}`]) {
         await (await recorder.fetch(server.baseUrl + page)).arrayBuffer();
     }
 
-    // Downloads up to each limit. The bundle counts only as a whole ("Download All as ZIP").
+    // Downloads up to each limit. The bundle's, as its page makes them: a file,
+    // then all of them as a ZIP, under one lease, which counts once as it closes.
     const sink = () => ({ write: () => {}, close: () => {} });
     completed(await client.hosted.download({ id: encrypted.id, secret: encrypted.secret, sink: sink() }).result);
     completed(await client.hosted.download({ id: plain.id, sink: sink() }).result);
-    completed(await client.hosted.download({ bundleId: bundle.id, keyB64: bundle.secret, asZip: true, sink: sink() }).result);
+    const page = await client.hosted.open({ id: bundle.id, secret: bundle.secret });
+    completed(await page.download({ files: [1], sink: sink() }).result);
+    completed(await page.download({ asZip: true, sink: sink() }).result);
+    await page.close();
 
     if (faults) {
         await recorder.fetch(`${server.baseUrl}/api/resolve`, {
@@ -140,6 +143,6 @@ export async function runFixture(server, { faults = false } = {}) {
 
     return {
         secrets: recorder.secrets, responses: recorder.responses, uploads: { encrypted, plain, bundle }, fetch: recorder.fetch,
-        credentialRequests, authorized: recorder.authorized, memberIds: recorder.memberIds,
+        credentialRequests, authorized: recorder.authorized,
     };
 }

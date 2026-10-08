@@ -156,8 +156,10 @@ test.describe('on a server with HTTPS', () => {
         secrets.addLink(link);
         expect(notifications.map((n) => n.body), "the notifications' bodies").toEqual(expect.arrayContaining(['Preparing 3 files…', 'Uploading 3 files…']));
         expect(app.eventsOf('window'), 'windows the app opened').toHaveLength(1);
-        expect(uploadsStarted(server).map(({ fileCount, isEncrypted }) => ({ fileCount, isEncrypted })),
-            'the uploads the server was asked to start').toEqual([{ fileCount: 3, isEncrypted: true }]);
+        // One encrypted upload of them all, which tells the server nothing of how many files it holds.
+        expect(uploadsStarted(server).map((body) => Object.keys(body).sort()), 'the uploads the server was asked to start')
+            .toEqual([['encrypted', 'header', 'lifetimeMs', 'manageTokenHash', 'maxDownloads', 'meta', 'size']]);
+        expect(uploadsStarted(server)[0].encrypted).toBe(true);
 
         await receiveBundle(page, desktop, link, files);
     });
@@ -176,8 +178,10 @@ test.describe('on a server with HTTPS', () => {
         const { link } = expectLinkCopied(app, shared);
         await expect(window.locator('#download-link'), 'the link the open app shows').toHaveValue(link);
         secrets.addLink(link);
-        expect(uploadsStarted(server).map(({ fileCount, isEncrypted }) => ({ fileCount, isEncrypted })),
-            'the uploads the server was asked to start').toEqual([{ fileCount: 2, isEncrypted: true }]);
+        // One encrypted upload of them all, which tells the server nothing of how many files it holds.
+        expect(uploadsStarted(server).map((body) => Object.keys(body).sort()), 'the uploads the server was asked to start')
+            .toEqual([['encrypted', 'header', 'lifetimeMs', 'manageTokenHash', 'maxDownloads', 'meta', 'size']]);
+        expect(uploadsStarted(server)[0].encrypted).toBe(true);
 
         await receiveBundle(page, desktop, link, files);
     });

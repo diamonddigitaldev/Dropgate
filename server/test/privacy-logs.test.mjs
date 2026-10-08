@@ -4,7 +4,7 @@ import { before, describe, test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { startServer, waitFor } from './helpers/harness.mjs';
 import { runFixture } from './helpers/fixture.mjs';
-import { PAST_SESSION_EXPIRY_MS, initUpload, postJson, sendChunk } from './helpers/uploads.mjs';
+import { PAST_SESSION_EXPIRY_MS, initUpload, postJson, sendChunk, uploadV3Bundle } from './helpers/uploads.mjs';
 import { QUIET_MS, SMALL_CHUNKS, plainObject, fileBytes, runDownloads, runUploads, sendChunks, startUpload } from './helpers/dgup4.mjs';
 
 // Each run does Dropgate 3's transfers and Dropgate 4's uploads: within the rate limit, which stays on.
@@ -32,7 +32,6 @@ const KNOWN_EVENTS = [
     String.raw`Sealed bundle manifest deleted \(\d+\/\d+ downloads\)\. Member files will expire independently\.`,
     String.raw`Bundle downloaded and deleted \(\d+\/\d+ downloads\)\. ${CAPACITY}`,
     String.raw`Bundle downloaded \(\d+\/(\d+|unlimited) downloads\)\.`,
-    String.raw`Blocked access to an encrypted bundle (over an insecure connection \(HTTP\)|because upload E2EE is disabled)\.`,
     String.raw`Upload rejected due to insufficient storage\. Current usage: \d+\.\d{2} GB, Reserved: \d+\.\d{2} GB, Requested: \d+\.\d{2} GB\.`,
     String.raw`Upload incomplete: \d+\/\d+ chunks\.`,
     String.raw`Upload size mismatch\. Expected: \d+, Actual: \d+`,
@@ -130,6 +129,8 @@ describe('at every log level, with a malformed request and a missing stored file
 
 describe('what DEBUG logs', () => {
     let messages = [];
+    // What Dropgate 4's transfers logged, a bundle's included: everything before Dropgate 3's.
+    let v4Messages = [];
 
     before(async () => {
         const server = await startServer({
@@ -148,7 +149,11 @@ describe('what DEBUG logs', () => {
             await sendChunks(server, await startUpload(server, quiet), quiet, 0, 1);
             await server.advanceClock(QUIET_MS + 1_000);
             await waitFor(() => server.output.stdout.includes('Upload ended at its deadline.'), { what: 'the quiet upload to end' });
+            await sleep(300);
+            v4Messages = linesOf(server.since(mark)).map((l) => l.match(OWN_LINE)?.[2] ?? `(not a log line) ${l}`);
 
+            // A Dropgate 3 bundle, on Dropgate 3's routes, which stay until they're deleted.
+            await uploadV3Bundle(server, { encrypted: true, sealed: true });
             // A cancelled upload, and an abandoned one for the zombie sweep.
             const cancelled = await initUpload(server, 1000, 2);
             await sendChunk(server, cancelled.uploadId, 0, new Uint8Array(500).fill(1));
@@ -186,7 +191,13 @@ describe('what DEBUG logs', () => {
         }
     });
 
-    test("no message gives a bundle's file count", {
+    test("no message about Dropgate 4's uploads gives how many files one has", () => {
+        assert.ok(v4Messages.some((m) => /^Upload started\./.test(m)), "Dropgate 4's uploads logged");
+        const counted = v4Messages.filter((m) => FILE_COUNT.test(m) || /\b\d+ files?\b/.test(m));
+        assert.deepEqual(counted, []);
+    });
+
+    test("no message gives a Dropgate 3 bundle's file count", {
         expectFailure: {
             label: 'known issue until the v4 server rewrite: bundle messages include the file count',
             match: /file count/,

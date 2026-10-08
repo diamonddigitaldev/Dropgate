@@ -6,31 +6,27 @@ import { join } from 'node:path';
 import { DropgateClient, DropgateError, sources } from '../src/index.js';
 import type { DownloadOutcome, DownloadSink, DownloadSnapshot, FileSource, Outcome, UploadHandle, UploadSnapshot } from '../src/index.js';
 import { newOperationId } from '../src/operation.js';
-import { cryptoProvider, keyToBase64 } from '../src/crypto/index.js';
-import { getDefaultBase64 } from '../src/adapters/defaults.js';
-import { createObject } from '../src/object/index.js';
+import { cryptoProvider } from '../src/crypto/index.js';
+import { createObject, ObjectLayout } from '../src/object/index.js';
 import { CHUNK_SIZE, MANAGE_TOKEN, MANAGE_TOKEN_HASH, fakeV4 } from './helpers/fake-v4.js';
 import { readZip } from './helpers/zip-reader.js';
 
 const provider = cryptoProvider();
-const base64 = getDefaultBase64();
 
 // DropgateClient against a fake server, through its `fetchFn` option: no
-// network. One file is a Dropgate 4 upload; several are a bundle, which is
-// still sent and fetched on version 3's routes. The real server is in
-// hosted.test.ts.
+// network. One file or several, an upload is one Dropgate 4 object. The real
+// server is in hosted.test.ts.
 
 const BASE_URL = 'https://files.example';
 const FILE_ID = '0b7d4c52-5f0e-4d8e-9a57-3c1f2e6b8a90';
+// A Dropgate 3 bundle's ID, as its /b/ link has it.
 const BUNDLE_ID = '6a1e9f3b-2c4d-4b7a-8e5f-9d0c1b2a3e4f';
 const SECOND_FILE_ID = '9c3b2a1d-7e6f-4a5b-8c9d-0e1f2a3b4c5d';
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 // A link's secret, as it appears after the # in an encrypted link: 32 bytes, URL-safe base64.
 const LINK_SECRET = 'CPuytR72dDo2WhXGdB6x6aXlPcJu7Ec0tYvcUn5GL0k';
-// A version 3 link's key (standard base64, 44 characters), as a bundle's link still has.
+// A version 3 link's key (standard base64, 44 characters), as a Dropgate 3 bundle's link had.
 const LINK_KEY = 'q3Rk8vXo2LmN5pT7wYc9ZbHd4sFj6gKa1eUi0rQnVxM=';
-// The bytes of a bundle's member, as the fake server's version 3 routes give them.
-const MEMBER_BYTES = 4;
 // How a client reaches the fake server, on https://: every snapshot, result and error carries it.
 const transport = { secure: true };
 
@@ -43,6 +39,7 @@ const META = `GET /api/v4/objects/${FILE_ID}`;
 const LEASE = `POST /api/v4/objects/${FILE_ID}/leases`;
 const CONTENT = `GET /api/v4/objects/${FILE_ID}/content`;
 const RELEASE = 'DELETE /api/v4/lease';
+const RENEW = 'POST /api/v4/lease/renew';
 
 interface RecordedRequest {
   method: string;
@@ -50,13 +47,14 @@ interface RecordedRequest {
   headers: string;
   body: string;
   credentials: RequestCredentials | undefined;
+  keepalive: boolean | undefined;
 }
 
 /**
  * A fake Dropgate server behind `fetchFn`. It records every request, answers
  * Dropgate 4's routes as a server would (`v4`), with an unencrypted
  * `notes.txt` of CHUNK_SIZE bytes stored as FILE_ID, and every upload
- * finished stored there too, and answers version 3's bundle routes. `onChunk`
+ * finished stored there too. `onChunk`
  * runs while a chunk request is in flight, before the server answers it.
  */
 function fakeServer({ chunkSize = CHUNK_SIZE, maxSizeMB = 0 }: { chunkSize?: number; maxSizeMB?: number } = {}) {
@@ -82,6 +80,7 @@ function fakeServer({ chunkSize = CHUNK_SIZE, maxSizeMB = 0 }: { chunkSize?: num
       headers: JSON.stringify(headers),
       body: typeof init.body === 'string' ? init.body : '',
       credentials: init.credentials,
+      keepalive: init.keepalive,
     });
 
     // Answer on a later turn of the event loop, like a real network.
@@ -89,8 +88,7 @@ function fakeServer({ chunkSize = CHUNK_SIZE, maxSizeMB = 0 }: { chunkSize?: num
 
     const path = new URL(url).pathname;
     const route = `${method} ${path.replace(/\/chunks\/\d+$/, '/chunks/:index')}`;
-    const chunkIndex = route === CHUNK ? Number(path.split('/').pop())
-      : route === 'POST /upload/chunk' ? Number(headers['X-Chunk-Index']) : null;
+    const chunkIndex = route === CHUNK ? Number(path.split('/').pop()) : null;
     if (chunkIndex !== null) {
       chunkIndexes.push(chunkIndex);
       if (init.body instanceof Blob) chunkBodies.push(new Uint8Array(await init.body.arrayBuffer()));
@@ -114,22 +112,6 @@ function fakeServer({ chunkSize = CHUNK_SIZE, maxSizeMB = 0 }: { chunkSize?: num
             p2p: { enabled: true },
           },
         });
-      case 'POST /upload/chunk':
-        return json(200, {});
-      case 'POST /upload/complete':
-        return json(200, { id: FILE_ID });
-      case 'POST /upload/cancel':
-        return json(200, {});
-      case `GET /api/file/${FILE_ID}`:
-        return new Response(new Uint8Array(MEMBER_BYTES));
-      case `GET /api/bundle/${BUNDLE_ID}/meta`:
-        return json(200, { isEncrypted: false, files: [{ fileId: FILE_ID, sizeBytes: MEMBER_BYTES, filename: 'notes.txt' }] });
-      case `POST /api/bundle/${BUNDLE_ID}/downloaded`:
-        return json(200, {});
-      case 'POST /upload/init-bundle':
-        return json(200, { bundleUploadId: 'bundle-1', fileUploadIds: ['upload-1', 'upload-2'] });
-      case 'POST /upload/complete-bundle':
-        return json(200, { bundleId: BUNDLE_ID });
       default:
         return (await v4.handle(method, path, init)) ?? json(404, { error: 'Not found.' });
     }
@@ -142,6 +124,10 @@ function fakeServer({ chunkSize = CHUNK_SIZE, maxSizeMB = 0 }: { chunkSize?: num
     chunkBodies,
     v4,
     paths: () => requests.map((r) => `${r.method} ${new URL(r.url).pathname}`),
+    /** The Range header of each content request, or `whole` for one with none. */
+    ranges: () => requests
+      .filter((r) => `${r.method} ${new URL(r.url).pathname}` === CONTENT)
+      .map((r) => (JSON.parse(r.headers) as Record<string, string>).Range ?? 'whole'),
     /** What a request to `route` sent in a header. */
     headerOf: (route: string, name: string) => requests
       .filter((r) => `${r.method} ${new URL(r.url).pathname}` === route)
@@ -328,14 +314,17 @@ describe('DropgateClient', () => {
     await client.server.connect();
     await client.links.resolve(`${BASE_URL}/${FILE_ID}#${LINK_SECRET}`);
     await client.hosted.metadata({ id: FILE_ID });
-    await client.hosted.metadata({ bundleId: BUNDLE_ID });
     const completed = [
       await client.hosted.upload({ files: file('one.txt'), lifetimeMs: 60_000, encrypt: false }).result,
       await client.hosted.upload({ files: [file('one.txt'), file('two.txt')], lifetimeMs: 60_000, encrypt: false }).result,
-      await client.hosted.download({ id: FILE_ID, sink: nullSink() }).result,
-      await client.hosted.download({ bundleId: BUNDLE_ID, asZip: true, sink: nullSink() }).result,
+      await client.hosted.download({ id: FILE_ID, sink: () => nullSink() }).result,
+      await client.hosted.download({ id: FILE_ID, asZip: true, sink: nullSink() }).result,
+      await client.hosted.download({ id: FILE_ID, files: [1], sink: nullSink() }).result,
     ];
-    expect(completed.map((outcome) => outcome.status)).toEqual(['completed', 'completed', 'completed', 'completed']);
+    expect(completed.map((outcome) => outcome.status)).toEqual(['completed', 'completed', 'completed', 'completed', 'completed']);
+    const opened = await client.hosted.open({ id: FILE_ID });
+    expect((await opened.download({ files: [0], sink: nullSink() }).result).status).toBe('completed');
+    await opened.close();
     const cancelled = client.hosted.upload({ files: file('three.txt'), lifetimeMs: 60_000, encrypt: false, retry: { retries: 0 } });
     server.onChunk = () => cancelled.cancel();
     expect((await cancelled.result).status).toBe('cancelled');
@@ -344,10 +333,8 @@ describe('DropgateClient', () => {
 
     const paths = new Set(server.paths());
     for (const path of [
-      'GET /api/info', META, `GET /api/bundle/${BUNDLE_ID}/meta`,
-      START, 'PUT /api/v4/upload/chunks/0', FINISH, LEASE, CONTENT, RELEASE, CANCEL,
-      'POST /upload/init-bundle', 'POST /upload/chunk', 'POST /upload/complete',
-      'POST /upload/complete-bundle', `GET /api/file/${FILE_ID}`, `POST /api/bundle/${BUNDLE_ID}/downloaded`,
+      'GET /api/info', META, START, 'PUT /api/v4/upload/chunks/0', 'PUT /api/v4/upload/chunks/1',
+      FINISH, LEASE, CONTENT, RELEASE, CANCEL,
     ]) {
       expect(paths.has(path), `the test should make ${path}`).toBe(true);
     }
@@ -403,25 +390,25 @@ describe('Outcomes', () => {
     const server = fakeServer();
     const client = createClient(server.fetchFn);
     server.answer(CONTENT, endlessBody);
-    server.answer('POST /upload/chunk', noAnswer);
+    server.answer(CHUNK, noAnswer);
 
     const settled: string[] = [];
     const download = client.hosted.download({ id: FILE_ID, sink: nullSink() }).result.then((o) => { settled.push('download'); return o; });
     const handle = client.hosted.upload({ files: [fileNamed('one.txt'), fileNamed('two.txt')], lifetimeMs: 60_000, encrypt: false });
     const upload = handle.result.then((o) => { settled.push('upload'); return o; });
-    await expect.poll(() => server.paths()).toEqual(expect.arrayContaining([CONTENT, 'POST /upload/chunk']));
+    await expect.poll(() => server.paths()).toEqual(expect.arrayContaining([CONTENT, 'PUT /api/v4/upload/chunks/0']));
 
     client.operations.cancelAll();
     const byClient = { status: 'cancelled', cancellation: { by: 'parent', source: 'client' }, transport };
     expect(await download).toEqual(byClient);
     expect(await upload).toEqual(byClient);
     expect(settled.sort()).toEqual(['download', 'upload']);
-    await expect.poll(() => server.requests.filter((r) => r.url.endsWith('/upload/cancel')).map((r) => JSON.parse(r.body).uploadId))
-      .toEqual(['upload-1', 'upload-2']);
+    // One upload of two files, so one cancel.
+    await expect.poll(() => server.headerOf(CANCEL, 'Dropgate-Upload')).toEqual(['upload-1']);
 
     // A cancel after the fact reaches nothing, and new operations run as normal.
     client.operations.cancelAll();
-    server.answer('POST /upload/chunk', null);
+    server.answer(CHUNK, null);
     server.answer(CONTENT, null);
     const next = client.hosted.upload({ files: fileNamed('three.txt'), lifetimeMs: 60_000, encrypt: false });
     expect((await next.result).status).toBe('completed');
@@ -504,7 +491,6 @@ describe('Outcomes', () => {
       .toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT', message: 'File at index 0 is missing or invalid.' }));
     expect(() => client.hosted.download({} as never)).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
     expect(() => client.hosted.download({ id: FILE_ID } as never)).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
-    expect(() => client.hosted.download({ id: FILE_ID, bundleId: BUNDLE_ID, sink: nullSink() } as never)).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
     expect(server.requests).toEqual([]);
   });
 
@@ -520,13 +506,8 @@ describe('Outcomes', () => {
 
     const gone = fakeServer();
     await expect(createClient(gone.fetchFn).hosted.metadata({ id: SECOND_FILE_ID })).rejects.toMatchObject({ code: 'NOT_FOUND', message: 'The server has no such upload.' });
-    gone.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => gone.json(404, { error: 'Bundle not found.' }));
-    await expect(createClient(gone.fetchFn).hosted.metadata({ bundleId: BUNDLE_ID })).rejects.toMatchObject({ code: 'NOT_FOUND', message: 'Bundle not found.' });
-
-    const sealed = fakeServer();
-    sealed.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => sealed.json(200, { isEncrypted: true, sealed: true, encryptedManifest: 'AAAA' }));
-    await expect(createClient(sealed.fetchFn).hosted.metadata({ bundleId: BUNDLE_ID })).rejects.toMatchObject({ code: 'KEY_REQUIRED' });
-    await expect(createClient(sealed.fetchFn).hosted.metadata({ bundleId: BUNDLE_ID, keyB64: LINK_KEY })).rejects.toMatchObject({ code: 'DECRYPT_FAILED' });
+    await expect(createClient(gone.fetchFn).hosted.open({ id: SECOND_FILE_ID })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(createClient(gone.fetchFn).hosted.open({} as never)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
 
   // Hard requirement 8: what a failed or cancelled operation reports is safe to
@@ -548,8 +529,9 @@ describe('Outcomes', () => {
     const failingUpload = createClient(failing.fetchFn).hosted.upload({ files: fileNamed(name, 2), lifetimeMs: 60_000, encrypt: true, retry: { retries: 0 } });
     failingUpload.subscribe((snapshot) => snapshots.push(snapshot));
     reported.push(await failingUpload.result);
-    failing.answer('POST /upload/complete', () => failing.json(500, { error: 'Server error during file validation.' }));
-    const failingBundle = createClient(failing.fetchFn).hosted.upload({ files: [fileNamed(name), fileNamed(`Copy of ${name}`)], lifetimeMs: 60_000, encrypt: true });
+    const failingBundle = createClient(failing.fetchFn).hosted.upload({
+      files: [fileNamed(name), fileNamed(`Copy of ${name}`)], lifetimeMs: 60_000, encrypt: true, retry: { retries: 0 },
+    });
     failingBundle.subscribe((snapshot) => snapshots.push(snapshot));
     reported.push(await failingBundle.result);
     const cancelling = fakeServer();
@@ -573,8 +555,8 @@ describe('Outcomes', () => {
       const shown = [JSON.stringify(outcome), (outcome as { error?: Error }).error?.message ?? ''].join('\n');
       expect(secrets.filter((piece) => shown.includes(piece)), shown).toEqual([]);
     }
-    // Nor does any snapshot an upload gives along the way, the bundle's per-file steps included.
-    expect(snapshots.some((snapshot) => snapshot.phase === 'file-start')).toBe(true);
+    // Nor does any snapshot an upload gives along the way, those saying which of several files it's on included.
+    expect(snapshots.some((snapshot) => snapshot.fileIndex === 1)).toBe(true);
     for (const snapshot of snapshots) {
       const shown = JSON.stringify(snapshot);
       expect(secrets.filter((piece) => shown.includes(piece)), shown).toEqual([]);
@@ -640,16 +622,15 @@ describe('The upload handle', () => {
     // The steps in order, each status once it's reached.
     const steps = seen.map((snapshot) => `${snapshot.status}:${snapshot.phase}`).filter((step, i, all) => step !== all[i - 1]);
     expect(steps).toEqual([
-      'initializing:server-compat', 'initializing:init', 'uploading:init',
-      'uploading:file-start', 'uploading:chunk', 'uploading:file-complete',
-      'uploading:file-start', 'uploading:chunk', 'uploading:file-complete',
+      'initializing:server-compat', 'initializing:init', 'uploading:init', 'uploading:chunk',
       'completing:complete', 'completed:done',
     ]);
-    // Bytes only ever go up, and each file's chunks are counted on the bundle's whole.
+    // Bytes only ever go up, the files' chunks counted as one upload's, each saying which file it starts in.
     const bytes = seen.map((snapshot) => snapshot.processedBytes);
     expect(bytes).toEqual([...bytes].sort((x, y) => x - y));
     expect(seen.filter((snapshot) => snapshot.phase === 'chunk').map((s) => [s.fileIndex, s.chunkIndex, s.processedBytes]))
-      .toEqual([[0, 0, 0], [0, 1, CHUNK_SIZE], [1, 0, CHUNK_SIZE * 2]]);
+      .toEqual([[0, 0, 0], [0, 1, CHUNK_SIZE], [1, 2, CHUNK_SIZE * 2]]);
+    expect(seen.filter((snapshot) => snapshot.status === 'uploading').every((s) => s.totalFiles === 2)).toBe(true);
 
     // Once it has ended, subscribe() adds nothing, and nothing more is given.
     const late: UploadSnapshot[] = [];
@@ -1054,20 +1035,15 @@ describe('Hosted download into a sink', () => {
     }
   });
 
-  it('a bundle as separate files asks for a sink for each, told its name and size; as a ZIP it writes one archive to one sink', async () => {
+  it('several files apart ask for a sink for each, told its name and size; as a ZIP they write one archive to one sink', async () => {
     const log: string[] = [];
     const server = fakeServer();
-    server.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => server.json(200, {
-      isEncrypted: false,
-      files: [{ fileId: FILE_ID, sizeBytes: 4, filename: 'a.txt' }, { fileId: SECOND_FILE_ID, sizeBytes: 2, filename: 'b.txt' }],
-    }));
-    server.answer(`GET /api/file/${SECOND_FILE_ID}`, () => new Response(new Uint8Array([7, 8])));
-    server.answer(`POST /api/bundle/${BUNDLE_ID}/downloaded`, () => { log.push('server told'); return server.json(200, {}); });
+    server.v4.store(FILE_ID, { encrypted: false, size: 6, bytes: new Uint8Array([1, 2, 3, 4, 7, 8]), files: [{ name: 'a.txt', size: 4 }, { name: 'b.txt', size: 2 }] });
     const client = createClient(server.fetchFn);
 
     const asked: unknown[] = [];
     const separate = await client.hosted.download({
-      bundleId: BUNDLE_ID,
+      id: FILE_ID,
       sink: (file) => { asked.push(file); return recordingSink(log, file.name).sink; },
     }).result;
     expect(asked).toEqual([{ name: 'a.txt', size: 4, index: 0 }, { name: 'b.txt', size: 2, index: 1 }]);
@@ -1076,10 +1052,10 @@ describe('Hosted download into a sink', () => {
 
     log.length = 0;
     const archive = recordingSink(log, 'zip');
-    const zipped = await client.hosted.download({ bundleId: BUNDLE_ID, asZip: true, sink: archive.sink }).result;
+    const zipped = await client.hosted.download({ id: FILE_ID, asZip: true, sink: archive.sink }).result;
     expect(zipped.status).toBe('completed');
     expect([...archive.bytes().slice(0, 2)], 'a ZIP archive starts PK').toEqual([0x50, 0x4b]);
-    expect(log.filter((entry) => !entry.startsWith('zip write')), 'the server is told only once the archive is saved').toEqual(['zip close', 'server told']);
+    expect(log.filter((entry) => !entry.startsWith('zip write'))).toEqual(['zip close']);
   });
 
   it('an upload of several files gives each to its own sink, or all to one ZIP, under one lease', async () => {
@@ -1109,25 +1085,27 @@ describe('Hosted download into a sink', () => {
     expect(codeOf(await client.hosted.download({ id: FILE_ID, sink: nullSink() }).result)).toBe('INVALID_ARGUMENT');
   });
 
-  it("a ZIP that couldn't be saved is never reported to the server as downloaded", async () => {
+  it("a ZIP that couldn't be saved fails OUTPUT_WRITE_FAILED, and its lease is still released", async () => {
     const server = fakeServer();
+    server.v4.store(FILE_ID, { encrypted: false, size: 6, bytes: new Uint8Array(6), files: [{ name: 'a.txt', size: 4 }, { name: 'b.txt', size: 2 }] });
     const archive = recordingSink();
     archive.sink.close = () => Promise.reject(new Error('Disk full.'));
-    const outcome = await createClient(server.fetchFn).hosted.download({ bundleId: BUNDLE_ID, asZip: true, sink: archive.sink }).result;
+    const outcome = await createClient(server.fetchFn).hosted.download({ id: FILE_ID, asZip: true, sink: archive.sink }).result;
     expect(codeOf(outcome)).toBe('OUTPUT_WRITE_FAILED');
-    expect(server.paths()).not.toContain(`POST /api/bundle/${BUNDLE_ID}/downloaded`);
+    expect(server.paths()).toContain(RELEASE);
+    expect(server.v4.leases.size).toBe(0);
   });
 
-  it("a ZIP member whose bytes don't come to the size the server gave fails INTEGRITY_FAILED, and the archive is never finished", async () => {
-    for (const sent of [MEMBER_BYTES + 1, MEMBER_BYTES - 1]) {
+  it("a ZIP whose bytes don't come to the sizes the server gave fails INTEGRITY_FAILED, and the archive is never finished", async () => {
+    for (const sent of [7, 5]) {
       const server = fakeServer();
-      server.answer(`GET /api/file/${FILE_ID}`, () => new Response(new Uint8Array(sent)));
+      server.v4.store(FILE_ID, { encrypted: false, size: 6, bytes: new Uint8Array(6), files: [{ name: 'a.txt', size: 4 }, { name: 'b.txt', size: 2 }] });
+      server.answer(CONTENT, () => new Response(new Uint8Array(sent), { status: 200 }));
       const archive = recordingSink();
-      const outcome = await createClient(server.fetchFn).hosted.download({ bundleId: BUNDLE_ID, asZip: true, sink: archive.sink }).result;
-      expect(codeOf(outcome), `${sent} bytes for a ${MEMBER_BYTES}-byte member`).toBe('INTEGRITY_FAILED');
+      const outcome = await createClient(server.fetchFn).hosted.download({ id: FILE_ID, asZip: true, sink: archive.sink }).result;
+      expect(codeOf(outcome), `${sent} bytes for 6`).toBe('INTEGRITY_FAILED');
       expect(archive.log.at(-1)).toBe('sink abort INTEGRITY_FAILED');
       expect(archive.log).not.toContain('sink close');
-      expect(server.paths()).not.toContain(`POST /api/bundle/${BUNDLE_ID}/downloaded`);
     }
   });
 
@@ -1138,8 +1116,8 @@ describe('Hosted download into a sink', () => {
       { id: FILE_ID },
       { id: FILE_ID, sink: { write: () => {} } },
       { id: FILE_ID, asZip: true, sink: () => nullSink() },
-      { bundleId: BUNDLE_ID, sink: nullSink() },
-      { bundleId: BUNDLE_ID, asZip: true, sink: () => nullSink() },
+      { id: FILE_ID, files: [0, 1], asZip: true, sink: () => nullSink() },
+      { sink: nullSink() },
     ]) {
       expect(() => client.hosted.download(opts as never), JSON.stringify(opts)).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
     }
@@ -1273,21 +1251,19 @@ describe('client.hosted.metadata()', () => {
     expect(server.paths().filter((path) => path.endsWith('/leases')), 'leases taken').toEqual([]);
   });
 
-  it("reads a sealed bundle's files with its key", async () => {
-    const files = [
-      { fileId: FILE_ID, name: 'tax return.xlsx', sizeBytes: 9 },
-      { fileId: SECOND_FILE_ID, name: 'a.txt', sizeBytes: 3 },
-    ];
-    const key = await provider.generateKey();
-    const manifest = await provider.encrypt(key, new TextEncoder().encode(JSON.stringify({ files })));
-    const encryptedManifest = Buffer.from(manifest).toString('base64');
+  it("reads an encrypted upload of several files from its sealed list, which only the secret opens: the server is never told how many", async () => {
+    const sealed = await sealedFiles([{ name: 'tax return.xlsx', bytes: varied(9, 1) }, { name: 'a.txt', bytes: varied(3, 2) }]);
     const server = fakeServer();
-    server.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => server.json(200, { isEncrypted: true, sealed: true, encryptedManifest }));
-    const meta = await createClient(server.fetchFn).hosted.metadata({ bundleId: BUNDLE_ID, keyB64: await keyToBase64(provider, key, base64) });
-    expect(meta).toEqual({ kind: 'bundle', bundleId: BUNDLE_ID, isEncrypted: true, sealed: true, files, fileCount: 2, totalSizeBytes: 12, transport });
+    server.v4.store(FILE_ID, sealed.stored);
+    const meta = await createClient(server.fetchFn).hosted.metadata({ id: FILE_ID, secret: sealed.secret });
+    expect(meta).toEqual({
+      kind: 'bundle', id: FILE_ID, encrypted: true, files: [{ name: 'tax return.xlsx', size: 9 }, { name: 'a.txt', size: 3 }], totalSize: 12, transport,
+    });
+    await expect(createClient(server.fetchFn).hosted.metadata({ id: FILE_ID })).rejects.toMatchObject({ code: 'KEY_REQUIRED' });
+    await expect(createClient(server.fetchFn).hosted.metadata({ id: FILE_ID, secret: LINK_SECRET })).rejects.toMatchObject({ code: 'DECRYPT_FAILED' });
   });
 
-  it('needs an upload or a bundle ID, and asks nothing without one, nor about an ID no server makes', async () => {
+  it('needs an upload ID, and asks nothing without one, nor about an ID no server makes', async () => {
     const server = fakeServer();
     await expect(createClient(server.fetchFn).hosted.metadata({} as never)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     expect(server.requests).toEqual([]);
@@ -1329,32 +1305,21 @@ describe('The file name rule and the size rule in the client', () => {
   it('refuses a name received from the server that is structurally invalid, without naming it', async () => {
     const server = fakeServer();
     server.v4.store(FILE_ID, { encrypted: false, size: 4, bytes: new Uint8Array(4), files: [{ name: '../../evil.txt', size: 4 }] });
-    server.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => server.json(200, {
-      isEncrypted: false,
-      files: [{ fileId: FILE_ID, sizeBytes: 4, filename: 'a.txt' }, { fileId: SECOND_FILE_ID, sizeBytes: 4, filename: 'b\u0000.txt' }],
-    }));
+    server.v4.store(SECOND_FILE_ID, { encrypted: false, size: 8, bytes: new Uint8Array(8), files: [{ name: 'a.txt', size: 4 }, { name: 'b\u0000.txt', size: 4 }] });
     const client = createClient(server.fetchFn);
     const error = await client.hosted.metadata({ id: FILE_ID }).catch((err: unknown) => err as DropgateError);
     expect(error).toMatchObject({ code: 'INVALID_FILENAME', origin: 'server' });
     expect(JSON.stringify(error)).not.toContain('evil');
-    await expect(client.hosted.metadata({ bundleId: BUNDLE_ID })).rejects.toMatchObject({ code: 'INVALID_FILENAME', origin: 'server', details: { index: 1 } });
+    await expect(client.hosted.metadata({ id: SECOND_FILE_ID })).rejects.toMatchObject({ code: 'INVALID_FILENAME', origin: 'server', details: { index: 1 } });
     expect(codeOf(await client.hosted.download({ id: FILE_ID, sink: nullSink() }).result)).toBe('INVALID_FILENAME');
   });
 
   it("saves a ZIP's members under their safe names, and tells two the same apart", async () => {
     const server = fakeServer();
-    server.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => server.json(200, {
-      isEncrypted: false,
-      files: [
-        { fileId: FILE_ID, sizeBytes: 4, filename: 'photo‮gnp.exe' },
-        { fileId: SECOND_FILE_ID, sizeBytes: 4, filename: 'Notes.txt' },
-        { fileId: FILE_ID, sizeBytes: 4, filename: 'notes.txt' },
-        { fileId: SECOND_FILE_ID, sizeBytes: 4, filename: 'CON.txt' },
-      ],
-    }));
-    server.answer(`GET /api/file/${SECOND_FILE_ID}`, () => new Response(new Uint8Array(4)));
+    const names = ['photo‮gnp.exe', 'Notes.txt', 'notes.txt', 'CON.txt'];
+    server.v4.store(FILE_ID, { encrypted: false, size: 16, bytes: new Uint8Array(16), files: names.map((name) => ({ name, size: 4 })) });
     const archive = recordingSink();
-    const outcome = await createClient(server.fetchFn).hosted.download({ bundleId: BUNDLE_ID, asZip: true, sink: archive.sink }).result;
+    const outcome = await createClient(server.fetchFn).hosted.download({ id: FILE_ID, asZip: true, sink: archive.sink }).result;
     expect(outcome.status).toBe('completed');
     expect(zipMemberNames(archive.bytes())).toEqual(['photo[U+202E]gnp.exe', 'Notes.txt', 'notes (1).txt', '_CON.txt']);
   });
@@ -1373,6 +1338,17 @@ describe('The file name rule and the size rule in the client', () => {
     expect(await run(1_000_001)).toBe('completed');
     expect(await run(MB)).toBe('completed');
     expect(await run(MB + 1)).toBe('FILE_TOO_LARGE');
+  });
+
+  it('checks several files against the limit together, as one upload, before anything is sent', async () => {
+    const MB = 1024 * 1024;
+    for (const encrypt of [false, true]) {
+      const server = fakeServer({ chunkSize: MB, maxSizeMB: 1 });
+      const half = () => new File([new Uint8Array(MB / 2 + 1)], 'half.bin');
+      const outcome = await createClient(server.fetchFn).hosted.upload({ files: [half(), half()], lifetimeMs: 60_000, encrypt }).result;
+      expect(outcome.status === 'failed' && outcome.error, `encrypt: ${encrypt}`).toMatchObject({ code: 'FILE_TOO_LARGE', message: expect.stringMatching(/too large together/) });
+      expect(server.paths().filter((path) => path !== 'GET /api/info')).toEqual([]);
+    }
   });
 });
 
@@ -1403,27 +1379,66 @@ describe('Downloading some of an upload\'s files', () => {
     expect(codeOf(await client.hosted.download({ id: FILE_ID, files: [3], sink: nullSink() }).result), 'a file it doesn\'t have').toBe('INVALID_ARGUMENT');
   });
 
-  it("gives a bundle's files one at a time without telling the server it was downloaded", async () => {
-    const log: string[] = [];
+  it("asks only for the chunks a file is in, by one Range, never a chunk that's only padding, and writes it byte for byte", async () => {
+    // 4 MiB and a byte, so Padme pads past its last chunk with a chunk of padding alone.
+    const contents = [varied(10, 1), varied(4 * 1024 * 1024 - 10 - (CHUNK_SIZE + 5) + 1, 2), varied(CHUNK_SIZE + 5, 3)];
+    const sealed = await sealedFiles(contents.map((bytes, i) => ({ name: `${'abc'[i]}.txt`, bytes })));
+    const layout = ObjectLayout.fromStoredSize(sealed.stored.size, CHUNK_SIZE);
+    const total = contents.reduce((sum, c) => sum + c.length, 0);
+    expect((layout.chunkCount - 1) * CHUNK_SIZE, 'the last chunk is padding alone').toBeGreaterThanOrEqual(total);
     const server = fakeServer();
-    server.answer(`GET /api/bundle/${BUNDLE_ID}/meta`, () => server.json(200, {
-      isEncrypted: false,
-      files: [{ fileId: FILE_ID, sizeBytes: 4, filename: 'a.txt' }, { fileId: SECOND_FILE_ID, sizeBytes: 2, filename: 'b.txt' }],
-    }));
-    server.answer(`GET /api/file/${SECOND_FILE_ID}`, () => new Response(new Uint8Array([7, 8])));
-    server.answer(`POST /api/bundle/${BUNDLE_ID}/downloaded`, () => { log.push('server told'); return server.json(200, {}); });
+    server.v4.store(FILE_ID, sealed.stored);
     const client = createClient(server.fetchFn);
+    // The stored bytes of the chunks holding plaintext [start, end).
+    const chunksOf = (start: number, end: number) => {
+      const { start: from, end: to } = layout.range(Math.floor(start / CHUNK_SIZE), Math.floor((end - 1) / CHUNK_SIZE));
+      return `bytes=${from}-${to - 1}`;
+    };
+    const offsets = [0, 10, 10 + contents[1].length];
 
-    const asked: unknown[] = [];
-    const second = await client.hosted.download({
-      bundleId: BUNDLE_ID, files: [1], sink: (file) => { asked.push(file); return recordingSink(log, file.name).sink; },
-    }).result;
-    expect(second.status === 'completed' && second.value.filenames).toEqual(['b.txt']);
-    expect(asked).toEqual([{ name: 'b.txt', size: 2, index: 1 }]);
-    expect(server.paths()).not.toContain(`GET /api/file/${FILE_ID}`);
-    const partZip = await client.hosted.download({ bundleId: BUNDLE_ID, files: [0], asZip: true, sink: recordingSink(log, 'zip').sink }).result;
-    expect(partZip.status).toBe('completed');
-    expect(log, 'the server is told only of a ZIP of every file').not.toContain('server told');
+    for (let index = 0; index < 3; index++) {
+      const before = server.ranges().length;
+      const one = recordingSink();
+      const outcome = await client.hosted.download({ id: FILE_ID, secret: sealed.secret, files: [index], sink: one.sink }).result;
+      expect(codeOf(outcome), `file ${index}`).toBe('completed');
+      expect(server.ranges().slice(before), `file ${index}'s request`).toEqual([chunksOf(offsets[index], offsets[index] + contents[index].length)]);
+      expect(Buffer.from(one.bytes()).equals(Buffer.from(contents[index])), `file ${index}'s bytes`).toBe(true);
+    }
+    // No chunk of padding alone was asked for.
+    const lastAsked = Math.max(...server.ranges().map((r) => Number(/-(\d+)$/.exec(r)![1])));
+    expect(lastAsked).toBeLessThan(layout.range(layout.chunkCount - 1).start);
+
+    // Two files side by side are one run, one Range.
+    const before = server.ranges().length;
+    const outcome = await client.hosted.download({ id: FILE_ID, secret: sealed.secret, files: [0, 1], asZip: true, sink: recordingSink().sink }).result;
+    expect(codeOf(outcome)).toBe('completed');
+    expect(server.ranges().slice(before)).toEqual([chunksOf(0, offsets[2])]);
+  });
+
+  it("asks only for an unencrypted file's own bytes, and writes them byte for byte", async () => {
+    const contents = [varied(10, 4), varied(CHUNK_SIZE, 5), varied(7, 6)];
+    const server = fakeServer();
+    const bytes = new Uint8Array(Buffer.concat(contents));
+    server.v4.store(FILE_ID, { encrypted: false, size: bytes.length, bytes, files: contents.map((c, i) => ({ name: `${'abc'[i]}.txt`, size: c.length })) });
+    const client = createClient(server.fetchFn);
+    const one = recordingSink();
+    expect(codeOf(await client.hosted.download({ id: FILE_ID, files: [1], sink: one.sink }).result)).toBe('completed');
+    expect(server.ranges()).toEqual([`bytes=10-${10 + CHUNK_SIZE - 1}`]);
+    expect(Buffer.from(one.bytes()).equals(Buffer.from(contents[1]))).toBe(true);
+    // Files not side by side are a Range each.
+    const sinks: Uint8Array[][] = [];
+    expect(codeOf(await client.hosted.download({
+      id: FILE_ID, files: [0, 2], sink: () => { const sink = recordingSink(); sinks.push([]); return sink.sink; },
+    }).result)).toBe('completed');
+    expect(server.ranges().slice(1)).toEqual(['bytes=0-9', `bytes=${10 + CHUNK_SIZE}-`]);
+  });
+
+  it('downloads every file whole, to the last chunk and its padding, when all of them are asked for', async () => {
+    const sealed = await sealedFiles([{ name: 'a.txt', bytes: varied(10, 1) }, { name: 'b.txt', bytes: varied(20, 2) }]);
+    const server = fakeServer();
+    server.v4.store(FILE_ID, sealed.stored);
+    expect(codeOf(await createClient(server.fetchFn).hosted.download({ id: FILE_ID, secret: sealed.secret, files: [1, 0], asZip: true, sink: recordingSink().sink }).result)).toBe('completed');
+    expect(server.ranges()).toEqual(['whole']);
   });
 
   it('refuses a files list that isn\'t indexes, each once, before anything starts', () => {
@@ -1729,7 +1744,7 @@ describe('A download cut off part-way', () => {
     const files = [{ name: 'a.bin', bytes: varied(CHUNK_SIZE + 300, 3) }, { name: 'b.bin', bytes: varied(CHUNK_SIZE * 2 + 7, 4) }];
     const sealed = await sealedFiles(files);
     const stored = CHUNK_SIZE + 16;
-    for (const [what, run] of [
+    for (const [what, run, ranges] of [
       ['a ZIP', async (client: DropgateClient) => {
         const archive = recordingSink();
         const outcome = await client.hosted.download({ id: FILE_ID, secret: sealed.secret, asZip: true, sink: archive.sink, retry: { backoffMs: 1 } }).result;
@@ -1737,19 +1752,20 @@ describe('A download cut off part-way', () => {
         const zip = readZip([{ bytes: archive.bytes() }]);
         expect(zip.entries.map((e) => e.name)).toEqual(['a.bin', 'b.bin']);
         zip.entries.forEach((entry, i) => expect(Buffer.from(zip.bytesOf(entry)).equals(Buffer.from(files[i].bytes)), entry.name).toBe(true));
-      }],
+      }, [undefined, `bytes=${60 + stored}-`, `bytes=${60 + stored * 2}-`]],
       ['the second file', async (client: DropgateClient) => {
         const one = recordingSink();
         const outcome = await client.hosted.download({ id: FILE_ID, secret: sealed.secret, files: [1], sink: () => one.sink, retry: { backoffMs: 1 } }).result;
         expect(outcome.status, 'the second file').toBe('completed');
         expect(Buffer.from(one.bytes()).equals(Buffer.from(files[1].bytes))).toBe(true);
-      }],
+        // Its chunks alone, from the one it starts in; the cut is continued from the next whole chunk after it.
+      }, [`bytes=${60 + stored}-`, `bytes=${60 + stored * 2}-`]],
     ] as const) {
       const server = fakeServer();
       server.v4.store(FILE_ID, sealed.stored);
       cutting(server, [60 + stored + 1, stored * 2 - 3]);
       await run(createClient(server.fetchFn));
-      expect(server.headerOf(CONTENT, 'Range'), what).toEqual([undefined, `bytes=${60 + stored}-`, `bytes=${60 + stored * 2}-`]);
+      expect(server.headerOf(CONTENT, 'Range'), what).toEqual(ranges);
       expect(server.paths().filter((path) => path === LEASE), `${what}: one lease`).toHaveLength(1);
     }
   });
@@ -1851,5 +1867,156 @@ describe('client.hosted.delete()', () => {
     // An ID no server makes is never put in a path.
     await expect(client.hosted.delete({ id: '../uploads', manageToken: MANAGE_TOKEN })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     expect(server.requests).toEqual([]);
+  });
+});
+
+describe('client.hosted.open()', () => {
+  /** An upload of three files, stored as FILE_ID. */
+  async function threeFiles(server: ReturnType<typeof fakeServer>, encrypted: boolean) {
+    const contents = [varied(10, 1), varied(CHUNK_SIZE + 3, 2), varied(20, 3)];
+    const files = contents.map((bytes, i) => ({ name: `${'abc'[i]}.txt`, bytes }));
+    if (encrypted) {
+      const sealed = await sealedFiles(files);
+      server.v4.store(FILE_ID, sealed.stored);
+      return { contents, secret: sealed.secret };
+    }
+    const bytes = new Uint8Array(Buffer.concat(contents));
+    server.v4.store(FILE_ID, { encrypted: false, size: bytes.length, bytes, files: files.map((f) => ({ name: f.name, size: f.bytes.length })) });
+    return { contents, secret: undefined };
+  }
+
+  it('reads the metadata with no lease; every download after shares one lease, taken at the first, and close() releases it, counting once', async () => {
+    for (const encrypted of [false, true]) {
+      const server = fakeServer();
+      const { contents, secret } = await threeFiles(server, encrypted);
+      const client = createClient(server.fetchFn);
+
+      const opened = await client.hosted.open({ id: FILE_ID, secret });
+      expect(opened.metadata).toEqual({
+        kind: 'bundle', id: FILE_ID, encrypted, files: contents.map((bytes, i) => ({ name: `${'abc'[i]}.txt`, size: bytes.length })),
+        totalSize: CHUNK_SIZE + 33, transport,
+      });
+      expect(server.paths().filter((path) => path === LEASE), 'opening takes no lease').toEqual([]);
+
+      // Each file on its own, then all of them as a ZIP.
+      for (let index = 0; index < 3; index++) {
+        const one = recordingSink();
+        expect(codeOf(await opened.download({ files: [index], sink: one.sink }).result)).toBe('completed');
+        expect(Buffer.from(one.bytes()).equals(Buffer.from(contents[index])), `file ${index}`).toBe(true);
+      }
+      const archive = recordingSink();
+      expect(codeOf(await opened.download({ asZip: true, sink: archive.sink }).result)).toBe('completed');
+      expect(readZip([{ bytes: archive.bytes() }]).entries.map((entry) => entry.name)).toEqual(['a.txt', 'b.txt', 'c.txt']);
+
+      const lease = server.headerOf(CONTENT, 'Dropgate-Lease');
+      expect(server.paths().filter((path) => path === LEASE), 'one lease for them all').toHaveLength(1);
+      expect(new Set(lease).size, 'every request under it').toBe(1);
+      expect(server.paths(), 'nothing released while it is open').not.toContain(RELEASE);
+      expect(server.v4.objects.get(FILE_ID)?.downloadCount ?? 0, 'nothing counted while it is open').toBe(0);
+
+      await opened.close();
+      expect(server.paths().filter((path) => path === RELEASE)).toHaveLength(1);
+      expect(server.headerOf(RELEASE, 'Dropgate-Lease')).toEqual([lease[0]]);
+      expect(server.v4.objects.get(FILE_ID)?.downloadCount, 'one download').toBe(1);
+      // Closing again does nothing more.
+      await opened.close();
+      expect(server.paths().filter((path) => path === RELEASE)).toHaveLength(1);
+      // Printed, logged or serialised, it shows nothing of the secret or the lease.
+      expect(JSON.stringify(opened)).toBe('"[DropgateOpenedUpload]"');
+      expect(String(opened)).toBe('[DropgateOpenedUpload]');
+    }
+  });
+
+  it('opened and closed with no download takes no lease and counts nothing', async () => {
+    const server = fakeServer();
+    await threeFiles(server, false);
+    const opened = await createClient(server.fetchFn).hosted.open({ id: FILE_ID });
+    await opened.close();
+    expect(server.paths()).toEqual(['GET /api/info', META]);
+    expect(server.v4.objects.get(FILE_ID)?.downloadCount ?? 0).toBe(0);
+  });
+
+  it('keeps its lease while open, renewing it every 2 minutes: 30 minutes on, it is still held, and still one download', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const server = fakeServer();
+      const { contents } = await threeFiles(server, false);
+      const opened = await createClient(server.fetchFn).hosted.open({ id: FILE_ID });
+      expect(codeOf(await opened.download({ files: [0], sink: recordingSink().sink }).result)).toBe('completed');
+      const [lease] = server.headerOf(CONTENT, 'Dropgate-Lease');
+
+      for (let minute = 0; minute < 30; minute += 2) await vi.advanceTimersByTimeAsync(2 * 60_000);
+      await expect.poll(() => server.v4.renewals.length).toBe(15);
+      expect(new Set(server.v4.renewals)).toEqual(new Set([lease]));
+
+      const last = recordingSink();
+      expect(codeOf(await opened.download({ files: [2], sink: last.sink }).result)).toBe('completed');
+      expect(Buffer.from(last.bytes()).equals(Buffer.from(contents[2]))).toBe(true);
+      expect(server.paths().filter((path) => path === LEASE), 'the same lease, 30 minutes on').toHaveLength(1);
+
+      await opened.close();
+      // Closed, it renews nothing more.
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(server.v4.renewals).toHaveLength(15);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes a new lease for its next download once the server says its lease has gone', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const server = fakeServer();
+      await threeFiles(server, false);
+      const opened = await createClient(server.fetchFn).hosted.open({ id: FILE_ID });
+      expect(codeOf(await opened.download({ files: [0], sink: recordingSink().sink }).result)).toBe('completed');
+      // The server forgets it, as it would one that ran out while nothing could renew it.
+      server.v4.leases.clear();
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+      await expect.poll(() => server.paths().filter((path) => path === RENEW)).toHaveLength(1);
+      // Its answer, a 404, comes on a later turn, as the fake server's answers do.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(codeOf(await opened.download({ files: [1], sink: recordingSink().sink }).result)).toBe('completed');
+      expect(server.paths().filter((path) => path === LEASE)).toHaveLength(2);
+      await opened.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('downloads started together share the one lease', async () => {
+    const server = fakeServer();
+    const { secret } = await threeFiles(server, true);
+    const opened = await createClient(server.fetchFn).hosted.open({ id: FILE_ID, secret });
+    const outcomes = await Promise.all([0, 1, 2].map((index) => opened.download({ files: [index], sink: recordingSink().sink }).result));
+    expect(outcomes.map(codeOf)).toEqual(['completed', 'completed', 'completed']);
+    expect(server.paths().filter((path) => path === LEASE)).toHaveLength(1);
+    await opened.close();
+  });
+
+  it('close() cancels its downloads still running, then releases the lease; after it, a download is refused', async () => {
+    const server = fakeServer();
+    await threeFiles(server, false);
+    server.answer(CONTENT, endlessBody);
+    const opened = await createClient(server.fetchFn).hosted.open({ id: FILE_ID });
+    const sink = recordingSink();
+    const running = opened.download({ asZip: true, sink: sink.sink });
+    await expect.poll(() => server.paths()).toContain(CONTENT);
+
+    await opened.close();
+    expect(await running.result).toEqual({ status: 'cancelled', cancellation: { by: 'self', source: 'hosted.download' }, transport });
+    expect(sink.log.at(-1)).toBe('sink abort OPERATION_CANCELLED');
+    expect(server.paths().at(-1)).toBe(RELEASE);
+    // Kept alive, so it's sent even as a page closes.
+    expect(server.requests.at(-1)!.keepalive).toBe(true);
+    expect(() => opened.download({ sink: nullSink() })).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT', transport }));
+  });
+
+  it('needs the secret of an encrypted upload, as metadata() does, and asks for nothing more without it', async () => {
+    const server = fakeServer();
+    await threeFiles(server, true);
+    await expect(createClient(server.fetchFn).hosted.open({ id: FILE_ID })).rejects.toMatchObject({ code: 'KEY_REQUIRED' });
+    await expect(createClient(server.fetchFn).hosted.open({ id: FILE_ID, secret: LINK_SECRET })).rejects.toMatchObject({ code: 'DECRYPT_FAILED' });
+    expect(server.paths().filter((path) => path !== 'GET /api/info' && path !== META)).toEqual([]);
   });
 });

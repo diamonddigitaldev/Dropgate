@@ -49,10 +49,10 @@ export default defineConfig({
     use: {
         trace: 'off',
         // The server expects to sit behind a reverse proxy that terminates TLS,
-        // and only serves an encrypted bundle's page to requests that came in over
-        // HTTPS. It trusts one proxy hop, so this header plays the proxy's part.
-        // The pages themselves load from http://127.0.0.1, which browsers treat as
-        // a secure context, so the Web Crypto API and service workers still work.
+        // and trusts one proxy hop, so this header plays the proxy's part. The
+        // pages themselves load from http://127.0.0.1, which browsers treat as a
+        // secure context, so the Web Crypto API and service workers still work.
+        // The plain-HTTP localhost spec goes without it.
         extraHTTPHeaders: { 'X-Forwarded-Proto': 'https' },
         // Bootstrap scrolls smoothly unless the user prefers reduced motion. A page
         // that's still scrolling can move a button out from under a click, so the

@@ -43,7 +43,7 @@ test.describe('a bundle, end-to-end encrypted', () => {
         await server.advanceClock(3 * MINUTE);
         expect((await openLink(page, link))?.status(), 'the bundle page after three minutes').toBe(200);
         await expect(page.locator('#bundle-file-count')).toHaveText(String(files.length));
-        expect(server.storedFiles(), 'files the server holds after three minutes').toHaveLength(files.length);
+        expect(server.storedFiles(), 'uploads the server holds after three minutes: the bundle is one').toHaveLength(1);
 
         await server.advanceClock(3 * MINUTE);
         await expectGone(page, link);
@@ -61,7 +61,7 @@ test.describe('a bundle, unencrypted', () => {
         await server.advanceClock(3 * MINUTE);
         expect((await openLink(page, link))?.status(), 'the bundle page after three minutes').toBe(200);
         await expect(page.locator('#bundle-file-count')).toHaveText(String(files.length));
-        expect(server.storedFiles(), 'files the server holds after three minutes').toHaveLength(files.length);
+        expect(server.storedFiles(), 'uploads the server holds after three minutes: the bundle is one').toHaveLength(1);
 
         await server.advanceClock(3 * MINUTE);
         await expectGone(page, link);

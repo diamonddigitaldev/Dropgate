@@ -9,14 +9,14 @@
   <script nonce="<%= nonce %>">streamSaver.mitm = '/vendor/streamsaver/mitm.html';</script>
   <script src="/js/theme.js" defer></script>
   <script type="module" src="/js/page-common.js"></script>
-  <script type="module" src="/js/download-standard.js"></script>
+  <script type="module" src="/js/download.js"></script>
 </head>
 
 <body>
   <main>
     <div class="container-main text-center">
       <%- include('../partials/header') %>
-      <p class="lead mb-4">Verify your file details before starting the download.</p>
+      <p class="lead mb-4" id="page-lead">Verify your file details before starting the download.</p>
 
       <div id="status-card" class="card shadow-sm">
         <div class="card-body p-4">
@@ -46,6 +46,37 @@
             </div>
           </div>
 
+          <div id="bundle-details" class="mt-4" style="display: none;">
+            <div class="row g-3 justify-content-center">
+              <div class="col-md-4">
+                <div class="file-label">Files</div>
+                <div class="file-value" id="bundle-file-count">-</div>
+              </div>
+              <div class="col-md-4">
+                <div class="file-label">Total size</div>
+                <div class="file-value" id="bundle-total-size">-</div>
+              </div>
+              <div class="col-md-4">
+                <div class="file-label">Encryption</div>
+                <div class="file-value" id="bundle-encryption">-</div>
+              </div>
+            </div>
+          </div>
+
+          <div id="file-list-container" class="mt-3" style="display: none;">
+            <button id="toggle-file-list" class="btn btn-sm btn-outline-secondary mb-2">
+              <span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span>
+              Show files
+            </button>
+            <div id="file-list" class="text-start" style="display: none;">
+              <ul id="file-list-items" class="list-group list-group-flush"></ul>
+            </div>
+          </div>
+
+          <div id="download-actions" class="mt-3" style="display: none;">
+            <button id="download-all-button" class="btn btn-primary">Download All as ZIP</button>
+          </div>
+
           <button id="download-button" class="btn btn-primary" style="display: none;">Start Download</button>
           <div id="progress-container" class="mt-3" style="display: none;">
             <div class="progress" role="progressbar" style="height: 6px;">
@@ -54,6 +85,7 @@
             <div class="progress-info text-body-secondary">
               <span id="progress-text">0 MB / 0 MB</span>
             </div>
+            <div class="text-body-secondary small mt-1" id="progress-file-name"></div>
           </div>
         </div>
       </div>
@@ -63,9 +95,9 @@
           starting the download.</p>
       </div>
       <div id="encryption-statement" class="text-body-secondary mt-3" style="display: none;">
-        <strong>End-to-End Encryption enabled for this file!</strong><br>
-        <p class="mb-0">Your file will be decrypted locally in your browser using the key in the URL. The server never
-          sees the decrypted data.</p>
+        <strong id="encryption-statement-title">End-to-End Encryption enabled for this file!</strong><br>
+        <p class="mb-0" id="encryption-statement-text">Your file will be decrypted locally in your browser using the
+          key in the URL. The server never sees the decrypted data.</p>
       </div>
     </div>
   </main>

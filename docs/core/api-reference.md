@@ -80,25 +80,26 @@ Uploads to the server, and downloads from it.
 
 | Method | Description |
 | --- | --- |
-| `upload(opts)` | Upload one or more files, encrypted if the server supports it unless `encrypt: false`. Several files are uploaded as a bundle, under one link. Gives the upload's [handle](#operation-handles) at once |
-| `download(opts)` | Download an upload (`id`) into a [sink](#download-sinks), decrypting it with the `secret` from its link if it was encrypted; or a bundle (`bundleId`, with `keyB64`). Gives the download's [handle](#operation-handles) at once |
-| `metadata(opts)` | What the server holds about an upload (`id`, with its `secret`) or a bundle (`bundleId`, with `keyB64`): the files' names and sizes, decrypted if it was encrypted ([below](#metadata)). It takes no lease and counts nothing |
+| `upload(opts)` | Upload one or more files, encrypted if the server supports it unless `encrypt: false`. One file or several, an upload is one object on the server, under one link. Gives the upload's [handle](#operation-handles) at once |
+| `download(opts)` | Download an upload (`id`), or some of its files, into a [sink](#download-sinks), decrypting it with the `secret` from its link if it was encrypted. Gives the download's [handle](#operation-handles) at once |
+| `metadata(opts)` | What the server holds about an upload (`id`, with its `secret`): the files' names and sizes, decrypted if it was encrypted ([below](#metadata)). It takes no lease and counts nothing |
+| `open(opts)` | Open an upload (`id`, with its `secret`) for a page that may download it several times, all counted as one download ([below](#clienthostedopenopts)) |
 | `validate(opts)` | Check files and settings against a server's limits (`files`, `lifetimeMs`, `encrypt`, and the `serverInfo` from `client.server.connect()`), as `upload()` does before it starts, and give `true`. Left out, `encrypt` is what `upload()` would do: encrypted where the server supports it |
 | `delete(opts)` | Delete an upload (`id`) from the server at once, with the `manageToken` its upload gave ([below](#clienthosteddeleteopts)) |
 
 `upload()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them), `lifetimeMs` (0 for unlimited, where the server allows it), and optionally `encrypt` (default: encrypted where the server supports it), `maxDownloads`, `filenameOverrides` (names to send instead, by file index), `signal`, `timeouts` (`serverInfoMs` 5000, `initMs` 15000, `chunkMs` 60000 for each chunk, `completeMs` 30000) and `retry` ([below](#retries)). Its completed value, an `UploadResult`, holds `downloadUrl`, the link; `id`, the upload's ID on the server, which is the link's path; `files`, each `name` and `size`; `manageToken`; and `transport`.
 
-* **The link** is `https://<server>/<id>` for an unencrypted upload. An encrypted one's adds `#` and its **secret**: 32 random bytes, in URL-safe base64 with no `=` (43 characters). The keys that encrypt the upload are made from the secret, which never leaves the device: it's in the link alone. A bundle's link is still `https://<server>/b/<id>#<key>`, as in 3.x.
-* **The manage token** lets whoever has it delete the upload: 32 random bytes, URL-safe base64. Only its SHA-256 is sent, when the upload starts, and the token itself is in this value alone: never in a snapshot, an error, a log or the link. Keep it where only the upload's sender can use it, such as the page or the app that made the upload. A bundle's upload doesn't have one yet.
-* **One file is one encrypted object:** its name and size are sealed in a list only the secret opens, and the file is padded inside it so the stored size says little about the file's (never past the server's maximum upload size, so padding never makes a file too large). Each chunk is sealed once, and a chunk sent again is the same bytes.
+* **The link** is `https://<server>/<id>` for an unencrypted upload. An encrypted one's adds `#` and its **secret**: 32 random bytes, in URL-safe base64 with no `=` (43 characters). The keys that encrypt the upload are made from the secret, which never leaves the device: it's in the link alone. One file and several have links of the same shape.
+* **The manage token** lets whoever has it delete the upload: 32 random bytes, URL-safe base64. Only its SHA-256 is sent, when the upload starts, and the token itself is in this value alone: never in a snapshot, an error, a log or the link. Keep it where only the upload's sender can use it, such as the page or the app that made the upload.
+* **One upload is one encrypted object,** one file or several: the files' names and sizes, and how many there are, are sealed in a list only the secret opens, and the files are padded inside it, one after another, so the stored size says little about theirs (never past the server's maximum upload size, so padding never makes an upload too large; the limit is on the whole of it). Each chunk is sealed once, and a chunk sent again is the same bytes.
 
-`download()` takes `id` (with `secret`, for an encrypted upload) or `bundleId` (with `keyB64`), `sink`, and optionally `files` (which of several files to download, by their index in the upload's list, each once; all of them if left out), `asZip` (several files as one ZIP archive), `signal`, `timeoutMs`: how long each wait may take, for the server's answer and then for each file's next bytes (default 60000, and 0 for none), and `retry` ([below](#retries)). A big file never times out for taking long, only if it stalls, and time spent writing to the sink never counts. Its completed value, a `DownloadResult`, holds `filename` (one file) or `filenames` (several), `receivedBytes`, `wasEncrypted` and `transport`.
+`download()` takes `id` (with `secret`, for an encrypted upload), `sink`, and optionally `files` (which of several files to download, by their index in the upload's list, each once; all of them if left out), `asZip` (several files as one ZIP archive), `signal`, `timeoutMs`: how long each wait may take, for the server's answer and then for each file's next bytes (default 60000, and 0 for none), and `retry` ([below](#retries)). A big file never times out for taking long, only if it stalls, and time spent writing to the sink never counts. Its completed value, a `DownloadResult`, holds `filename` (one file) or `filenames` (several), `receivedBytes`, `wasEncrypted` and `transport`.
 
 * **One download, one lease.** Each `download()` of an upload by `id` takes a lease from the server, and releases it as soon as the download ends, however it ends. A lease that sent any byte is one download against the upload's limit, so at its limit the upload is gone once the download is saved. While other downloads hold every place the limit allows, the download waits, with the snapshot's `text` saying "Someone is downloading this right now.", and starts when one frees.
-* **Everything is checked before it's finished.** An encrypted upload is read to its last chunk, padding included, and every chunk is checked, so a changed, reordered or shortened upload fails with `INTEGRITY_FAILED`; the last file's sink (or the ZIP) is only closed once all of it has been. A download of some of an upload's files reads the whole upload.
+* **Everything is checked before it's finished.** An encrypted upload is read to its last chunk, padding included, and every chunk is checked, so a changed, reordered or shortened upload fails with `INTEGRITY_FAILED`; the last file's sink (or the ZIP) is only closed once all of it has been. A download of some of an upload's files asks only for the chunks they're in (one `Range` for each run of files next to each other), never a chunk that's only padding, and checks each of those.
 * **A dropped connection is picked up where it stopped,** under the same lease, so it counts once: core asks for the rest with `Range`, from the next whole chunk of an encrypted upload (the next byte of an unencrypted one), and `If-Range`, so it only ever continues the same upload. Nothing is written twice. If the server sends the whole upload again instead of the rest, none of it is written, and the download fails with `INTEGRITY_FAILED`.
 
-`upload()` and `download()` throw `INVALID_ARGUMENT` at once, before anything starts, for no files, something that isn't a file, neither an `id` nor a `bundleId`, a `files` that isn't indexes, or a sink that doesn't fit. After that, they report how they ended in their [outcome](outcomes.md), and never throw. `metadata()` and `validate()` throw a [`DropgateError`](errors.md).
+`upload()` and `download()` throw `INVALID_ARGUMENT` at once, before anything starts, for no files, something that isn't a file, no `id`, a `files` that isn't indexes, or a sink that doesn't fit. After that, they report how they ended in their [outcome](outcomes.md), and never throw. `metadata()` and `validate()` throw a [`DropgateError`](errors.md).
 
 #### Retries
 
@@ -126,9 +127,26 @@ Deletes an upload from the server at once: its bytes and its details go, its lin
 
 * **Only the token's holder can.** The token is sent only in the `Dropgate-Manage-Token` header, to the client's own server: never in a URL, and it's never in an error. No credential is sent, and none is needed.
 * It throws `INVALID_ARGUMENT` before any request without an `id`, or with a `manageToken` that isn't 32 bytes of URL-safe base64; `NOT_FOUND` for an upload that isn't there (it was deleted, expired, or downloaded as many times as it allowed); `REQUEST_REJECTED`, with `status` 403, for a token that isn't this upload's; or a request's error. It isn't retried.
-* A bundle's upload doesn't have a manage token yet, so it can't be deleted this way.
+#### client.hosted.open(opts)
 
-**Changed in 4.0:** an upload of one file is a Dropgate 4 object, under the link `https://<server>/<id>#<secret>`. The completed value's `fileId`, `bundleId`, `uploadId`, `keyB64` and `baseUrl` are gone: `id` is the one ID, the secret is in `downloadUrl`, and the server's address is `client.server.baseUrl`. `download()` and `metadata()` take `id` and `secret` for it, where 3.x took `fileId` and `keyB64`, and the metadata has one shape for one file or several ([below](#metadata)). `delete()` is new. Retries changed: 3.x retried a failed chunk 5 times whatever the error; 4.0 retries only what can recover, until the server stops waiting, and a dropped download continues instead of failing.
+```javascript
+const opened = await client.hosted.open({ id, secret });
+// opened.metadata: the files, read with no lease
+const one = opened.download({ files: [1], sink: ({ name }) => sinkFor(name) });
+const all = opened.download({ asZip: true, sink: zipWriter });
+// As the page goes:
+addEventListener('pagehide', () => opened.close());
+```
+
+Opens an upload for a page that may download it several times, its files one by one and all of them as a ZIP, as the Web UI's download page does. It takes `id`, `secret` (for an encrypted upload), and optionally `timeoutMs` (default 5000) and `signal`, and gives a promise of an opened upload: its `metadata` ([below](#metadata)), `download(opts)` and `close()`.
+
+* **One lease for all of them.** Opening reads the metadata and takes no lease. The first download takes one, every download after shares it, and it's renewed every 2 minutes while the upload is open. `close()` releases it: then, if anything was downloaded, it counts as one download, however many there were; opened and closed with none, it counts nothing. While other downloads hold every place the upload's limit allows, a download waits, as `client.hosted.download()`'s does.
+* **`download(opts)`** takes `download()`'s options but `id` and `secret` (`sink`, `files`, `asZip`, `signal`, `timeoutMs`, `retry`), and gives the download's [handle](#operation-handles) at once. Once the upload has been closed, it throws `INVALID_ARGUMENT`.
+* **`close()`** cancels its downloads still running, and releases the lease. It makes its request before it waits for anything, with `keepalive`, so a page can call it from `pagehide` as it goes. Calling it again does nothing.
+* Printed, logged or serialised, an opened upload shows nothing of its secret or its lease.
+* It throws as `metadata()` does.
+
+**Changed in 4.0:** every upload, one file or several, is a Dropgate 4 object, under the link `https://<server>/<id>#<secret>`. The completed value's `fileId`, `bundleId`, `uploadId`, `keyB64` and `baseUrl` are gone: `id` is the one ID, the secret is in `downloadUrl`, the server's address is `client.server.baseUrl`, and `manageToken` is always there. `download()` and `metadata()` take `id` and `secret`, where 3.x took `fileId` or `bundleId`, and `keyB64`; `BundleMetadata` and `HostedFileInfo` are gone, and the metadata has one shape for one file or several ([below](#metadata)). A file of several downloads by its own chunks, and counts against the upload's limit: 3.x never counted a bundle's files downloaded one by one. `open()` and `delete()` are new. Retries changed: 3.x retried a failed chunk 5 times whatever the error; 4.0 retries only what can recover, until the server stops waiting, and a dropped download continues instead of failing.
 
 ### client.direct
 
@@ -175,7 +193,7 @@ Its session has `peer`, `stop()`, `getStatus()`, `getBytesReceived()`, `getTotal
 | --- | --- |
 | `resolve(value, opts?)` | Resolve a sharing code or link someone typed or pasted, into where to open it on this server. It's read on the device, and nothing of it is sent: the server is only asked for its info (as `connect()` does, and kept), to check it works with this client and has direct transfer on. A link to another server is refused without a request |
 
-Its result has `valid`, and `transport`, valid or not. A valid one has `type` and `target`, the path to open on the server: `hosted` for an upload's link or ID (`/<id>`, with the secret after its `#` still on it), `bundle` for a bundle's 3.x-shaped link (`/b/<id>#<key>`), or `p2p` for a direct transfer's code (`/p2p/<code>`, the code upper case). Whether the upload is there is for the page it opens to find out. One that isn't valid has `reason`, for people. It throws `VERSION_UNSUPPORTED` if the server's DGUP doesn't work with this client's, or `connect()`'s errors.
+Its result has `valid`, and `transport`, valid or not. A valid one has `type` and `target`, the path to open on the server: `hosted` for an upload's link or ID (`/<id>`, with the secret after its `#` still on it), `bundle` for a Dropgate 3 bundle's link (`/b/<id>#<key>`), whose page says it was made with an older version, or `p2p` for a direct transfer's code (`/p2p/<code>`, the code upper case). Whether the upload is there is for the page it opens to find out. One that isn't valid has `reason`, for people. It throws `VERSION_UNSUPPORTED` if the server's DGUP doesn't work with this client's, or `connect()`'s errors.
 
 **Changed in 4.0:** `resolve()` asks the server nothing about the input, where 3.x sent the ID or code to `/api/resolve`; a hosted upload's `type` is `hosted`, where 3.x said `file`.
 
@@ -269,15 +287,13 @@ A download writes into a **sink**: any object with `write(chunk)` and `close()`,
 | Several files as a ZIP (`asZip: true`) | A sink, for the one archive |
 | Several files apart | A function, called for each file |
 
-A bundle (by `bundleId`) always takes a function, or a sink with `asZip`. Downloaded as a ZIP of every file, a bundle is reported to the server as downloaded only once its sink has closed; its files downloaded on their own, or a ZIP of some of them, are never counted, as in 3.x.
+Every download, one file or several, a ZIP or not, is one download against the upload's limit; downloads made through one [opened upload](#clienthostedopenopts) are one together.
 
 ## Metadata
 
 `client.hosted.metadata({ id, secret })` gives an `UploadMetadata`, the same shape for one file or several: `kind` (`file` for one, `bundle` for several), `id`, `encrypted`, `files` (each `name` and `size`, in order), `totalSize` and `transport`. Asking takes no lease and counts nothing, so a page can show what's there before anyone downloads it. It never says when the upload expires or how many downloads it has left: the server doesn't give that.
 
-`client.hosted.metadata({ bundleId, keyB64 })` gives a bundle's `BundleMetadata`: `kind: 'bundle'`, `bundleId`, `isEncrypted`, `sealed`, `files` (each `fileId`, `name` and `sizeBytes`), `fileCount`, `totalSizeBytes` and `transport`.
-
-Names are decrypted, and sizes are the files' as they'll be downloaded, so neither needs any crypto of your own. An encrypted upload needs its `secret` (or a bundle its `keyB64`): without it, `metadata()` throws `KEY_REQUIRED`, and with one that doesn't open it, or isn't 32 bytes, `DECRYPT_FAILED`. The upload's header is checked before any of it is downloaded: an upload whose list of files or header was changed throws `INTEGRITY_FAILED`, and one made in a format this version can't read, `VERSION_UNSUPPORTED`. A name that breaks the [file name rule](quick-start.md#file-names) throws `INVALID_FILENAME`, without the name. Where there's no Web Crypto (a page served over plain HTTP from another machine), an encrypted upload throws `RUNTIME_UNSUPPORTED`. An encrypted upload's list of files is sealed too, so only the secret's holder can read its names and sizes.
+Names are decrypted, and sizes are the files' as they'll be downloaded, so neither needs any crypto of your own. An encrypted upload needs its `secret`: without it, `metadata()` throws `KEY_REQUIRED`, and with one that doesn't open it, or isn't 32 bytes, `DECRYPT_FAILED`. The upload's header is checked before any of it is downloaded: an upload whose list of files or header was changed throws `INTEGRITY_FAILED`, and one made in a format this version can't read, `VERSION_UNSUPPORTED`. A name that breaks the [file name rule](quick-start.md#file-names) throws `INVALID_FILENAME`, without the name. Where there's no Web Crypto (a page served over plain HTTP from another machine), an encrypted upload throws `RUNTIME_UNSUPPORTED`. An encrypted upload's list of files is sealed too, so only the secret's holder can read its names and sizes.
 
 ## File Sources
 
@@ -312,7 +328,7 @@ An upload reads each file one chunk at a time through a `FileSource`: `name`, `s
 
 ## zip.writer()
 
-A streaming ZIP writer, for writing several files received in a direct transfer into one archive. It's core's own: it stores without compressing, never holds a whole file in memory, and has no dependencies. A hosted bundle's ZIP needs none of this: `client.hosted.download({ bundleId, asZip: true, sink })` writes it with the same writer.
+A streaming ZIP writer, for writing several files received in a direct transfer into one archive. It's core's own: it stores without compressing, never holds a whole file in memory, and has no dependencies. A hosted upload's ZIP of several files needs none of this: `client.hosted.download({ id, secret, asZip: true, sink })` writes it with the same writer.
 
 ```javascript
 import { zip } from '@dropgate/core';

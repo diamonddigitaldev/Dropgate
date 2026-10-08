@@ -6,6 +6,7 @@ import { after, before, describe, test } from 'node:test';
 import { startServer } from './helpers/harness.mjs';
 import { CLIENT_IP, USER_AGENT, createClient, createRecorder, fixtureFiles, runFixture } from './helpers/fixture.mjs';
 import { HOUR_MS, SMALL_CHUNKS, runDownloads, runUploads } from './helpers/dgup4.mjs';
+import { postJson, uploadV3Bundle } from './helpers/uploads.mjs';
 
 // Every field a stored record may have. A new field has to be added here deliberately.
 const FILE_FIELDS = new Set(['name', 'path', 'expiresAt', 'isEncrypted', 'maxDownloads', 'downloadCount', 'bundleId']);
@@ -26,15 +27,16 @@ describe('what the server stores', () => {
         const { upload } = await createClient(server, createRecorder());
         await upload(fixtureFiles.encrypted(), true);
         await upload(fixtureFiles.plain(), false);
+        await upload(fixtureFiles.bundle(), true);
 
-        const all = () => [
+        // A Dropgate 3 bundle, encrypted and sealed, on Dropgate 3's routes, which stay until they're deleted.
+        await uploadV3Bundle(server, { encrypted: true, sealed: true });
+        stored.push(
+            ...server.records('objects.sqlite').map((r) => ({ ...r, db: 'object' })),
             ...server.records('file-database.sqlite').map((r) => ({ ...r, db: 'file' })),
             ...server.records('bundle-database.sqlite').map((r) => ({ ...r, db: 'bundle' })),
-        ];
-        const beforeBundle = new Set(all().map((r) => r.id));
-        await upload(fixtureFiles.bundle(), true);
-        stored.push(...all());
-        bundleRecords = stored.filter((r) => !beforeBundle.has(r.id));
+        );
+        bundleRecords = stored.filter((r) => r.db !== 'object');
     });
 
     after(() => server?.stop());
@@ -42,7 +44,7 @@ describe('what the server stores', () => {
     test('every stored record holds only known fields, with no IP, user agent or creation time', () => {
         const problems = [];
         for (const { db, id, value } of stored) {
-            const allowed = db === 'file' ? FILE_FIELDS : BUNDLE_FIELDS;
+            const allowed = { object: OBJECT_FIELDS, file: FILE_FIELDS, bundle: BUNDLE_FIELDS }[db];
             const extra = Object.keys(value).filter((k) => !allowed.has(k));
             if (extra.length) problems.push(`${db} record ${id} has unknown field(s): ${extra.join(', ')}`);
             const text = JSON.stringify(value);
@@ -50,11 +52,11 @@ describe('what the server stores', () => {
                 if (text.includes(secret)) problems.push(`${db} record ${id} contains "${secret}"`);
             }
         }
-        assert.ok(stored.length >= 3, 'the uploads were stored');
+        assert.equal(stored.filter((r) => r.db === 'object').length, 3, 'the uploads were stored, the bundle as one');
         assert.deepEqual(problems, []);
     });
 
-    test('an encrypted bundle is stored as one record, with no per-file names or sizes', {
+    test("Dropgate 3's encrypted bundle is stored as one record, with no per-file names or sizes", {
         expectFailure: {
             label: 'known issue until the v4 server rewrite: each member file gets its own record, with its encrypted name and size',
             match: /per-file/,
@@ -202,17 +204,24 @@ describe('responses, and what is left after the download limit', () => {
         assert.deepEqual(problems, []);
     });
 
-    test('an encrypted bundle can no longer be fetched once its download limit is reached', {
+    test('an encrypted bundle can no longer be fetched once its download limit is reached', async () => {
+        const { bundle } = fixture.uploads;
+        assert.equal((await fetch(`${server.baseUrl}/api/v4/objects/${bundle.id}`)).status, 404, 'the bundle is gone');
+        assert.equal((await fetch(`${server.baseUrl}/api/v4/objects/${bundle.id}/leases`, { method: 'POST' })).status, 404, 'and no lease is given');
+        assert.equal(fs.existsSync(path.join(server.uploadsDir, 'objects', bundle.id)), false, 'and none of it is stored');
+    });
+
+    test("Dropgate 3's encrypted bundle can no longer be fetched once its download limit is reached", {
         expectFailure: {
             label: 'known issue until the v4 server rewrite: member files stay downloadable until they expire',
             match: /still downloadable/,
         },
     }, async () => {
-        const { bundle } = fixture.uploads;
-        assert.equal((await fetch(`${server.baseUrl}/api/bundle/${bundle.id}/meta`)).status, 404, 'the bundle is gone');
-        assert.equal(fixture.memberIds.length, bundle.files.length, "the bundle's files were finished");
+        const v3 = await uploadV3Bundle(server, { encrypted: true, sealed: true, maxDownloads: 1 });
+        await (await postJson(server, `/api/bundle/${v3.bundleId}/downloaded`, {})).arrayBuffer();
+        assert.equal((await fetch(`${server.baseUrl}/api/bundle/${v3.bundleId}/meta`)).status, 404, 'the bundle is gone');
         const reachable = [];
-        for (const fileId of fixture.memberIds) {
+        for (const fileId of v3.memberIds) {
             const res = await fetch(`${server.baseUrl}/api/file/${fileId}`);
             await res.arrayBuffer();
             if (res.status !== 404) reachable.push(fileId);

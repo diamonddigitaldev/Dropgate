@@ -1,4 +1,4 @@
-import { DEFAULT_CHUNK_SIZE, ENCRYPTION_OVERHEAD_PER_CHUNK } from '../constants.js';
+import { DEFAULT_CHUNK_SIZE } from '../constants.js';
 import { encryptedSize, isChunkSize, paddedLength } from '../object/layout.js';
 
 // One size rule: every conversion between bytes and KB, MB or GB is in 1024s
@@ -13,12 +13,12 @@ export function mbToBytes(mb: number): number {
 }
 
 /**
- * How many bytes the server stores for an upload of one file, the number its
- * maximum upload size is checked against: the file's size unencrypted; and
- * encrypted, Dropgate 4's object, with its header, its padding and each
- * chunk's tag. Padding is clamped to `maxBytes`, so it never makes a file too
+ * How many bytes the server stores for an upload, the number its maximum
+ * upload size is checked against: the files' size unencrypted; and encrypted,
+ * Dropgate 4's object, with its header, its padding and each chunk's tag. An
+ * upload of several files is one object, so give their sizes added up. Padding is clamped to `maxBytes`, so it never makes a file too
  * large: the result is over `maxBytes` only when the file itself doesn't fit.
- * @param sizeBytes - The file's size in bytes.
+ * @param sizeBytes - The file's size in bytes, or several files' added up.
  * @param opts.encrypted - Whether the upload is encrypted.
  * @param opts.chunkSize - The server's chunk size in bytes (default: 5 MB, the server's default).
  * @param opts.maxBytes - The server's maximum upload size in bytes, 0 or left out for none.
@@ -34,15 +34,4 @@ export function estimateUploadBytes(sizeBytes: number, opts: { encrypted: boolea
     // Too large even unpadded: that's what it would need.
     return encryptedSize(base, chunkSize);
   }
-}
-
-/**
- * How many bytes of a file a Dropgate 3 encrypted upload holds on the server,
- * from the number of bytes the server stored: each chunk's overhead taken off.
- * A bundle's files are still stored that way.
- */
-export function plaintextBytes(storedBytes: number, chunkSize: number): number {
-  if (!(storedBytes > 0)) return 0;
-  const chunks = Math.ceil(storedBytes / (chunkSize + ENCRYPTION_OVERHEAD_PER_CHUNK));
-  return storedBytes - chunks * ENCRYPTION_OVERHEAD_PER_CHUNK;
 }

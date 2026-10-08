@@ -51,6 +51,8 @@ The following tables enumerate every category of data processed by Dropgate, gro
 
 ### 2.2 Dropgate Server — Bundle Data
 
+These are Dropgate 3's bundles. Nothing makes one any more: the Web UI, the desktop app and the core library upload several files as one Dropgate 4 upload, kept as the **Dropgate 4 object** and its record above. The server keeps Dropgate 3's routes, and these records, until they're removed; a Dropgate 3 bundle's link (`/b/<id>`) opens a page saying it was made with an older version.
+
 | Data | Stored? | Where | Why | When Created | When Deleted |
 |------|---------|-------|-----|--------------|--------------|
 | **Bundle ID** (UUID) | Yes | Database (as key) | Unique identifier for the bundle download URL. | On bundle completion. | On expiry or max downloads reached. |
@@ -128,11 +130,11 @@ Even with E2EE active, the following metadata is visible to the server:
 - Expiry timestamp and download limits.
 - Upload timing patterns (when chunks arrive).
 - The length of each filename. Encrypted names aren't padded, so a stored encrypted name is exactly 28 bytes longer than the original name in UTF-8.
-- For sealed bundles: the number of files, and each file's size and name length. The client sends these when the bundle upload starts; only the names themselves are hidden.
+- For Dropgate 3's sealed bundles: the number of files, and each file's size and name length. The client sends these when the bundle upload starts; only the names themselves are hidden.
 
 Encryption also protects each chunk only on its own. A chunk's position and whether it is the last one are not authenticated, so someone able to modify stored files could remove, reorder or duplicate chunks without the download failing to decrypt. See [DGUP §4.7](./DGUP.md#47-integrity-limitations).
 
-A single file is now uploaded as a Dropgate 4 upload, which shows less, and keeps none of those weaknesses ([DGUP §21.2](./DGUP.md#212-the-object-a-client-makes)): the size the server stores is padded (Padmé, to within about 1%, and never past the maximum upload size); the file's name and size are only in a sealed list, padded to 4 KiB or more, so the server learns neither the name's length nor how many files there are, up to dozens; and each chunk's position, and whether it's the last, are authenticated, so a changed, reordered or shortened upload fails to download. What it still shows: the padded size, whether it's encrypted, its expiry and download limit, and when its chunks arrive.
+Every upload, one file or several, is now a Dropgate 4 upload, which shows less, and keeps none of those weaknesses ([DGUP §21.2](./DGUP.md#212-the-object-a-client-makes)): the size the server stores is padded (Padmé, to within about 1%, and never past the maximum upload size), the files' sizes together; the files' names and sizes are only in a sealed list, padded to 4 KiB or more, so the server learns neither a name's length nor how many files there are, up to dozens; and each chunk's position, and whether it's the last, are authenticated, so a changed, reordered or shortened upload fails to download. What it still shows: the padded size, whether it's encrypted, its expiry and download limit, and when its chunks arrive.
 
 ### 3.3 Key Lifecycle
 
@@ -146,13 +148,7 @@ For a single file (a Dropgate 4 upload):
 
 The upload's **manage token**, which deletes it ([DGUP §20.6](./DGUP.md#206-the-uploaders-delete)), is 32 more random bytes, made with the secret. The server is sent only its SHA-256, and the token itself stays in the memory of the page or app that uploaded the file: neither the Web UI nor the desktop app writes it anywhere, and it's gone when the page or the app closes. The Web UI's result screen offers **Delete upload** while the page holds it; a reload, or **Send more files**, drops it ([DGUP §21.4](./DGUP.md#214-deleting-from-the-result-screen)). The token itself is sent only to delete the upload, in the `Dropgate-Manage-Token` header: never in a URL, so it's in no address bar, history or proxy log, and never in an error or a log line, on either side.
 
-For a bundle (still uploaded as in Dropgate 3), the key is:
-
-1. **Generated** by the client using `crypto.subtle.generateKey`.
-2. **Used** to encrypt all chunks and the filename.
-3. **Exported** to URL-safe Base64 and appended to the download URL as a fragment (`#<keyBase64>`).
-4. **Not transmitted to the server**, as a single file's secret isn't.
-5. **Not persisted** by the client. The key exists only in the download link. If the link is lost, the files cannot be decrypted.
+Several files are uploaded the same way, as one upload: one secret, one manage token and one link for all of them.
 
 ### 3.4 Server's Cryptographic Capabilities
 
@@ -218,11 +214,11 @@ With SQLite, `objects.sqlite` writes zeros over a Dropgate 4 record as it delete
 |---------|-----------------|-----------|
 | **File expiry** (`expiresAt`) | File from disk + database record. | Gone the moment it expires: from then on every route answers as if it had never existed. Deleted at the next check, every **60 seconds**. |
 | **Bundle expiry** | Sealed: manifest record. Unsealed: all member files + manifest. | Gone the moment it expires, as a file is. Deleted at the next check, every **60 seconds**. |
-| **Max downloads reached** | Single file: file + record. Unsealed bundle: all member files + manifest. Sealed bundle: manifest record only; the member files stay on disk, and can still be downloaded by file ID, until they expire. A bundle download only counts when every file is downloaded together (**Download All as ZIP**); downloading files one at a time never counts. See [DGUP §11.3](./DGUP.md#113-download-counting). | Immediately after the triggering download. |
+| **Max downloads reached** (Dropgate 3's uploads) | Single file: file + record. Unsealed bundle: all member files + manifest. Sealed bundle: manifest record only; the member files stay on disk, and can still be downloaded by file ID, until they expire. A bundle download only counts when every file is downloaded together (**Download All as ZIP**); downloading files one at a time never counts. See [DGUP §11.3](./DGUP.md#113-download-counting). | Immediately after the triggering download. |
 | **Zombie upload cleanup** | Temporary file + storage reservation + session state. **Known issue in 3.x:** when a bundle upload is cancelled or abandoned part-way, files that had already finished uploading stay on disk with no database record, so expiry never removes them. They're deleted at the next restart in the default mode, and kept indefinitely with `UPLOAD_PRESERVE_UPLOADS=true`. | Every **5 minutes** (configurable via `UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS`). |
 | **Dropgate 4 upload's deadline** | Temporary file + storage reservation + session state. Quiet: 5 minutes after its last request. Paused: when the pause runs out (`UPLOAD_MAX_PAUSE_MINUTES`). | At once, at the deadline. |
 | **Dropgate 4 upload's expiry** (`expiresAt`) | The object from disk + its record; its open leases end, uncounted. | Gone the moment it expires. Deleted at the next check, every **60 seconds**. |
-| **Dropgate 4 upload's download limit** | The object from disk + its record + its storage. A file and a bundle alike: a bundle is one object, so nothing of it is left. One download is one lease that sent any bytes, counted when it ends, however many ranges or files it fetched. See [DGUP §20.3](./DGUP.md#203-leases-and-counting). | At once, when the last download's lease ends. |
+| **Dropgate 4 upload's download limit** | The object from disk + its record + its storage. A file and a bundle alike: a bundle is one object, so nothing of it is left. One download is one lease that sent any bytes, counted when it ends, however many ranges or files it fetched: a download page's files and its ZIP are one lease, released as the page goes. See [DGUP §20.3](./DGUP.md#203-leases-and-counting). | At once, when the last download's lease ends. |
 | **Dropgate 4 download lease's deadline** | The lease. If it sent any bytes, it counts as one download. | At once: 5 minutes after its last request, or, paused, when the pause runs out. |
 | **Server restart** (non-persistent mode) | All files, temporary files, and in-memory data. | On process start. |
 | **Server restart** (persistent mode) | Only temporary files in `data/uploads/tmp/`. | On process start. |
@@ -438,7 +434,7 @@ Dropgate itself receives none of this.
 
 - **Enable E2EE wherever possible.** When encryption is active, the server cannot access file content or filenames. There is no meaningful performance cost.
 - **Share download links through secure channels.** The encryption key is embedded in the URL fragment. Anyone with the full URL can decrypt the file.
-- **Use single-download mode (`maxDownloads=1`) for sensitive files.** The file is automatically deleted after one download, minimising exposure. For an encrypted bundle, only its file list is deleted, and the files themselves stay until their lifetime ends (see §5.1), so a short lifetime matters more there.
+- **Use single-download mode (`maxDownloads=1`) for sensitive files.** The file is automatically deleted after one download, minimising exposure. An upload of several files goes whole, as a single file does. (Only a Dropgate 3 encrypted bundle, which nothing makes now, kept its files until their lifetime ended, see §5.1.)
 - **Use short lifetimes for sensitive files.** Even if the download limit is not reached, the file will be automatically deleted when the lifetime expires.
 - **Consider using a VPN** when connecting to a Dropgate Server. This is particularly relevant for P2P transfers (DGDTP), where ICE candidates can expose real IP addresses. Choose a VPN provider that supports peer-to-peer traffic and research their privacy policies, logging practices, and jurisdiction carefully.
 - **Prefer P2P (DGDTP) for the highest privacy.** When both sender and receiver are online simultaneously, DGDTP transfers file data directly between peers without it ever touching the server. The server's role is limited to initial signalling.

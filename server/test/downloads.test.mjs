@@ -88,6 +88,39 @@ describe('an upload\'s metadata', () => {
     });
 });
 
+describe('the download page', () => {
+    let server;
+    before(async () => { server = await startServer({ env: BASE }); });
+    after(() => server?.stop());
+
+    /** A page's status, and whether it's the download page, the older-version page or the 404 page. */
+    const page = async (route) => {
+        const res = await fetch(server.baseUrl + route, { redirect: 'manual' });
+        const html = await res.text();
+        const which = html.includes('src="/js/download.js"') ? 'download'
+            : html.includes('Link From an Older Version') ? 'older version'
+                : html.includes('File Not Found') ? '404' : 'something else';
+        return { status: res.status, which };
+    };
+
+    test('is one page for a file and several alike, encrypted or not, over plain HTTP, and takes no lease', async () => {
+        for (const object of [oneFile(), twoPlainFiles(), twoFiles()]) {
+            const { id } = await uploadObject(server, object, { maxDownloads: 1 });
+            assert.deepEqual(await page(`/${id}`), { status: 200, which: 'download' });
+            assert.equal(recordOf(server, id).downloadCount, 0);
+            assert.equal((await downloads.take(server, id)).status, 201, "the limit's one place is still there");
+        }
+        assert.deepEqual(await page(`/${crypto.randomUUID()}`), { status: 404, which: '404' });
+    });
+
+    test("a Dropgate 3 bundle's link is 410, with a page saying it's from an older version, whatever its ID", async () => {
+        const { id } = await uploadObject(server, twoFiles());
+        for (const route of [`/b/${crypto.randomUUID()}`, `/b/${id}`, '/b/not-an-id']) {
+            assert.deepEqual(await page(route), { status: 410, which: 'older version' }, route);
+        }
+    });
+});
+
 test('an expired upload is gone from every route at once, open leases included, and its bytes go at the next sweep', async (t) => {
     const server = await startServer({ env: BASE, clock: true });
     t.after(server.stop);

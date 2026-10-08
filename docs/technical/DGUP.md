@@ -1,6 +1,6 @@
 # DGUP — Dropgate Upload Protocol
 
-**Protocol Version:** 4.0, in development. Until it's finished, §4 to §12 and §16 to §18 describe version 3's requests, with `/api/info` giving version 4's fields. Version 4's routes go under `/api/v4/` as they're built: its uploads are in [§19](#19-version-4-uploads), and its downloads and the uploader's delete in [§20](#20-version-4-downloads)
+**Protocol Version:** 4.0, in development. Until it's finished, §4 to §12 and §16 to §18 describe version 3's requests, with `/api/info` giving version 4's fields. Version 4's routes go under `/api/v4/` as they're built: its uploads are in [§19](#19-version-4-uploads), and its downloads and the uploader's delete in [§20](#20-version-4-downloads), its links and pages in [§21](#21-version-4-links-and-pages). The Web UI, the desktop app and the core library upload and download only on version 4, one file or several; version 3's requests stay on the server until they're removed
 **Status:** In development
 **Last Updated:** October 2026
 
@@ -411,10 +411,10 @@ The server deletes the temporary file, releases the storage reservation, and rem
 
 | Upload Type | URL Format |
 |-------------|------------|
-| Single file (unencrypted) | `https://<host>/<id>`, a version 4 upload ([§21.1](#211-links)) |
-| Single file (encrypted) | `https://<host>/<id>#<secret>`, a version 4 upload ([§21.1](#211-links)) |
-| Bundle (unencrypted) | `https://<host>/b/<bundleId>` |
-| Bundle (encrypted) | `https://<host>/b/<bundleId>#<keyBase64>` |
+| One file or several (unencrypted) | `https://<host>/<id>`, a version 4 upload ([§21.1](#211-links)) |
+| One file or several (encrypted) | `https://<host>/<id>#<secret>`, a version 4 upload ([§21.1](#211-links)) |
+| Version 3 bundle (unencrypted) | `https://<host>/b/<bundleId>`: now a page saying it was made with an older version, `410` ([§21.3](#213-the-download-page)) |
+| Version 3 bundle (encrypted) | `https://<host>/b/<bundleId>#<keyBase64>`, the same |
 
 The fragment identifier (`#<keyBase64>`, or a version 4 upload's `#<secret>`) is processed exclusively by the client. Browsers never include it in requests, and the clients never send it ([§4.5](#45-key-transmission)).
 
@@ -860,7 +860,7 @@ The lease is 32 random bytes, base64url with no padding (43 characters). The las
 ### 20.3 Leases and Counting
 
 - **A lease counts as one download once, when it ends, if it sent any byte:** released, or run out. So a finished download counts, and so does one cancelled or abandoned part-way, when its lease ends; a lease that sent nothing counts nothing.
-- **Under one lease, everything is one download:** retries, ranges, a download resumed after a pause, and every file of a bundle.
+- **Under one lease, everything is one download:** retries, ranges, a download resumed after a pause, and every file of a bundle. The download page holds one lease while it's open, for a bundle's files one by one and its ZIP ([§21.3](#213-the-download-page)).
 - **At the limit, the upload goes at once:** when a lease's count reaches `maxDownloads`, the object, its record and its storage are removed. A bundle is one object, so nothing of it is left.
 - **A new download waits while others hold the limit's places:** when the open leases and the downloads counted already make `maxDownloads`, taking a lease is `423`, `DOWNLOADS_BUSY`, with `Retry-After` (5 seconds). The client asks again then; once a lease ends having sent nothing, its place is free again.
 - **An upload with no limit** (`maxDownloads` `0`) keeps no count, and downloads never remove it.
@@ -935,18 +935,18 @@ The core library's call is `client.hosted.delete({ id, manageToken })`, with the
 
 ## 21. Version 4 Links and Pages
 
-A single file is uploaded as a version 4 upload ([§19](#19-version-4-uploads)) by the Web UI, the desktop app and the core library; a bundle is still uploaded as in §5.2 to §9. This section is what a client does with the routes of §19 and §20: the link it gives, the object it makes, and the download page.
+Every upload, one file or several, is a version 4 upload ([§19](#19-version-4-uploads)) from the Web UI, the desktop app and the core library: one start, one object and one link, whatever the number of files. Nothing uploads a version 3 bundle (§5.2 to §9) any more. This section is what a client does with the routes of §19 and §20: the link it gives, the object it makes, and the download page.
 
 ### 21.1 Links
 
 | Upload | Link |
 |--------|------|
-| Encrypted | `https://<host>/<id>#<secret>` |
-| Unencrypted | `https://<host>/<id>` |
+| Encrypted, one file or several | `https://<host>/<id>#<secret>` |
+| Unencrypted, one file or several | `https://<host>/<id>` |
 
 - **`id`** is the upload's ID, as the finish gives it ([§19.6](#196-finish)): the only thing in the path.
 - **The secret** is 32 random bytes, in URL-safe base64 with no `=`: 43 characters of `A–Z a–z 0–9 - _`. It isn't a key: the upload's keys are made from it ([§21.2](#212-the-object-a-client-makes)). It's never sent, in a request, a log or an error; only the link carries it.
-- **A version 3 single-file link** (`/<fileId>#` and 44 characters of standard base64) names an upload a version 4 server doesn't have, so its page says it isn't there.
+- **A version 3 single-file link** (`/<fileId>#` and 44 characters of standard base64) names an upload a version 4 server doesn't have, so its page says it isn't there. **A version 3 bundle's link** (`/b/<bundleId>`) gets a page saying it was made with an older version ([§21.3](#213-the-download-page)).
 
 ### 21.2 The Object a Client Makes
 
@@ -955,11 +955,13 @@ The server stores an object without reading it ([§19.1](#191-the-object)). A cl
 - **Three keys, one per purpose,** each HKDF-SHA256 of the secret, with the object's random 16-byte salt as the salt: the header's (info `dropgate/4 header`), the chunks' (`dropgate/4 payload`) and the file list's (`dropgate/4 meta`). Nothing from one upload opens under another's keys.
 - **The header** ends with HMAC-SHA256 of its first 28 bytes under the header key. A client checks the header's fields before making any key from it, and its MAC once it has: a header that fails, with a file list that doesn't open either, is most likely the wrong link; with one that opens, the header was changed.
 - **The chunks** are AES-256-GCM under the payload key, with no associated data. Chunk `i`'s 12-byte nonce is `i` as an 11-byte big-endian number, then `01` for the last chunk and `00` for any other, so a chunk moved, repeated, dropped, taken from another upload or cut short fails to open. A client seals each chunk once, and sends a chunk again as the same bytes: sealing one index twice over different bytes would reuse a nonce.
-- **Padding (Padmé):** the plaintext is the file, then zero bytes up to a length that shows only the top bits of the file's size (about 1% more on average). The padding stops at the server's maximum upload size (`capabilities.upload.maxSizeMB` × 1024²), so it never makes a file too large: the object is then exactly the limit. A file whose object is over the limit unpadded is refused before the upload starts.
-- **The file list** (`meta`) is UTF-8 JSON, `{"files":[{"name","size"}]}`, after its 4-byte big-endian length, padded with zero bytes to 4 KiB, 8 KiB and so on up to 1 MiB, then sealed under the meta key with a random 12-byte nonce before it. Names follow the file name rule (§5.1), checked when sent and when received.
+- **Padding (Padmé):** the plaintext is the files, one after another in the list's order, then zero bytes up to a length that shows only the top bits of their size together (about 1% more on average). The padding stops at the server's maximum upload size (`capabilities.upload.maxSizeMB` × 1024²), so it never makes an upload too large: the object is then exactly the limit. Files whose object is over the limit unpadded are refused before the upload starts: the limit is on the whole upload.
+- **The file list** (`meta`) is UTF-8 JSON, `{"files":[{"name","size"}]}`, 1 to 1,000 files in order, after its 4-byte big-endian length, padded with zero bytes to 4 KiB, 8 KiB and so on up to 1 MiB, then sealed under the meta key with a random 12-byte nonce before it. Names follow the file name rule (§5.1), checked when sent and when received.
 - **The manage token** is 32 more random bytes. Only its SHA-256 goes with the start (`manageTokenHash`); the client keeps the token for the uploader's delete ([§20.6](#206-the-uploaders-delete)), and gives it nowhere else.
 
-An unencrypted object is the file's bytes, with its name and size sent in plain at the start.
+An unencrypted object is the files' bytes, one after another, with their names and sizes sent in plain at the start.
+
+- **A file of several** is a run of the plaintext: file `k` starts after the sizes of the files before it. Encrypted, a client downloads it by one `Range` of the chunks it's in, from chunk ⌊start / C⌋ to chunk ⌊(end − 1) / C⌋, so it never asks for a chunk that's only padding, and opens them as a run whose last chunk is checked against the object's last; unencrypted, by the `Range` of its own bytes. Files next to each other are one run. All of them together are the whole object, read to its last chunk.
 
 ### 21.3 The Download Page
 
@@ -967,16 +969,17 @@ An unencrypted object is the file's bytes, with its name and size sent in plain 
 GET /{id}
 ```
 
-- **One page, served over HTTP and HTTPS alike.** The server sends it for an upload that's there, with no check of how the request came in: the page itself decides whether it can decrypt, from whether the browser gives it a secure context (HTTPS, or `localhost`), which the server can't tell from the request. An unknown, expired or deleted upload, or an encrypted one on a server with E2EE off, gets the not-found page (`404`). A version 3 bundle's ID redirects to `/b/<bundleId>`.
+- **One page for one file and several, served over HTTP and HTTPS alike.** The server sends it for an upload that's there, with no check of how the request came in: the page itself decides whether it can decrypt, from whether the browser gives it a secure context (HTTPS, or `localhost`), which the server can't tell from the request, and, from the metadata (once its list is opened, for an encrypted one), whether it shows one file or several. An unknown, expired or deleted upload, or an encrypted one on a server with E2EE off, gets the not-found page (`404`).
+- **`GET /b/{bundleId}`,** a version 3 bundle's link, is always `410`, with a page saying the link was made with an older version and the sender needs to update.
 - **Loading the page takes no lease and counts nothing.** The page holds no file name or size: a link preview, which fetches the page without the `#` part, sees only the server's name and Dropgate's description. The page reads the upload's metadata ([§20.1](#201-metadata)) and opens its file list with the secret, in the browser.
-- **Downloading** is core's: one lease ([§20.2](#202-leases)), released as soon as the download ends, so at its limit the upload is gone once the file is saved. A download that finds every allowed place held waits as `Retry-After` says, and starts when one frees.
+- **Downloading one file** is core's: one lease ([§20.2](#202-leases)), released as soon as the download ends, so at its limit the upload is gone once the file is saved. A download that finds every allowed place held waits as `Retry-After` says, and starts when one frees.
+- **Several files** are opened with core's `client.hosted.open()`: the page's downloads, each file on its own and **Download All as ZIP**, share one lease, taken at the first, renewed every 2 minutes (`POST /api/v4/lease/renew`) and released as the page goes (`pagehide`), so they count as one download. Each file asks only for its own part of the upload ([§21.2](#212-the-object-a-client-makes)).
 - **A dropped connection** is continued under the same lease, from where it got to ([§7.4](#74-reconnecting-downloads)).
-- **Without a secure context,** an unencrypted file is handed to the browser: the page takes the lease with `fetch()` and sends the browser to `/api/v4/leases/{lease}` ([§20.5](#205-a-browsers-own-downloads)). An encrypted file can't be downloaded there, and the page says why.
+- **Without a secure context,** an unencrypted upload is handed to the browser: the page takes the lease with `fetch()` and sends the browser to `/api/v4/leases/{lease}` ([§20.5](#205-a-browsers-own-downloads)), or, for several files, `/api/v4/leases/{lease}/files/{index}` in a hidden frame for each, one by one or all of them, under one lease the page renews while it's open. That lease isn't released as the page goes, since the browser's downloads go on after it: it runs out 5 minutes after their last bytes. An encrypted upload can't be downloaded there, and the page says why.
 
 ### 21.4 Deleting From the Result Screen
 
-The Web UI's result screen, after a single file's upload, has **Delete upload**. Once confirmed, it deletes the upload ([§20.6](#206-the-uploaders-delete)) with the manage token its upload gave, and the link stops working.
+The Web UI's result screen, after an upload of one file or several, has **Delete upload**. Once confirmed, it deletes the upload ([§20.6](#206-the-uploaders-delete)) with the manage token its upload gave, and the link stops working.
 
 - **The token is in the page's memory only:** never in storage, the page itself or a URL. A reload, or **Send more files**, drops it, and the button with it; the upload then stays until it expires or reaches its download limit.
 - **An upload that's already gone** (expired, or downloaded as many times as it allows) is reported as already gone.
-- A bundle's upload has no manage token yet, so its result screen has no Delete.

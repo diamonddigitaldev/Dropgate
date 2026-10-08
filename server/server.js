@@ -2287,42 +2287,21 @@ if (enableUpload) {
     uploadRouter.use(noteRoute);
     app.use('/upload', uploadRouter);
 
-    // Bundle download page
-    app.get('/b/:bundleId', limiter, async (req, res) => {
-        const bundleId = req.params.bundleId;
-        const bundleInfo = await getLiveBundle(bundleId);
-
-        if (!bundleInfo) return res.status(404).render('pages/404', { serverName });
-
-        if (bundleInfo.isEncrypted) {
-            if (!uploadEnableE2EE) {
-                log('debug', 'Blocked access to an encrypted bundle because upload E2EE is disabled.');
-                return res.status(404).render('pages/404', { serverName });
-            }
-
-            if (req.protocol !== 'https') {
-                log('debug', 'Blocked access to an encrypted bundle over an insecure connection (HTTP).');
-                return res.status(400).render('pages/insecure', { serverName });
-            }
-        }
-
-        return res.status(200).render('pages/download-bundle', { serverName, bundleId });
-    });
-
-    // An upload's download page. It's the same over HTTP and HTTPS: the page
-    // reads the upload's metadata itself, and checks for itself whether it can
-    // decrypt here (isSecureContext), which a server can't tell from the
-    // request. An encrypted upload on a server with E2EE off isn't there.
+    // An upload's download page, for one file and several alike. It's the same
+    // over HTTP and HTTPS: the page reads the upload's metadata itself, which
+    // says how many files it has (once decrypted, for an encrypted one), and
+    // checks for itself whether it can decrypt here (isSecureContext), which a
+    // server can't tell from the request. An encrypted upload on a server with
+    // E2EE off isn't there.
     app.get('/:id', limiter, async (req, res) => {
-        const id = req.params.id;
-
-        // A Dropgate 3 bundle's ID, typed in, opens its own page.
-        if (await getLiveBundle(id)) return res.redirect(301, `/b/${id}`);
-
-        if (!(await getLiveObject(id))) return res.status(404).render('pages/404', { serverName });
-        return res.status(200).render('pages/download-standard', { serverName });
+        if (!(await getLiveObject(req.params.id))) return res.status(404).render('pages/404', { serverName });
+        return res.status(200).render('pages/download', { serverName });
     });
 }
+
+// A Dropgate 3 bundle's link. Nothing Dropgate 4 makes has one, and no upload
+// it was made for can be served, so the page says it's from an older version.
+app.get('/b/:id', limiter, (_req, res) => res.status(410).render('pages/older-version', { serverName }));
 
 // 404 fallback
 app.use((_req, res) => res.status(404).render('pages/404', { serverName }));

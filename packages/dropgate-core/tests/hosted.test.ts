@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DropgateClient } from '../src/index.js';
 import type { DownloadSink, UploadResult } from '../src/index.js';
-import { encryptedSize, paddedLength, padme } from '../src/object/index.js';
+import { encryptedSize, paddedLength, padme, ObjectLayout } from '../src/object/index.js';
+import { readZip } from './helpers/zip-reader.js';
 // The server suite's own harness: the real server.js, in a throwaway folder, on a free port.
 import { startServer } from '../../../server/test/helpers/harness.mjs';
 
-// One file's upload, metadata and download, against the real server: what
-// core sends is what the server takes, stores and gives back.
+// Uploads, metadata and downloads, one file and several, against the real
+// server: what core sends is what the server takes, stores and gives back.
 
 interface Server {
   baseUrl: string;
@@ -419,6 +420,164 @@ describe("The uploader's delete, against the real server", { timeout: 60_000 }, 
       for (const request of server.requests().filter((r) => r.method === 'DELETE' && r.url.startsWith('/api/v4/objects/'))) {
         expect(request.url.includes(token)).toBe(false);
         expect(request.headers.authorization).toBeUndefined();
+      }
+    });
+  });
+});
+
+describe('Several files on Dropgate 4, against the real server', { timeout: 90_000 }, () => {
+  /** Three files, as File objects, with names the server must never see when they're encrypted. */
+  const three = (sizes: number[], seed: number) => sizes.map((size, i) => ({
+    name: ['Holiday plans – été.pdf', 'budget 2026.xlsx', 'Sam passport scan.png'][i],
+    bytes: fileBytes(size, seed + i),
+  }));
+  const asFiles = (files: Array<{ name: string; bytes: Uint8Array }>) => files.map((f) => new File([f.bytes], f.name));
+
+  const uploadAll = async (client: DropgateClient, files: File[], opts: { encrypt: boolean; maxDownloads?: number }): Promise<UploadResult> => {
+    const outcome = await client.hosted.upload({ files, lifetimeMs: 60 * 60 * 1000, ...opts }).result;
+    if (outcome.status !== 'completed') throw outcome.status === 'failed' ? outcome.error : new Error('The upload was cancelled.');
+    return outcome.value;
+  };
+
+  it('encrypted: one start, one object and one record, with no file name, count or size of a file reaching the server; its manage token deletes it', async () => {
+    await withServer({ UPLOAD_PRESERVE_UPLOADS: 'true', LOG_LEVEL: 'DEBUG' }, async (server) => {
+      const client = new DropgateClient({ server: server.baseUrl });
+      const files = three([CHUNK + 10, 3000, CHUNK * 2 + 7], 20);
+      const value = await uploadAll(client, asFiles(files), { encrypt: true });
+      const secret = new URL(value.downloadUrl).hash.slice(1);
+
+      // One link, of the same shape as a single file's.
+      expect(value.downloadUrl).toBe(`${server.baseUrl}/${value.id}#${secret}`);
+      expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(value.files).toEqual(files.map((f) => ({ name: f.name, size: f.bytes.length })));
+      expect(routes(server).filter((route) => route === 'POST /api/v4/uploads'), 'one start').toHaveLength(1);
+      expect(routes(server).some((route) => route.startsWith('POST /upload/')), "Dropgate 3's routes").toBe(false);
+
+      // Nothing of a name, the secret or the manage token went in any request.
+      const names = files.flatMap((f) => [Buffer.from(f.name), Buffer.from(encodeURIComponent(f.name))]);
+      expect(holding(server, [...names, ...spellings(secret), ...spellings(value.manageToken)])).toEqual([]);
+      const start = JSON.parse(server.requests().find((r) => r.url === '/api/v4/uploads')!.body.toString());
+      expect(Object.keys(start).sort()).toEqual(['encrypted', 'header', 'lifetimeMs', 'manageTokenHash', 'meta', 'size']);
+      expect(start.size, 'the whole object, padded').toBe(encryptedSize(paddedLength(CHUNK * 3 + 3017, CHUNK, 100 * MiB), CHUNK));
+
+      // One stored object, one record: its sealed list, and no file's name, count or size.
+      expect(server.storedFiles()).toEqual([`objects/${value.id}`]);
+      const records = server.records('objects.sqlite');
+      expect(records.map((r) => r.id)).toEqual([value.id]);
+      const allowed = ['downloadCount', 'encrypted', 'expiresAt', 'manageTokenHash', 'maxDownloads', 'meta', 'size'];
+      expect(Object.keys(records[0].value).filter((key) => !allowed.includes(key)), 'fields beyond the allowlist').toEqual([]);
+      expect(records[0].value.files, 'a list of files the server can read').toBeUndefined();
+      expect(Buffer.from(records[0].value.meta, 'base64url').length, 'the sealed list, in its 4 KiB bucket').toBe(12 + 4096 + 16);
+      const kept = JSON.stringify(records);
+      for (const f of files) expect(kept.includes(f.name) || kept.includes(String(f.bytes.length)), f.name).toBe(false);
+
+      // Its log lines give sizes alone: no name, and not how many files.
+      const output = server.output.stdout + server.output.stderr;
+      expect(output).toMatch(/Upload started\./);
+      for (const f of files) expect(output.includes(f.name), f.name).toBe(false);
+      expect(output).not.toMatch(/\b3 files?\b|\(3\)|files: 3/);
+
+      // Read back with the secret: the files, as one upload of several.
+      expect(await client.hosted.metadata({ id: value.id, secret })).toEqual({
+        kind: 'bundle', id: value.id, encrypted: true, files: value.files, totalSize: CHUNK * 3 + 3017, transport: { secure: true },
+      });
+
+      // The manage token, as a single file's does, deletes it at once.
+      await client.hosted.delete({ id: value.id, manageToken: value.manageToken });
+      expect(server.storedFiles()).toEqual([]);
+      await expect(client.hosted.metadata({ id: value.id, secret })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    });
+  });
+
+  it("a file of several downloads by one Range of its own chunks, never a chunk of padding alone, byte for byte; all of them as a ZIP read whole", async () => {
+    await withServer({ UPLOAD_MAX_FILE_DOWNLOADS: '0' }, async (server) => {
+      const uploader = new DropgateClient({ server: server.baseUrl });
+      // 4 MiB and a byte altogether, so Padme pads past the last file's chunk with a chunk of padding alone.
+      const files = three([10, 4 * MiB - 10 - (CHUNK + 5) + 1, CHUNK + 5], 30);
+      const total = 4 * MiB + 1;
+      for (const encrypt of [true, false]) {
+        const value = await uploadAll(uploader, asFiles(files), { encrypt, maxDownloads: 0 });
+        const secret = encrypt ? new URL(value.downloadUrl).hash.slice(1) : undefined;
+        const { size } = JSON.parse(server.requests().filter((r) => r.url === '/api/v4/uploads').at(-1)!.body.toString());
+        const layout = encrypt ? ObjectLayout.fromStoredSize(size, CHUNK) : null;
+        if (layout) expect((layout.chunkCount - 1) * CHUNK, 'a last chunk of padding alone').toBeGreaterThanOrEqual(total);
+        const offsets = [0, files[0].bytes.length, files[0].bytes.length + files[1].bytes.length];
+        // What a file's download asks for: its chunks' stored bytes encrypted, its own bytes not.
+        const asked = (index: number) => {
+          const start = offsets[index];
+          const end = start + files[index].bytes.length;
+          if (!layout) return end === total ? `bytes=${start}-` : `bytes=${start}-${end - 1}`;
+          const run = layout.range(Math.floor(start / CHUNK), Math.floor((end - 1) / CHUNK));
+          return run.end === layout.storedSize ? `bytes=${run.start}-` : `bytes=${run.start}-${run.end - 1}`;
+        };
+
+        for (let index = 0; index < 3; index++) {
+          const before = server.requests().length;
+          const { sink, bytes } = keeping();
+          const outcome = await uploader.hosted.download({ id: value.id, secret, files: [index], sink }).result;
+          expect(outcome.status, `encrypted: ${encrypt}, file ${index}`).toBe('completed');
+          expect(bytes().equals(Buffer.from(files[index].bytes)), `encrypted: ${encrypt}, file ${index}`).toBe(true);
+          expect(contentRequests(server.requests().slice(before)).map((r) => r.range), `encrypted: ${encrypt}, file ${index}`).toEqual([asked(index)]);
+        }
+        if (layout) {
+          const padding = layout.range(layout.chunkCount - 1).start;
+          for (const { range } of contentRequests(server.requests())) {
+            const last = /^bytes=\d+-(\d*)$/.exec(String(range))![1];
+            if (last !== '') expect(Number(last), `${range}`).toBeLessThan(padding);
+          }
+        }
+
+        // All of them as a ZIP: the whole upload, read to its last chunk, and every member intact.
+        const before = server.requests().length;
+        const { sink, bytes } = keeping();
+        const zipped = await uploader.hosted.download({ id: value.id, secret, asZip: true, sink }).result;
+        expect(zipped.status, `encrypted: ${encrypt}, the ZIP`).toBe('completed');
+        expect(contentRequests(server.requests().slice(before)).map((r) => r.range)).toEqual([undefined]);
+        const zip = readZip([{ bytes: new Uint8Array(bytes()) }]);
+        expect(zip.entries.map((entry) => entry.name)).toEqual(files.map((f) => f.name));
+        zip.entries.forEach((entry, i) => expect(Buffer.from(zip.bytesOf(entry)).equals(Buffer.from(files[i].bytes)), entry.name).toBe(true));
+      }
+    });
+  });
+
+  it('an opened upload counts once however many downloads it makes; at a limit of 1, another waits while it is open, then finds the upload gone once it closes', async () => {
+    await withServer({}, async (server) => {
+      const uploader = new DropgateClient({ server: server.baseUrl });
+      const files = three([100, CHUNK + 1, 200], 40);
+      for (const encrypt of [true, false]) {
+        const value = await uploadAll(uploader, asFiles(files), { encrypt, maxDownloads: 1 });
+        const secret = encrypt ? new URL(value.downloadUrl).hash.slice(1) : undefined;
+        const before = server.requests().length;
+        const leaseRoutes = () => routes(server).slice(before).filter((route) => route.endsWith('/leases') || route === 'DELETE /api/v4/lease');
+
+        // A page opened and closed with no download counts nothing.
+        const idle = await new DropgateClient({ server: server.baseUrl }).hosted.open({ id: value.id, secret });
+        await idle.close();
+        expect(leaseRoutes(), 'a page opened and closed').toEqual([]);
+
+        // One page: each file, then the ZIP, under one lease.
+        const page = await new DropgateClient({ server: server.baseUrl }).hosted.open({ id: value.id, secret });
+        for (let index = 0; index < 3; index++) {
+          const { sink, bytes } = keeping();
+          expect((await page.download({ files: [index], sink }).result).status).toBe('completed');
+          expect(bytes().equals(Buffer.from(files[index].bytes))).toBe(true);
+        }
+        expect((await page.download({ asZip: true, sink: keeping().sink }).result).status).toBe('completed');
+        expect(leaseRoutes(), 'one lease for four downloads').toEqual([`POST /api/v4/objects/${value.id}/leases`]);
+
+        // A second page waits while the first is open: its one place is taken.
+        const second = await new DropgateClient({ server: server.baseUrl }).hosted.open({ id: value.id, secret });
+        const waiting = second.download({ files: [0], sink: keeping().sink });
+        await expect.poll(() => waiting.snapshot.text, { timeout: 10_000 }).toBe('Someone is downloading this right now.');
+        expect(waiting.snapshot.status).toBe('downloading');
+
+        // The first page closes: its one download counts, and at the limit the whole upload goes.
+        await page.close();
+        expect(server.storedFiles()).toEqual([]);
+        const outcome = await waiting.result;
+        expect(outcome.status === 'failed' && outcome.error.code, `encrypted: ${encrypt}`).toBe('NOT_FOUND');
+        await second.close();
+        await expect(uploader.hosted.metadata({ id: value.id, secret })).rejects.toMatchObject({ code: 'NOT_FOUND' });
       }
     });
   });

@@ -331,6 +331,23 @@ const OPERATIONS: Record<string, (make: Make) => Promise<Collected>> = {
     results: [await make().hosted.metadata({ id: FILE_ID })],
     errors: [await errorFrom(() => make({ failing: true }).hosted.metadata({ id: FILE_ID }))],
   }),
+  'hosted.open': async (make) => {
+    const snapshots: unknown[] = [];
+    const opened = await make().hosted.open({ id: FILE_ID });
+    const download = opened.download({ sink: nullSink() });
+    snapshots.push(download.snapshot);
+    download.subscribe((s) => snapshots.push(s));
+    const done = await download.result;
+    await opened.close();
+    return {
+      snapshots,
+      results: [opened.metadata, done, done.status === 'completed' && done.value],
+      errors: [
+        await errorFrom(() => make({ failing: true }).hosted.open({ id: FILE_ID })),
+        await errorFrom(() => opened.download({ sink: nullSink() })),
+      ],
+    };
+  },
   // It resolves to nothing, so only its error has a transport to carry.
   'hosted.delete': async (make) => ({
     snapshots: [],

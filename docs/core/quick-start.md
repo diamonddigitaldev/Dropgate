@@ -115,13 +115,9 @@ const secret = link.hash.slice(1) || undefined; // an unencrypted upload's link 
 const upload = await client.hosted.metadata({ id, secret });
 console.log(upload.kind, upload.encrypted, `${upload.totalSize} bytes`);
 for (const { name, size } of upload.files) console.log(`- ${name}: ${size} bytes`);
-
-// A bundle's link is still https://<server>/b/<id>#<key>:
-const bundle = await client.hosted.metadata({ bundleId: 'bundle-id-456', keyB64: 'key-from-the-link' });
-console.log(`${bundle.fileCount} files, ${bundle.totalSizeBytes} bytes`);
 ```
 
-An encrypted upload's list of files is sealed as well, so only the secret's holder can read it. An encrypted upload without its secret throws `KEY_REQUIRED`, and a secret that doesn't open it, `DECRYPT_FAILED`.
+One file and several are read the same way, from links of the same shape: `kind` is `file` for one and `bundle` for several. An encrypted upload's list of files is sealed as well, so only the secret's holder can read its names and sizes, or how many there are. An encrypted upload without its secret throws `KEY_REQUIRED`, and a secret that doesn't open it, `DECRYPT_FAILED`.
 
 ## Downloading Files
 
@@ -170,12 +166,21 @@ const outcome = await download.result;
 if (outcome.status !== 'completed' && path) await rm(path, { force: true }); // a FileHandle has no abort()
 ```
 
-Several files download as one ZIP archive into one sink with `asZip: true`, or as separate files, with a function giving a sink for each; `files` picks some of them, by their index in the list:
+Several files download as one ZIP archive into one sink with `asZip: true`, or as separate files, with a function giving a sink for each; `files` picks some of them, by their index in the list, and only their part of the upload is downloaded:
 
 ```javascript
-const zipped = client.hosted.download({ bundleId, keyB64, asZip: true, sink: zipWriter });
-const separate = client.hosted.download({ bundleId, keyB64, sink: ({ name }) => sinkFor(name) });
-const second = client.hosted.download({ bundleId, keyB64, files: [1], sink: ({ name }) => sinkFor(name) });
+const zipped = client.hosted.download({ id, secret, asZip: true, sink: zipWriter });
+const separate = client.hosted.download({ id, secret, sink: ({ name }) => sinkFor(name) });
+const second = client.hosted.download({ id, secret, files: [1], sink: ({ name }) => sinkFor(name) });
+```
+
+Each of those is one download against the upload's limit. A page that offers its files one by one and as a ZIP opens the upload instead, so that everything it downloads counts once, and closes it as it goes ([`client.hosted.open()`](api-reference.md#clienthostedopenopts)):
+
+```javascript
+const opened = await client.hosted.open({ id, secret });
+const first = opened.download({ files: [0], sink: ({ name }) => sinkFor(name) });
+const all = opened.download({ asZip: true, sink: zipWriter });
+addEventListener('pagehide', () => opened.close());
 ```
 
 ## File Names
@@ -194,7 +199,7 @@ Core has one file name rule, for hosted uploads and direct transfers alike.
 | `report.pdf. ` | `report.pdf` | Trailing dots and spaces |
 | `a:b` | `a_b` | `:` (a Windows `name:stream`) and `< > " \| ? *` |
 
-`filenames.unique(name, taken)` gives `name (1).ext`, `name (2).ext` and so on when a name is taken; `taken` is a list of names, compared without regard to case, or a function. A bundle downloaded as a ZIP has its members named this way already.
+`filenames.unique(name, taken)` gives `name (1).ext`, `name (2).ext` and so on when a name is taken; `taken` is a list of names, compared without regard to case, or a function. A ZIP of several files has its members named this way already.
 
 ## Sizes
 

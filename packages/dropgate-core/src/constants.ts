@@ -12,8 +12,3 @@ export const AES_GCM_IV_BYTES = 12;
  * AES-GCM authentication tag size in bytes
  */
 export const AES_GCM_TAG_BYTES = 16;
-
-/**
- * Total encryption overhead per chunk (IV + tag)
- */
-export const ENCRYPTION_OVERHEAD_PER_CHUNK = AES_GCM_IV_BYTES + AES_GCM_TAG_BYTES;

@@ -48,12 +48,12 @@ At `DEBUG` level you may also see:
 - An upload paused or resumed, and one that ended at its deadline, with its size
 - A download lease taken or paused, a download counted against its limit, and an upload deleted at its download limit or by its uploader
 - Chunk counts and chunk sizes
-- The number of files in a bundle
+- The number of files in a Dropgate 3 bundle, sent on Dropgate 3's routes (no Dropgate 4 upload's line gives how many files it has)
 - Cleanup of expired or incomplete uploads
 
 **A paused upload** is kept only in the server's memory, with its temporary file and the storage it reserved, until its pause runs out (`UPLOAD_MAX_PAUSE_MINUTES`): then it goes at once. Nothing about it, not even that it exists, is written to a database, so a restart ends it, with `UPLOAD_PRESERVE_UPLOADS=true` too. No upload in progress, paused or not, records an IP address or when it started.
 
-**A download** of a Dropgate 4 upload takes a lease: a random ID, held only in the server's memory with the upload's ID, whether it has sent any bytes, whether it's paused, and when it runs out. It holds no IP address and nothing else about who asked, and none survives a restart. When it ends, it counts as one download if it sent anything; at the upload's download limit, the upload is deleted at once. Its metadata (what a link preview or a download page reads first) takes no lease and counts nothing.
+**A download** of a Dropgate 4 upload takes a lease: a random ID, held only in the server's memory with the upload's ID, whether it has sent any bytes, whether it's paused, and when it runs out. It holds no IP address and nothing else about who asked, and none survives a restart. When it ends, it counts as one download if it sent anything; at the upload's download limit, the upload is deleted at once. A download page holds one lease for everything it downloads, an upload's files one by one and its ZIP, and releases it as the page closes. Its metadata (what a link preview or a download page reads first) takes no lease and counts nothing.
 
 **An uploader can delete their own upload** with its manage token, a random value only the page or app that uploaded it holds: in the Web UI, **Delete upload** on the result screen, while the page is open. The server keeps only its SHA-256, and the token is sent only in the delete's own header, never in a URL. Deleting removes the upload's bytes and record at once, and downloads in progress stop. With `UPLOAD_PRESERVE_UPLOADS=true`, Dropgate 4's database writes zeros over a record as it deletes it, so an upload that's gone leaves nothing of itself in the file.
 

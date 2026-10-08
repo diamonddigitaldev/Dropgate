@@ -146,10 +146,9 @@ export interface UploadResult {
   id: string;
   /**
    * The manage token, which only this upload's sender has: 32 random bytes,
-   * URL-safe base64. The server keeps only its SHA-256. A bundle's upload
-   * doesn't have one yet.
+   * URL-safe base64. The server keeps only its SHA-256.
    */
-  manageToken?: string;
+  manageToken: string;
   /** The files uploaded, in order. */
   files: HostedFile[];
   /** How the client reached its server. */
@@ -387,17 +386,22 @@ export interface ValidateUploadOptions {
 
 /**
  * Which hosted upload: one by its `id`, with the `secret` from its link (after
- * the #) if it's encrypted; or a bundle's, by its `bundleId` and `keyB64`, as
- * bundles are still uploaded.
+ * the #) if it's encrypted. One file and several are named alike.
  */
-export type HostedTarget =
-  | { id: string; secret?: string; bundleId?: undefined; keyB64?: undefined }
-  | { bundleId: string; keyB64?: string; id?: undefined; secret?: undefined };
+export interface HostedTarget {
+  /** The upload's ID: its link's path. */
+  id: string;
+  /** What's after the # in an encrypted upload's link. It never leaves this device. */
+  secret?: string;
+}
 
 /** Options for `client.hosted.metadata()`. */
 export type MetadataOptions = HostedTarget & RequestOptions;
 
-/** What `client.hosted.metadata({ id })` gives: the same shape for one file or several. */
+/** Options for `client.hosted.open()`. */
+export type OpenOptions = HostedTarget & RequestOptions;
+
+/** What `client.hosted.metadata()` gives: the same shape for one file or several. */
 export interface UploadMetadata {
   /** `file` for one file, `bundle` for several. */
   kind: 'file' | 'bundle';
@@ -412,38 +416,6 @@ export interface UploadMetadata {
   /** How the client reached its server. */
   transport: Transport;
 }
-
-/** One file of a bundle, as its metadata describes it. */
-export interface HostedFileInfo {
-  /** The file's ID on the server. */
-  fileId: string;
-  /** The file's name, decrypted if it was encrypted. */
-  name: string;
-  /** The file's size in bytes, as it will be downloaded (decrypted). */
-  sizeBytes: number;
-}
-
-/** What `client.hosted.metadata({ bundleId })` gives for a bundle. */
-export interface BundleMetadata {
-  kind: 'bundle';
-  /** The bundle's ID on the server. */
-  bundleId: string;
-  /** Whether the bundle's files are end-to-end encrypted. */
-  isEncrypted: boolean;
-  /** Whether the list of files is encrypted too (sealed), so the server can't read which files belong to it. */
-  sealed: boolean;
-  /** The bundle's files, in order. */
-  files: HostedFileInfo[];
-  /** How many files the bundle has. */
-  fileCount: number;
-  /** The files' sizes added up, in bytes. */
-  totalSizeBytes: number;
-  /** How the client reached its server. */
-  transport: Transport;
-}
-
-/** What `client.hosted.metadata()` gives. */
-export type HostedMetadata = UploadMetadata | BundleMetadata;
 
 /** The step a download is on. */
 export type DownloadPhase =
@@ -479,10 +451,10 @@ export interface DownloadSnapshot {
 }
 
 /**
- * Options for `client.hosted.download()`: an upload by `id` (or a bundle by
- * `bundleId`), and the sink its bytes are written to.
+ * What a download writes, and how: for `client.hosted.download()`, and for an
+ * opened upload's `download()`.
  */
-export type DownloadOptions = HostedTarget & {
+export interface DownloadSinkOptions {
   /**
    * Where the bytes go: a sink, or a function giving one for each file as it
    * starts (it's told the file's name and size). Required. A single file takes
@@ -493,7 +465,7 @@ export type DownloadOptions = HostedTarget & {
   /**
    * For an upload of several files: which to download, by their index in its
    * list of files, each once (all of them if left out). They're written in
-   * the list's order.
+   * the list's order. Only the chunks holding them are asked for.
    */
   files?: number[];
   /** For several files: write them into one ZIP archive, to the one sink. */
@@ -517,7 +489,40 @@ export type DownloadOptions = HostedTarget & {
    * minutes after its last bytes).
    */
   retry?: RetryOptions;
-};
+}
+
+/**
+ * Options for `client.hosted.download()`: an upload by `id`, with its
+ * `secret` if it's encrypted, and the sink its bytes are written to.
+ */
+export type DownloadOptions = HostedTarget & DownloadSinkOptions;
+
+/**
+ * An upload opened with `client.hosted.open()`, as a download page holds it
+ * while it's open: its metadata, read with no lease, and downloads of it, all
+ * under one lease, so they count as one download however many there are.
+ * The lease is taken at its first download, renewed every 2 minutes while it's
+ * open, and released by `close()`. Printed, logged or serialised, it shows
+ * nothing of the secret or the lease.
+ */
+export interface OpenedUpload {
+  /** What the server holds about the upload, with its files' names opened. */
+  readonly metadata: UploadMetadata;
+  /**
+   * Downloads the upload, or some of its files, into `sink`, under the opened
+   * upload's one lease. Gives the download's handle at once, as
+   * `client.hosted.download()` does.
+   * @throws {DropgateError} INVALID_ARGUMENT, before a download starts, once it has been closed, or
+   * for a sink or files list it can't use.
+   */
+  download(opts: DownloadSinkOptions): DownloadHandle;
+  /**
+   * Closes it: cancels its downloads still running, and releases its lease,
+   * which then counts as one download if it sent anything. Calling it again
+   * does nothing. A page calls it on `pagehide`.
+   */
+  close(): Promise<void>;
+}
 
 /** Options for `client.hosted.delete()`: the upload, and the manage token its upload gave. */
 export interface DeleteOptions extends RequestOptions {

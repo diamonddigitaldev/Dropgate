@@ -1,5 +1,6 @@
 import { DropgateError, filenames } from './dropgate-core.js';
 import { pageClient } from './page-common.js';
+import { showBundle } from './download-bundle.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
 const statusTitle = document.getElementById('status-title');
@@ -209,11 +210,12 @@ async function loadMetadata() {
 
   try {
     // The secret is after the #, and never leaves this page. Core opens the
-    // file's name with it, and gives the file's size as it will be saved.
+    // files' names with it, and gives their sizes as they will be saved. The
+    // upload is opened with no lease: one is only taken to download.
     const secret = window.location.hash.substring(1);
-    let metadata;
+    let opened;
     try {
-      metadata = await client.hosted.metadata({ id, secret: secret || undefined });
+      opened = await client.hosted.open({ id, secret: secret || undefined });
     } catch (error) {
       // Only an encrypted file needs the secret, and Web Crypto to read it.
       if (DropgateError.is(error, 'KEY_REQUIRED') || DropgateError.is(error, 'RUNTIME_UNSUPPORTED')) {
@@ -230,10 +232,14 @@ async function loadMetadata() {
       throw error;
     }
 
-    if (metadata.files.length !== 1) {
-      showError('Download Error', "This upload has several files, which this page can't download.");
+    const { metadata } = opened;
+    if (metadata.files.length > 1) {
+      showBundle({ id, opened, format: formatBytes, takeLease });
       return;
     }
+    // One file is downloaded on its own lease, released as soon as it's saved, so
+    // at its download limit it's gone at once. The opened upload, with no lease, holds nothing.
+    opened.close();
     const [file] = metadata.files;
     downloadState.isEncrypted = metadata.encrypted;
     downloadState.sizeBytes = file.size;
@@ -264,7 +270,7 @@ async function loadMetadata() {
     console.error(error);
     resetTitleProgress();
     if (DropgateError.is(error, 'DECRYPT_FAILED')) {
-      showError('Wrong Link', "This link's key doesn't open the file. Check that the whole link was copied.");
+      showError('Wrong Link', "This link's key doesn't open the upload. Check that the whole link was copied.");
     } else if (DropgateError.is(error, 'NOT_FOUND')) {
       showError('File Not Found', 'This file may have expired, been downloaded, or been deleted.');
     } else {

@@ -480,12 +480,12 @@ export const uploadButton = (window) => window.locator('#action-bar').getByRole(
 export const securityWarning = (window) => window.getByRole('alertdialog', { name: 'Upload Security Warning' });
 
 /**
- * The body of every upload the server was asked to start, in order: single
- * files (POST /upload/init) and bundles (POST /upload/init-bundle).
+ * The body of every upload the server was asked to start, in order: one file
+ * or several, each upload is one POST /api/v4/uploads.
  * @param {{ requests: () => { method: string, url: string, body: Buffer }[] }} server
  */
 export const uploadsStarted = (server) => server.requests()
-    .filter(({ method, url }) => method === 'POST' && /^\/(upload\/init-bundle|api\/v4\/uploads)$/.test(url))
+    .filter(({ method, url }) => method === 'POST' && /^\/api\/v4\/uploads$/.test(url))
     .map(({ body }) => JSON.parse(body.toString('utf8')));
 
 export const test = base.extend({

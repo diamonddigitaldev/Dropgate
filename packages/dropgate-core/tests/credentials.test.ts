@@ -11,7 +11,6 @@ import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
 
 const BASE_URL = 'https://files.example';
 const FILE_ID = '0b7d4c52-5f0e-4d8e-9a57-3c1f2e6b8a90';
-const BUNDLE_ID = '6a1e9f3b-2c4d-4b7a-8e5f-9d0c1b2a3e4f';
 // Tokens that would be noticed anywhere they turned up.
 const TOKEN = 'zq7TOKENaaaa.bbbb-cccc_dddd~eeee';
 const RENEWED = 'zq7RENEWEDffff.gggg';
@@ -25,16 +24,15 @@ interface Seen {
   init: RequestInit;
 }
 
-// One file's upload, on Dropgate 4's routes.
+// An upload's routes, one file or several.
 const START = '/api/v4/uploads';
 const CHUNK = '/api/v4/upload/chunks/0';
 const FINISH = '/api/v4/upload/complete';
 const CANCEL = '/api/v4/upload';
-const isUpload = (path: string) => path.startsWith('/upload/') || path.startsWith('/api/v4/upload');
+const isUpload = (path: string) => path.startsWith('/api/v4/upload');
 
 /**
- * A fake Dropgate server: Dropgate 4's routes for one file, version 3's for a
- * bundle. With `credentialRequired`, it says so in its info, and answers any
+ * A fake Dropgate server, on Dropgate 4's routes. With `credentialRequired`, it says so in its info, and answers any
  * upload request without `Authorization: Bearer <accept>` with 401. `answer`
  * replaces a route's answer (a chunk's as `PUT /api/v4/upload/chunks/:index`),
  * and `pass` gives the usual one.
@@ -71,11 +69,6 @@ function fakeServer({ credentialRequired = false, accept = TOKEN }: { credential
           protocols: { dgup: { major: 4, minor: 0 }, dgdtp: { major: 4, minor: 0 } },
           capabilities: { upload: { enabled: true, maxSizeMB: 0, maxLifetimeHours: 0, e2ee: true, chunkSize: CHUNK_SIZE, credentialRequired } },
         });
-      case 'POST /upload/init-bundle': return json(200, { bundleUploadId: 'bundle-1', fileUploadIds: ['upload-1', 'upload-2'] });
-      case 'POST /upload/chunk': return json(200, {});
-      case 'POST /upload/complete': return json(200, { id: FILE_ID });
-      case 'POST /upload/complete-bundle': return json(200, { bundleId: BUNDLE_ID });
-      case 'POST /upload/cancel': return json(200, {});
       default: return pass(request);
     }
   };
@@ -137,7 +130,7 @@ describe('Nothing is sent unless the server asks and a provider gives one (09 14
     const client = make(server, auth);
     expect((await upload(client).result).status).toBe('completed');
     expect((await upload(client, [file('a.txt'), file('b.txt')]).result).status).toBe('completed');
-    expect((await client.hosted.download({ id: FILE_ID, sink: nullSink() }).result).status).toBe('completed');
+    expect((await client.hosted.download({ id: FILE_ID, sink: () => nullSink() }).result).status).toBe('completed');
     expect(auth).not.toHaveBeenCalled();
     expect(server.withAuth()).toEqual([]);
     expect(server.seen.map((r) => r.body + r.url).join('\n')).not.toContain(TOKEN);
@@ -172,13 +165,13 @@ describe('Asked once per operation, sent with every request of it (09 14.3)', ()
     expect(auth).toHaveBeenCalledTimes(1);
   });
 
-  it('asks once for a bundle, and its every request carries it', async () => {
+  it('asks once for an upload of several files, and its every request carries it', async () => {
     const server = fakeServer({ credentialRequired: true });
     const auth = giving(TOKEN);
     const outcome = await upload(make(server, auth), [file('a.txt'), file('b.txt')], true).result;
     expect(outcome.status).toBe('completed');
     expect(auth).toHaveBeenCalledTimes(1);
-    expect(server.uploads().map((r) => r.path)).toContain('/upload/complete-bundle');
+    expect(server.uploads().map((r) => r.path)).toEqual([START, '/api/v4/upload/chunks/0', '/api/v4/upload/chunks/1', '/api/v4/upload/chunks/2', '/api/v4/upload/chunks/3', FINISH]);
     expect(server.uploads().every((r) => r.headers.Authorization === `Bearer ${TOKEN}`)).toBe(true);
   });
 

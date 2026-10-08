@@ -287,12 +287,9 @@ function areFilesTooLargeForStandard(files) {
     ? state.maxSizeMB * 1024 * 1024
     : null;
   if (!maxBytes) return false;
-  // Check total estimated size across all files
-  let totalEstimated = 0;
-  for (const file of files) {
-    totalEstimated += sizes.estimateUpload(file.size, { encrypted: Boolean(state.encrypt), chunkSize: state.info?.capabilities?.upload?.chunkSize, maxBytes });
-  }
-  return totalEstimated > maxBytes;
+  // One file or several, an upload is stored as one object, checked whole.
+  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+  return sizes.estimateUpload(totalSize, { encrypted: Boolean(state.encrypt), chunkSize: state.info?.capabilities?.upload?.chunkSize, maxBytes }) > maxBytes;
 }
 
 function updateStartEnabled() {
@@ -837,10 +834,10 @@ async function startStandardUpload() {
     ? state.maxSizeMB * 1024 * 1024
     : null;
   if (maxBytes) {
-    let totalEstimated = 0;
-    for (const f of files) {
-      totalEstimated += sizes.estimateUpload(f.size, { encrypted: encrypt, chunkSize: state.info?.capabilities?.upload?.chunkSize, maxBytes });
-    }
+    // One file or several, an upload is stored as one object, checked whole.
+    const totalEstimated = sizes.estimateUpload(files.reduce((sum, f) => sum + f.size, 0), {
+      encrypted: encrypt, chunkSize: state.info?.capabilities?.upload?.chunkSize, maxBytes,
+    });
     if (totalEstimated > maxBytes) {
       if (state.p2pEnabled && state.p2pSecureOk) {
         setMode('p2p');
@@ -876,10 +873,10 @@ async function startStandardUpload() {
     });
 
     // Where the upload is. Core's snapshots never name a file, so the name of
-    // the one a bundle is on comes from this page's own list.
+    // the one an upload of several is on comes from this page's own list.
     upload.subscribe(({ phase, text, percent, fileIndex }) => {
       const p = (typeof percent === 'number') ? percent : 0;
-      const onFile = files.length > 1 && ['file-start', 'chunk', 'file-complete'].includes(phase);
+      const onFile = files.length > 1 && phase === 'chunk';
       const currentFileName = onFile ? files[fileIndex]?.name : null;
       const sub = currentFileName ? `${text || phase} — ${currentFileName}` : (text || phase);
 
@@ -929,9 +926,9 @@ async function startStandardUpload() {
 
     if (outcome.status === 'completed') {
       showProgress({ title: 'Uploading', sub: 'Upload successful!', percent: 100, doneBytes: totalSize, totalBytes: totalSize, icon: 'cloud_upload' });
-      // A bundle's upload has no manage token yet, so it has no Delete.
+      // The manage token, for this page's Delete: in its memory only.
       const { id, manageToken } = outcome.value;
-      state.uploaded = manageToken ? { id, manageToken } : null;
+      state.uploaded = { id, manageToken };
       showShare({ link: outcome.value.downloadUrl });
     } else if (outcome.status === 'cancelled') {
       showToast('Upload cancelled.', 'warning');

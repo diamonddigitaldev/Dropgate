@@ -240,7 +240,7 @@ Run the server behind a reverse proxy that terminates TLS:
 * [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)
 * [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/)
 
-On plain HTTP, even on `localhost` or `127.0.0.1`, the Web UI encrypts uploads, since browsers count localhost as secure. A single file's download page, `https://<host>/<id>`, is served over HTTP and HTTPS alike: the page itself checks whether the browser can decrypt there, so on localhost an encrypted file downloads, and over plain HTTP from another machine the page says it needs HTTPS. **Known issue in 3.x, which bundles still have:** the server refuses an encrypted bundle's page unless the request came in over HTTPS, and shows "Secure Connection Required", localhost included. To download encrypted bundles while testing locally, put the server behind a TLS-terminating proxy on the same machine.
+On plain HTTP, even on `localhost` or `127.0.0.1`, the Web UI encrypts uploads, since browsers count localhost as secure. An upload's download page, `https://<host>/<id>`, one file or several, is served over HTTP and HTTPS alike: the page itself checks whether the browser can decrypt there, so on localhost an encrypted upload downloads, and over plain HTTP from another machine the page says it needs HTTPS. (In 3.x, an encrypted bundle's page needed HTTPS even on localhost; that's fixed in 4.0.) A Dropgate 3 bundle's link, `https://<host>/b/<id>`, answers 410 with a page saying it was made with an older version.
 
 
 ## Storage and Lifecycle

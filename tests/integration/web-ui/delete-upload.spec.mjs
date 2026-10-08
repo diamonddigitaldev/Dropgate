@@ -73,9 +73,26 @@ for (const encrypted of [false, true]) {
     });
 }
 
-test("a bundle's result screen has no Delete: its upload has no manage token yet", async ({ page }) => {
-    await uploadFromHomePage(page, [madeUpFile('One of two é.bin', SIZE, 26), madeUpFile('Two of two é.bin', SIZE, 27)], { encrypted: true });
-    await expect(page.locator('#deleteUpload')).toBeHidden();
+test("a bundle's result screen has Delete too, which removes the whole upload, once confirmed, with the token in its header alone", async ({ page, server }) => {
+    const link = await uploadFromHomePage(page, [madeUpFile('One of two é.bin', SIZE, 26), madeUpFile('Two of two é.bin', SIZE, 27)], { encrypted: true });
+    const id = new URL(link).pathname.slice(1);
+    expect(server.storedFiles()).toEqual([`objects/${id}`]);
+
+    await page.locator('#deleteUpload').click();
+    await page.locator('#confirmDeleteUpload').click();
+    await expect(page.locator('#shareTitle')).toHaveText(/upload deleted/i);
+    expect(server.storedFiles(), 'files the server holds').toEqual([]);
+
+    const all = requests(server);
+    const deletes = all.filter((r) => r.route === `DELETE /api/v4/objects/${id}`);
+    expect(deletes).toHaveLength(1);
+    const token = deletes[0].headers['dropgate-manage-token'];
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const elsewhere = all.filter((r) => r !== deletes[0]
+        && [r.url, JSON.stringify(r.headers), r.body.toString('latin1')].some((part) => part.includes(token)));
+    expect(elsewhere.map((r) => r.route), 'requests holding the manage token').toEqual([]);
+
+    await expectGone(page, link);
 });
 
 test('"Send more files" drops the manage token and the Delete button too', async ({ page }) => {

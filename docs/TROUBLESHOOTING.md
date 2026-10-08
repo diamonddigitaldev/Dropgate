@@ -68,8 +68,9 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 
 - Browsers only provide some features Dropgate relies on in a **secure context** (HTTPS or localhost), notably the Web Crypto API used for end-to-end encryption. The Web UI also only enables direct transfer (P2P) in a secure context.
 - If you see missing buttons or “blocked” errors in the Web UI, run the server behind HTTPS.
-- An encrypted file's download page over plain HTTP from another machine says it needs HTTPS: the browser gives the page no Web Crypto there. On `localhost` or `127.0.0.1` it works, since browsers count those as secure.
-- **Known issue in 3.x, which bundles still have:** on plain HTTP, even on `localhost` or `127.0.0.1`, opening an encrypted bundle's link shows **"Secure Connection Required"**. The server only serves an encrypted bundle's page over HTTPS. To test encrypted bundles locally, put the server behind a TLS-terminating reverse proxy on the same machine.
+- An encrypted upload's download page over plain HTTP from another machine says it needs HTTPS, for one file or several: the browser gives the page no Web Crypto there. On `localhost` or `127.0.0.1` it works, since browsers count those as secure. (In 3.x, an encrypted bundle's page said **"Secure Connection Required"** on localhost too; that's fixed in 4.0.)
+- An unencrypted upload's page over plain HTTP from another machine hands each file to the browser to download itself, so several files come as separate downloads, with no ZIP.
+- **A link that says it's from an older version** (`/b/<id>`) was made by Dropgate 3. A Dropgate 4 server can't open it: the sender needs to update and send the files again.
 
 ## 5) P2P issues (Direct transfer)
 

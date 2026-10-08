@@ -17,7 +17,7 @@ test('at the window\'s smallest, with a link shown, nothing on Upload scrolls si
     // The link row as it is after an upload, with a long link.
     await window.evaluate(() => {
         document.getElementById('link-section').classList.remove('d-none');
-        document.getElementById('download-link').value = `https://dropgate.example.test/b/40418c60-e655-4d32-ba0c-c225a94e8c3b#${'k'.repeat(43)}`;
+        document.getElementById('download-link').value = `https://dropgate.example.test/40418c60-e655-4d32-ba0c-c225a94e8c3b#${'k'.repeat(43)}`;
     });
     // A horizontal scrollbar takes its height from the view: offsetHeight counts it, clientHeight doesn't.
     // (The row still reaches past the column, so scrollWidth stays wider: it's clipped, not scrollable.)

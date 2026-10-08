@@ -540,11 +540,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 });
 
                 // Where the upload is, while it runs. Core's snapshots never
-                // name a file, so the name of the one a bundle is on comes from
-                // this page's own list.
+                // name a file, so the name of the one an upload of several is
+                // on comes from this page's own list.
                 const report = (snapshot) => {
                     if (!['initializing', 'uploading', 'completing'].includes(snapshot.status)) return;
-                    const onFile = files.length > 1 && ['file-start', 'chunk', 'file-complete'].includes(snapshot.phase);
+                    const onFile = files.length > 1 && snapshot.phase === 'chunk';
                     const fileName = onFile ? files[snapshot.fileIndex]?.name : null;
                     api.uploadProgress({
                         text: fileName ? `${snapshot.text} — ${fileName}` : snapshot.text,

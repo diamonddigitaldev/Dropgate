@@ -1,6 +1,7 @@
 // Parity: an upload given a download limit of 2 on the home page can be
-// downloaded twice, and then its link is gone. For a bundle, only "Download All
-// as ZIP" counts: downloading its files one at a time doesn't use up the limit.
+// downloaded twice, and then its link is gone. For a bundle, each visit to its
+// page is one download, however many it makes: its files one at a time and a
+// ZIP count once, when the page goes.
 import { madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, test } from '../helpers/test.mjs';
 import { download, expectGone, openLink, uploadFromHomePage } from '../helpers/webui.mjs';
@@ -19,9 +20,8 @@ async function downloadFromStandardPage(page, link, file) {
     expect(summary(got.bytes)).toEqual(summary(file.buffer));
 }
 
-/** Download a bundle as one ZIP from the bundle page, and check every entry. */
-async function downloadZip(page, link, files) {
-    await openLink(page, link);
+/** Download a bundle as one ZIP from its page, already open, and check every entry. */
+async function downloadZip(page, files) {
     await expect(page.locator('#bundle-file-count')).toHaveText(String(files.length));
     const zip = await download(page, page.locator('#download-all-button'));
     await expect(page.locator('#status-title')).toHaveText(/download complete/i);
@@ -32,9 +32,8 @@ async function downloadZip(page, link, files) {
     }
 }
 
-/** Download every file in a bundle one at a time from the bundle page. */
-async function downloadEachFile(page, link, files) {
-    await openLink(page, link);
+/** Download every file in a bundle one at a time from its page, already open. */
+async function downloadEachFile(page, files) {
     await page.locator('#toggle-file-list').click();
     for (const file of files) {
         const got = await download(page, page.getByTitle(`Download ${file.name}`, { exact: true }));
@@ -71,18 +70,22 @@ for (const encrypted of [true, false]) {
     test.describe(`a bundle, ${kind}`, () => {
         test.use({ serverEnv: encrypted ? ALLOW_UP_TO_5 : { ...ALLOW_UP_TO_5, UPLOAD_ENABLE_E2EE: 'false' } });
 
-        test('with a limit of 2, gives each file alone without using up the limit, then two ZIPs, and then its link is gone', async ({ page, server }) => {
+        test('with a limit of 2, gives each file and a ZIP on one visit to its page, a ZIP on a second, and then its link is gone', async ({ page, server }) => {
             const files = bundleFiles(encrypted ? 60 : 70);
             const link = await uploadFromHomePage(page, files, { encrypted, maxDownloads: LIMIT });
 
-            await downloadEachFile(page, link, files);
-            await downloadZip(page, link, files);
-            await downloadZip(page, link, files);
+            // One visit: every file alone, then all of them, which counts once as the page goes.
+            await openLink(page, link);
+            await downloadEachFile(page, files);
+            await downloadZip(page, files);
+            // A second visit, which the first's leaving has counted before.
+            await openLink(page, link);
+            await downloadZip(page, files);
+            // Leaving it counts the second.
+            await page.goto('about:blank');
 
             await expectGone(page, link);
-            // An encrypted bundle's files stay on the server until they expire. That's a
-            // known issue, checked by the server suite, so it's only checked here unencrypted.
-            if (!encrypted) expect(server.storedFiles(), 'files the server still holds').toEqual([]);
+            expect(server.storedFiles(), 'files the server still holds').toEqual([]);
         });
     });
 }

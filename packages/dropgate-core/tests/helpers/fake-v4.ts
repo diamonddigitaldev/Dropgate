@@ -23,6 +23,8 @@ export interface StoredObject {
   meta?: string;
   files?: Array<{ name: string; size: number }>;
   maxDownloads: number;
+  /** Downloads counted so far: a lease that sent anything, once it ended. */
+  downloadCount?: number;
   manageTokenHash?: string;
 }
 
@@ -74,11 +76,29 @@ const rangeOf = (header: string, size: number): [number, number] | null => {
  * Every finished upload is stored under `id`, when it's given. A content
  * request with `Range` gets that range (206), unless its `If-Range` isn't the
  * upload's ETag, which gets the whole upload (200), as the server answers.
+ * A lease counts as one download when it's released, if it sent anything; at
+ * its limit, with no other lease open, the upload goes. A new lease waits
+ * (423) while open leases and counted downloads make the limit.
  */
 export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: number; id?: string } = {}) {
   const uploads = new Map<string, Upload>();
   const objects = new Map<string, StoredObject>();
   const leases = new Map<string, { id: string; served: boolean }>();
+  /** Every renew asked for, by lease. */
+  const renewals: string[] = [];
+  const openLeases = (id: string) => [...leases.values()].filter((lease) => lease.id === id).length;
+  /** Ends a lease: one download, if it sent anything; the upload goes at its limit, once no other lease is open. */
+  const endLease = (key: string) => {
+    const lease = leases.get(key);
+    if (!lease) return false;
+    leases.delete(key);
+    const stored = objects.get(lease.id);
+    if (lease.served && stored) {
+      stored.downloadCount = (stored.downloadCount ?? 0) + 1;
+      if (stored.maxDownloads > 0 && stored.downloadCount >= stored.maxDownloads && openLeases(lease.id) === 0) objects.delete(lease.id);
+    }
+    return true;
+  };
   /** The ID the next finished upload gets, if one is set. */
   const next: { id?: string } = {};
   let uploadCount = 0;
@@ -161,6 +181,9 @@ export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: nu
       }
       if (method === 'POST' && rest === '/leases') {
         if (!stored) return notFound();
+        if (stored.maxDownloads > 0 && openLeases(id) + (stored.downloadCount ?? 0) >= stored.maxDownloads) {
+          return json(423, { code: 'DOWNLOADS_BUSY', error: 'Someone is downloading this right now. Try again shortly.' }, { 'Retry-After': '5' });
+        }
         const lease = randomBytes(32).toString('base64url');
         leases.set(lease, { id, served: false });
         return json(201, { lease, deadline: Date.now() + 300_000, etag: `"${id}"` });
@@ -196,7 +219,13 @@ export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: nu
     }
 
     if (method === 'DELETE' && path === '/api/v4/lease') {
-      return leases.delete(headerOf(init, 'Dropgate-Lease') ?? '') ? new Response(null, { status: 204 }) : notFound();
+      return endLease(headerOf(init, 'Dropgate-Lease') ?? '') ? new Response(null, { status: 204 }) : notFound();
+    }
+    if (method === 'POST' && path === '/api/v4/lease/renew') {
+      const key = headerOf(init, 'Dropgate-Lease') ?? '';
+      if (!leases.has(key)) return notFound();
+      renewals.push(key);
+      return json(200, { deadline: Date.now() + 300_000 });
     }
     return undefined;
   }
@@ -206,6 +235,7 @@ export function fakeV4({ chunkSize = CHUNK_SIZE, id: fixedId }: { chunkSize?: nu
     uploads,
     objects,
     leases,
+    renewals,
     /** Gives the next finished upload this ID. */
     nextId: (id: string) => { next.id = id; },
     /** Stores an upload as if it had been sent, by its ID. */

@@ -33,7 +33,7 @@ A failed or cancelled outcome never holds a file name, a secret or a manage toke
 
 Work that ends after a cancel, however it ends, is `cancelled`, even if a request then fails on the way out. Work that had already finished when the cancel came is `completed`: an upload the server has already saved can't be taken back by cancelling it.
 
-Calling an upload or a download with nothing to do (no files, or neither an `id` nor a `bundleId`), or a download without a sink that fits it, throws `INVALID_ARGUMENT` at once, since there's no operation for an outcome to describe.
+Calling an upload or a download with nothing to do (no files, or no `id`), or a download without a sink that fits it, throws `INVALID_ARGUMENT` at once, since there's no operation for an outcome to describe.
 
 A download only completes once its sink has closed. A sink's `write()` or `close()` that fails fails the download, with `OUTPUT_WRITE_FAILED`, and a download that fails or is cancelled aborts its sink, so nothing half-written is finished as if it were whole.
 

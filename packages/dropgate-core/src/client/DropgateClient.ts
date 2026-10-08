@@ -1,4 +1,4 @@
-import { DEFAULT_CHUNK_SIZE, ENCRYPTION_OVERHEAD_PER_CHUNK } from '../constants.js';
+import { DEFAULT_CHUNK_SIZE } from '../constants.js';
 import { DropgateError, directTransferDisabled, errorFromStatus, toDropgateError, withTransport } from '../errors.js';
 import { guardedFetch, insecureTransportNotAllowed, isSecureServerUrl } from '../transport.js';
 import type { Transport } from '../transport.js';
@@ -33,12 +33,12 @@ import type {
   DownloadResult,
   DownloadHandle,
   DownloadSnapshot,
-  HostedMetadata,
-  HostedFileInfo,
+  DownloadSinkOptions,
   HostedFile,
   MetadataOptions,
+  OpenOptions,
+  OpenedUpload,
   UploadMetadata,
-  BundleMetadata,
   DeleteOptions,
 } from '../types.js';
 import type {
@@ -52,17 +52,17 @@ import { makeAbortSignal, makeWaitSignal, fetchJson, sleep, buildBaseUrl, parseS
 import type { FetchJsonOptions, FetchJsonResult } from '../utils/network.js';
 import { parseShareInput } from '../utils/share-link.js';
 import { validateFilename } from '../utils/filename.js';
-import { plaintextBytes, mbToBytes, estimateUploadBytes } from '../utils/size.js';
+import { mbToBytes, estimateUploadBytes } from '../utils/size.js';
 import { bytesToBase64url, base64urlToBytes } from '../utils/base64.js';
-import { cryptoProvider, sha256Hex, keyToBase64, keyFromBase64, encryptName, decryptName } from '../crypto/index.js';
-import type { ContentKey, CryptoProvider } from '../crypto/index.js';
+import { cryptoProvider } from '../crypto/index.js';
+import type { CryptoProvider } from '../crypto/index.js';
 import { OperationCredentials, credentialExpired } from '../credentials.js';
 import type { CredentialProvider } from '../credentials.js';
 import { startP2PSend } from '../p2p/send.js';
 import { startP2PReceive } from '../p2p/receive.js';
 import { resolvePeerConfig } from '../p2p/helpers.js';
 import { StreamingZipWriter } from '../zip/stream-zip.js';
-import { createObject, openObject, ObjectLayout, isChunkSize, HEADER_BYTES, SECRET_BYTES, MAX_FILES } from '../object/index.js';
+import { createObject, openObject, checkFiles, ObjectLayout, isChunkSize, HEADER_BYTES, SECRET_BYTES, MAX_FILES } from '../object/index.js';
 import type { ObjectWriter, OpenedObject } from '../object/index.js';
 
 /**
@@ -120,8 +120,9 @@ export interface ServerApi {
 export interface HostedApi {
   /**
    * Uploads one or more files, encrypted if the server supports it unless
-   * `encrypt` says otherwise. One file is uploaded on its own; several are
-   * uploaded as a bundle, under one link. The completed value has the link
+   * `encrypt` says otherwise: one file or several, each upload is one object
+   * on the server, under one link, its list of files sealed with the rest for
+   * an encrypted one. The completed value has the link
    * (`downloadUrl`, with the secret after its # for an encrypted upload), the
    * upload's `id`, and its `manageToken`, which only this sender has.
    *
@@ -134,32 +135,40 @@ export interface HostedApi {
   upload(opts: UploadOptions): UploadHandle;
   /**
    * Downloads an upload (`id`), decrypting it with the `secret` from its link
-   * if it was encrypted, into `sink`; or a bundle (`bundleId`, `keyB64`). It
-   * takes one lease from the server for the download, which is one download
-   * against the upload's limit, and releases it as soon as the download ends,
-   * however it ends. Core awaits each write to
-   * the sink and its close: the download only completes once the sink has
-   * closed, and a write or close that fails fails it, with OUTPUT_WRITE_FAILED.
-   * A failed or cancelled download aborts its sink.
+   * if it was encrypted, into `sink`: all of it, or the files `files` names,
+   * for which only the chunks holding them are asked for. It takes one lease
+   * from the server for the download, which is one download against the
+   * upload's limit, and releases it as soon as the download ends, however it
+   * ends. Core awaits each write to the sink and its close: the download only
+   * completes once the sink has closed, and a write or close that fails fails
+   * it, with OUTPUT_WRITE_FAILED. A failed or cancelled download aborts its sink.
    *
-   * Gives the download's handle at once, as `upload()` does.
-   * @throws {DropgateError} INVALID_ARGUMENT, before a download starts, if there's neither an
-   * id nor a bundleId, or the sink isn't one the download can use.
+   * Gives the download's handle at once, as `upload()` does. For several
+   * downloads that count as one, as a download page makes, use `open()`.
+   * @throws {DropgateError} INVALID_ARGUMENT, before a download starts, if there's no id, or the
+   * sink or files list isn't one the download can use.
    */
   download(opts: DownloadOptions): DownloadHandle;
   /**
    * Reads what the server holds about an upload (`id`): its files' names and
    * sizes, decrypting them with the `secret` from its link if it was
-   * encrypted. It takes no lease and counts nothing. A bundle's (`bundleId`)
-   * is read with `keyB64`.
+   * encrypted. It takes no lease and counts nothing.
    * @throws {DropgateError} NOT_FOUND if there's no such upload; KEY_REQUIRED if it's encrypted and
    * there's no secret; RUNTIME_UNSUPPORTED if it's encrypted and there's no Web Crypto here;
    * DECRYPT_FAILED if the secret doesn't open it; INTEGRITY_FAILED if what the server holds was
    * changed; VERSION_UNSUPPORTED if it was made in a format this version can't read; or a request's error.
    */
-  metadata(opts: MetadataOptions & { id: string }): Promise<UploadMetadata>;
-  metadata(opts: MetadataOptions & { bundleId: string }): Promise<BundleMetadata>;
-  metadata(opts: MetadataOptions): Promise<HostedMetadata>;
+  metadata(opts: MetadataOptions): Promise<UploadMetadata>;
+  /**
+   * Opens an upload (`id`, with its `secret` if it's encrypted) for a page
+   * that may download it several times, its files one by one and all of them
+   * as a ZIP: its metadata is read now, with no lease, and every download of
+   * it shares one lease, taken at the first, renewed every 2 minutes while
+   * it's open and released by `close()`. However many downloads it makes, they
+   * count as one; opened and closed with none, it counts nothing.
+   * @throws {DropgateError} As metadata() does.
+   */
+  open(opts: OpenOptions): Promise<OpenedUpload>;
   /**
    * Checks files and upload settings against a server's limits, as `upload()`
    * does before it starts.
@@ -222,19 +231,6 @@ function resolveServerToBaseUrl(server: string | ServerTarget): string {
   return buildBaseUrl(server);
 }
 
-/**
- * Estimate total upload size including encryption overhead.
- */
-function estimateTotalUploadSizeBytes(
-  fileSizeBytes: number,
-  totalChunks: number,
-  isEncrypted: boolean
-): number {
-  const base = Number(fileSizeBytes) || 0;
-  if (!isEncrypted) return base;
-  return base + (Number(totalChunks) || 0) * ENCRYPTION_OVERHEAD_PER_CHUNK;
-}
-
 /** The chunk size the server's uploads use, which its encrypted downloads come in. */
 function serverChunkSize(serverInfo: ServerInfo, fallback: number): number {
   const size = serverInfo?.capabilities?.upload?.chunkSize;
@@ -280,16 +276,13 @@ function checkProtocol(client: ProtocolVersion, given: unknown): ProtocolCompati
 const UPLOAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * The upload an operation names: by `id`, with its link's `secret`, or a
- * bundle by `bundleId`, with its `keyB64`.
- * @throws {DropgateError} INVALID_ARGUMENT for neither, or both.
+ * The upload an operation names: by `id`, with its link's `secret`.
+ * @throws {DropgateError} INVALID_ARGUMENT without an id.
  */
-function hostedTarget(opts: Partial<MetadataOptions> | undefined):
-  { id: string; secret?: string } | { bundleId: string; keyB64?: string; id?: undefined } {
-  const { id, bundleId } = opts ?? {};
-  if (typeof id === 'string' && id && bundleId === undefined) return { id, secret: opts?.secret };
-  if (typeof bundleId === 'string' && bundleId && id === undefined) return { bundleId, keyB64: opts?.keyB64 };
-  throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'Either id or bundleId is required.' });
+function hostedTarget(opts: Partial<MetadataOptions> | undefined): { id: string; secret?: string } {
+  const { id } = opts ?? {};
+  if (typeof id === 'string' && id) return { id, secret: opts?.secret };
+  throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'An upload id is required.' });
 }
 
 /**
@@ -340,6 +333,36 @@ function unreachableTooLong(cause: DropgateError): DropgateError {
     code: 'NOT_FOUND',
     message: "The server dropped this upload: it couldn't be reached for longer than the server waits.",
     cause,
+  });
+}
+
+/** How often an opened upload renews its lease: well inside the 5 minutes the server holds one with no request. */
+const LEASE_RENEW_MS = 2 * 60 * 1000;
+
+/** A download's lease: its ID, the upload's ETag, and how long the server holds it, as it last said. */
+interface TakenLease {
+  lease: string;
+  etag: string;
+  deadline: unknown;
+}
+
+/** Where a download gets its upload's metadata, and the lease it's downloaded under. */
+interface DownloadSource {
+  read(compat: ServerConnection, signal: AbortSignal): Promise<{ meta: UploadMetadata; opened?: OpenedObject }>;
+  lease: {
+    take(baseUrl: string, opts: { timeoutMs: number; signal: AbortSignal; progress: (patch: Partial<DownloadSnapshot>) => void }): Promise<TakenLease>;
+    /** The download has ended, however it ended. */
+    done(baseUrl: string, taken: TakenLease): Promise<void>;
+  };
+}
+
+/** `promise`, or the reason `signal` aborts with, whichever comes first. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
   });
 }
 
@@ -489,7 +512,8 @@ export class DropgateClient {
     this.hosted = Object.freeze({
       upload: stamped((o: UploadOptions) => this._upload(o)),
       download: stamped((o: DownloadOptions) => this._download(o)),
-      metadata: stamped((o: MetadataOptions) => this._metadata(o)) as HostedApi['metadata'],
+      metadata: stamped((o: MetadataOptions) => this._metadata(o)),
+      open: stamped((o: OpenOptions) => this._open(o)),
       validate: stamped((o: ValidateUploadOptions) => this._validate(o)),
       delete: stamped((o: DeleteOptions) => this._delete(o)),
     });
@@ -615,12 +639,11 @@ export class DropgateClient {
     return { valid: true, type: input.kind, target: input.secret ? `${path}#${input.secret}` : path, transport };
   }
 
-  private async _metadata(opts: MetadataOptions): Promise<HostedMetadata> {
+  private async _metadata(opts: MetadataOptions): Promise<UploadMetadata> {
     const target = hostedTarget(opts);
     const compat = await this._connect(opts);
     this._requireCompatible(compat, 'dgup');
-    if (target.id !== undefined) return (await this._readObject(target.id, target.secret, compat, opts)).meta;
-    return (await this._readMetadata({ bundleId: target.bundleId, keyB64: target.keyB64, timeoutMs: opts.timeoutMs, signal: opts.signal }, compat)).meta;
+    return (await this._readObject(target.id, target.secret, compat, opts)).meta;
   }
 
   /**
@@ -683,103 +706,6 @@ export class DropgateClient {
     };
   }
 
-  /**
-   * Reads a bundle's metadata from the server, decrypting its file names, and
-   * gives the key too, for its download.
-   */
-  private async _readMetadata(
-    opts: { bundleId: string; keyB64?: string } & RequestOptions,
-    compat: ServerConnection,
-  ): Promise<{ meta: BundleMetadata; cryptoKey?: ContentKey }> {
-    const { bundleId, keyB64, timeoutMs = 5000, signal } = opts;
-    const { baseUrl, serverInfo } = compat;
-    const chunkSize = serverChunkSize(serverInfo, this.chunkSize);
-
-    const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/bundle/${encodeURIComponent(bundleId)}/meta`, { method: 'GET', timeoutMs, signal });
-    if (!res.ok) throw errorFromStatus(res.status, json, 'Failed to fetch bundle metadata.');
-    if (!json || typeof json !== 'object') {
-      throw new DropgateError({ code: 'INVALID_RESPONSE', message: 'The server sent no metadata.' });
-    }
-
-    const raw = json as {
-      isEncrypted?: boolean;
-      sealed?: boolean;
-      encryptedManifest?: string;
-      files?: Array<{ fileId: string; sizeBytes: number; filename?: string; encryptedFilename?: string }>;
-    };
-    const isEncrypted = Boolean(raw.isEncrypted);
-
-    // The key, for an encrypted upload: a missing one, and no Web Crypto, are
-    // both found before anything is decrypted.
-    let cryptoKey: ContentKey | undefined;
-    if (isEncrypted) {
-      if (!keyB64) throw new DropgateError({ code: 'KEY_REQUIRED' });
-      if (!this._crypto.canEncrypt) {
-        throw new DropgateError({
-          code: 'RUNTIME_UNSUPPORTED',
-          message: 'Web Crypto API not available for decryption. Encrypted uploads need a secure context (HTTPS or localhost).',
-        });
-      }
-    }
-    const decrypt = async <T>(run: (key: ContentKey) => Promise<T>): Promise<T> => {
-      try {
-        cryptoKey ??= await keyFromBase64(this._crypto, keyB64!, this.base64);
-        return await run(cryptoKey);
-      } catch (err) {
-        throw new DropgateError({ code: 'DECRYPT_FAILED', cause: err });
-      }
-    };
-    const openName = (encrypted: string | undefined) =>
-      decrypt((key) => decryptName(this._crypto, String(encrypted ?? ''), key, this.base64));
-
-    // A received name is checked as a sent one is: whoever uploaded it, a name
-    // that's empty, too long or has a path in it never reaches the caller.
-    const received = (name: string, index?: number): string => {
-      validateFilename(name, { origin: 'server', ...(index === undefined ? {} : { index }) });
-      return name;
-    };
-
-    let files: HostedFileInfo[];
-    const sealed = Boolean(raw.sealed && raw.encryptedManifest);
-    if (sealed) {
-      // A sealed bundle's file list is encrypted: only the key holder can read it.
-      const manifest = await decrypt(async (key) => {
-        const decrypted = await this._crypto.decrypt(key, this.base64.decode(raw.encryptedManifest!));
-        const parsed = JSON.parse(new TextDecoder().decode(decrypted)) as { files?: Array<{ fileId: string; sizeBytes: number; name: string }> };
-        if (!Array.isArray(parsed?.files)) throw new TypeError('The manifest has no files.');
-        return parsed.files;
-      });
-      files = manifest.map((f, i) => ({ fileId: f.fileId, name: received(f.name || 'file', i), sizeBytes: Number(f.sizeBytes) || 0 }));
-    } else if (Array.isArray(raw.files)) {
-      files = [];
-      for (const f of raw.files) {
-        const stored = Number(f.sizeBytes) || 0;
-        files.push({
-          fileId: f.fileId,
-          name: received(isEncrypted ? await openName(f.encryptedFilename) : (f.filename || 'file'), files.length),
-          // An unsealed encrypted bundle's sizes are what the server stored, ciphertext.
-          sizeBytes: isEncrypted ? plaintextBytes(stored, chunkSize) : stored,
-        });
-      }
-    } else {
-      throw new DropgateError({ code: 'INVALID_RESPONSE', message: 'Invalid bundle metadata: missing files or manifest.' });
-    }
-
-    return {
-      meta: {
-        kind: 'bundle',
-        transport: this.transport,
-        bundleId,
-        isEncrypted,
-        sealed,
-        files,
-        fileCount: files.length,
-        totalSizeBytes: files.reduce((sum, f) => sum + f.sizeBytes, 0),
-      },
-      cryptoKey,
-    };
-  }
-
   private async _delete(opts: DeleteOptions): Promise<void> {
     const { id, manageToken, timeoutMs = 5000, signal } = opts ?? ({} as DeleteOptions);
     // The token is 32 bytes as URL-safe base64; anything else is never sent. Neither is ever repeated.
@@ -814,8 +740,11 @@ export class DropgateClient {
     if (files.length === 0) {
       throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'At least one file is required.' });
     }
+    if (files.length > MAX_FILES) {
+      throw new DropgateError({ code: 'INVALID_ARGUMENT', message: `An upload holds 1 to ${MAX_FILES} files.` });
+    }
 
-    // Validate each file and check size limits
+    // Validate each file
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const fileSize = Number(file?.size);
@@ -825,23 +754,24 @@ export class DropgateClient {
       if (fileSize === 0) {
         throw new DropgateError({ code: 'FILE_EMPTY', details: { index: i } });
       }
+    }
 
-      // maxSizeMB: 0 means unlimited. One file is stored as one object, with
-      // its header, tags and padding (which never makes it too large); a
-      // bundle's files are each still stored as Dropgate 3's, and checked so.
-      const maxMB = Number(caps.maxSizeMB);
-      if (Number.isFinite(maxMB) && maxMB > 0) {
-        const limitBytes = mbToBytes(maxMB);
-        const validationChunkSize = serverChunkSize(serverInfo, this.chunkSize);
-        const estimatedBytes = files.length === 1
-          ? estimateUploadBytes(fileSize, { encrypted: encrypt, chunkSize: validationChunkSize, maxBytes: limitBytes })
-          : estimateTotalUploadSizeBytes(fileSize, Math.ceil(fileSize / validationChunkSize), encrypt);
-        if (estimatedBytes > limitBytes) {
-          const msg = encrypt
-            ? `File at index ${i} too large once encryption overhead is included. Server limit: ${maxMB} MB.`
-            : `File at index ${i} too large. Server limit: ${maxMB} MB.`;
-          throw new DropgateError({ code: 'FILE_TOO_LARGE', message: msg, details: { index: i } });
-        }
+    // maxSizeMB: 0 means unlimited. One file or several, an upload is stored
+    // as one object, with its header, tags and padding (which never makes it
+    // too large), and the limit is on the whole of it.
+    const maxMB = Number(caps.maxSizeMB);
+    if (Number.isFinite(maxMB) && maxMB > 0) {
+      const limitBytes = mbToBytes(maxMB);
+      const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+      const estimatedBytes = estimateUploadBytes(totalBytes, {
+        encrypted: encrypt, chunkSize: serverChunkSize(serverInfo, this.chunkSize), maxBytes: limitBytes,
+      });
+      if (estimatedBytes > limitBytes) {
+        const what = files.length === 1 ? 'File at index 0 too large' : 'These files are too large together';
+        const msg = encrypt
+          ? `${what} once encryption overhead is included. Server limit: ${maxMB} MB.`
+          : `${what}. Server limit: ${maxMB} MB.`;
+        throw new DropgateError({ code: 'FILE_TOO_LARGE', message: msg, ...(files.length === 1 ? { details: { index: 0 } } : {}) });
       }
     }
 
@@ -900,23 +830,13 @@ export class DropgateClient {
       throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'At least one file is required.' });
     }
 
-    const currentUploadIds: string[] = [];
-    // A Dropgate 4 upload in progress, by its ID, until it's finished.
+    // The upload in progress, by its ID, until it's finished.
     let currentObjectUpload: string | null = null;
     const totalSizeBytes = files.reduce((sum, f) => sum + f.size, 0);
     // The upload's credential, only if its server asks for one: every request
     // the upload makes, its cancel included, carries it, and nothing else does.
     let credentials = OperationCredentials.none;
 
-    const callCancelEndpoint = async (uploadId: string): Promise<void> => {
-      try {
-        await fetchJson(this.fetchFn, `${this.baseUrl}/upload/cancel`, {
-          method: 'POST', timeoutMs: 5000,
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...credentials.headers() },
-          body: JSON.stringify({ uploadId }),
-        });
-      } catch { /* Best effort */ }
-    };
     const cancelObjectUpload = async (uploadId: string): Promise<void> => {
       try {
         await fetchJson(this.fetchFn, `${this.baseUrl}/api/v4/upload`, {
@@ -969,180 +889,13 @@ export class DropgateClient {
       // What can recover is retried until the server stops waiting, or `retries` times if that's set.
       const policy = retryPolicy(retry);
 
-      // ========== ONE FILE: one Dropgate 4 object ==========
-      if (files.length === 1) {
-        return this._uploadObject({
-          file: files[0], name: filenames[0], encrypted: effectiveEncrypt, lifetimeMs, maxDownloads,
-          compat, progress, signal: effectiveSignal, send, credentials, timeouts, policy,
-          started: (uploadId) => { currentObjectUpload = uploadId; },
-          finished: () => { currentObjectUpload = null; },
-        });
-      }
-
-      // ========== SEVERAL FILES: a bundle ==========
-      // 2) Encryption prep (single key for all files)
-      let cryptoKey: ContentKey | null = null;
-      let keyB64: string | null = null;
-      const transmittedFilenames: string[] = [];
-
-      if (effectiveEncrypt) {
-        if (!this._crypto.canEncrypt) {
-          throw new DropgateError({
-            code: 'RUNTIME_UNSUPPORTED',
-            message: 'Web Crypto API not available. Encryption requires a secure context (HTTPS or localhost).',
-          });
-        }
-        progress({ phase: 'crypto', text: 'Generating encryption key...' });
-        try {
-          cryptoKey = await this._crypto.generateKey();
-          keyB64 = await keyToBase64(this._crypto, cryptoKey, this.base64);
-          for (const name of filenames) {
-            transmittedFilenames.push(await encryptName(this._crypto, name, cryptoKey, this.base64));
-          }
-        } catch (err) {
-          throw new DropgateError({ code: 'ENCRYPT_FAILED', cause: err });
-        }
-      } else {
-        transmittedFilenames.push(...filenames);
-      }
-
-      // 3) Compute chunk sizes
-      const serverChunkSize = serverInfo?.capabilities?.upload?.chunkSize;
-      const effectiveChunkSize = (Number.isFinite(serverChunkSize) && serverChunkSize! > 0)
-        ? serverChunkSize!
-        : this.chunkSize;
-
-      // ========== MULTI-FILE (BUNDLE) ==========
-      // Prepare per-file metadata
-      const fileManifest = files.map((f, i) => {
-        const totalChunks = Math.ceil(f.size / effectiveChunkSize);
-        const totalUploadSize = estimateTotalUploadSizeBytes(f.size, totalChunks, effectiveEncrypt);
-        return { filename: transmittedFilenames[i], totalSize: totalUploadSize, totalChunks };
+      // One file or several: one Dropgate 4 object.
+      return this._uploadObject({
+        files, names: filenames, encrypted: effectiveEncrypt, lifetimeMs, maxDownloads,
+        compat, progress, signal: effectiveSignal, send, credentials, timeouts, policy,
+        started: (uploadId) => { currentObjectUpload = uploadId; },
+        finished: () => { currentObjectUpload = null; },
       });
-
-      // Init bundle
-      progress({ phase: 'init', text: `Reserving server storage for ${files.length} files...`, totalFiles: files.length });
-
-      const initBundleRes = await send(`${baseUrl}/upload/init-bundle`, {
-        method: 'POST',
-        timeoutMs: timeouts.initMs ?? 15000,
-        signal: effectiveSignal,
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          fileCount: files.length,
-          files: fileManifest,
-          lifetime: lifetimeMs,
-          isEncrypted: effectiveEncrypt,
-          ...(maxDownloads !== undefined ? { maxDownloads } : {}),
-        }),
-      });
-
-      if (!initBundleRes.res.ok) {
-        throw errorFromStatus(initBundleRes.res.status, initBundleRes.json, 'Bundle initialisation failed.');
-      }
-
-      const bundleInitJson = initBundleRes.json as { bundleUploadId?: string; fileUploadIds?: string[] } | null;
-      const bundleUploadId = bundleInitJson?.bundleUploadId;
-      const fileUploadIds = bundleInitJson?.fileUploadIds;
-      if (!bundleUploadId || !fileUploadIds || fileUploadIds.length !== files.length) {
-        throw new DropgateError({ code: 'INVALID_RESPONSE', message: 'Server did not return valid bundle upload IDs.' });
-      }
-      currentUploadIds.push(...fileUploadIds);
-      progress({ status: 'uploading' });
-
-      // Upload each file sequentially
-      const fileResults: Array<{ fileId: string; name: string; size: number }> = [];
-      let cumulativeBytes = 0;
-
-      for (let fi = 0; fi < files.length; fi++) {
-        const file = files[fi];
-        const uploadId = fileUploadIds[fi];
-        const totalChunks = fileManifest[fi].totalChunks;
-        const totalUploadSize = fileManifest[fi].totalSize;
-
-        progress({
-          phase: 'file-start', text: `Uploading file ${fi + 1} of ${files.length}...`,
-          percent: totalSizeBytes > 0 ? (cumulativeBytes / totalSizeBytes) * 100 : 0,
-          processedBytes: cumulativeBytes,
-          fileIndex: fi, totalFiles: files.length,
-        });
-
-        await this._uploadFileChunks({
-          file, uploadId, cryptoKey, effectiveChunkSize, totalChunks, totalUploadSize,
-          baseOffset: cumulativeBytes, totalBytesAllFiles: totalSizeBytes,
-          progress, signal: effectiveSignal, baseUrl, policy,
-          chunkTimeoutMs: timeouts.chunkMs ?? 60000,
-          credentials,
-        });
-
-        // Complete individual file
-        const completeRes = await send(`${baseUrl}/upload/complete`, {
-          method: 'POST',
-          timeoutMs: timeouts.completeMs ?? 30000,
-          signal: effectiveSignal,
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ uploadId }),
-        });
-
-        if (!completeRes.res.ok) {
-          throw errorFromStatus(completeRes.res.status, completeRes.json, `File ${fi + 1} finalisation failed.`);
-        }
-
-        const fileId = (completeRes.json as { id?: string })?.id;
-        if (!fileId) throw new DropgateError({ code: 'INVALID_RESPONSE', message: `Server did not return a valid file id for file ${fi + 1}.` });
-
-        fileResults.push({ fileId, name: filenames[fi], size: file.size });
-        cumulativeBytes += file.size;
-
-        progress({
-          phase: 'file-complete', text: `File ${fi + 1} of ${files.length} uploaded.`,
-          percent: totalSizeBytes > 0 ? (cumulativeBytes / totalSizeBytes) * 100 : 0,
-          processedBytes: cumulativeBytes,
-        });
-      }
-
-      // Complete bundle
-      progress({ status: 'completing', phase: 'complete', text: 'Finalising bundle...', percent: 100, processedBytes: totalSizeBytes });
-
-      // For encrypted bundles, build and encrypt the manifest client-side.
-      // The server stores only the opaque blob and cannot read which files belong to the bundle.
-      let encryptedManifestB64: string | undefined;
-      if (effectiveEncrypt && cryptoKey) {
-        const manifest = JSON.stringify({
-          files: fileResults.map(r => ({
-            fileId: r.fileId,
-            name: r.name,
-            sizeBytes: r.size,
-          })),
-        });
-        const manifestBytes = new TextEncoder().encode(manifest);
-        encryptedManifestB64 = this.base64.encode(await this._crypto.encrypt(cryptoKey, manifestBytes));
-      }
-
-      const completeBundleRes = await send(`${baseUrl}/upload/complete-bundle`, {
-        method: 'POST',
-        timeoutMs: timeouts.completeMs ?? 30000,
-        signal: effectiveSignal,
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          bundleUploadId,
-          ...(encryptedManifestB64 ? { encryptedManifest: encryptedManifestB64 } : {}),
-        }),
-      });
-
-      if (!completeBundleRes.res.ok) {
-        throw errorFromStatus(completeBundleRes.res.status, completeBundleRes.json, 'Bundle finalisation failed.');
-      }
-
-      const bundleId = (completeBundleRes.json as { bundleId?: string })?.bundleId;
-      if (!bundleId) throw new DropgateError({ code: 'INVALID_RESPONSE', message: 'Server did not return a valid bundle id.' });
-
-      let downloadUrl = `${baseUrl}/b/${bundleId}`;
-      if (effectiveEncrypt && keyB64) downloadUrl += `#${keyB64}`;
-
-      return {
-        downloadUrl, id: bundleId, files: fileResults.map(({ name, size }) => ({ name, size })), transport: this.transport,
-      };
     };
 
     return this._registry.add(startOperation<UploadResult, UploadSnapshot>({
@@ -1157,7 +910,6 @@ export class DropgateClient {
       work: (ctx) => {
         // However it's cancelled, the server is told to discard what it has.
         ctx.scope.onCancel(() => {
-          for (const id of currentUploadIds) callCancelEndpoint(id).catch(() => { });
           if (currentObjectUpload) cancelObjectUpload(currentObjectUpload).catch(() => { });
         });
         return work(ctx);
@@ -1174,15 +926,16 @@ export class DropgateClient {
   }
 
   /**
-   * Uploads one file as a Dropgate 4 object: started with its header, sealed
-   * file list and the manage token's SHA-256, sent chunk by chunk (each chunk
+   * Uploads one file or several as one Dropgate 4 object, the files' bytes one
+   * after another: started with its header, sealed list of files and the
+   * manage token's SHA-256, sent chunk by chunk (each chunk
    * of an encrypted one sealed once, and those same bytes sent again on a
    * retry), then finished. Gives the link, with the secret after its # for an
    * encrypted one, and the manage token: nothing else ever holds either.
    */
   private async _uploadObject(p: {
-    file: FileSource;
-    name: string;
+    files: FileSource[];
+    names: string[];
     encrypted: boolean;
     lifetimeMs: number;
     maxDownloads?: number;
@@ -1196,7 +949,7 @@ export class DropgateClient {
     started: (uploadId: string) => void;
     finished: () => void;
   }): Promise<UploadResult> {
-    const { file, name, encrypted, compat, progress, signal, send, timeouts } = p;
+    const { encrypted, compat, progress, signal, send, timeouts } = p;
     const { baseUrl, serverInfo } = compat;
     const chunkSize = serverChunkSize(serverInfo, this.chunkSize);
     if (!isChunkSize(chunkSize)) {
@@ -1204,7 +957,12 @@ export class DropgateClient {
     }
     const maxMB = Number(serverInfo?.capabilities?.upload?.maxSizeMB);
     const maxBytes = Number.isFinite(maxMB) && maxMB > 0 ? mbToBytes(maxMB) : 0;
-    const files = [{ name, size: file.size }];
+    const sources = p.files;
+    const files = sources.map((source, i) => ({ name: p.names[i], size: source.size }));
+    // 1 to 1,000 files, each name by the one rule: checked for every upload, before anything is sent.
+    checkFiles(files);
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const several = files.length > 1;
 
     // The manage token deletes the upload: only its SHA-256 is sent, and the
     // token itself is given in the result alone.
@@ -1230,7 +988,7 @@ export class DropgateClient {
       }
       layout = writer.layout;
     } else {
-      layout = ObjectLayout.plain(file.size, chunkSize);
+      layout = ObjectLayout.plain(totalSize, chunkSize);
     }
 
     progress({ phase: 'init', text: 'Reserving server storage...' });
@@ -1259,36 +1017,39 @@ export class DropgateClient {
     // How long the server waits for the next request: every answer moves it on.
     const window = new RetryWindow();
     window.heard(deadline);
-    progress({ status: 'uploading' });
+    progress({ status: 'uploading', ...(several ? { totalFiles: files.length } : {}) });
 
+    const sizes = files.map((f) => f.size);
     const totalChunks = layout.chunkCount;
     for (let i = 0; i < totalChunks; i++) {
       if (signal.aborted) throw signal.reason || new DropgateError({ code: 'OPERATION_CANCELLED' });
 
-      const processedBytes = Math.min(file.size, i * chunkSize);
+      // The parts of the files the chunk holds, in order; an encrypted one's last may end in padding.
+      const { parts } = layout.chunkParts(i, sizes);
+      const processedBytes = Math.min(totalSize, i * chunkSize);
       progress({
         phase: 'chunk',
         text: `Uploading chunk ${i + 1} of ${totalChunks}...`,
-        percent: (processedBytes / file.size) * 100,
+        percent: (processedBytes / totalSize) * 100,
         processedBytes,
         chunkIndex: i, totalChunks,
+        // The file the chunk starts in; a chunk of padding alone is still the last file's.
+        ...(several ? { fileIndex: parts[0]?.file ?? files.length - 1 } : {}),
       });
 
-      // One bounded read: the chunk's part of the file, and no more of it.
+      // Bounded reads: each file's part of the chunk, and no more of it.
       let body: Uint8Array<ArrayBuffer>;
-      if (writer) {
-        // The file's part of the chunk; the rest is padding, which is zero bytes.
-        const { parts } = writer.chunkParts(i);
+      if (parts.length === 1 && !writer) {
+        body = await readRange(sources[parts[0].file], parts[0].offset, parts[0].offset + parts[0].length);
+      } else {
+        // The rest of an encrypted chunk is padding, which is zero bytes.
         const plaintext = new Uint8Array(layout.chunkLength(i));
         let at = 0;
         for (const part of parts) {
-          plaintext.set(await readRange(file, part.offset, part.offset + part.length), at);
+          plaintext.set(await readRange(sources[part.file], part.offset, part.offset + part.length), at);
           at += part.length;
         }
-        body = await writer.seal(i, plaintext);
-      } else {
-        const { start: from, end: to } = layout.chunkBytes(i);
-        body = await readRange(file, from, to);
+        body = writer ? await writer.seal(i, plaintext) : plaintext;
       }
 
       const digest = this.base64.encode(await this._crypto.sha256(body));
@@ -1308,7 +1069,7 @@ export class DropgateClient {
       writer?.confirm(i);
     }
 
-    progress({ status: 'completing', phase: 'complete', text: 'Finalising upload...', percent: 100, processedBytes: file.size });
+    progress({ status: 'completing', phase: 'complete', text: 'Finalising upload...', percent: 100, processedBytes: totalSize });
     // The finish gives the same answer if it's asked again, so it's retried as a chunk is.
     const finish = await retrying(async () => {
       const out = await send(`${baseUrl}/api/v4/upload/complete`, {
@@ -1343,7 +1104,23 @@ export class DropgateClient {
   }
 
   private _download(opts: DownloadOptions): DownloadHandle {
-    const target = hostedTarget(opts);
+    const { id, secret } = hostedTarget(opts);
+    return this._startDownload(opts, {
+      read: async (compat, signal) => this._readObject(id, secret, compat, { timeoutMs: opts.timeoutMs ?? 60000, signal }),
+      // One lease for this download alone, released as it ends.
+      lease: {
+        take: (baseUrl, waitOpts) => this._takeLease(baseUrl, id, waitOpts),
+        done: (baseUrl, taken) => this._releaseLease(baseUrl, taken.lease),
+      },
+    });
+  }
+
+  /**
+   * Checks a download's sink and files list, then starts it as an operation:
+   * `read` gives the upload's metadata and opened object, and `lease` the
+   * lease it's downloaded under.
+   */
+  private _startDownload(opts: DownloadSinkOptions, how: DownloadSource): DownloadHandle {
     const { asZip, sink, signal, timeoutMs = 60000 } = opts;
     // A download cut off is continued until the server stops holding its lease, or `retries` times if that's set.
     const policy = retryPolicy(opts.retry);
@@ -1357,9 +1134,7 @@ export class DropgateClient {
     // The sink is checked before anything starts: one sink for a single file
     // or a ZIP, and a function giving one per file for several files apart.
     const zipped = Boolean(asZip);
-    const sinkFits = typeof sink === 'function'
-      ? !zipped
-      : isDownloadSink(sink) && (target.id !== undefined || zipped);
+    const sinkFits = typeof sink === 'function' ? !zipped : isDownloadSink(sink);
     if (!sinkFits) {
       throw new DropgateError({
         code: 'INVALID_ARGUMENT',
@@ -1367,139 +1142,9 @@ export class DropgateClient {
           ? 'A download needs a sink, with write() and close(), for its bytes.'
           : zipped
             ? 'Files downloaded as a ZIP need one sink, with write() and close().'
-            : target.id !== undefined
-              ? 'The sink needs write() and close(), or must be a function giving a sink.'
-              : 'A bundle downloaded as separate files needs a function giving a sink for each file.',
+            : 'The sink needs write() and close(), or must be a function giving a sink.',
       });
     }
-
-    const bundleWork = async (ctx: OperationContext<DownloadSnapshot>, bundleId: string, keyB64?: string): Promise<DownloadResult> => {
-      const progress = ctx.update;
-      const downloadSignal = ctx.signal;
-      let open: SinkWriter | null = null;
-
-      try {
-        // 0) Connect
-        const compat = await this._connect({ timeoutMs, signal: downloadSignal });
-        progress({ phase: 'server-compat', text: compat.dgup.message });
-        this._requireCompatible(compat, 'dgup');
-        const { baseUrl } = compat;
-
-        // 1) Metadata, with the file names decrypted
-        progress({ phase: 'metadata', text: 'Fetching bundle info...' });
-        const { meta, cryptoKey } = await this._readMetadata({ bundleId, keyB64, timeoutMs, signal: downloadSignal }, compat);
-        const indexes = chooseFiles(chosenIndexes, meta.files.length);
-        const files = indexes.map((i) => meta.files[i]);
-        const totalBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0);
-        const several = true;
-        progress({ status: 'downloading', totalBytes, ...(several ? { totalFiles: files.length } : {}) });
-
-        const streamOpts = { baseUrl, isEncrypted: meta.isEncrypted, cryptoKey, compat, signal: downloadSignal, timeoutMs };
-        let written = 0;
-        const counted = (fileIndex: number, done: number) => (fileBytes: number) => {
-          const processedBytes = done + fileBytes;
-          progress({
-            phase: 'downloading',
-            percent: totalBytes > 0 ? (processedBytes / totalBytes) * 100 : 0,
-            processedBytes,
-            ...(several ? { fileIndex } : {}),
-          });
-        };
-        const fileStarts = (fi: number) => {
-          progress({
-            phase: several ? 'file-start' : 'downloading',
-            text: several ? `Downloading file ${fi + 1} of ${files.length}...` : 'Downloading...',
-            percent: totalBytes > 0 ? (written / totalBytes) * 100 : 0,
-            processedBytes: written,
-            ...(several ? { fileIndex: fi } : {}),
-          });
-        };
-
-        if (zipped) {
-          // ===== BUNDLE AS ZIP: one sink, one archive =====
-          const out = await SinkWriter.open(sink, { name: '', size: totalBytes, index: 0 });
-          open = out;
-          const zip = new StreamingZipWriter((chunk) => out.write(chunk));
-          const drained = async () => {
-            try {
-              await zip.drained();
-            } catch (err) {
-              throw toDropgateError(err, 'OUTPUT_WRITE_FAILED');
-            }
-          };
-          // The writer refuses a member whose bytes don't come to the size the
-          // metadata gave: the server sent something other than what it described.
-          const sized = (run: () => void) => {
-            try {
-              run();
-            } catch (err) {
-              if (err instanceof DropgateError && err.code === 'INVALID_ARGUMENT') {
-                throw new DropgateError({ code: 'INTEGRITY_FAILED', message: "A file's bytes didn't match its size.", cause: err });
-              }
-              throw toDropgateError(err, 'OUTPUT_WRITE_FAILED');
-            }
-          };
-          // The writer saves each member under its safe name, and tells two the same apart.
-          for (let fi = 0; fi < files.length; fi++) {
-            fileStarts(indexes[fi]);
-            zip.startFile(files[fi].name, files[fi].sizeBytes);
-            const done = written;
-            written += await this._streamFile(files[fi].fileId, streamOpts, async (chunk) => {
-              sized(() => zip.writeChunk(chunk));
-              await drained();
-            }, counted(indexes[fi], done));
-            sized(() => zip.endFile());
-          }
-          progress({ status: 'completing', phase: 'complete', text: 'Finishing the download...' });
-          try {
-            await zip.finalize();
-          } catch (err) {
-            throw toDropgateError(err, 'OUTPUT_WRITE_FAILED');
-          }
-          await out.close();
-          open = null;
-
-          // Only once the archive of every file is saved is the server told it was downloaded.
-          if (files.length === meta.files.length) {
-            try {
-              await fetchJson(this.fetchFn, `${baseUrl}/api/bundle/${encodeURIComponent(bundleId)}/downloaded`, {
-                method: 'POST', timeoutMs: 5000,
-                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                body: '{}',
-              });
-            } catch { /* Best effort */ }
-          }
-        } else {
-          // ===== A FILE, OR A BUNDLE'S FILES: a sink each =====
-          for (let fi = 0; fi < files.length; fi++) {
-            const file = files[fi];
-            fileStarts(indexes[fi]);
-            const out = await SinkWriter.open(sink, { name: file.name, size: file.sizeBytes, index: indexes[fi] });
-            open = out;
-            const done = written;
-            written += await this._streamFile(file.fileId, streamOpts, (chunk) => out.write(chunk), counted(indexes[fi], done));
-            if (fi === files.length - 1) progress({ status: 'completing', phase: 'complete', text: 'Finishing the download...' });
-            await out.close();
-            open = null;
-          }
-        }
-
-        return {
-          filenames: files.map((f) => f.name),
-          receivedBytes: written,
-          wasEncrypted: meta.isEncrypted,
-          transport: this.transport,
-        };
-      } catch (err) {
-        // A failed or cancelled download is never finished as if it were whole.
-        await open?.abort(downloadSignal.aborted ? downloadSignal.reason : err);
-        throw err;
-      }
-    };
-
-    const work = (ctx: OperationContext<DownloadSnapshot>): Promise<DownloadResult> => (target.id !== undefined
-      ? this._downloadObject(ctx, { id: target.id, secret: target.secret, sink, zipped, files: chosenIndexes, timeoutMs, policy })
-      : bundleWork(ctx, target.bundleId, target.keyB64));
 
     return this._registry.add(startOperation<DownloadResult, DownloadSnapshot>({
       kind: 'hosted.download',
@@ -1507,7 +1152,7 @@ export class DropgateClient {
       transport: this.transport,
       signal,
       initial: { status: 'initializing', phase: 'server-info', text: 'Checking server...', percent: 0, processedBytes: 0, totalBytes: 0 },
-      work,
+      work: (ctx) => this._downloadObject(ctx, { sink, zipped, files: chosenIndexes, timeoutMs, policy, how }),
       finalSnapshot: (outcome, last) => {
         if (outcome.status === 'completed') {
           return { ...last, status: 'completed', phase: 'done', text: 'Download complete!', percent: 100, processedBytes: outcome.value.receivedBytes };
@@ -1520,25 +1165,124 @@ export class DropgateClient {
   }
 
   /**
-   * Downloads an upload under one lease: the whole object, as it's stored,
-   * each chunk of an encrypted one opened as it comes, to the one marked last,
-   * padding included, so nothing can have been cut off; and its files written
-   * out in order. The last file, or the ZIP, is only finished once everything
-   * has come and been checked. A connection that drops, or stalls, is asked
-   * again under the same lease for the rest, from the next whole chunk; and if
-   * the server sends anything but the rest of the same upload, none of it is
-   * written. The lease is released as soon as the download ends, however it
-   * ends, so it counts at once.
+   * Opens an upload for a page that may download it several times: its
+   * metadata now, with no lease; then one lease, taken at the first download,
+   * renewed every 2 minutes, shared by every download, and released at close().
+   */
+  private async _open(opts: OpenOptions): Promise<OpenedUpload> {
+    const { id, secret } = hostedTarget(opts);
+    const compat = await this._connect(opts);
+    this._requireCompatible(compat, 'dgup');
+    const { baseUrl } = compat;
+    const read = await this._readObject(id, secret, compat, opts);
+
+    // The lease, once a download has taken it; and the take under way, which downloads started together share.
+    let lease: TakenLease | null = null;
+    let taking: Promise<TakenLease> | null = null;
+    let renewTimer: ReturnType<typeof setInterval> | null = null;
+    let closed = false;
+    // Ends a take that's waiting for a place, when the upload is closed.
+    const closing = new AbortController();
+    const running = new Set<DownloadHandle>();
+
+    const stopRenewing = () => {
+      if (renewTimer !== null) clearInterval(renewTimer);
+      renewTimer = null;
+    };
+    const renew = async () => {
+      const held = lease;
+      if (!held) return;
+      try {
+        const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/v4/lease/renew`, {
+          method: 'POST', timeoutMs: 5000, headers: { Accept: 'application/json', 'Dropgate-Lease': held.lease },
+        });
+        if (res.ok) {
+          held.deadline = (json as { deadline?: unknown } | null)?.deadline;
+        } else if (res.status === 404 && lease === held) {
+          // It ended (it was deleted, or ran out while nothing could renew it): the next download takes another.
+          lease = null;
+          stopRenewing();
+        }
+      } catch { /* Tried again in 2 minutes; the server holds it for 5. */ }
+    };
+
+    const shared: DownloadSource['lease'] = {
+      take: async (leaseUrl, waitOpts) => {
+        if (closed) throw new DropgateError({ code: 'OPERATION_CANCELLED' });
+        if (lease) return lease;
+        taking ??= this._takeLease(leaseUrl, id, { ...waitOpts, signal: closing.signal })
+          .then((taken) => {
+            lease = taken;
+            renewTimer = setInterval(() => { renew().catch(() => { }); }, LEASE_RENEW_MS);
+            // A page or app that never closes it doesn't keep Node.js running for it.
+            (renewTimer as { unref?: () => void }).unref?.();
+            return taken;
+          })
+          .finally(() => { taking = null; });
+        // A download cancelled while the take waits stops waiting; the take goes on for the others.
+        return untilAborted(taking, waitOpts.signal);
+      },
+      // Downloads share the lease: only close() releases it.
+      done: async () => { },
+    };
+
+    const hidden = '[DropgateOpenedUpload]';
+    return Object.freeze({
+      metadata: read.meta,
+      download: (o: DownloadSinkOptions): DownloadHandle => {
+        try {
+          if (closed) throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'This upload has been closed.' });
+          const handle = this._startDownload(o ?? ({} as DownloadSinkOptions), { read: async () => read, lease: shared });
+          running.add(handle);
+          handle.result.finally(() => running.delete(handle));
+          return handle;
+        } catch (err) {
+          throw withTransport(err, this.transport);
+        }
+      },
+      close: async (): Promise<void> => {
+        if (closed) return;
+        closed = true;
+        stopRenewing();
+        closing.abort(new DropgateError({ code: 'OPERATION_CANCELLED' }));
+        const ending = [...running];
+        for (const handle of ending) handle.cancel();
+        // Released before anything is awaited, so the request is made even
+        // from a page's pagehide, as the page goes.
+        const held = lease;
+        lease = null;
+        const released = held ? this._releaseLease(baseUrl, held.lease) : Promise.resolve();
+        await Promise.all(ending.map((handle) => handle.result));
+        await released;
+      },
+      toJSON: () => hidden,
+      toString: () => hidden,
+      [Symbol.for('nodejs.util.inspect.custom')]: () => hidden,
+    }) as OpenedUpload;
+  }
+
+  /**
+   * Downloads an upload under one lease, into its sink: the whole object, as
+   * it's stored, each chunk of an encrypted one opened as it comes, to the one
+   * marked last, padding included, so nothing can have been cut off; or, for
+   * some of its files, only the chunks they're in, one run of chunks for each
+   * run of files next to each other, and never a chunk that's only padding.
+   * The last file, or the ZIP, is only finished once everything has come and
+   * been checked. A connection that drops, or stalls, is asked again under the
+   * same lease for the rest, from the next whole chunk; and if the server sends
+   * anything but the rest of the same upload, none of it is written. A lease of
+   * its own is released as soon as the download ends, however it ends, so it
+   * counts at once.
    */
   private async _downloadObject(
     ctx: OperationContext<DownloadSnapshot>,
-    o: { id: string; secret?: string; sink: DownloadOptions['sink']; zipped: boolean; files?: number[]; timeoutMs: number; policy: RetryPolicy },
+    o: { sink: DownloadOptions['sink']; zipped: boolean; files?: number[]; timeoutMs: number; policy: RetryPolicy; how: DownloadSource },
   ): Promise<DownloadResult> {
     const progress = ctx.update;
     const downloadSignal = ctx.signal;
-    const { id, secret, sink, zipped, timeoutMs } = o;
+    const { sink, zipped, timeoutMs } = o;
     let baseUrl = this.baseUrl;
-    let lease: string | null = null;
+    let taken: TakenLease | null = null;
     // The sink being written, to abort if the download doesn't complete.
     let open: SinkWriter | null = null;
 
@@ -1550,9 +1294,13 @@ export class DropgateClient {
 
       // The metadata, with the files' names opened: no lease yet.
       progress({ phase: 'metadata', text: 'Fetching file info...' });
-      const { meta, opened } = await this._readObject(id, secret, compat, { timeoutMs, signal: downloadSignal });
+      const { meta, opened } = await o.how.read(compat, downloadSignal);
       const { files } = meta;
-      // The files asked for, in the list's order; the others' bytes are passed over.
+      const id = meta.id;
+      // Where each file's bytes start in the upload's plaintext.
+      const offsets: number[] = [];
+      files.reduce((at, file) => { offsets.push(at); return at + file.size; }, 0);
+      // The files asked for, in the list's order; the others' bytes are passed over, or never asked for.
       const indexes = chooseFiles(o.files, files.length);
       const wanted = new Set(indexes);
       const lastWanted = indexes[indexes.length - 1];
@@ -1563,11 +1311,11 @@ export class DropgateClient {
       }
       progress({ status: 'downloading', totalBytes: totalSize, ...(several ? { totalFiles: indexes.length } : {}) });
 
-      const taken = await this._takeLease(baseUrl, id, { timeoutMs, signal: downloadSignal, progress });
-      lease = taken.lease;
+      taken = await o.how.lease.take(baseUrl, { timeoutMs, signal: downloadSignal, progress });
+      const lease = taken;
       // How long the server holds the lease for a download that has stopped: every answer, and every byte, moves it on.
       const window = new RetryWindow();
-      window.heard(taken.deadline);
+      window.heard(lease.deadline);
 
       // Where each file goes: a sink of its own, or its place in one ZIP.
       const zipOut = zipped ? await SinkWriter.open(sink, { name: '', size: totalSize, index: 0 }) : null;
@@ -1586,10 +1334,11 @@ export class DropgateClient {
         }
       };
 
-      // The file the bytes are in, how far into it they are, and the one being written.
+      // The file the bytes are in, how many bytes have been written, the files
+      // finished, and the one being written.
       let fileIndex = 0;
-      let fileWritten = 0;
       let written = 0;
+      let finished = 0;
       let current: SinkWriter | null = null;
       let started = -1;
       const startFile = async (index: number) => {
@@ -1610,12 +1359,19 @@ export class DropgateClient {
           open = current;
         }
       };
-      // Gives the files asked for their bytes, in order; any after the last file is padding.
-      const deliver = async (bytes: Uint8Array) => {
+      // Gives the files asked for their bytes, `bytes` starting at `position`
+      // in the plaintext, in order. Bytes of other files, and the padding
+      // after the last file, are passed over.
+      const deliver = async (position: number, bytes: Uint8Array) => {
         let at = 0;
-        while (at < bytes.byteLength && fileIndex < files.length) {
-          const piece = bytes.subarray(at, at + Math.min(bytes.byteLength - at, files[fileIndex].size - fileWritten));
+        while (at < bytes.byteLength) {
+          const here = position + at;
+          while (fileIndex < files.length && here >= offsets[fileIndex] + files[fileIndex].size) fileIndex++;
+          if (fileIndex === files.length) return;
+          const fileEnd = offsets[fileIndex] + files[fileIndex].size;
+          const length = Math.min(bytes.byteLength - at, fileEnd - here);
           if (wanted.has(fileIndex)) {
+            const piece = bytes.subarray(at, at + length);
             if (started !== fileIndex) await startFile(fileIndex);
             if (zip) {
               await zipStep(() => zip.writeChunk(piece));
@@ -1623,14 +1379,11 @@ export class DropgateClient {
             } else {
               await current!.write(piece);
             }
-            written += piece.byteLength;
+            written += length;
             progress({ phase: 'downloading', percent: (written / totalSize) * 100, processedBytes: written, ...(several ? { fileIndex } : {}) });
-          }
-          at += piece.byteLength;
-          fileWritten += piece.byteLength;
-          if (fileWritten === files[fileIndex].size) {
-            // Each file but the last is finished as it ends; the last waits for the rest to be checked.
-            if (wanted.has(fileIndex)) {
+            if (here + length === fileEnd) {
+              finished++;
+              // Each file but the last is finished as it ends; the last waits for the rest to be checked.
               if (zip) await zipStep(() => zip.endFile());
               else if (fileIndex !== lastWanted) {
                 await current!.close();
@@ -1638,9 +1391,8 @@ export class DropgateClient {
                 open = zipOut;
               }
             }
-            fileIndex++;
-            fileWritten = 0;
           }
+          at += length;
         }
       };
 
@@ -1648,95 +1400,125 @@ export class DropgateClient {
       // download that fails before its first byte still aborts it.
       await startFile(indexes[0]);
 
-      // How far it has got: an encrypted upload's chunks opened and written,
-      // or an unencrypted one's bytes written. A try that drops is followed by
-      // one for the rest, from there.
+      // What's asked for: the whole upload when every file is wanted, read to
+      // its last chunk; otherwise each run of files next to each other, alone.
       const size = opened ? opened.layout.storedSize : meta.totalSize;
-      let nextChunk = 0;
-      let plainWritten = 0;
-
-      await retrying(async () => {
-        const from = opened ? (nextChunk === 0 ? 0 : opened.layout.range(nextChunk).start) : plainWritten;
-        // The timeout is on each wait, for an answer and then for the next bytes,
-        // so a big file never times out just for taking long, and a slow sink never counts.
-        const { signal: waitSignal, waiting, cleanup } = makeWaitSignal(downloadSignal, timeoutMs);
-        let stopWatching = (): void => { };
-        // Only what the server sends goes wrong in a way that may recover; what's written stays as it went.
-        const failed = (err: unknown, code: 'SERVER_UNREACHABLE' | 'CONNECTION_LOST') => (waitSignal.aborted ? waitSignal.reason : toDropgateError(err, code));
-        try {
-          let res: Response;
-          try {
-            res = await waiting(() => this.fetchFn(`${baseUrl}/api/v4/objects/${id}/content`, {
-              method: 'GET',
-              // The rest of it, and only if it's still the same upload: anything else is sent whole, and refused.
-              headers: { 'Dropgate-Lease': lease!, ...(from > 0 ? { Range: `bytes=${from}-`, 'If-Range': taken.etag } : {}) },
-              signal: waitSignal,
-            }));
-          } catch (err) {
-            throw failed(err, 'SERVER_UNREACHABLE');
-          }
-          if (!res.ok) throw withRetryAfter(errorFromStatus(res.status, await res.json().catch(() => null), 'Download failed.'), res);
-          window.heard();
-          if (from > 0) {
-            if (res.status === 200) {
-              throw new DropgateError({ code: 'INTEGRITY_FAILED', message: "The server sent the whole upload again, not the rest of it, so it may have changed. Nothing more of it was written." });
-            }
-            const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(res.headers.get('Content-Range') ?? '');
-            if (res.status !== 206 || !range || Number(range[1]) !== from || Number(range[2]) !== size - 1 || Number(range[3]) !== size) {
-              throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server didn't send the rest of the upload." });
-            }
-          } else if (res.status !== 200) {
-            throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server didn't send the whole upload." });
-          }
-          if (!res.body) throw new DropgateError({ code: 'RUNTIME_UNSUPPORTED', message: 'Streaming response not available.' });
-
-          const reader = res.body.getReader();
-          // A cancel or timeout ends a read that's waiting, whether or not fetch() errors the body itself.
-          const cancelRead = () => { reader.cancel(waitSignal.reason).catch(() => { }); };
-          waitSignal.addEventListener('abort', cancelRead, { once: true });
-          stopWatching = () => waitSignal.removeEventListener('abort', cancelRead);
-          async function* received(): AsyncGenerator<Uint8Array> {
-            for (;;) {
-              let next: ReadableStreamReadResult<Uint8Array>;
-              try {
-                next = await waiting(() => reader.read());
-              } catch (err) {
-                throw failed(err, 'CONNECTION_LOST');
-              }
-              if (waitSignal.aborted) throw waitSignal.reason;
-              if (next.done) return;
-              window.heard();
-              yield next.value;
-            }
-          }
-
-          if (opened) {
-            // From the start, the header is checked against the metadata's; after a drop, the chunks go on from the next.
-            const chunks = from === 0 ? opened.read(received()) : opened.chunks(received(), nextChunk);
-            for await (const { index, plaintext } of chunks) {
-              await deliver(plaintext);
-              nextChunk = index + 1;
-            }
-          } else {
-            for await (const piece of received()) {
-              if (plainWritten + piece.byteLength > meta.totalSize) {
-                throw new DropgateError({ code: 'INTEGRITY_FAILED', message: 'More data came than the upload holds.' });
-              }
-              await deliver(piece);
-              plainWritten += piece.byteLength;
-            }
-          }
-        } finally {
-          stopWatching();
-          cleanup();
+      const whole = indexes.length === files.length;
+      const runs: Array<{ start: number; end: number }> = [];
+      if (whole) {
+        runs.push({ start: 0, end: opened ? opened.layout.length : meta.totalSize });
+      } else {
+        for (const index of indexes) {
+          const last = runs[runs.length - 1];
+          if (last && last.end === offsets[index]) last.end = offsets[index] + files[index].size;
+          else runs.push({ start: offsets[index], end: offsets[index] + files[index].size });
         }
-      }, {
-        policy: o.policy, window, signal: downloadSignal,
-        random: (length) => this._crypto.randomBytes(length),
-        waiting: ({ remainingMs }) => progress({ text: `The connection was lost. Reconnecting in ${(remainingMs / 1000).toFixed(1)}s...` }),
-        retrying: () => progress({ text: 'Reconnecting...' }),
-      });
-      if (fileIndex !== files.length) throw new DropgateError({ code: 'INTEGRITY_FAILED', message: 'The data ended before the last file did.' });
+      }
+
+      for (const run of runs) {
+        // How far the run has got: an encrypted upload's next chunk to open,
+        // or an unencrypted one's next byte. A try that drops is followed by
+        // one for the rest, from there.
+        const span = opened && !whole ? opened.layout.span(run.start, run.end - run.start) : null;
+        const lastChunk = opened ? (span ? span.last : opened.layout.chunkCount - 1) : 0;
+        let nextChunk = span ? span.first : 0;
+        let plainAt = run.start;
+
+        await retrying(async () => {
+          // The stored bytes asked for, `from` to `to` included; and whether that's a range, or the whole upload.
+          const from = opened ? (whole && nextChunk === 0 ? 0 : opened.layout.range(nextChunk, lastChunk).start) : plainAt;
+          const to = opened ? opened.layout.range(nextChunk, lastChunk).end - 1 : run.end - 1;
+          const ranged = from > 0 || to < size - 1;
+          // The timeout is on each wait, for an answer and then for the next bytes,
+          // so a big file never times out just for taking long, and a slow sink never counts.
+          const { signal: waitSignal, waiting, cleanup } = makeWaitSignal(downloadSignal, timeoutMs);
+          let stopWatching = (): void => { };
+          // Only what the server sends goes wrong in a way that may recover; what's written stays as it went.
+          const failed = (err: unknown, code: 'SERVER_UNREACHABLE' | 'CONNECTION_LOST') => (waitSignal.aborted ? waitSignal.reason : toDropgateError(err, code));
+          try {
+            let res: Response;
+            try {
+              res = await waiting(() => this.fetchFn(`${baseUrl}/api/v4/objects/${id}/content`, {
+                method: 'GET',
+                // Only these bytes, and only if it's still the same upload: anything else is sent whole, and refused.
+                headers: {
+                  'Dropgate-Lease': lease.lease,
+                  ...(ranged ? { Range: to === size - 1 ? `bytes=${from}-` : `bytes=${from}-${to}`, 'If-Range': lease.etag } : {}),
+                },
+                signal: waitSignal,
+              }));
+            } catch (err) {
+              throw failed(err, 'SERVER_UNREACHABLE');
+            }
+            if (!res.ok) throw withRetryAfter(errorFromStatus(res.status, await res.json().catch(() => null), 'Download failed.'), res);
+            window.heard();
+            if (ranged) {
+              if (res.status === 200) {
+                throw new DropgateError({
+                  code: 'INTEGRITY_FAILED',
+                  message: written > 0
+                    ? 'The server sent the whole upload again, not the rest of it, so it may have changed. Nothing more of it was written.'
+                    : "The server sent the whole upload, not the part of it asked for, so it may have changed. None of it was written.",
+                });
+              }
+              const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(res.headers.get('Content-Range') ?? '');
+              if (res.status !== 206 || !range || Number(range[1]) !== from || Number(range[2]) !== to || Number(range[3]) !== size) {
+                throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server didn't send the part of the upload asked for." });
+              }
+            } else if (res.status !== 200) {
+              throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server didn't send the whole upload." });
+            }
+            if (!res.body) throw new DropgateError({ code: 'RUNTIME_UNSUPPORTED', message: 'Streaming response not available.' });
+
+            const reader = res.body.getReader();
+            // A cancel or timeout ends a read that's waiting, whether or not fetch() errors the body itself.
+            const cancelRead = () => { reader.cancel(waitSignal.reason).catch(() => { }); };
+            waitSignal.addEventListener('abort', cancelRead, { once: true });
+            stopWatching = () => waitSignal.removeEventListener('abort', cancelRead);
+            async function* received(): AsyncGenerator<Uint8Array> {
+              for (;;) {
+                let next: ReadableStreamReadResult<Uint8Array>;
+                try {
+                  next = await waiting(() => reader.read());
+                } catch (err) {
+                  throw failed(err, 'CONNECTION_LOST');
+                }
+                if (waitSignal.aborted) throw waitSignal.reason;
+                if (next.done) return;
+                window.heard();
+                yield next.value;
+              }
+            }
+
+            if (opened) {
+              // From the start, the header is checked against the metadata's; otherwise the chunks go on from the next.
+              const chunks = from === 0 ? opened.read(received()) : opened.chunks(received(), nextChunk, lastChunk);
+              for await (const { index, plaintext } of chunks) {
+                await deliver(index * opened.layout.chunkSize, plaintext);
+                nextChunk = index + 1;
+              }
+            } else {
+              for await (const piece of received()) {
+                if (plainAt + piece.byteLength > run.end) {
+                  throw new DropgateError({ code: 'INTEGRITY_FAILED', message: 'More data came than the upload holds.' });
+                }
+                await deliver(plainAt, piece);
+                plainAt += piece.byteLength;
+              }
+              if (plainAt !== run.end) throw new DropgateError({ code: 'INTEGRITY_FAILED', message: 'The data ended before the last file did.' });
+            }
+          } finally {
+            stopWatching();
+            cleanup();
+          }
+        }, {
+          policy: o.policy, window, signal: downloadSignal,
+          random: (length) => this._crypto.randomBytes(length),
+          waiting: ({ remainingMs }) => progress({ text: `The connection was lost. Reconnecting in ${(remainingMs / 1000).toFixed(1)}s...` }),
+          retrying: () => progress({ text: 'Reconnecting...' }),
+        });
+      }
+      if (finished !== indexes.length) throw new DropgateError({ code: 'INTEGRITY_FAILED', message: 'The data ended before the last file did.' });
 
       // Everything has come, and been checked: the last file, or the ZIP, is finished.
       progress({ status: 'completing', phase: 'complete', text: 'Finishing the download...' });
@@ -1759,7 +1541,7 @@ export class DropgateClient {
       await open?.abort(downloadSignal.aborted ? downloadSignal.reason : err);
       throw toDropgateError(err, 'CONNECTION_LOST');
     } finally {
-      if (lease) await this._releaseLease(baseUrl, lease);
+      if (taken) await o.how.lease.done(baseUrl, taken);
     }
   }
 
@@ -1773,7 +1555,7 @@ export class DropgateClient {
     baseUrl: string,
     id: string,
     { timeoutMs, signal, progress }: { timeoutMs: number; signal: AbortSignal; progress: (patch: Partial<DownloadSnapshot>) => void },
-  ): Promise<{ lease: string; etag: string; deadline: unknown }> {
+  ): Promise<TakenLease> {
     for (;;) {
       const { res, json } = await fetchJson(this.fetchFn, `${baseUrl}/api/v4/objects/${id}/leases`, {
         method: 'POST', timeoutMs, signal, headers: { Accept: 'application/json' },
@@ -1793,140 +1575,17 @@ export class DropgateClient {
     }
   }
 
-  /** Releases a download's lease, so it counts now (if it sent anything) and frees its place. Best effort. */
+  /**
+   * Releases a download's lease, so it counts now (if it sent anything) and
+   * frees its place. Best effort. Its request is made before this first
+   * awaits anything, and kept alive, so it's sent even as a page closes.
+   */
   private async _releaseLease(baseUrl: string, lease: string): Promise<void> {
     try {
       await fetchJson(this.fetchFn, `${baseUrl}/api/v4/lease`, {
-        method: 'DELETE', timeoutMs: 5000, headers: { 'Dropgate-Lease': lease },
+        method: 'DELETE', timeoutMs: 5000, keepalive: true, headers: { 'Dropgate-Lease': lease },
       });
     } catch { /* The lease runs out by itself. */ }
-  }
-
-  /**
-   * Streams one file's bytes from the server into `deliver`, decrypting them
-   * if it's encrypted, awaiting each delivery before reading on. Returns how
-   * many bytes were delivered.
-   */
-  private async _streamFile(
-    fileId: string,
-    opts: {
-      baseUrl: string;
-      isEncrypted: boolean;
-      cryptoKey: ContentKey | undefined;
-      compat: ServerConnection;
-      signal: AbortSignal;
-      timeoutMs: number;
-    },
-    deliverChunk: (chunk: Uint8Array) => Promise<void>,
-    onBytesDelivered: (deliveredBytes: number) => void,
-  ): Promise<number> {
-    const { baseUrl, isEncrypted, cryptoKey, compat, signal, timeoutMs } = opts;
-    // The timeout is on each wait, for the answer and then for the next bytes,
-    // so a big file never times out just for taking long, and a slow sink never counts.
-    const { signal: downloadSignal, waiting, cleanup: downloadCleanup } = makeWaitSignal(signal, timeoutMs);
-    let deliveredBytes = 0;
-    let stopWatching = (): void => { };
-
-    // Each step's own failure, typed where it happens. A cancel or a timeout
-    // keeps its own code, whichever step it interrupts.
-    const step = async <T>(code: 'CONNECTION_LOST' | 'INTEGRITY_FAILED' | 'OUTPUT_WRITE_FAILED', run: () => Promise<T> | T): Promise<T> => {
-      try {
-        return await run();
-      } catch (err) {
-        if (downloadSignal.aborted) throw downloadSignal.reason;
-        throw toDropgateError(err, code);
-      }
-    };
-
-    try {
-      let downloadRes: Response;
-      try {
-        downloadRes = await waiting(() => this.fetchFn(`${baseUrl}/api/file/${encodeURIComponent(fileId)}`, {
-          method: 'GET', signal: downloadSignal,
-        }));
-      } catch (err) {
-        throw toDropgateError(err, 'SERVER_UNREACHABLE');
-      }
-
-      if (!downloadRes.ok) throw errorFromStatus(downloadRes.status, null, 'Download failed.');
-      if (!downloadRes.body) throw new DropgateError({ code: 'RUNTIME_UNSUPPORTED', message: 'Streaming response not available.' });
-
-      const reader = downloadRes.body.getReader();
-      // A cancel or timeout ends a read that's waiting, whether or not fetch() errors the body itself.
-      const cancelRead = () => { reader.cancel(downloadSignal.reason).catch(() => { }); };
-      downloadSignal.addEventListener('abort', cancelRead, { once: true });
-      stopWatching = () => downloadSignal.removeEventListener('abort', cancelRead);
-      const read = async () => {
-        const next = await step('CONNECTION_LOST', () => waiting(() => reader.read()));
-        if (downloadSignal.aborted) throw downloadSignal.reason;
-        return next;
-      };
-      const decrypt = (chunk: Uint8Array) => step('INTEGRITY_FAILED', () => this._crypto.decrypt(cryptoKey!, chunk));
-      const deliver = async (chunk: Uint8Array) => {
-        await step('OUTPUT_WRITE_FAILED', () => deliverChunk(chunk));
-        deliveredBytes += chunk.byteLength;
-        onBytesDelivered(deliveredBytes);
-      };
-
-      if (isEncrypted && cryptoKey) {
-        const ENCRYPTED_CHUNK_SIZE = serverChunkSize(compat.serverInfo, this.chunkSize) + ENCRYPTION_OVERHEAD_PER_CHUNK;
-        const pendingChunks: Uint8Array[] = [];
-        let pendingLength = 0;
-
-        const flushPending = (): Uint8Array => {
-          if (pendingChunks.length === 0) return new Uint8Array(0);
-          if (pendingChunks.length === 1) {
-            const result = pendingChunks[0];
-            pendingChunks.length = 0;
-            pendingLength = 0;
-            return result;
-          }
-          const result = new Uint8Array(pendingLength);
-          let offset = 0;
-          for (const chunk of pendingChunks) { result.set(chunk, offset); offset += chunk.length; }
-          pendingChunks.length = 0;
-          pendingLength = 0;
-          return result;
-        };
-
-        while (true) {
-          if (downloadSignal.aborted) throw downloadSignal.reason;
-          const { done, value } = await read();
-          if (done) break;
-
-          pendingChunks.push(value);
-          pendingLength += value.length;
-
-          while (pendingLength >= ENCRYPTED_CHUNK_SIZE) {
-            const buffer = flushPending();
-            const encryptedChunk = buffer.subarray(0, ENCRYPTED_CHUNK_SIZE);
-            if (buffer.length > ENCRYPTED_CHUNK_SIZE) {
-              pendingChunks.push(buffer.subarray(ENCRYPTED_CHUNK_SIZE));
-              pendingLength = buffer.length - ENCRYPTED_CHUNK_SIZE;
-            }
-            await deliver(new Uint8Array(await decrypt(encryptedChunk)));
-          }
-        }
-
-        if (pendingLength > 0) {
-          await deliver(new Uint8Array(await decrypt(flushPending())));
-        }
-      } else {
-        while (true) {
-          if (downloadSignal.aborted) throw downloadSignal.reason;
-          const { done, value } = await read();
-          if (done) break;
-          await deliver(value);
-        }
-      }
-    } catch (err) {
-      throw toDropgateError(err, 'CONNECTION_LOST');
-    } finally {
-      stopWatching();
-      downloadCleanup();
-    }
-
-    return deliveredBytes;
   }
 
   private async _directSend(opts: P2PSendFileOptions): Promise<P2PSendSession> {
@@ -1991,77 +1650,6 @@ export class DropgateClient {
     const onError = out.onError;
     if (typeof onError === 'function') out.onError = (err: unknown) => onError(withTransport(err, transport));
     return out as O;
-  }
-
-  /**
-   * Upload a single file's chunks to the server. Used by hosted.upload().
-   */
-  private async _uploadFileChunks(params: {
-    file: FileSource;
-    uploadId: string;
-    cryptoKey: ContentKey | null;
-    effectiveChunkSize: number;
-    totalChunks: number;
-    totalUploadSize: number;
-    baseOffset: number;
-    totalBytesAllFiles: number;
-    progress: (patch: Partial<UploadSnapshot>) => void;
-    signal: AbortSignal;
-    baseUrl: string;
-    policy: RetryPolicy;
-    chunkTimeoutMs: number;
-    credentials: OperationCredentials;
-  }): Promise<void> {
-    const {
-      file, uploadId, cryptoKey, effectiveChunkSize, totalChunks,
-      baseOffset, totalBytesAllFiles, progress, signal, baseUrl,
-      policy, chunkTimeoutMs, credentials,
-    } = params;
-    const window = new RetryWindow();
-
-    for (let i = 0; i < totalChunks; i++) {
-      if (signal.aborted) {
-        throw signal.reason || new DropgateError({ code: 'OPERATION_CANCELLED' });
-      }
-
-      const start = i * effectiveChunkSize;
-      const end = Math.min(start + effectiveChunkSize, file.size);
-
-      const processedBytes = baseOffset + start;
-      const percent = totalBytesAllFiles > 0 ? (processedBytes / totalBytesAllFiles) * 100 : 0;
-      progress({
-        phase: 'chunk',
-        text: `Uploading chunk ${i + 1} of ${totalChunks}...`,
-        percent, processedBytes,
-        chunkIndex: i, totalChunks,
-      });
-
-      // One bounded read: the chunk, and no more of the file.
-      const chunkBytes = await readRange(file, start, end);
-
-      let uploadBytes: Uint8Array<ArrayBuffer>;
-      if (cryptoKey) {
-        try {
-          uploadBytes = await this._crypto.encrypt(cryptoKey, chunkBytes);
-        } catch (err) {
-          throw new DropgateError({ code: 'ENCRYPT_FAILED', cause: err });
-        }
-      } else {
-        uploadBytes = chunkBytes;
-      }
-
-      if (uploadBytes.byteLength > effectiveChunkSize + 1024) {
-        throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'Chunk too large (client-side). Check chunk size settings.' });
-      }
-
-      const hashHex = await sha256Hex(this._crypto, uploadBytes);
-
-      await this._attemptChunkUpload(
-        `${baseUrl}/upload/chunk`,
-        { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Upload-ID': uploadId, 'X-Chunk-Index': String(i), 'X-Chunk-Hash': hashHex }, body: new Blob([uploadBytes]) },
-        { policy, window, timeoutMs: chunkTimeoutMs, signal, progress, chunkIndex: i, credentials }
-      );
-    }
   }
 
   /**
