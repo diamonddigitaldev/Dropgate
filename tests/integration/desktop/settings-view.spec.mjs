@@ -4,7 +4,7 @@
 // only runs in a packaged app (desktop/updates.spec.mjs).
 //
 // And the app keeps no log on disk unless the person asks it to: v3 wrote
-// debug.log at every launch, with the paths of the files it was given (PB-D1).
+// debug.log at every launch, with the paths of the files it was given.
 import fs from 'node:fs';
 import path from 'node:path';
 import { madeUpFile } from '../helpers/files.mjs';
@@ -67,7 +67,8 @@ test('keeps no log on disk by default, through an upload and a restart', async (
     expect(fs.existsSync(path.join(desktop.profile, 'debug.log'))).toBe(false);
 });
 
-// 09 6.1, 6.3, 6.6 to 6.8: the debug log's switch, on Dropgate's Privacy tab. It's the kit's keepLogOnDisk.
+// The debug log's switch, on Dropgate's Privacy tab: off by default, what the file holds when it's on, and the
+// file gone at once when it's turned off. It's the kit's keepLogOnDisk.
 test('Keep log on disk for troubleshooting: off and no file by default; on, debug.log holds the run so far and none of its files or links; off, it goes at once', async ({ desktop, secrets }) => {
     const opened = madeUpFile('Opened at launch.bin', 20_000, 33);
     // Uploaded with the picked file, unencrypted, so the server may keep its name.

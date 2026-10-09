@@ -100,7 +100,7 @@ const vectors: Array<{
   };
 }> = JSON.parse(readFileSync(new URL('./fixtures/dgup4-object-vectors.json', import.meta.url), 'utf8')).vectors;
 
-describe('Padmé (09 8.1)', () => {
+describe('Padmé', () => {
   it('matches the vector table, and is never smaller than its input', () => {
     expect(padme(1_000_000)).toBe(1_015_808); // 992 KiB
     expect(padme(50_000_000)).toBe(48 * MiB);
@@ -118,7 +118,7 @@ describe('Padmé (09 8.1)', () => {
   });
 });
 
-describe("The clamp to the server's limit (09 8.2)", () => {
+describe("The clamp to the server's limit", () => {
   it('pads a 99 MiB file against a 100 MiB limit to exactly the limit', () => {
     const length = 99 * MiB;
     const chunkSize = 5 * MiB;
@@ -151,7 +151,7 @@ describe("The clamp to the server's limit (09 8.2)", () => {
   });
 });
 
-describe('Layout (09 8.3)', () => {
+describe('Layout: the padding after the last file, inside the chunks', () => {
   it('pads with zero bytes after the last file, inside the stream, with the last flag on the final padded chunk', async () => {
     const built = await build([fileOf('report.pdf', 100_000, 0), fileOf('photo.jpg', 50_000, 1)]);
     const { layout } = built.writer;
@@ -184,7 +184,7 @@ describe('Layout (09 8.3)', () => {
   });
 });
 
-describe('The true size comes only from the meta (09 8.4)', () => {
+describe('The true size comes only from the meta', () => {
   const files = [fileOf('report.pdf', 100_000, 0), fileOf('Photo – été.jpg', 50_000, 1)];
 
   /** A meta sealed under the object's own meta key, from the manifest's raw JSON. */
@@ -229,7 +229,7 @@ describe('The true size comes only from the meta (09 8.4)', () => {
   });
 });
 
-describe('Truncation (09 8.5)', () => {
+describe('Truncation, padding chunks included', () => {
   // 8 MiB and a byte pads to 8.25 MiB: the file ends in chunk 128 of 132, and
   // chunks 129 to 131 are only padding.
   const length = 8 * MiB + 1;
@@ -258,7 +258,7 @@ describe('Truncation (09 8.5)', () => {
   });
 });
 
-describe('Tampering with the stored object (09 4.6)', () => {
+describe('Tampering with the stored object', () => {
   // 300,000 bytes pad to 303,104: five chunks.
   const file = fileOf('notes.txt', 300_000);
   let built: Built;
@@ -318,7 +318,7 @@ describe('Tampering with the stored object (09 4.6)', () => {
   });
 });
 
-describe('No padding option (09 8.9)', () => {
+describe('No padding option', () => {
   it("has no padding option in the public API, and doesn't pad an unencrypted object", () => {
     for (const file of ['../src/types.ts', '../src/index.ts', '../src/helpers.ts']) {
       expect(readFileSync(new URL(file, import.meta.url), 'utf8')).not.toMatch(/pad/i);
@@ -329,7 +329,7 @@ describe('No padding option (09 8.9)', () => {
   });
 });
 
-describe('The meta, padded to buckets from 4 KiB (09 8.10)', () => {
+describe('The meta, padded to buckets from 4 KiB', () => {
   const metaLength = async (names: string[]) =>
     (await createObject(provider, { files: names.map((name) => ({ name, size: 1 })), chunkSize: C })).meta.byteLength;
 
@@ -393,7 +393,7 @@ describe('Members and resume points', () => {
   });
 });
 
-describe("The object's exact bytes (09 8.11, core's half)", () => {
+describe("The object's exact bytes, against fixed vectors", () => {
   for (const vector of vectors) {
     it(`makes the pinned bytes: ${vector.name}`, async () => {
       const { input, output } = vector;

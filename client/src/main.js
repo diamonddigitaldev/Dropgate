@@ -17,10 +17,10 @@ const { FileReads } = require('./core/file-reads');
 //   version 1 deletes them, once. windowBounds is the kit's key too.
 // - The log is kept in memory, redacted, and on disk only while the person
 //   keeps it there (keepLogOnDisk, off): v3 wrote debug.log at every launch,
-//   with every argv's paths in it (PB-D1).
+//   with every argv's paths in it.
 // - The updater checks GitHub 5 seconds after a packaged launch and when
 //   asked, never sends an ID of the install, makes none, and deletes the one
-//   v3's updater kept (PB-D4). As in v3, a launch for Share with Dropgate
+//   v3's updater kept. As in v3, a launch for Share with Dropgate
 //   doesn't check.
 // - Windows' app ID is build.appId, the one the installer's Start menu
 //   shortcut carries, so Share with Dropgate's notifications show.
@@ -30,8 +30,8 @@ const { FileReads } = require('./core/file-reads');
 //   a second launch) reach Upload as the kit's files:opened (#93), every one
 //   of them, bar a Share with Dropgate launch's, which are main's own.
 // - A link is copied to the clipboard marked to stay out of Windows'
-//   clipboard history and cloud clipboard, and out of KDE's: it holds the key
-//   (PB-D5). Notifications say how many files, never which (PB-D6).
+//   clipboard history and cloud clipboard, and out of KDE's: it holds the key.
+//   Notifications say how many files, never which.
 // Share with Dropgate (Windows' context menu) launches the app with a file's
 // path and --upload: it uploads the file in a hidden window, without opening
 // the main one, and quits once it's done. Windows starts one launch per file

@@ -1,4 +1,4 @@
-// The credential boundary against the real server (09 14.9): until accounts
+// The credential boundary against the real server: until accounts
 // come (#91, phase 12), the server asks no credential for anything, so a
 // client with an auth provider is never asked for one and sends none, and no
 // credential reaches the server's output or storage (the privacy tests check

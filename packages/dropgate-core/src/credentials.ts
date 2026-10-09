@@ -1,6 +1,6 @@
 import { DropgateError } from './errors.js';
 
-// The credential boundary (08 §7.3): how core asks for a credential, for a
+// The credential boundary: how core asks for a credential, for a
 // server that needs one to accept an operation. It's the boundary only, not
 // an account design: what a credential is, and how one is got, is the
 // integrator's. Core asks only when the server says the operation needs one,

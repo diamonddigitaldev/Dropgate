@@ -1,4 +1,4 @@
-// The packaged desktop app checking for updates (09 13.11, and the update dot).
+// The packaged desktop app checking for updates: no ID of the install, and the update dot.
 // The updater is electron-kit's, and only runs in a packaged app, so these run
 // against a test build whose update address is this machine
 // (helpers/update-server.mjs), named in DROPGATE_PACKAGED_APP: in CI, the
@@ -6,7 +6,7 @@
 //
 // v3's updater sent a random ID of the install with every check, kept in the
 // profile's .updaterId, so GitHub could link one install's checks across time
-// and addresses (PB-D4). The kit sends a fixed value in its place, makes no ID
+// and addresses. The kit sends a fixed value in its place, makes no ID
 // at all, and deletes the .updaterId v3 left. Two new profiles' checks, on each channel, must carry nothing that
 // tells them apart or ties them together, and leave no ID behind.
 //
@@ -90,7 +90,7 @@ test.beforeEach(() => fs.rmSync(CACHE, { recursive: true, force: true }));
 test.afterAll(() => fs.rmSync(CACHE, { recursive: true, force: true }));
 
 for (const channel of ['stable', 'beta', 'alpha']) {
-    test(`on ${channel}, two new installs' update checks carry no ID of either, and leave none in the profile (09 13.11)`, async () => {
+    test(`on ${channel}, two new installs' update checks carry no ID of either, and leave none in the profile`, async () => {
         const server = await startUpdateServer(OFFERS);
         try {
             // Automatic downloads off, so the check is all there is.

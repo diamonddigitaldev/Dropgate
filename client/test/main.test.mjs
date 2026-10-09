@@ -54,7 +54,7 @@ test('the main process is the kit\'s: its name, settings, memory log, files, cre
     assert.match(options, /donate: 'https:\/\/buymeacoff\.ee\/willtda'/);
 });
 
-test('a link is copied kept out of the clipboard\'s history and sync, and notifications and the log never name a file (PB-D5, PB-D6)', () => {
+test('a link is copied kept out of the clipboard\'s history and sync, and notifications and the log never name a file', () => {
     assert.doesNotMatch(main + renderer, /writeText\(|execCommand\('copy'\)/, 'every copy goes through copyPrivately()');
     for (const format of ['CanIncludeInClipboardHistory', 'CanUploadToCloudClipboard', 'ExcludeClipboardContentFromMonitorProcessing', 'x-kde-passwordManagerHint']) {
         assert.ok(main.includes(`'${format}'`), format);
@@ -80,7 +80,7 @@ test('the client keeps no log of its own, and has no updater, update boxes or li
     assert.ok(!/Update Available|Update Ready|showMessageBox/.test(main), 'no native update boxes');
     assert.ok(!/shell\.openExternal|open-external/.test(main), 'links open through the kit\'s shell:open-external');
     assert.ok(!/requestSingleInstanceLock/.test(main), 'one instance is the kit\'s');
-    assert.ok(!/console\.log/.test(renderer), 'the page logs nothing to its console: v3 logged file names and paths (PB-D9)');
+    assert.ok(!/console\.log/.test(renderer), 'the page logs nothing to its console: v3 logged file names and paths');
 });
 
 test('v3\'s settings are dropped, once, and the client\'s defaults are ones the kit takes', () => {

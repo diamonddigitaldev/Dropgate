@@ -5,7 +5,7 @@ import type { CredentialProvider, CredentialRequest, DownloadSink } from '../src
 import { errorFromStatus } from '../src/errors.js';
 import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
 
-// The credential boundary (08 §7.3; 09 §14): how core asks for a credential
+// The credential boundary: how core asks for a credential
 // for a server that needs one, and where one may and may not go. Against a
 // fake server through `fetchFn`: no network.
 
@@ -111,7 +111,7 @@ async function everythingSeen(client: DropgateClient, handle: ReturnType<Dropgat
   return { outcome, text: parts.join('\n') };
 }
 
-describe('Nothing is sent unless the server asks and a provider gives one (09 14.1, 14.2)', () => {
+describe('Nothing is sent unless the server asks and a provider gives one', () => {
   it('sends no credential with no provider: every request, every operation', async () => {
     const server = fakeServer();
     const client = make(server);
@@ -137,7 +137,7 @@ describe('Nothing is sent unless the server asks and a provider gives one (09 14
   });
 });
 
-describe('Asked once per operation, sent with every request of it (09 14.3)', () => {
+describe('Asked once per operation, sent with every request of it', () => {
   it('asks once for an upload, and sends the token on each of its requests and no others', async () => {
     const server = fakeServer({ credentialRequired: true });
     const auth = giving(TOKEN);
@@ -198,7 +198,7 @@ describe('Asked once per operation, sent with every request of it (09 14.3)', ()
   });
 });
 
-describe('No credential, no upload (09 14.4)', () => {
+describe('No credential, no upload', () => {
   it('fails AUTH_REQUIRED with no provider, before any upload request', async () => {
     const server = fakeServer({ credentialRequired: true });
     const outcome = await upload(make(server)).result;
@@ -242,7 +242,7 @@ describe('No credential, no upload (09 14.4)', () => {
   });
 });
 
-describe('An expired credential is renewed once (09 14.5)', () => {
+describe('An expired credential is renewed once', () => {
   it('asks once more after AUTH_EXPIRED, and sends the request again with the new token', async () => {
     const server = fakeServer({ credentialRequired: true });
     let expired = false;
@@ -288,7 +288,7 @@ describe('An expired credential is renewed once (09 14.5)', () => {
   });
 });
 
-describe('Typed outcomes, never retried as they are (09 14.6)', () => {
+describe('Typed outcomes, never retried as they are', () => {
   it('maps a 401 to AUTH_REQUIRED, and a code the server names to its own', () => {
     expect(errorFromStatus(401, null).code).toBe('AUTH_REQUIRED');
     expect(errorFromStatus(401, { code: 'AUTH_EXPIRED' }).code).toBe('AUTH_EXPIRED');
@@ -316,7 +316,7 @@ describe('Typed outcomes, never retried as they are (09 14.6)', () => {
   }
 });
 
-describe('Never in a snapshot, result, error, log or URL (09 14.7, hard requirement 8)', () => {
+describe('Never in a snapshot, result, error, log or URL', () => {
   it('a completed upload, encrypted: only the Authorization header carries it', async () => {
     const server = fakeServer({ credentialRequired: true });
     const client = make(server, giving(TOKEN));
@@ -355,7 +355,7 @@ describe('Never in a snapshot, result, error, log or URL (09 14.7, hard requirem
   });
 });
 
-describe('Only what a credential may be, and only to its own server (09 14.8)', () => {
+describe('Only what a credential may be, and only to its own server', () => {
   for (const [label, given] of [
     ['a token with a line break', { token: `${TOKEN}\r\nX-Evil: 1` }],
     ['a token with a space', { token: `${TOKEN} more` }],

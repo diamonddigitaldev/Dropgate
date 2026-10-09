@@ -36,10 +36,10 @@ function expectLinkCopied(app, file) {
     expect(finished.map(({ status, error }) => ({ status, error })), 'how the upload finished').toEqual([{ status: 'success' }]);
     expect(at, 'when the link was copied, next to when the upload finished').toBeGreaterThanOrEqual(finished[0].at);
 
-    // The link holds the key, so it's copied marked to stay out of the clipboard's history and sync (PB-D5).
+    // The link holds the key, so it's copied marked to stay out of the clipboard's history and sync.
     expect(copied[0].types, 'the formats the link was copied with').toEqual(expect.arrayContaining(['text/plain', ...PRIVATE_FORMATS]));
 
-    // Notifications say how many files, never which, nor where they are (PB-D6).
+    // Notifications say how many files, never which, nor where they are.
     const notifications = app.eventsOf('notification');
     for (const { title, body } of notifications) {
         for (const shared of [].concat(file)) {

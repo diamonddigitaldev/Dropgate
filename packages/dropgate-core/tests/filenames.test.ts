@@ -3,7 +3,8 @@ import { filenames } from '../src/index.js';
 import { DropgateError } from '../src/errors.js';
 import { validateFilename } from '../src/utils/filename.js';
 
-// 09 10.1 and 10.2: the one file name rule.
+// The one file name rule: which names a list may hold, and how a name is made
+// safe to save.
 
 const utf8 = (s: string) => new TextEncoder().encode(s).length;
 
@@ -18,7 +19,7 @@ function thrownBy(run: () => unknown): DropgateError {
   throw new Error('expected it to throw');
 }
 
-describe('filenames.validate (09 10.1, manifest validation)', () => {
+describe('filenames.validate: the names a file list may hold', () => {
   it('accepts ordinary and non-ASCII names', () => {
     for (const name of ['test.txt', 'my-file.pdf', 'ünïcode.txt', '写真.jpg', '🎉 party.png', 'a:b', 'CON.txt', 'a.', '.bashrc', 'photo‮gnp.exe']) {
       expect(() => filenames.validate(name), name).not.toThrow();
@@ -67,7 +68,7 @@ describe('filenames.validate (09 10.1, manifest validation)', () => {
   });
 });
 
-describe('filenames.sanitize (09 10.2, output sanitisation)', () => {
+describe('filenames.sanitize: a name made safe to save', () => {
   it('normalises to NFC', () => {
     const decomposed = 'ünicode.txt'; // u + combining diaeresis
     expect(filenames.sanitize(decomposed)).toBe('ünicode.txt');
@@ -141,7 +142,7 @@ describe('filenames.sanitize (09 10.2, output sanitisation)', () => {
   });
 });
 
-describe('filenames.unique (09 10.2, collisions)', () => {
+describe('filenames.unique: names that collide', () => {
   it('keeps a name that is free', () => {
     expect(filenames.unique('a.txt', [])).toBe('a.txt');
     expect(filenames.unique('a.txt', ['b.txt'])).toBe('a.txt');

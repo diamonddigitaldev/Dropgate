@@ -80,7 +80,7 @@ beforeEach(() => {
   FakePeer.reset();
 });
 
-describe('No automatic fallback to plain HTTP (09 7.1.1)', () => {
+describe('No automatic fallback to plain HTTP', () => {
   it('a server that only answers on http:// is never tried there: connect() fails with a network error', async () => {
     const requests: string[] = [];
     // Port 443 is blocked: every https:// request fails as a refused connection does.
@@ -113,7 +113,7 @@ describe('No automatic fallback to plain HTTP (09 7.1.1)', () => {
   });
 });
 
-describe('No redirect is followed (09 7.1.2)', () => {
+describe('No redirect is followed', () => {
   it('an https:// server that redirects to http:// is refused with a typed error, and nothing is sent to http://', async () => {
     const requests: Seen[] = [];
     // As fetch() does: a redirect is followed unless the request says otherwise.
@@ -160,7 +160,7 @@ describe('No redirect is followed (09 7.1.2)', () => {
   });
 });
 
-describe('An insecure server needs allowInsecure (09 7.1.3, 7.1.4)', () => {
+describe('An insecure server needs allowInsecure', () => {
   it('http:// on another machine, without opting in, is refused with INSECURE_TRANSPORT_NOT_ALLOWED before any request', () => {
     const server = fakeServer();
     const err = (() => {
@@ -219,7 +219,7 @@ describe('An insecure server needs allowInsecure (09 7.1.3, 7.1.4)', () => {
   });
 });
 
-describe('Loopback is secure (09 7.1.5)', () => {
+describe('Loopback is secure', () => {
   it.each([
     'http://localhost', 'http://localhost:52443', 'http://127.0.0.1', 'http://127.0.0.1:52443',
     'http://[::1]', 'http://[::1]:52443', 'http://LOCALHOST', 'https://192.168.1.10', 'https://files.example',
@@ -421,7 +421,7 @@ const HANDLE_CANCEL: Record<string, (client: DropgateClient) => { cancel(): void
 /** What the client offers that isn't an operation, and so gives no snapshot, result or error of its own. */
 const NOT_OPERATIONS = new Set(['server.on', 'operations.get', 'operations.list']);
 
-describe('transport.secure on every snapshot, result and error (09 7.1.6)', () => {
+describe('transport.secure on every snapshot, result and error', () => {
   it('every public method is in the table, or listed as not an operation', () => {
     const client = new DropgateClient({ server: SECURE_URL, fetchFn: fakeServer().fetchFn });
     const methods: string[] = [];

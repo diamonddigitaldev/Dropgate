@@ -10,7 +10,7 @@ import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
 
 // The crypto provider: every encrypt, decrypt, key, hash and random number
 // core uses goes through it. WebCrypto today; phase 11 adds the audited
-// JavaScript one where crypto.subtle is missing (09 7.1.9–7.1.12).
+// JavaScript one where crypto.subtle is missing.
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
