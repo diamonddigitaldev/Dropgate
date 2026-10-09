@@ -87,7 +87,7 @@ Dropgate was built to make **secure file sharing accessible**, **transparent**, 
 └── docs/                    # Privacy, troubleshooting, and technical notes
 ```
 
-Each part has its own tests. See the READMEs linked below, and the [integration tests README](./tests/integration/README.md) for the end-to-end tests of the Web UI and the client. The [docs checks](./tests/docs/README.md) check that every link in the READMEs and the docs leads somewhere, and that the environment variables, endpoints and error codes they name match the code.
+Each part has its own tests. See the READMEs linked below, and the [integration tests README](./tests/integration/README.md) for the end-to-end tests of the Web UI and the client. The [docs checks](./tests/docs/README.md) check that every link in the READMEs and the docs leads somewhere, that the environment variables, endpoints and error codes they name match the code, and that every claim in the privacy docs that something isn't logged or stored names the test that proves it.
 
 
 ## Getting Started

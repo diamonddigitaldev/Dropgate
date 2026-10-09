@@ -1,9 +1,9 @@
 # Browser Usage
 
-For browser environments, you can use the IIFE bundle:
+For browser environments, you can use the IIFE bundle, `dist/index.browser.js` in the package, which defines the global `DropgateCore`:
 
 ```html
-<script src="/path/to/dropgate-core.browser.js"></script>
+<script src="/path/to/index.browser.js"></script>
 <script>
   const { DropgateClient } = DropgateCore;
   const client = new DropgateClient({ server: location.origin });
@@ -11,11 +11,11 @@ For browser environments, you can use the IIFE bundle:
 </script>
 ```
 
-Or as an ES module:
+Or as an ES module, `dist/index.js` (the Dropgate Server's Web UI serves this one as `/js/dropgate-core.js`):
 
 ```html
 <script type="module">
-  import { DropgateClient } from '/path/to/dropgate-core.js';
+  import { DropgateClient } from '/path/to/index.js';
   const client = new DropgateClient({ server: location.origin });
   // ...
 </script>

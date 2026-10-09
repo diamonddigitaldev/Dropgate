@@ -4,17 +4,19 @@
 
 This document describes what data Dropgate collects, where and why it is stored, how it is processed, and when it is deleted. It covers all three components of the monorepo: the Dropgate Server, the Dropgate Client (Electron), and the `dropgate-core` library (which is also used in the Web UI).
 
+Every claim here that Dropgate doesn't log or keep something links the automated test that checks it, by the test's name (or its first words, ending in "…").
+
 ---
 
 ## 1. Principles
 
 Dropgate follows a data-minimisation approach:
 
-- **No user accounts or authentication.** There is no concept of a registered user. No usernames, passwords, email addresses, or tokens are collected.
-- **No tracking or analytics.** Dropgate does not embed analytics scripts, tracking pixels, or third-party telemetry.
-- **No cookies.** Neither the server nor the Web UI sets any cookies, and none are ever sent: every request the Web UI, the core library and the Dropgate Client make omits credentials (`credentials: 'omit'`).
-- **No persistent client-side web storage.** The Web UI does not use `localStorage`, `sessionStorage`, or `IndexedDB`. The one thing the browser keeps is the service worker that streamed downloads use (StreamSaver): after the first streamed download, it stays registered for the server's site. It stores no data.
-- **Encryption by default.** When E2EE is enabled (the default), the server stores only ciphertext and has no mechanism to recover plaintext file content or filenames.
+- **No user accounts or authentication.** There is no concept of a registered user. No usernames, passwords, email addresses, or tokens are collected (test: [the server asks no credential, and a client with an auth provider sends none](../../server/test/credentials.test.mjs)).
+- **No tracking or analytics.** Dropgate does not embed analytics scripts, tracking pixels, or third-party telemetry (test: [every response sends no referrer, sets no cookie, and names no third-party origin in its CSP](../../server/test/privacy-data.test.mjs)).
+- **No cookies.** Neither the server nor the Web UI sets any cookies, and none are ever sent: every request the Web UI, the core library and the Dropgate Client make omits credentials (`credentials: 'omit'`) (tests: [every response sends no referrer, sets no cookie…](../../server/test/privacy-data.test.mjs); [every fetch() in the web UI's pages and scripts omits credentials](../../server/test/web-ui-requests.test.mjs); [omits credentials from every request it makes](../../packages/dropgate-core/tests/client.test.ts); [a new profile's first Test reaches the server without ever reading the cookie store](../../tests/integration/desktop/first-check.spec.mjs)).
+- **No persistent client-side web storage.** The Web UI does not use `localStorage`, `sessionStorage`, or `IndexedDB`. The one thing the browser keeps is the service worker that streamed downloads use (StreamSaver): after the first streamed download, it stays registered for the server's site. It stores no data. (Checked after every Web UI test in all three browsers, such as [uploads from the home page, is stored encrypted, and downloads intact from the standard download page](../../tests/integration/parity/hosted-single.spec.mjs): the site keeps no cookie, `localStorage`, `sessionStorage`, IndexedDB or Cache Storage entry, and at most that one service worker.)
+- **Encryption by default.** When E2EE is enabled (the default), the server stores only ciphertext and has no mechanism to recover plaintext file content or filenames (test: [encrypted: one padded object, its chunks sealed and each sent with its digest; the secret and the name never reach the server](../../packages/dropgate-core/tests/hosted.test.ts)).
 
 ---
 
@@ -27,7 +29,7 @@ The following tables enumerate every category of data processed by Dropgate, gro
 | Data | Stored? | Where | Why | When Created | When Deleted |
 |------|---------|-------|-----|--------------|--------------|
 | **Stored upload** (a file or several, ciphertext or plaintext) | Yes | Filesystem: `data/uploads/objects/<id>` | Core purpose — the upload must be kept so recipients can download it: one object per upload, several files in one object. Encrypted, it holds a header the server reads only for its format and chunk size, then the chunks, with the files padded inside them. | On finishing (`POST /api/v4/upload/complete`). | On expiry, at its download limit, by its uploader's delete, or server restart (unless `UPLOAD_PRESERVE_UPLOADS=true`). |
-| **Upload in progress** | Temporarily | Filesystem: `data/uploads/tmp/<uploadId>`; in memory: its ID, `encrypted`, size, chunk size and count, the file list (below), lifetime, download limit, manage-token hash, each chunk held with its SHA-256, the storage reserved, paused or not, and its deadline | The chunks are written to disk as they arrive. Each chunk's digest is kept, so the same chunk sent again is recognised and different bytes for it refused. The storage is reserved under a lock, so two uploads at once can't both take the last of it. No IP address, account or time it started. | On starting (`POST /api/v4/uploads`). | On finishing (renamed), cancellation, its deadline (5 minutes after its last request, or, paused, when the pause runs out), or server restart, persistent mode included: never written to a database. |
+| **Upload in progress** | Temporarily | Filesystem: `data/uploads/tmp/<uploadId>`; in memory: its ID, `encrypted`, size, chunk size and count, the file list (below), lifetime, download limit, manage-token hash, each chunk held with its SHA-256, the storage reserved, paused or not, and its deadline | The chunks are written to disk as they arrive. Each chunk's digest is kept, so the same chunk sent again is recognised and different bytes for it refused. The storage is reserved under a lock, so two uploads at once can't both take the last of it. No IP address, account or time it started (test: [an upload in progress holds what its start sent and how far it has got…](../../server/test/privacy-data.test.mjs)). | On starting (`POST /api/v4/uploads`). | On finishing (renamed), cancellation, its deadline (5 minutes after its last request, or, paused, when the pause runs out), or server restart, persistent mode included: never written to a database (test: [a restart ends a paused upload, in persistent mode too…](../../server/test/pause.test.mjs)). |
 | **Upload ID** (UUID) | Temporarily | In memory, with the upload in progress | Names the upload in the `Dropgate-Upload` header of each request after the start, never in a URL. | On starting. | With the upload in progress; and kept 5 minutes after finishing (below). |
 | **Upload's ID** (UUID) | Yes | Database (as key), and the object's file name | Identifies the upload in its link. | On finishing. | When the record is deleted. |
 | **Size** (bytes) | Yes | Database | The stored object's size, padding included: for storage counting, `Content-Length` and ranges. | On finishing. | When the record is deleted. |
@@ -36,15 +38,15 @@ The following tables enumerate every category of data processed by Dropgate, gro
 | **Maximum downloads** (`maxDownloads`) | Yes | Database | The upload's download limit, `0` for none. | On finishing. | When the record is deleted. |
 | **Sealed file list** (`meta`) | Yes | Database | An encrypted upload's file names and sizes, encrypted by the client and padded to a size from 4 KiB to 1 MiB. The server can't read it, and its size says little about how many files there are. | On starting (in memory); on finishing (record). | When the record is deleted. |
 | **File list** (`files`, unencrypted) | Yes | Database | An unencrypted upload's file names and sizes, for its download pages and the name a browser saves a single file under, as Dropgate 3 kept an unencrypted file's name. | On starting (in memory); on finishing (record). | When the record is deleted. |
-| **Manage-token hash** | Yes | Database | The SHA-256 of a random token only the uploader's page or app holds, so the uploader can delete their own upload. The token itself is sent only with the delete (`DELETE /api/v4/objects/{id}`), compared with the hash, and never stored or logged. | On starting (in memory); on finishing (record). | When the record is deleted. |
+| **Manage-token hash** | Yes | Database | The SHA-256 of a random token only the uploader's page or app holds, so the uploader can delete their own upload. The token itself is sent only with the delete (`DELETE /api/v4/objects/{id}`), compared with the hash, and never stored or logged (tests: [no stored byte holds a lease, a manage token, an ID, a name or an address](../../server/test/privacy-data.test.mjs); [Dropgate's own log lines never contain an ID, a name, a key…](../../server/test/privacy-logs.test.mjs)). | On starting (in memory); on finishing (record). | When the record is deleted. |
 | **Download count** (`downloadCount`) | Yes | Database | Enforces the upload's download limit. Only stored when it has one. One download is one lease that sent any bytes, counted when the lease ends. | On finishing, at 0. | When the record is deleted. |
-| **Download lease** | Temporarily | In memory: a random lease ID, the upload's ID, whether it has sent any bytes, paused or not, its deadline, and the answers sending its bytes now | So a download's retries, ranges and files count once, and two downloads can't both take a limit's last place. No IP address, account or time it was taken. | On taking a lease (`POST /api/v4/objects/{id}/leases`). | When it's released, at its deadline (5 minutes after its last request, or, paused, when the pause runs out), when its upload is removed, or server restart. |
+| **Download lease** | Temporarily | In memory: a random lease ID, the upload's ID, whether it has sent any bytes, paused or not, its deadline, and the answers sending its bytes now | So a download's retries, ranges and files count once, and two downloads can't both take a limit's last place. No IP address, account or time it was taken (test: [a lease holds only its upload's ID, its own, how far it has got and its deadline: nothing from the request](../../server/test/privacy-data.test.mjs)). | On taking a lease (`POST /api/v4/objects/{id}/leases`). | When it's released, at its deadline (5 minutes after its last request, or, paused, when the pause runs out), when its upload is removed, or server restart. |
 | **A finished upload's answer** | Temporarily | In memory: upload ID → the object's ID | So that finishing again gets the same answer. | On finishing. | 5 minutes later, or server restart. |
-| **Storage format marker** | Yes | Filesystem: `data/uploads/dropgate-storage.json` | Says which version's layout the uploads folder holds (`{"format": 4}`), so a later version can tell. It holds nothing about any upload. | At every start with uploads on. | With the rest of the uploads folder: at shutdown and the next start in the default mode. |
+| **Storage format marker** | Yes | Filesystem: `data/uploads/dropgate-storage.json` | Says which version's layout the uploads folder holds (`{"format": 4}`), so a later version can tell. It holds nothing about any upload (test: [everything the server keeps is in data/…](../../server/test/startup.test.mjs)). | At every start with uploads on. | With the rest of the uploads folder: at shutdown and the next start in the default mode. |
 
 ### 2.2 Dropgate Server — What a Dropgate 3 Server Left
 
-Dropgate 4 reads nothing a Dropgate 3 server stored, and no Dropgate 3 link works with it. So it keeps none of it either:
+Dropgate 4 reads nothing a Dropgate 3 server stored, and no Dropgate 3 link works with it. So it keeps none of it either (test: [a persistent server deletes exactly Dropgate 3's layout as it starts, logging one line with the count and no ID or name](../../server/test/dropgate3.test.mjs)):
 
 | Data | Stored? | Where | Why | When Created | When Deleted |
 |------|---------|-------|-----|--------------|--------------|
@@ -58,8 +60,8 @@ Dropgate 4 reads nothing a Dropgate 3 server stored, and no Dropgate 3 link work
 | **Peer IDs** (P2P codes) | Transiently | PeerJS in-memory (not Dropgate-managed) | Peer discovery and routing. The code is also in the receiver link's URL path (`/p2p/<code>`), so reverse proxies may log it (see §9.2). | On peer registration. | On peer disconnection. |
 | **ICE candidates** | Transiently | PeerJS in-memory (not Dropgate-managed) | NAT traversal — relayed between peers during WebRTC connection setup. Contains IP addresses and ports. | During ICE gathering. | On connection establishment or failure. |
 | **SDP offers/answers** | Transiently | PeerJS in-memory (not Dropgate-managed) | WebRTC session negotiation. | During connection setup. | On connection establishment or failure. |
-| **File content** | **Never** | — | File data flows directly between peers via the WebRTC data channel. The server is not involved. | — | — |
-| **File metadata** (name, size, MIME) | **Never** | — | Exchanged between peers over the encrypted data channel. The server cannot observe it. | — | — |
+| **File content** | **Never** | — | File data flows directly between peers via the WebRTC data channel. The server is not involved (tests: [a file sent by direct transfer arrives intact when the receiver types the code into the home page, and none of it passes through the server](../../tests/integration/parity/direct-transfer.spec.mjs); [several files sent together by direct transfer arrive intact as one ZIP, and none of them passes through the server](../../tests/integration/parity/direct-transfer.spec.mjs)). | — | — |
+| **File metadata** (name, size, MIME) | **Never** | — | Exchanged between peers over the encrypted data channel. The server cannot observe it. (No request or WebSocket message reaching the server holds a file's name: checked after every test, such as [a file sent by direct transfer arrives intact when the receiver opens the link…](../../tests/integration/parity/direct-transfer.spec.mjs).) | — | — |
 
 These guarantees assume the server relays signalling honestly. The SDP it relays includes the DTLS certificate fingerprints that secure the peer connection, so a malicious or compromised server could put itself between the peers and read the transfer, including file names and contents. See [DGDTP §18.1](./DGDTP.md#181-transport-encryption).
 
@@ -67,9 +69,9 @@ These guarantees assume the server relays signalling honestly. The SDP it relays
 
 | Data | Stored? | Where | Why | When Created | When Deleted |
 |------|---------|-------|-----|--------------|--------------|
-| **Client IP address** | Transiently | In-memory (rate limiter) | Rate limiting. Tracked per sliding window by `express-rate-limit`. Not written to disk or database. | On each HTTP request. | When the rate-limit window expires (default: 60 seconds). |
-| **User-Agent header** | **No** | — | Present in HTTP requests but not logged, stored, or processed by Dropgate. | — | — |
-| **Request paths and methods** | **No** (unless logging) | stdout/stderr (if `LOG_LEVEL ≥ INFO`) | Operational logging. Not structured or persisted by Dropgate itself. Persistence depends on the server operator's log infrastructure. | On relevant server events. | Determined by operator's log retention policy. |
+| **Client IP address** | Transiently | In-memory (rate limiter) | Rate limiting. Tracked per sliding window by `express-rate-limit`. Not written to disk, a database or a log (tests: [no stored byte holds a lease, a manage token, an ID, a name or an address](../../server/test/privacy-data.test.mjs); [Dropgate's own log lines never contain an ID, a name, a key, a code, an IP…](../../server/test/privacy-logs.test.mjs)). | On each HTTP request. | When the rate-limit window expires (default: 60 seconds). |
+| **User-Agent header** | **No** | — | Present in HTTP requests but not logged, stored, or processed by Dropgate (tests: [every stored record holds only known fields, with no IP, user agent or creation time](../../server/test/privacy-data.test.mjs); [Dropgate's own log lines never contain an ID, a name, a key, a code, an IP, a user agent…](../../server/test/privacy-logs.test.mjs)). | — | — |
+| **Request paths and methods** | **No** | — | Dropgate's own log lines never name a request's path, so never an upload's ID. The one route they name is an unexpected error's, by its pattern (`GET /api/v4/objects/:id`), at `ERROR` (see [§8.3](#83-what-does-not-appear-in-logs); tests: [every message is a known event carrying only sizes, counts and timestamps](../../server/test/privacy-logs.test.mjs); [an error while answering gives 500 SERVER_ERROR, and the log names the route's pattern, never its ID](../../server/test/api.test.mjs)). A reverse proxy in front of the server may log them (§9.2). | — | — |
 
 ### 2.5 Dropgate Client (Electron)
 
@@ -86,10 +88,10 @@ The client's settings are kept by `electron-store` in `config.json` in its user 
 | **Log** | In memory; on disk only if the user turns it on | The app's memory; `debug.log` in the user data directory | Troubleshooting. The run's last 1,000 lines, redacted before they're kept (see §8.6). | As the app runs; the file when the setting is turned on. | When the app quits; the file as soon as the setting is turned off, and at a launch with it off. A `debug.log` an earlier version wrote is deleted when the app starts. |
 | **The download link, on the clipboard** | Until something else is copied | The system clipboard | Every successful upload's link is copied, as is the link when **Copy** is chosen. It holds an encrypted upload's key, so it's copied marked to be left out of Windows' clipboard history and cloud clipboard (and by apps that watch the clipboard), and out of KDE's clipboard history on Linux. | When an upload finishes, or on **Copy**. | When the clipboard is next written to. Other clipboard managers on Linux may still keep it. |
 | **Notifications** | By the OS | The OS's notification history | **Share with Dropgate** says what it's doing in notifications, which say how many files ("Uploading 3 files…"), never which. A paused upload's notification, 5 minutes before the server drops it, gives the time and nothing about the files. | During a background upload, and before a paused upload's deadline. | As the OS clears its notifications. |
-| **Files chosen, and an upload in progress, paused or not** | In memory only | The app's memory | Each file chosen's path, with its size and modification time then, so a file changed since isn't read; and an upload's state, with, while it's paused, the chunk it stopped and the deadline the server gave. Nothing is written to disk. | When a file is chosen; when the upload starts, or pauses. | When the file leaves the list or its upload ends, and when the app quits. |
+| **Files chosen, and an upload in progress, paused or not** | In memory only | The app's memory | Each file chosen's path, with its size and modification time then, so a file changed since isn't read; and an upload's state, with, while it's paused, the chunk it stopped and the deadline the server gave. Nothing is written to disk (tests: [after an upload and a restart, nothing in the profile holds the file's name…](../../tests/integration/desktop/profile.spec.mjs); [quit with an upload paused part-way, nothing in the profile holds…](../../tests/integration/desktop/profile.spec.mjs)). | When a file is chosen; when the upload starts, or pauses. | When the file leaves the list or its upload ends, and when the app quits. |
 | **The installer's choices** (Windows) | Yes | The registry, in the install's own key (`Software\<app's ID>`) | Whether "Share with Dropgate" was added to the right-click menu: one value, so an update keeps the choice. Who it's installed for is the install's location (only for you, or everyone). Nothing about the person. | When the app is installed. | When it's uninstalled, with the right-click entry. |
-| **Update-check ID** | **No** | — | The app sends a fixed value, the same for every installation, in place of an ID, and never makes or keeps one (see [§9.3](#93-github-dropgate-client-update-checks)). An `.updaterId` file written by version 3 is deleted when the app starts, and never read or sent. | — | — |
-| **Spell-check dictionaries** | **No** | — | The app has no spell checking, so it downloads no dictionaries. (On Linux, Electron would otherwise download them from Google as the app starts.) | — | — |
+| **Update-check ID** | **No** | — | The app sends a fixed value, the same for every installation, in place of an ID, and never makes or keeps one (see [§9.3](#93-github-dropgate-client-update-checks)). An `.updaterId` file written by version 3 is deleted when the app starts, and never read or sent (tests: [on each channel, two new installs' update checks carry no ID of either, and leave none in the profile](../../tests/integration/desktop/updates.spec.mjs); [an upgrade from v3 deletes the ID of the install v3's updater kept, and never sends it](../../tests/integration/desktop/updates.spec.mjs)). | — | — |
+| **Spell-check dictionaries** | **No** | — | The app has no spell checking, so it downloads no dictionaries. (On Linux, Electron would otherwise download them from Google as the app starts.) (test: [downloads no spell-check dictionaries](../../tests/integration/desktop/dictionaries.spec.mjs)) | — | — |
 | **Update downloads** | Yes, until installed | The user's cache folder (`dropgate-client-updater`) | An update the app has downloaded, waiting to be installed when the app closes. | When an update is downloaded. | Replaced by the next update. |
 
 ### 2.6 Web UI (Browser)
@@ -99,6 +101,7 @@ The client's settings are kept by `electron-store` in `config.json` in its user 
 | **Server capabilities** | Transiently | JavaScript memory | Cached `/api/info` response for the current page session. | On connection test. | On page unload. |
 | **File references** | Transiently | JavaScript memory (`File` objects) | The user's selected files, held in memory for upload. | On file selection. | On page unload or upload completion. |
 | **Transfer progress** | Transiently | JavaScript memory | Percentage, bytes transferred, etc. | During upload/P2P transfer. | On page unload or transfer completion. |
+| **A file's name, in its download address** | **No** | — | A download page saves each file through StreamSaver, at a random address the browser answers itself. The name isn't in it, only in the download's `Content-Disposition` header, so a browser that sends the address to the server, as Firefox's own Resume does, sends no name (test: [the addresses a file and a ZIP are saved from hold no file name, and each saves under its own name](../../tests/integration/web-ui/download-address.spec.mjs)). | — | — |
 
 ---
 
@@ -130,12 +133,12 @@ A file name's length isn't visible: names are only in the sealed list.
 For an upload of one file or several:
 
 1. **A secret is generated** by the client: 32 bytes from the browser's or the system's secure random numbers.
-2. **Keys are made from it**, one for the upload's header, one for its chunks and one for its list of files, each with HKDF-SHA256 and the upload's own random salt. They can't be exported, and are never stored.
+2. **Keys are made from it**, one for the upload's header, one for its chunks and one for its list of files, each with HKDF-SHA256 and the upload's own random salt. They can't be exported, and are never stored (test: [keeps derived keys to itself: they can't be exported, show no bytes, and each does only its own job](../../packages/dropgate-core/tests/crypto.test.ts)).
 3. **The secret is appended** to the download URL as a fragment, in URL-safe Base64 (`#<secret>`, 43 characters).
-4. **Not transmitted to the server.** URL fragments are not included in HTTP requests. A whole link pasted into the Web UI's "enter a sharing code" box, or given to the core library's `client.links.resolve()`, is read on the device, and nothing of it is sent: the download page it opens asks about the upload. See [DGUP §9.1](./DGUP.md#91-links).
-5. **Not persisted** by the client. The secret exists only in the download link. If the link is lost, the file cannot be decrypted.
+4. **Not transmitted to the server.** URL fragments are not included in HTTP requests. A whole link pasted into the Web UI's "enter a sharing code" box, or given to the core library's `client.links.resolve()`, is read on the device, and nothing of it is sent: the download page it opens asks about the upload. See [DGUP §9.1](./DGUP.md#91-links). (Tests: [encrypted: one padded object, its chunks sealed and each sent with its digest; the secret and the name never reach the server](../../packages/dropgate-core/tests/hosted.test.ts); [pasting an end-to-end encrypted link into Enter Sharing Code sends nothing of it to the server](../../tests/integration/web-ui/pasted-link.spec.mjs).)
+5. **Not persisted** by the client. The secret exists only in the download link. If the link is lost, the file cannot be decrypted. (The Web UI keeps nothing in the browser, checked after every Web UI test; the desktop app nothing in its profile: test [after an upload and a restart, nothing in the profile holds the file's name, its folder, its bytes, the link or its key](../../tests/integration/desktop/profile.spec.mjs).)
 
-The upload's **manage token**, which deletes it ([DGUP §7](./DGUP.md#7-the-uploaders-delete)), is 32 more random bytes, made with the secret. The server is sent only its SHA-256, and the token itself stays in the memory of the page or app that uploaded the file: neither the Web UI nor the desktop app writes it anywhere, and it's gone when the page or the app closes. The Web UI's result screen offers **Delete Upload** while the page holds it; a reload, or **Send More Files**, drops it ([DGUP §9.3](./DGUP.md#93-deleting-from-the-result-screen)). The token itself is sent only to delete the upload, in the `Dropgate-Manage-Token` header: never in a URL, so it's in no address bar, history or proxy log, and never in an error or a log line, on either side.
+The upload's **manage token**, which deletes it ([DGUP §7](./DGUP.md#7-the-uploaders-delete)), is 32 more random bytes, made with the secret. The server is sent only its SHA-256, and the token itself stays in the memory of the page or app that uploaded the file: neither the Web UI nor the desktop app writes it anywhere, and it's gone when the page or the app closes. The Web UI's result screen offers **Delete Upload** while the page holds it; a reload, or **Send More Files**, drops it ([DGUP §9.3](./DGUP.md#93-deleting-from-the-result-screen)). The token itself is sent only to delete the upload, in the `Dropgate-Manage-Token` header: never in a URL, so it's in no address bar, history or proxy log, and never in an error or a log line, on either side (tests: [is 32 random bytes, sent only as its SHA-256 with the start, and given only in the completed value](../../packages/dropgate-core/tests/client.test.ts); [a token that isn't the upload's is REQUEST_REJECTED (403) and deletes nothing…](../../packages/dropgate-core/tests/client.test.ts); [a reload drops the manage token, and the Delete button with it](../../tests/integration/web-ui/delete-upload.spec.mjs)).
 
 Several files are one upload: one secret, one manage token and one link for all of them.
 
@@ -185,7 +188,7 @@ data/
 | `false` (default) | In-memory | All metadata lost. All files in `data/uploads/` deleted. |
 | `true` | SQLite (`data/uploads/db/`) | Metadata and files preserved. Only `data/uploads/tmp/` is cleaned. |
 
-With SQLite, `objects.sqlite` writes zeros over a record as it deletes it (SQLite's `secure_delete`), so an upload that's gone leaves nothing of itself, such as its ID or an unencrypted file's name, in the file. Dropgate 3's two databases didn't, which is one more reason they're deleted (§2.2).
+With SQLite, `objects.sqlite` writes zeros over a record as it deletes it (SQLite's `secure_delete`), so an upload that's gone leaves nothing of itself, such as its ID or an unencrypted file's name, in the file (test: [no stored byte holds a lease, a manage token, an ID, a name or an address](../../server/test/privacy-data.test.mjs)). Dropgate 3's two databases didn't, which is one more reason they're deleted (§2.2).
 
 ---
 
@@ -209,7 +212,7 @@ With SQLite, `objects.sqlite` writes zeros over a record as it deletes it (SQLit
 | **Upload cancellation** (`DELETE /api/v4/upload`) | Temporary file, storage reservation, session state. |
 | **The uploader's delete** (`DELETE /api/v4/objects/{id}`, with the manage token) | The object from disk + its record + its storage, at once. Its open leases end, uncounted, and any of its bytes being sent stop. |
 | **A download released** (`DELETE /api/v4/lease`) | The lease. If it sent any bytes, it counts as one download, and at the limit the upload goes. |
-| **P2P transfer cancellation** (either peer calls `stop()`) | Connection resources. No server data to delete (DGDTP stores nothing on the server). |
+| **P2P transfer cancellation** (either peer calls `stop()`) | Connection resources. No server data to delete: the server only relayed the peers' signalling ([§2.3](#23-dropgate-server--p2p-signalling-dgdtp)). |
 
 ### 5.3 What Is NOT Automatically Deleted
 
@@ -289,10 +292,10 @@ Data in transit peer-to-peer: File content + metadata (DTLS-encrypted)
 
 | Level | Value | What Is Logged |
 |-------|-------|----------------|
-| `NONE` | -1 | Nothing at all: the server writes nothing to stdout or stderr. |
-| `ERROR` | 0 | Startup and configuration errors, file I/O failures, and unexpected errors, by their kind only (see [§8.3](#83-what-does-not-appear-in-logs)). |
+| `NONE` | -1 | Nothing at all: the server writes nothing to stdout or stderr (test: [nothing reaches stdout or stderr outside LOG_LEVEL](../../server/test/privacy-logs.test.mjs)). |
+| `ERROR` | 0 | Startup and configuration errors, file I/O failures, and unexpected errors, by their kind only (see [§8.3](#83-what-does-not-appear-in-logs); test: [an error while answering gives 500 SERVER_ERROR…](../../server/test/api.test.mjs)). |
 | `WARN` | 1 | Configuration warnings (such as the HTTPS requirement or an unlimited limit) and rate limit triggers. |
-| `INFO` | 2 | Startup configuration and storage capacity at startup, and how many uploads a Dropgate 3 server left, when a start deletes them. Nothing per upload or download. **Default.** |
+| `INFO` | 2 | Startup configuration and storage capacity at startup, and how many uploads a Dropgate 3 server left, when a start deletes them. Nothing per upload or download (test: [the default log level writes nothing per transfer](../../server/test/privacy-logs.test.mjs)). **Default.** |
 | `DEBUG` | 3 | Per-transfer events: an upload's start, each chunk, pause, resume, finish, cancel and deadline, downloads, deletion, expiry and rejections. |
 
 ### 8.2 What Appears in Logs
@@ -315,7 +318,7 @@ Every line carries a timestamp, so `DEBUG` output shows when transfers of a give
 
 ### 8.3 What Does NOT Appear in Logs
 
-At any log level, Dropgate's own messages do **not** include:
+At any log level, Dropgate's own messages do **not** include (tests: [Dropgate's own log lines never contain an ID, a name, a key, a code, an IP, a user agent or request body text](../../server/test/privacy-logs.test.mjs), at every level; [every message is a known event carrying only sizes, counts and timestamps](../../server/test/privacy-logs.test.mjs), at `DEBUG`):
 
 - File content.
 - Encryption keys.
@@ -325,10 +328,10 @@ At any log level, Dropgate's own messages do **not** include:
 - Download URLs.
 - User-Agent strings.
 
-**Everything the server writes goes through `LOG_LEVEL`,** errors included:
+**Everything the server writes goes through `LOG_LEVEL`,** errors included (test: [nothing reaches stdout or stderr outside LOG_LEVEL](../../server/test/privacy-logs.test.mjs)):
 
-- **Unexpected errors** are logged at `ERROR` by the kind of error and the route's pattern only, such as `GET /api/v4/objects/:id (Error, EISDIR)`. An error's message or stack trace is never written: it could hold the internal path of a stored upload, which contains its ID, or part of a request body. A request body that can't be read is logged at `DEBUG`, without any of it.
-- **A misconfigured reverse proxy,** one that passes a client address the rate limiter can't read (for example `IP:port`), is logged at `ERROR` by the rate limiter's error code, never the address.
+- **Unexpected errors** are logged at `ERROR` by the kind of error and the route's pattern only, such as `GET /api/v4/objects/:id (Error, EISDIR)`. An error's message or stack trace is never written: it could hold the internal path of a stored upload, which contains its ID, or part of a request body. A request body that can't be read is logged at `DEBUG`, without any of it (tests: [an error while answering gives 500 SERVER_ERROR, and the log names the route's pattern, never its ID](../../server/test/api.test.mjs); [a request body that can't be read answers 400 INVALID_REQUEST…](../../server/test/api.test.mjs)).
+- **A misconfigured reverse proxy,** one that passes a client address the rate limiter can't read (for example `IP:port`), is logged at `ERROR` by the rate limiter's error code, never the address (test: [a client address the rate limiter can't read is logged by its code alone, and not at all at NONE](../../server/test/api.test.mjs)).
 
 ### 8.4 PeerJS Debug Logging
 
@@ -345,7 +348,7 @@ Dropgate writes logs to stdout/stderr. Whether these logs are persisted, rotated
 
 ### 8.6 Dropgate Client Log
 
-The desktop client keeps its log in memory: the run's last 1,000 lines, which go when it quits. Nothing is written to disk unless the user turns on **Keep log on disk for troubleshooting** (**Settings**, under **Privacy**; off by default):
+The desktop client keeps its log in memory: the run's last 1,000 lines, which go when it quits. Nothing is written to disk unless the user turns on **Keep log on disk for troubleshooting** (**Settings**, under **Privacy**; off by default; test: [keeps no log on disk by default, through an upload and a restart](../../tests/integration/desktop/settings-view.spec.mjs)):
 
 - **Turned on,** the run so far is written to `debug.log` in the user data directory, and each line after it is added. It holds at most 2,000 lines after the run's first line, the newest kept. At the next launch, still on, it starts again.
 - **Turned off,** `debug.log` is deleted straight away. At a launch with it off, one an earlier run kept is deleted too.
@@ -356,7 +359,7 @@ The client's own lines never name the files it's given or where they are: it log
 - A URL keeps its scheme, host and path, and loses its query, its fragment (where an encrypted upload's key is) and any user name.
 - Errors are kept as their stack traces, redacted the same way.
 
-The log never holds file contents or encryption keys. A `debug.log` an earlier version wrote in the user data directory is deleted when the client starts, unless the setting is on.
+The log never holds file contents or encryption keys (test: [Keep log on disk for troubleshooting: off and no file by default; on, debug.log holds the run so far and none of its files or links…](../../tests/integration/desktop/settings-view.spec.mjs); and [a link is copied kept out of the clipboard's history and sync, and notifications and the log never name a file](../../client/test/main.test.mjs)). A `debug.log` an earlier version wrote in the user data directory is deleted when the client starts, unless the setting is on.
 
 ---
 
@@ -388,7 +391,7 @@ Each check sends requests to GitHub (`github.com`, and GitHub's release-asset ho
 
 - The client's IP address and the time.
 - The update channel the check is for, from the files it asks for: Stable reads the latest release, and Beta and Alpha read pre-releases too.
-- An `x-user-staging-id` header, which the auto-updater library (`electron-updater`) sends for staged rollouts. Dropgate doesn't use them, so it sends `00000000-0000-0000-0000-000000000000`, the same for every installation, and never makes or keeps an ID of its own. Nothing in a check tells one installation from another.
+- An `x-user-staging-id` header, which the auto-updater library (`electron-updater`) sends for staged rollouts. Dropgate doesn't use them, so it sends `00000000-0000-0000-0000-000000000000`, the same for every installation, and never makes or keeps an ID of its own. Nothing in a check tells one installation from another (test: [on each channel, two new installs' update checks carry no ID of either, and leave none in the profile](../../tests/integration/desktop/updates.spec.mjs)).
 - The user agent `electron-builder` and the system's preferred languages (`Accept-Language`). The check doesn't send the installed Dropgate version or any user details.
 
 When a check finds an update, the client downloads it from GitHub straight away, unless **Download updates automatically** is off in **Settings**, under **Update**, and installs it when you close the app. Those downloads send the same headers.

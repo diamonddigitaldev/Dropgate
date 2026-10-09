@@ -19,7 +19,7 @@
 // If the peers never connect, or the transfer fails after they do, the failure
 // says what each page saw.
 import os from 'node:os';
-import { madeUpFile, readZip, summary } from '../helpers/files.mjs';
+import { holdsPlaintext, madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, test } from '../helpers/test.mjs';
 import { describePeers, download, peerConnections, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
 
@@ -97,6 +97,28 @@ async function explained(heading, receiver, sender, part) {
     }
 }
 
+/**
+ * Where any of the files' bytes reached the server: the body of a request, or a
+ * WebSocket message either page sent. A file sent directly goes from peer to
+ * peer, so none should. (Their names are checked after every test, with the keys.)
+ */
+function bytesSent(server, secrets, files) {
+    const sent = [
+        ...server.requests().map(({ method, url, body }) => ({ where: `the body of ${method} ${new URL(url, 'http://server').pathname}`, bytes: body })),
+        ...secrets.messagesSent.map(({ url, payload }) => ({
+            where: `a WebSocket message to ${new URL(url).pathname}`,
+            bytes: typeof payload === 'string' ? Buffer.from(payload, 'latin1') : Buffer.from(payload),
+        })),
+    ];
+    const found = [];
+    for (const file of files) {
+        for (const { where, bytes } of sent) {
+            if (bytes?.length && holdsPlaintext(bytes, file.buffer)) found.push(`${file.name}, in ${where}`);
+        }
+    }
+    return found;
+}
+
 /** Wait for the receive page to offer what was sent, and if it never does, say why. */
 const expectConnected = (receiver, sender) => explained("Why the peers didn't connect", receiver, sender,
     () => expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 }));
@@ -119,7 +141,7 @@ async function receiveAndCompare(receiver, sender, file) {
     expect(summary(got.bytes)).toEqual(summary(file.buffer));
 }
 
-test('a file sent by direct transfer arrives intact when the receiver types the code into the home page', async ({ page, otherContext, stun, browserName }) => {
+test('a file sent by direct transfer arrives intact when the receiver types the code into the home page, and none of it passes through the server', async ({ page, otherContext, stun, browserName, server, secrets }) => {
     await recordBoth(browserName, page.context(), otherContext);
     await expectOnlyLocalStunOffered(page, stun);
     const file = madeUpFile('Sketches (direct) é.bin', SIZE, 30);
@@ -134,9 +156,10 @@ test('a file sent by direct transfer arrives intact when the receiver types the 
 
     await receiveAndCompare(receiver, page, file);
     await expectOnlyLocalCandidates(stun, browserName, page, receiver);
+    expect(bytesSent(server, secrets, [file]), "the file's bytes the server got").toEqual([]);
 });
 
-test('a file sent by direct transfer arrives intact when the receiver opens the link', async ({ page, otherContext, stun, browserName }) => {
+test('a file sent by direct transfer arrives intact when the receiver opens the link, and none of it passes through the server', async ({ page, otherContext, stun, browserName, server, secrets }) => {
     await recordBoth(browserName, page.context(), otherContext);
     await expectOnlyLocalStunOffered(page, stun);
     const file = madeUpFile('Sketches (linked) é.bin', SIZE, 31);
@@ -149,9 +172,10 @@ test('a file sent by direct transfer arrives intact when the receiver opens the 
 
     await receiveAndCompare(receiver, page, file);
     await expectOnlyLocalCandidates(stun, browserName, page, receiver);
+    expect(bytesSent(server, secrets, [file]), "the file's bytes the server got").toEqual([]);
 });
 
-test('several files sent together by direct transfer arrive intact as one ZIP', async ({ page, otherContext, stun, browserName }) => {
+test('several files sent together by direct transfer arrive intact as one ZIP, and none of them passes through the server', async ({ page, otherContext, stun, browserName, server, secrets }) => {
     await recordBoth(browserName, page.context(), otherContext);
     const files = [
         madeUpFile('plan.txt', 1_000, 32),
@@ -174,4 +198,5 @@ test('several files sent together by direct transfer arrive intact as one ZIP', 
         expect(summary(entries[i].bytes), `${file.name} in the ZIP`).toEqual(summary(file.buffer));
     }
     await expectOnlyLocalCandidates(stun, browserName, page, receiver);
+    expect(bytesSent(server, secrets, files), "the files' bytes the server got").toEqual([]);
 });

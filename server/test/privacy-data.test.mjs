@@ -71,6 +71,21 @@ describe('what Dropgate 4\'s uploads store, paused and resumed part-way', () => 
 
     after(() => server?.stop());
 
+    test('an upload in progress holds what its start sent and how far it has got: nothing else from the request, and no time it started', () => {
+        // The server makes every upload in progress in one place, in its start route.
+        const source = fs.readFileSync(path.join(server.dir, 'server.js'), 'utf8').replace(/\r\n/g, '\n');
+        const made = source.match(/\n {12}upload = \{\n([\s\S]*?)\n {12}\};\n {12}v4Uploads\.set\(id, upload\);/g);
+        assert.equal(made?.length, 1, 'one place makes an upload in progress');
+        const body = made[0];
+        const fields = [...body.matchAll(/^ {16}(\w+)[:,]/gm)].map((m) => m[1]);
+        assert.deepEqual(fields, [
+            'id', 'tempFilePath', 'encrypted', 'size', 'chunkSize', 'chunks', 'meta', 'files', 'lifetimeMs', 'maxDownloads',
+            'manageTokenHash', 'received', 'writing', 'paused', 'deadline', 'timer', 'busy', 'finishing',
+        ]);
+        assert.doesNotMatch(body, /\breq\b|Date\.now|clock/, 'nothing taken from the request itself, nor the time');
+        assert.equal(source.match(/v4Uploads\.set\(/g).length, 1, 'and nothing else adds one');
+    });
+
     test('every record holds only known fields: no address, upload ID, file name of an encrypted upload, or creation time', () => {
         assert.equal(records.length, 2, 'the two finished uploads');
         const problems = [];
