@@ -17,6 +17,8 @@ const CH = {
     UPLOAD_PROGRESS: 'upload:progress',
     UPLOAD_FINISHED: 'upload:finished',
     UPLOAD_CANCEL: 'upload:cancel',
+    UPLOAD_PAUSE: 'upload:pause',
+    UPLOAD_PAUSE_ENDING: 'upload:pause-ending',
     UPLOAD_BUSY: 'upload:busy',
     LINK_COPY: 'link:copy',
     FILE_OPENED: 'file:opened',
@@ -24,6 +26,7 @@ const CH = {
     UPLOAD_BACKGROUND_START: 'upload:background-start',
     UPLOAD_STATUS: 'upload:status',
     UPLOAD_CANCEL_REQUESTED: 'upload:cancel-requested',
+    UPLOAD_PAUSE_REQUESTED: 'upload:pause-requested',
 };
 
 /** Listen for a push from main; the callback gets its value, never the IPC event. */
@@ -38,6 +41,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     uploadProgress: (progress) => ipcRenderer.invoke(CH.UPLOAD_PROGRESS, progress),
     uploadFinished: (result) => ipcRenderer.invoke(CH.UPLOAD_FINISHED, result),
     cancelUpload: () => ipcRenderer.invoke(CH.UPLOAD_CANCEL),
+    pauseUpload: (paused) => ipcRenderer.invoke(CH.UPLOAD_PAUSE, paused),
+    pauseEnding: (deadline) => ipcRenderer.invoke(CH.UPLOAD_PAUSE_ENDING, deadline),
     isUploading: () => ipcRenderer.invoke(CH.UPLOAD_BUSY),
     copyLink: (link) => ipcRenderer.invoke(CH.LINK_COPY, link),
     onFileOpened: (callback) => on(CH.FILE_OPENED, callback),
@@ -45,4 +50,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onBackgroundUploadStart: (callback) => on(CH.UPLOAD_BACKGROUND_START, callback),
     onUploadStatus: (callback) => on(CH.UPLOAD_STATUS, callback),
     onCancelUpload: (callback) => on(CH.UPLOAD_CANCEL_REQUESTED, callback),
+    onPauseUpload: (callback) => on(CH.UPLOAD_PAUSE_REQUESTED, callback),
 });

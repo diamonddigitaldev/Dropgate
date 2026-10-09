@@ -1,4 +1,4 @@
-import { DropgateClient, lifetime } from './dropgate-core.js';
+import { DropgateClient, DropgateError, lifetime } from './dropgate-core.js';
 
 // The page: Dropgate's Upload section and its Server tab, in the kit's frame
 // (kit.ui.mountShell()): the nav rail, the header, and the Settings view, with
@@ -13,7 +13,11 @@ const kitApi = window.kitAPI;
 /**
  * A file on disk, as one of core's file sources: core asks for one range of
  * bytes at a time (read()), and main reads just that range, for a file it has
- * handed this page.
+ * handed this page. Like a browser's File, it can't be read once the file has
+ * changed since it was chosen (main checks its size and modification time), so
+ * a file edited during an upload, or while it's paused, is never sent part
+ * old, part new: the upload fails SOURCE_UNAVAILABLE, as core's own
+ * sources.fileHandle() does.
  */
 class LazyFile {
     constructor(filePath, name, size) {
@@ -24,7 +28,14 @@ class LazyFile {
 
     async read(start, end) {
         // IPC gives a Uint8Array (main's Buffer); core checks it has every byte asked for.
-        return api.readFileRange(this.filePath, start, end);
+        const bytes = await api.readFileRange(this.filePath, start, end);
+        if (bytes?.changed) {
+            throw new DropgateError({
+                code: 'SOURCE_UNAVAILABLE',
+                message: "A file changed after the upload started, so the rest of it can't be read as it was.",
+            });
+        }
+        return bytes;
     }
 }
 
@@ -75,6 +86,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         /** @type {{compatible:boolean, message?:string}} */
         let lastServerCheck = { compatible: false, message: '' };
         let activeUpload = null;
+        // Tells main where the upload this window runs is (performUpload()), so the buttons can be set again after a click.
+        let reportUpload = null;
+        // The notification before a paused upload's server drops it: its timer, and the deadline it's for.
+        let pauseEnding = { timer: null, deadline: null };
         // Whether this window shows an upload running: its own, or one main tells it about.
         let uploading = false;
         let uploadsAllowed = false;
@@ -110,6 +125,36 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         $('action-bar').append(actions.element);
         actions.update({ canRun: false, canClear: false });
+
+        // Pause Upload and Resume Upload, beside Cancel while an upload runs, on
+        // a server that lets uploads pause. The kit's action bar has no place
+        // for them, so they're the app's own, as a transfer's own buttons are
+        // (Will, 2026-10-09). Main passes a click on to whichever window runs
+        // the upload, as it does Cancel.
+        const pauseButton = (label, paused) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-outline-secondary';
+            button.textContent = label;
+            button.hidden = true;
+            button.addEventListener('click', () => {
+                button.disabled = true;
+                api.pauseUpload(paused);
+            });
+            return button;
+        };
+        const pauseBtn = pauseButton('Pause Upload', true);
+        const resumeBtn = pauseButton('Resume Upload', false);
+        // Just before Cancel, the bar's danger button.
+        actions.element.querySelector('.kit-action-buttons > .btn-danger').before(pauseBtn, resumeBtn);
+
+        /** Pause while the upload runs, Resume while it's paused, each usable only when core says it can be now. */
+        function showPauseControls({ pausable = false, paused = false, canPause = false } = {}) {
+            pauseBtn.hidden = !pausable || paused;
+            pauseBtn.disabled = !canPause;
+            resumeBtn.hidden = !paused;
+            resumeBtn.disabled = !(paused && canPause);
+        }
 
         /** Say what's happening, on the action bar's status line. */
         function setStatus(text) {
@@ -275,6 +320,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         if (text) setStatus(text);
                         uploading = true;
                         actions.update({ running: true, ...(percent !== undefined ? { percent } : {}) });
+                        showPauseControls(event.data);
                         linkSection.classList.add('d-none');
                         break;
                     }
@@ -284,6 +330,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         downloadLinkInput.value = link;
                         linkSection.classList.remove('d-none');
                         uploading = false;
+                        showPauseControls();
                         setStatus('Upload successful.');
                         actions.update({ running: false, percent: 100 });
                         resetUI();
@@ -293,6 +340,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     {
                         const { error } = event.data;
                         uploading = false;
+                        showPauseControls();
                         setStatus(`Upload failed: ${error}`);
                         actions.update({ running: false });
                         kit.ui.toast(`Upload failed: ${error}`, { type: 'danger' });
@@ -302,6 +350,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 case 'cancelled':
                     {
                         uploading = false;
+                        showPauseControls();
                         setStatus('Upload cancelled.');
                         actions.update({ running: false });
                         resetUI(false);
@@ -315,6 +364,25 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (activeUpload) {
                 activeUpload.cancel();
                 activeUpload = null;
+            }
+        });
+
+        // Pause or resume the upload this window runs (main passes on Pause Upload and Resume Upload from any window).
+        api.onPauseUpload(async (paused) => {
+            const upload = activeUpload;
+            if (!upload) return;
+            try {
+                await (paused ? upload.pause() : upload.resume());
+            } catch (error) {
+                const ended = !['initializing', 'uploading', 'paused', 'completing'].includes(upload.snapshot.status);
+                // It moved on before the click landed: it's finishing, or a pause is already settling.
+                if (!ended && !DropgateError.is(error, 'PAUSE_UNAVAILABLE')) {
+                    // The server refused the pause, or couldn't be asked to resume: nothing changed.
+                    kit.ui.toast(error?.message || (paused ? "The upload couldn't be paused." : "The upload couldn't be resumed."), { type: 'warning' });
+                }
+            } finally {
+                // The buttons, as the upload is now: a click disabled its own.
+                if (activeUpload === upload) reportUpload?.(upload.snapshot);
             }
         });
 
@@ -539,20 +607,37 @@ document.addEventListener('DOMContentLoaded', async () => {
                     encrypt: encrypt,
                 });
 
+                // Whether the server lets an upload pause: its pause length is 0 when the operator has turned pausing off.
+                const pausable = (serverCapabilities?.upload?.maxPauseMinutes ?? 0) > 0;
+
                 // Where the upload is, while it runs. Core's snapshots never
                 // name a file, so the name of the one an upload of several is
                 // on comes from this page's own list.
                 const report = (snapshot) => {
-                    if (!['initializing', 'uploading', 'completing'].includes(snapshot.status)) return;
+                    const { status, text, deadline } = snapshot;
+                    if (status !== 'paused') warnBeforeDeadline(null);
+                    if (!['initializing', 'uploading', 'paused', 'completing'].includes(status)) return;
+                    const paused = status === 'paused';
                     const onFile = files.length > 1 && snapshot.phase === 'chunk';
                     const fileName = onFile ? files[snapshot.fileIndex]?.name : null;
+                    let line = fileName ? `${text} — ${fileName}` : text;
+                    // Paused, the server holds the upload until its deadline, and nothing resumes it but Resume Upload.
+                    // Short, to fit the status line beside its buttons (Will, 2026-10-09).
+                    if (paused && text === 'Paused.' && deadline) {
+                        line = `Paused. Kept until ${formatDeadline(deadline)}.`;
+                        warnBeforeDeadline(deadline);
+                    }
                     api.uploadProgress({
-                        text: fileName ? `${snapshot.text} — ${fileName}` : snapshot.text,
+                        text: line,
                         // The step alone, with no file name, for the window's title.
-                        step: snapshot.text,
+                        step: text,
                         percent: snapshot.percent,
+                        pausable: pausable && ['initializing', 'uploading', 'paused'].includes(status),
+                        paused,
+                        canPause: snapshot.canPause,
                     });
                 };
+                reportUpload = report;
                 report(upload.snapshot);
                 upload.subscribe(report);
 
@@ -564,6 +649,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 // The upload's one outcome: completed, cancelled or failed.
                 const outcome = await upload.result;
 
+                warnBeforeDeadline(null);
+                reportUpload = null;
                 activeUpload = null;
                 setUploadingState(false);
                 revokeAllLazyFiles();
@@ -595,6 +682,36 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         // --- Utility Functions ---
+
+        /** How long before a paused upload's deadline the notification comes. */
+        const PAUSE_WARNING_MS = 5 * 60 * 1000;
+
+        /**
+         * The notification that a paused upload's server will drop it, 5
+         * minutes before its deadline, or at once when less is left (Will,
+         * 2026-10-09): nothing resumes it by itself. With null, or a new
+         * deadline, the one waiting is called off. Pausing again renews the
+         * deadline, and so the notification.
+         */
+        function warnBeforeDeadline(deadline) {
+            if (deadline === pauseEnding.deadline) return;
+            clearTimeout(pauseEnding.timer);
+            pauseEnding = { timer: null, deadline };
+            if (deadline === null) return;
+            const wait = Math.max(0, deadline - PAUSE_WARNING_MS - Date.now());
+            pauseEnding.timer = setTimeout(() => api.pauseEnding(deadline), wait);
+        }
+
+        /** When a paused upload's server stops holding it, as a local time: "14:32", or "14:32 tomorrow". */
+        function formatDeadline(ms) {
+            const at = new Date(ms);
+            const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            const today = new Date();
+            if (at.toDateString() === today.toDateString()) return time;
+            const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+            if (at.toDateString() === tomorrow.toDateString()) return `${time} tomorrow`;
+            return at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+        }
 
         /**
          * Update the security status card based on E2EE and HTTPS availability.

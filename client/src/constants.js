@@ -19,11 +19,13 @@ const IPC = Object.freeze({
     WINDOW_READY: 'window:ready',               // () the page has set itself up; main sends a background upload its files then
     WINDOW_SHOW: 'window:show',                 // () show the asking window, hidden for a background upload, to ask the person something
     FILES_ADD: 'files:add',                     // (paths) dropped files' paths -> { files: [{ name, size, filePath }], folders }
-    FILE_READ_RANGE: 'file:read-range',         // (filePath, start, end) -> the bytes, for a file main has handed the page
+    FILE_READ_RANGE: 'file:read-range',         // (filePath, start, end) -> the bytes, for a file main has handed the page, or { changed: true } if it changed since
     FILE_REVOKE: 'file:revoke',                 // (filePath) the page is done with it
-    UPLOAD_PROGRESS: 'upload:progress',         // ({ text?, percent? }) an upload's progress, from whichever window runs it
+    UPLOAD_PROGRESS: 'upload:progress',         // ({ text?, step?, percent?, pausable, paused, canPause }) an upload's progress, from whichever window runs it
     UPLOAD_FINISHED: 'upload:finished',         // ({ status: 'success', link } | { status: 'cancelled' } | { status: 'error', error })
     UPLOAD_CANCEL: 'upload:cancel',             // () cancel the upload running, in whichever window runs it
+    UPLOAD_PAUSE: 'upload:pause',               // (paused: boolean) pause, or with false resume, the upload running, in whichever window runs it
+    UPLOAD_PAUSE_ENDING: 'upload:pause-ending', // (deadline) a paused upload's server drops it at this time (ms since 1970): notify
     UPLOAD_BUSY: 'upload:busy',                 // () -> whether an upload is running anywhere, for Restart Now
     LINK_COPY: 'link:copy',                     // (link) copy it, kept out of the clipboard's history and sync
     // Main to page.
@@ -32,10 +34,11 @@ const IPC = Object.freeze({
     UPLOAD_BACKGROUND_START: 'upload:background-start', // push: { files: [{ name, size, filePath }] }, Share with Dropgate
     UPLOAD_STATUS: 'upload:status',             // push: { type: 'progress' | 'success' | 'cancelled' | 'error', data }, any window's upload, to the main window
     UPLOAD_CANCEL_REQUESTED: 'upload:cancel-requested', // push: () cancel the upload this window runs
+    UPLOAD_PAUSE_REQUESTED: 'upload:pause-requested',   // push: (paused: boolean) pause or resume the upload this window runs
 });
 
 /** The pushes, which main sends and the page only listens for. */
-const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.UPLOAD_BACKGROUND_START, IPC.UPLOAD_STATUS, IPC.UPLOAD_CANCEL_REQUESTED]);
+const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.UPLOAD_BACKGROUND_START, IPC.UPLOAD_STATUS, IPC.UPLOAD_CANCEL_REQUESTED, IPC.UPLOAD_PAUSE_REQUESTED]);
 
 /**
  * The client's own settings and their defaults, beside the kit's own. The

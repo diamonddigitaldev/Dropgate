@@ -5,6 +5,7 @@ const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 
 const { APP_NAME, IPC, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS } = require('./constants');
 const { menuItems } = require('./menu');
+const { FileReads } = require('./core/file-reads');
 
 // The house frame (electron-kit): one instance, the shared preload
 // (window.kitAPI) on the app's session, the settings, the log, the menu, the
@@ -78,8 +79,8 @@ const uploadingIn = new Set();
 let lastOpenDialogDir;
 
 // The files the page may read ranges of: those main handed it, from Open File,
-// a drop, or Share with Dropgate.
-const authorizedFilePaths = new Set();
+// a drop, or Share with Dropgate. One changed since can't be read (core/file-reads.js).
+const fileReads = new FileReads();
 
 // Batch collection for multi-file context menu selections.
 // Windows launches one process per selected file; we debounce them into a single bundle.
@@ -118,12 +119,8 @@ function showNotification(title, body) {
     return notification;
 }
 
-/** A file on disk, handed to the page: it may read it from now on. */
-function handOver(filePath) {
-    const stats = fs.statSync(filePath);
-    authorizedFilePaths.add(filePath);
-    return { name: path.basename(filePath), size: stats.size, filePath };
-}
+/** A file on disk, handed to the page: it may read it from now on, as it is now. */
+const handOver = (filePath) => fileReads.handOver(filePath);
 
 if (kit.primary) {
     // A second launch: the kit restores and focuses the main window, if there is
@@ -230,7 +227,10 @@ kit.ipc.handle(IPC.UPLOAD_PROGRESS, (event, progressData) => {
 
         // Update window title and taskbar progress. The taskbar and window
         // switchers show the title, so it gives the step, never a file name.
-        if (progressData.percent !== undefined) {
+        if (progressData.paused) {
+            main.setTitle(`${APP_NAME} — Paused`);
+            main.setProgressBar((progressData.percent ?? 0) / 100, { mode: 'paused' });
+        } else if (progressData.percent !== undefined) {
             main.setTitle(`${APP_NAME} — Uploading ${progressData.percent.toFixed(0)}%`);
             main.setProgressBar(progressData.percent / 100);
         } else if (progressData.step) {
@@ -323,26 +323,29 @@ kit.ipc.handle(IPC.LINK_COPY, (_event, link) => {
 // Restart Now asks first while any window, the main one or a hidden one, uploads.
 kit.ipc.handle(IPC.UPLOAD_BUSY, () => uploadingIn.size > 0);
 
-// Lazy file reading: renderer requests byte ranges instead of loading entire files into memory
-kit.ipc.handle(IPC.FILE_READ_RANGE, async (_event, filePath, start, end) => {
-    if (!authorizedFilePaths.has(filePath)) {
-        throw new Error('File access not authorized.');
-    }
+// Lazy file reading: the page asks for one range of bytes at a time, never a
+// whole file. A file changed since it was handed over answers { changed: true }.
+kit.ipc.handle(IPC.FILE_READ_RANGE, (_event, filePath, start, end) => fileReads.read(filePath, start, end));
 
-    const fd = fs.openSync(filePath, 'r');
-    try {
-        const length = end - start;
-        const buffer = Buffer.alloc(length);
-        const { bytesRead } = fs.readSync(fd, buffer, 0, length, start);
-        // Return only the bytes actually read (handles EOF)
-        return bytesRead < length ? buffer.subarray(0, bytesRead) : buffer;
-    } finally {
-        fs.closeSync(fd);
+kit.ipc.handle(IPC.FILE_REVOKE, (_event, filePath) => {
+    fileReads.revoke(filePath);
+});
+
+// Pause Upload and Resume Upload, from any window: passed on to whichever window runs the upload, as Cancel is.
+kit.ipc.handle(IPC.UPLOAD_PAUSE, (_event, paused) => {
+    if (typeof paused !== 'boolean') throw new Error('Expected whether to pause.');
+    for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send(IPC.UPLOAD_PAUSE_REQUESTED, paused);
     }
 });
 
-kit.ipc.handle(IPC.FILE_REVOKE, (_event, filePath) => {
-    authorizedFilePaths.delete(filePath);
+// A paused upload's server drops it at its deadline, and nothing resumes it by
+// itself, so the window running it says so 5 minutes before (or as it pauses,
+// when the pause is shorter). The notification gives the time, never a file.
+kit.ipc.handle(IPC.UPLOAD_PAUSE_ENDING, (_event, deadline) => {
+    if (!Number.isFinite(deadline)) throw new Error('Expected a deadline.');
+    const time = new Date(deadline).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    showNotification('Upload Still Paused', `The server drops it at ${time} unless it's resumed.`);
 });
 
 // Files dropped on Upload: the kit's drop zone hands the page their paths

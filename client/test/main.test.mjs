@@ -215,7 +215,7 @@ test('the copy is the house\'s: Title Case buttons and titles, sentence case lab
     for (const slip of ['File Lifetime</label>', 'Max Downloads</label>', 'Your Link:', '...\'', '...`', '..."', 'file(s)', 'Upload successful!']) {
         assert.ok(!text.includes(slip), `"${slip}"`);
     }
-    for (const title of ['Upload Security Warning', 'Upload Anyway', 'Drag & Drop Files Here', 'Add More']) {
+    for (const title of ['Upload Security Warning', 'Upload Anyway', 'Drag & Drop Files Here', 'Add More', 'Pause Upload', 'Resume Upload']) {
         assert.ok(text.includes(title), `"${title}"`);
     }
 });

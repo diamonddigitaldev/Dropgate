@@ -97,6 +97,8 @@ Then launch the client and connect to your server.
 4. **Choose your options** (E2EE is auto-applied when available, file lifetime, etc.).
 5. **Hit upload!** When it finishes, the **download link is copied to your clipboard**.
 
+**Pausing an upload.** On a server that allows it, **Pause Upload** sits beside **Cancel** while an upload runs. Paused, the status line says until when the server keeps it ("Paused. Kept until 14:32."), as long as the server's operator allows (an hour by default). **Resume Upload** carries on from where it stopped. Nothing resumes by itself: 5 minutes before that time (or as it pauses, if the server keeps it for less), a notification says so, naming no file, and an upload still paused then ends with "The server dropped this paused upload." A file changed while its upload runs or is paused can't be read on, so the upload fails rather than send part of the old file and part of the new one.
+
 Files opened with the app (**Open with**, files dropped on its icon, or opened while it's running) are added to **Upload**, every one of them; a file already in the list isn't added twice. On a Wayland desktop (such as GNOME's), a file opened while the app is running is added, but the desktop may only mark the app's icon as wanting attention instead of bringing its window forward.
 
 **Protip (Windows):** Right-click a file, or several, and choose **"Share with Dropgate"** to upload in the background, several files as one bundle. E2EE is auto-applied when available; if not, you'll see a warning. (On Windows 11, it's under **Show more options**.)
@@ -170,6 +172,7 @@ These tests read the app's source rather than launching it, so they don't need a
 * **The preload contract.** The preload is run as a sandboxed preload would be, and only loads what one can. Every call of its bridge reaches a channel in `src/constants.js`, every channel the page asks is answered in `main.js` through electron-kit (which answers the app's own page only), and every message `main.js` sends reaches the page. A mistake in any of these leaves the app doing nothing, with no error in the main process.
 * **Window security.** Every window keeps `contextIsolation` on, `nodeIntegration` off and the sandbox on.
 * **Menu shortcuts.** Every shortcut has a modifier, so none of them fires while you're typing.
+* **Reading files.** The page reads only the files the app handed it, and none that has changed since (its size or its modification time), checked on real files.
 * **What comes from electron-kit.** The accent colour meets WCAG 2.2 AA in both themes, the page loads electron-kit's styles and scripts in order, the shared parts (prompts, notifications in the window, the drop zone, the progress bar) are electron-kit's, the log is kept in memory, the updater is electron-kit's, and the build extends electron-kit's and packs only what the pages load.
 
 Tests for known issues are marked as expected failures, and there are none today. To see each test's name and label, run the tests with the TAP reporter:
@@ -182,7 +185,7 @@ GitHub Actions runs the tests this way on Ubuntu and Windows ([`ci.yml`](../.git
 
 ### The App, End to End
 
-The app itself is tested with the [integration tests](../tests/integration/README.md), which launch it from this folder with a throwaway profile, against a Dropgate Server started on your machine just for the test. They check its settings, its Settings view, that it keeps no log on disk and downloads no spell-check dictionaries, and **"Share with Dropgate"**: that a shared file uploads, end-to-end encrypted on a server with HTTPS, and that its link downloads intact. A packaged build's update checks are tested too, for anything that could identify an installation. Off CI they leave your clipboard alone, and they never touch your own settings.
+The app itself is tested with the [integration tests](../tests/integration/README.md), which launch it from this folder with a throwaway profile, against a Dropgate Server started on your machine just for the test. They check its settings, its Settings view, that it keeps no log on disk and downloads no spell-check dictionaries, and **"Share with Dropgate"**: that a shared file uploads, end-to-end encrypted on a server with HTTPS, and that its link downloads intact; and pausing an upload: the deadline it shows, the notification before it, that nothing resumes by itself, the upload ending at the deadline, and a file edited while paused refused. A packaged build's update checks are tested too, for anything that could identify an installation. Off CI they leave your clipboard alone, and they never touch your own settings.
 
 They need this folder's and the server's dependencies. From the repository root:
 
