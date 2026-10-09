@@ -181,7 +181,10 @@ test('the next start finds nothing left and logs nothing about it; at NONE, the 
 
     const quiet = server.mark();
     await server.restart({ env: { LOG_LEVEL: 'NONE' } });
-    assert.deepEqual(server.since(quiet), { stdout: '', stderr: '' });
+    // The run before, stopped by the restart, can still be writing its own last line.
+    const { stdout, stderr } = server.since(quiet);
+    const written = (stdout + stderr).split(/\r?\n/).filter((l) => l && !/\[INFO\] Dropgate Server is shutting down\.\.\.$/.test(l));
+    assert.deepEqual(written, [], 'the run at NONE wrote something');
     assert.deepEqual(fs.readdirSync(server.uploadsDir).filter((f) => /^[0-9a-f-]{36}$/.test(f)), [], 'deleted at NONE too');
 
     const again = server.mark();
