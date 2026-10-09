@@ -1,5 +1,5 @@
 import { DropgateError, filenames } from './dropgate-core.js';
-import { pageClient } from './page-common.js';
+import { formatBytes, pageClient } from './page-common.js';
 import { showBundle } from './download-bundle.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
@@ -55,16 +55,6 @@ function showError(title, message) {
   });
   downloadButton.style.display = 'none';
   progressContainer.style.display = 'none';
-}
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return '0 bytes';
-  if (bytes === 0) return '0 bytes';
-  const k = 1000;
-  const sizes = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const v = bytes / Math.pow(k, i);
-  return `${v.toFixed(v < 10 && i > 0 ? 2 : 1)} ${sizes[i]}`;
 }
 
 async function startDownload() {

@@ -120,7 +120,7 @@ test.describe('with pausing turned off on the server', () => {
         await expect(page.getByRole('button', { name: /pause|resume/i })).toHaveCount(0);
 
         await page.locator('#cancelStandardUpload').click();
-        await expect(page.locator('#statusAlert')).toHaveText(/upload cancelled/i);
+        await expect(page.locator('#toast-host')).toContainText(/upload cancelled/i);
         expect(requests(server).filter((r) => r.route.startsWith('POST /api/v4/upload/pause'))).toEqual([]);
         await page.unrouteAll({ behavior: 'ignoreErrors' });
     });

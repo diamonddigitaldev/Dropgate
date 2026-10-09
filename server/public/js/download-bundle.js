@@ -69,8 +69,8 @@ function toggleFileList() {
   fileListVisible = !fileListVisible;
   fileList.style.display = fileListVisible ? 'block' : 'none';
   toggleFileListBtn.innerHTML = fileListVisible
-    ? '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_less</span> Hide files'
-    : '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span> Show files';
+    ? '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_less</span> Hide Files'
+    : '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span> Show Files';
 }
 
 function buildFileList() {
@@ -174,8 +174,8 @@ async function downloadSingleFile(index, dlBtn) {
   const failed = (message) => {
     if (fileProgressText) {
       fileProgressText.textContent = message;
-      fileProgressText.classList.remove('text-success');
-      fileProgressText.classList.add('text-danger');
+      fileProgressText.classList.remove('text-success-emphasis');
+      fileProgressText.classList.add('text-danger-emphasis');
     }
   };
 
@@ -215,8 +215,8 @@ async function downloadSingleFile(index, dlBtn) {
     if (fileProgressBar) fileProgressBar.style.width = '100%';
     if (fileProgressText) {
       fileProgressText.textContent = 'Download complete!';
-      fileProgressText.classList.remove('text-danger');
-      fileProgressText.classList.add('text-success');
+      fileProgressText.classList.remove('text-danger-emphasis');
+      fileProgressText.classList.add('text-success-emphasis');
     }
   } catch (error) {
     console.error('Single file download failed:', error);

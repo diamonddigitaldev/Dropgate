@@ -244,6 +244,8 @@ On plain HTTP, even on `localhost` or `127.0.0.1`, the Web UI encrypts uploads, 
 
 The Web UI's upload can pause: **Pause Upload** stops it part-way, the card says until when the server keeps it (`UPLOAD_MAX_PAUSE_MINUTES` from the pause, as a local time), and **Resume Upload** carries it on. Nothing resumes by itself: still paused then, the upload ends. With `UPLOAD_MAX_PAUSE_MINUTES=0` there's no Pause. The download pages have no Pause: the browser's own download manager does that.
 
+The Web UI looks and behaves as the desktop app does. Its modals (the Upload Security Warning, Delete This Upload? and the QR code) close on Escape as Cancel, as their close button and backdrop do, and the focus goes back to the button that opened them; with no modal open, Escape goes back to the start, but never while an upload is under way. Its toasts are the desktop app's: centred at the top, filled with their kind's colour, gone after 4.5 seconds. Every text and control meets WCAG 2.2 AA contrast in the light theme and the dark one, which follow the browser's, with a solid focus ring for the keyboard. Every size it shows, the limit ("Max upload size") included, counts in 1024s, as `UPLOAD_MAX_FILE_SIZE_MB` does: 1.5 MB is 1,572,864 bytes.
+
 
 ## Storage and Lifecycle
 
@@ -254,7 +256,7 @@ The Web UI's upload can pause: **Pause Upload** stops it part-way, the card says
 - Files can be set to expire after a certain period or after a certain number of downloads. An upload is gone the moment it expires: from then on the server answers as if it had never existed, and deletes it within a minute.
 - A Dropgate 4 upload in progress ends 5 minutes after its last request, or, paused, when its pause runs out (`UPLOAD_MAX_PAUSE_MINUTES`). It ends at once: its temporary file and the storage it reserved go. Dropgate 3's incomplete uploads are cleaned up on an interval.
 - A Dropgate 4 download takes a lease, kept in memory only, and counts once when it ends if it sent anything, however many requests or files it took. At its upload's download limit, the upload is deleted at once, a bundle as a whole. While open downloads already make the limit, a new one is asked to wait. `UPLOAD_MAX_PAUSE_MINUTES` is also how long a paused download is kept.
-- The uploader can delete a Dropgate 4 upload at once, with the manage token only their page or app holds: in the Web UI, **Delete upload** on the result screen, while the page is open. With `UPLOAD_PRESERVE_UPLOADS=true`, a deleted record is overwritten with zeros in the database.
+- The uploader can delete a Dropgate 4 upload at once, with the manage token only their page or app holds: in the Web UI, **Delete Upload** on the result screen, while the page is open. With `UPLOAD_PRESERVE_UPLOADS=true`, a deleted record is overwritten with zeros in the database.
 - Storage used, for `UPLOAD_MAX_STORAGE_GB`, is what's stored plus what every upload in progress has reserved.
 
 

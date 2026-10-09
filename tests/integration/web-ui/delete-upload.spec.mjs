@@ -34,7 +34,7 @@ for (const encrypted of [false, true]) {
             await page.locator('#deleteUpload').click();
             await page.locator('#confirmDeleteUpload').click();
             await expect(page.locator('#shareTitle')).toHaveText(/upload deleted/i);
-            await expect(page.locator('#statusAlert')).toHaveText(/upload deleted/i);
+            await expect(page.locator('#toast-host')).toContainText(/upload deleted/i);
             await expect(page.locator('#deleteUpload')).toBeHidden();
             await expect(page.locator('#shareLinkGroup')).toBeHidden();
             expect(server.storedFiles(), 'files the server holds').toEqual([]);
@@ -95,7 +95,7 @@ test("a bundle's result screen has Delete too, which removes the whole upload, o
     await expectGone(page, link);
 });
 
-test('"Send more files" drops the manage token and the Delete button too', async ({ page }) => {
+test('"Send More Files" drops the manage token and the Delete button too', async ({ page }) => {
     await uploadFromHomePage(page, [madeUpFile('Sent on é.bin', SIZE, 25)], { encrypted: true });
     await page.locator('#newUpload').click();
     await expect(page.locator('#startBtn')).toBeVisible();

@@ -20,15 +20,14 @@
       <%- include('../partials/header') %>
         <p id="tagline" class="lead text-center mb-4">Send files securely, or enter a sharing code to receive.</p>
 
-        <div id="statusAlert" class="alert mt-3" role="status" hidden></div>
-
         <div id="panels" class="row g-4">
           <!-- File selection -->
           <div class="col-lg-6">
             <div class="card shadow-sm h-100">
               <div class="card-body p-4 dropzone-card-body">
                 <div id="dropzone" class="dropzone text-center" tabindex="0" role="button" aria-label="Select files">
-                  <input id="fileInput" class="visually-hidden" type="file" multiple />
+                  <%# Out of the Tab order: it's hidden, and the drop zone around it opens it. %>
+                  <input id="fileInput" class="visually-hidden" type="file" multiple tabindex="-1" aria-hidden="true" />
                   <div id="dzEmpty">
                     <span class="material-icons-round drop-icon">upload_file</span>
                     <p class="drop-label mb-1">Drag &amp; Drop Files Here</p>
@@ -182,8 +181,8 @@
             </div>
 
             <div class="d-flex flex-wrap justify-content-center gap-2 mt-3">
-              <button class="btn btn-secondary" id="newUpload" type="button">Send more files</button>
-              <button class="btn btn-outline-danger" id="deleteUpload" type="button" hidden>Delete upload</button>
+              <button class="btn btn-secondary" id="newUpload" type="button">Send More Files</button>
+              <button class="btn btn-outline-danger" id="deleteUpload" type="button" hidden>Delete Upload</button>
             </div>
           </div>
         </div>
@@ -270,6 +269,9 @@
   </div>
 
   <%- include('../partials/footer') %>
+
+  <%# Toasts: a polite live region; a danger toast is an alert of its own. %>
+  <div id="toast-host" class="toast-host" role="status" aria-live="polite"></div>
 </body>
 
 </html>

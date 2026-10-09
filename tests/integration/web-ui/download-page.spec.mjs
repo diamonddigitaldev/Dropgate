@@ -37,7 +37,7 @@ for (const several of [false, true]) for (const encrypted of [true, false]) {
             expect(html).toContain(`<meta name="og:title" content="${name}">`);
             expect(html).toContain('<meta name="og:description" content="A lightweight, open-source, privacy-focused file sharing tool.">');
             for (const each of files) expect(html, 'a file name').not.toContain(each.name);
-            expect(html, 'the file size').not.toMatch(/123[,.]?456|123\.5 KB|120\.6 KB/);
+            expect(html, 'the file size').not.toMatch(/123[,.]?456|123\.5 KB|120\.6 KB|121 KB/);
             expect(html, 'how many files').not.toMatch(/3 files/);
             expect(server.requests().slice(before).map((r) => `${r.method} ${r.url}`), 'what the preview asked for').toEqual([
                 'GET /api/info', `GET ${pathname}`,

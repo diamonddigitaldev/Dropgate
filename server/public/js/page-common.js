@@ -11,6 +11,30 @@ export function pageClient() {
   return new DropgateClient({ server: location.origin, allowInsecure: location.protocol === 'http:' });
 }
 
+/**
+ * A size in bytes, short, as the desktop app shows it (electron-kit's
+ * formatBytes): "512 B", "1.5 KB", "12 MB". In 1024s, as the server's limits
+ * and core count, labelled KB, MB, GB and TB; one decimal below 10. A size
+ * that isn't known is "0 B".
+ */
+export function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  // Rounding up to 1024 of a unit reads as the next one.
+  if (Math.round(value) >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
+}
+
 (async () => {
   try {
     const client = pageClient();

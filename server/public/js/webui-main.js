@@ -1,5 +1,5 @@
 import { DropgateError, hosts, lifetime, sizes } from './dropgate-core.js';
-import { pageClient } from './page-common.js';
+import { formatBytes, pageClient } from './page-common.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -80,9 +80,7 @@ const els = {
 
   codeInput: $('codeInput'),
   codeGo: $('codeGo'),
-  statusAlert: $('statusAlert'),
-
-  toast: $('toast'),
+  toastHost: $('toast-host'),
 };
 
 const state = {
@@ -103,7 +101,7 @@ const state = {
   p2pSecureOk: true,
   upload: null,
   // The upload just finished, with the manage token that deletes it: held in
-  // this page's memory only, so a reload or "Send more files" drops it.
+  // this page's memory only, so a reload or "Send More Files" drops it.
   uploaded: null,
 };
 
@@ -147,34 +145,57 @@ function isFile(file) {
   });
 }
 
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return '0 bytes';
-  if (bytes === 0) return '0 bytes';
-  const k = 1000;
-  const sizes = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const v = bytes / Math.pow(k, i);
-  return `${v.toFixed(v < 10 && i > 0 ? 2 : 1)} ${sizes[i]}`;
-}
+/** Each toast type's glyph, as electron-kit's. */
+const TOAST_ICONS = { info: 'info', success: 'check_circle', warning: 'warning', danger: 'error' };
 
-function showToast(text, type = 'info', timeoutMs = 4500) {
-  const el = els.statusAlert;
-  if (!el) { alert(text); return; }
-  el.textContent = String(text || '');
-  // Map type to Bootstrap alert class and add custom toast styling
-  let alertType = 'info';
-  if (type === 'warning') alertType = 'warning';
-  else if (type === 'error' || type === 'danger') alertType = 'danger';
-  else if (type === 'success') alertType = 'success';
-  else alertType = 'info';
-  el.className = `alert alert-${alertType} shadow-sm toast-notification toast-${alertType}`;
-  el.hidden = false;
-  if (timeoutMs > 0) {
-    const snap = el.textContent;
-    setTimeout(() => {
-      if (el.textContent === snap) el.hidden = true;
-    }, timeoutMs);
-  }
+/** How long a toast stays: electron-kit's --timing-toast. */
+const TOAST_MS = 4500;
+
+/**
+ * Show a toast, as electron-kit's kit.ui.toast() does: under the others, for
+ * 4.5 s or until its close button is pressed. A danger toast is announced at
+ * once (role="alert"); the rest politely, through the host's live region. The
+ * message is text, never markup.
+ * @param {string} text
+ * @param {'info' | 'success' | 'warning' | 'danger'} [type]
+ */
+function showToast(text, type = 'info') {
+  if (!Object.hasOwn(TOAST_ICONS, type)) type = 'info';
+  const icon = document.createElement('span');
+  icon.className = 'material-icons-round toast-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = TOAST_ICONS[type];
+
+  const body = document.createElement('div');
+  body.className = 'toast-body';
+  body.textContent = String(text || '');
+
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'toast-close';
+  close.title = 'Dismiss';
+  close.setAttribute('aria-label', 'Dismiss');
+  close.innerHTML = '<span class="material-icons-round" aria-hidden="true">close</span>';
+
+  const note = document.createElement('div');
+  note.className = `toast-note toast-${type}`;
+  if (type === 'danger') note.setAttribute('role', 'alert');
+  note.append(icon, body, close);
+  els.toastHost.append(note);
+
+  let closed = false;
+  const dismiss = () => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(timer);
+    note.classList.add('leaving');
+    const gone = () => note.remove();
+    note.addEventListener('transitionend', gone, { once: true });
+    // In case nothing transitions (reduced motion, a hidden page).
+    setTimeout(gone, 1000);
+  };
+  close.addEventListener('click', dismiss);
+  const timer = setTimeout(dismiss, TOAST_MS);
 }
 
 function setHidden(el, hidden) {
@@ -419,21 +440,58 @@ function updateSecurityStatus() {
  */
 function showInsecureUploadModal() {
   // If the modal doesn't exist, proceed anyway.
-  return confirmWithModal(els.insecureUploadModal, els.confirmInsecureUpload, true);
+  return confirmWithModal(els.insecureUploadModal, els.confirmInsecureUpload, true, els.startBtn);
+}
+
+/** The modal open now, which Escape closes: `{ modal, shown, closing }`. */
+let openModal = null;
+
+/**
+ * Closes the open modal, as Cancel. Bootstrap ignores hide() while a modal is
+ * still opening, so one asked to close then closes as soon as it's open.
+ */
+function closeOpenModal() {
+  if (!openModal) return;
+  if (openModal.shown) openModal.modal.hide();
+  else openModal.closing = true;
+}
+
+/**
+ * Show a modal. Its close button, its backdrop and Escape close it, each as
+ * Cancel, and the focus then goes back to what opened it, as electron-kit's
+ * prompts do. The opener is the button that was pressed: WebKit doesn't focus
+ * a button that's clicked.
+ * @returns The modal's Bootstrap instance.
+ */
+function showModal(modalEl, opener = document.activeElement) {
+  const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+  const open = { modal, shown: false, closing: false };
+  openModal = open;
+  modalEl.addEventListener('shown.bs.modal', () => {
+    open.shown = true;
+    if (open.closing) modal.hide();
+  }, { once: true });
+  modalEl.addEventListener('hidden.bs.modal', () => {
+    if (openModal === open) openModal = null;
+    // Unless it's gone or been turned off meanwhile, such as Delete once it's deleted.
+    if (opener instanceof HTMLElement && opener !== document.body) opener.focus();
+  }, { once: true });
+  modal.show();
+  return modal;
 }
 
 /**
  * Show a modal asking to confirm, and return a promise.
  * @returns {Promise<boolean>} True if `confirmEl` was clicked, false if the modal closed otherwise.
  */
-function confirmWithModal(modalEl, confirmEl, withoutModal) {
+function confirmWithModal(modalEl, confirmEl, withoutModal, opener) {
   return new Promise((resolve) => {
     if (!modalEl) {
       resolve(withoutModal);
       return;
     }
 
-    const modal = new window.bootstrap.Modal(modalEl);
+    const modal = showModal(modalEl, opener);
 
     const cleanup = () => {
       confirmEl?.removeEventListener('click', onConfirm);
@@ -453,8 +511,6 @@ function confirmWithModal(modalEl, confirmEl, withoutModal) {
 
     confirmEl?.addEventListener('click', onConfirm, { once: true });
     modalEl.addEventListener('hidden.bs.modal', onHide, { once: true });
-
-    modal.show();
   });
 }
 
@@ -465,7 +521,8 @@ function updateCapabilitiesUI() {
   if (state.uploadEnabled) {
     const maxText = (state.maxSizeMB === 0)
       ? 'You can upload files of any size.'
-      : `Max upload size: ${formatBytes(state.maxSizeMB * 1000 * 1000)}.`;
+      // The server's limit counts in 1024s, as every size the page shows does.
+      : `Max upload size: ${formatBytes(state.maxSizeMB * 1024 * 1024)}.`;
 
     const p2pAvailable = state.p2pEnabled && state.p2pSecureOk;
     els.maxUploadHint.textContent = p2pAvailable && state.maxSizeMB > 0
@@ -602,7 +659,7 @@ function validateLifetimeInput() {
   const maxMs = Number.isFinite(maxH) && maxH > 0 ? maxH * 60 * 60 * 1000 : null;
   if (maxMs && ms > maxMs) {
     els.lifetimeHelp.textContent = `File lifetime too long. Server limit: ${maxH} hours.`;
-    els.lifetimeHelp.className = 'form-text text-danger';
+    els.lifetimeHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
@@ -624,7 +681,7 @@ function validateMaxDownloadsInput() {
   // Handle invalid input
   if (isNaN(value) || value < 0) {
     els.maxDownloadsHelp.textContent = 'Must be a non-negative number.';
-    els.maxDownloadsHelp.className = 'form-text text-danger';
+    els.maxDownloadsHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
@@ -645,13 +702,13 @@ function validateMaxDownloadsInput() {
   // Server has limit > 1
   if (value === 0) {
     els.maxDownloadsHelp.textContent = `0 (unlimited) not allowed. Server limit: ${max} downloads.`;
-    els.maxDownloadsHelp.className = 'form-text text-danger';
+    els.maxDownloadsHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
   if (value > max) {
     els.maxDownloadsHelp.textContent = `Exceeds server limit of ${max} downloads.`;
-    els.maxDownloadsHelp.className = 'form-text text-danger';
+    els.maxDownloadsHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
@@ -710,7 +767,7 @@ function setShareIcon(icon, color) {
 async function deleteUploaded() {
   const uploaded = state.uploaded;
   if (!uploaded) return;
-  const confirmed = await confirmWithModal(els.deleteUploadModal, els.confirmDeleteUpload, false);
+  const confirmed = await confirmWithModal(els.deleteUploadModal, els.confirmDeleteUpload, false, els.deleteUpload);
   if (!confirmed || state.uploaded !== uploaded) return;
 
   setDisabled(els.deleteUpload, true);
@@ -760,7 +817,7 @@ function stopP2P() {
   state.p2pSession = null;
 }
 
-function showQRModal(url) {
+function showQRModal(url, opener) {
   if (!els.qrModal || !els.qrCanvas) return;
 
   const QRCodeStylingCtor = globalThis.QRCodeStyling;
@@ -783,9 +840,7 @@ function showQRModal(url) {
   els.qrCanvas.innerHTML = '';
   qrCode.append(els.qrCanvas);
 
-  const modalEl = document.getElementById('qrModal');
-  const modal = new window.bootstrap.Modal(modalEl);
-  modal.show();
+  showModal(els.qrModal, opener);
 }
 
 function copyToClipboard(value) {
@@ -1054,6 +1109,10 @@ async function startP2PSendFlow() {
   }
 
   els.tagline.textContent = 'Direct Transfer (P2P)';
+  // Copy and the QR code read the link as it's shown, so they work as soon as
+  // the code shows, which is before the send below resolves.
+  els.copyP2PLink.onclick = () => copyToClipboard(els.p2pLink.value).then(() => showToast('Copied link.', 'success'));
+  els.qrP2PLink.onclick = () => showQRModal(els.p2pLink.value, els.qrP2PLink);
   state.p2pSession = await coreClient.direct.send({
     file,
     Peer,
@@ -1146,8 +1205,6 @@ async function startP2PSendFlow() {
     },
   });
 
-  els.copyP2PLink.onclick = () => copyToClipboard(els.p2pLink.value).then(() => showToast('Copied link.', 'success'));
-  els.qrP2PLink.onclick = () => showQRModal(els.p2pLink.value);
   els.cancelP2P.onclick = () => {
     resetTitleProgress();
     stopP2P();
@@ -1283,7 +1340,7 @@ function wireUI() {
 
   // Share actions
   els.copyShare?.addEventListener('click', () => copyToClipboard(els.shareLink.value).then(() => showToast('Copied link.', 'success')));
-  els.qrShare?.addEventListener('click', () => showQRModal(els.shareLink.value));
+  els.qrShare?.addEventListener('click', () => showQRModal(els.shareLink.value, els.qrShare));
   els.newUpload?.addEventListener('click', resetToMain);
   els.deleteUpload?.addEventListener('click', deleteUploaded);
 
@@ -1323,11 +1380,21 @@ function wireUI() {
   // Initial state
   setDisabled(els.codeGo, true);
 
-  // Reset on ESC, but never under an upload, whose card (and, paused, its
-  // Resume) would go while it carries on.
+  // Escape closes the modal that's open, as Cancel, wherever the focus is,
+  // and does nothing else; it's caught first, so Bootstrap's own handler on
+  // the modal never sees it. With no modal, Escape resets the page, but
+  // never under an upload, whose card (and, paused, its Resume) would go
+  // while it carries on.
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !state.upload) resetToMain();
-  });
+    if (e.key !== 'Escape') return;
+    if (openModal) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeOpenModal();
+      return;
+    }
+    if (!state.upload) resetToMain();
+  }, true);
 }
 
 async function init() {

@@ -29,7 +29,7 @@ test('cancelling an upload part-way says it was cancelled, goes back to the star
     await expect.poll(() => chunks, { message: 'the second chunk should be on its way' }).toBe(2);
     await page.locator('#cancelStandardUpload').click();
 
-    await expect(page.locator('#statusAlert')).toHaveText(/upload cancelled/i);
+    await expect(page.locator('#toast-host')).toContainText(/upload cancelled/i);
     await expect(page.locator('#startBtn'), 'back at the start').toBeVisible();
     await expect(page.locator('#cancelStandardUpload')).toBeHidden();
     await expect(page.getByText(/upload failed/i)).toHaveCount(0);

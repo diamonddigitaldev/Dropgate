@@ -986,9 +986,9 @@ GET /{id}
 
 ### 21.4 Deleting From the Result Screen
 
-The Web UI's result screen, after an upload of one file or several, has **Delete upload**. Once confirmed, it deletes the upload ([§20.6](#206-the-uploaders-delete)) with the manage token its upload gave, and the link stops working.
+The Web UI's result screen, after an upload of one file or several, has **Delete Upload**. Once confirmed, it deletes the upload ([§20.6](#206-the-uploaders-delete)) with the manage token its upload gave, and the link stops working.
 
-- **The token is in the page's memory only:** never in storage, the page itself or a URL. A reload, or **Send more files**, drops it, and the button with it; the upload then stays until it expires or reaches its download limit.
+- **The token is in the page's memory only:** never in storage, the page itself or a URL. A reload, or **Send More Files**, drops it, and the button with it; the upload then stays until it expires or reaches its download limit.
 - **An upload that's already gone** (expired, or downloaded as many times as it allows) is reported as already gone.
 
 ### 21.5 Pausing an Upload From the Home Page

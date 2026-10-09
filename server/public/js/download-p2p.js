@@ -1,5 +1,5 @@
 import { hosts, zip, filenames } from './dropgate-core.js';
-import { pageClient } from './page-common.js';
+import { formatBytes, pageClient } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard, clearStatusBorder } from './status-card.js';
 
 const elTitle = document.getElementById('title');
@@ -62,8 +62,8 @@ function buildP2PFileList(files) {
     p2pFileListVisible = !p2pFileListVisible;
     elP2PFileList.style.display = p2pFileListVisible ? 'block' : 'none';
     elP2PToggleFileList.innerHTML = p2pFileListVisible
-      ? '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_less</span> Hide files'
-      : '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span> Show files';
+      ? '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_less</span> Hide Files'
+      : '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span> Show Files';
   });
 }
 
@@ -92,16 +92,6 @@ document.addEventListener('visibilitychange', () => {
     setProgress();
   }
 });
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return '0 bytes';
-  if (bytes === 0) return '0 bytes';
-  const k = 1000;
-  const sizes = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const v = bytes / Math.pow(k, i);
-  return `${v.toFixed(v < 10 && i > 0 ? 2 : 1)} ${sizes[i]}`;
-}
 
 const setProgress = () => {
   const pct = total > 0 ? Math.min(100, (received / total) * 100) : 0;
