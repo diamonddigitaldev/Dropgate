@@ -12,6 +12,18 @@ export function pageClient() {
 }
 
 /**
+ * A StreamSaver write stream that saves a file under `name`. StreamSaver's
+ * download address would end with the name, and a browser can ask the server
+ * for that address itself: Firefox does when its own Resume restarts a paused
+ * download. So the address is a random one, with no name in it, and the name
+ * reaches the browser only in the download's Content-Disposition header.
+ */
+export function saveStream(name, options = {}) {
+  const random = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+  return window.streamSaver.createWriteStream(name, { ...options, pathname: random });
+}
+
+/**
  * A size in bytes, short, as the desktop app shows it (electron-kit's
  * formatBytes): "512 B", "1.5 KB", "12 MB". In 1024s, as the server's limits
  * and core count, labelled KB, MB, GB and TB; one decimal below 10. A size

@@ -1,5 +1,5 @@
 import { DropgateError, filenames } from './dropgate-core.js';
-import { formatBytes, pageClient } from './page-common.js';
+import { formatBytes, pageClient, saveStream } from './page-common.js';
 import { showBundle } from './download-bundle.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
@@ -117,7 +117,7 @@ async function startDownload() {
       id: downloadState.id,
       secret: downloadState.secret,
       timeoutMs: 0, // No timeout for large file downloads
-      sink: streamSaver.createWriteStream(downloadState.fileName).getWriter(),
+      sink: saveStream(downloadState.fileName).getWriter(),
     });
     download.subscribe(({ percent, processedBytes, totalBytes }) => {
       updateTitleProgress(Math.round(percent));

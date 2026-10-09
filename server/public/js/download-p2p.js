@@ -1,5 +1,5 @@
 import { hosts, zip, filenames } from './dropgate-core.js';
-import { formatBytes, pageClient } from './page-common.js';
+import { formatBytes, pageClient, saveStream } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard, clearStatusBorder } from './status-card.js';
 
 const elTitle = document.getElementById('title');
@@ -160,7 +160,7 @@ function startDownload() {
 
   // Create streamSaver write stream
   if (window.streamSaver?.createWriteStream) {
-    const stream = window.streamSaver.createWriteStream(fileName, isMultiFile ? undefined : (total ? { size: total } : undefined));
+    const stream = saveStream(fileName, isMultiFile ? undefined : (total ? { size: total } : undefined));
     writer = stream.getWriter();
 
     // For multi-file transfers, set up a ZIP writer that pipes ZIP data into the StreamSaver writer

@@ -495,6 +495,12 @@ app.get('/vendor/bootstrap/bootstrap.min.js', serveVendorFile('bootstrap/dist/js
 app.get('/vendor/streamsaver/streamsaver.js', serveVendorFile('streamsaver/StreamSaver.js', 'application/javascript; charset=utf-8'));
 app.get('/vendor/streamsaver/mitm.html', (req, res) => res.render('pages/mitm'));
 app.get('/vendor/streamsaver/sw.js', serveVendorFile('streamsaver/sw.js', 'application/javascript; charset=utf-8'));
+// Any other request under StreamSaver's folder is a download address that only
+// its service worker answers, which a browser has sent here instead: Firefox's
+// own Resume does, once the page's stream has gone. Answering it with a page
+// would have the browser save that page as the file, marked complete, so the
+// connection is dropped, and the browser marks the download failed.
+app.use('/vendor/streamsaver/', (req) => req.socket.destroy());
 app.get('/vendor/peerjs/peerjs.min.js', serveVendorFile('peerjs/dist/peerjs.min.js', 'application/javascript; charset=utf-8'));
 app.get('/vendor/qr-code-styling/qr-code-styling.js', serveVendorFile('qr-code-styling/lib/qr-code-styling.js', 'application/javascript; charset=utf-8'));
 app.get('/vendor/material-icons/round.css', serveVendorFile('material-icons/iconfont/round.css', 'text/css; charset=utf-8'));

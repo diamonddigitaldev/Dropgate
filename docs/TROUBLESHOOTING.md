@@ -61,6 +61,11 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - A restart drops every upload in progress, paused ones too.
 - No **Pause Upload** button: the server has pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`).
 
+**A download paused in the browser failed, or never finishes**
+- The download pages stream each file to disk through the page itself, so a browser's own Pause only works while that page stays open, and only in Chrome: Resume there carries on and saves the whole file. In Firefox, Pause ends the download, and the page says it failed. In Chrome with the page closed while paused, Resume never finishes: cancel it.
+- Download the file again from its link. A download that got part of the file counts as one against the upload's download limit, so with a limit of 1 the upload is already gone: ask its sender to upload it again.
+- No browser shows such a download as complete: Firefox marks it failed, and Chrome leaves it unfinished. See [DGUP §9.2](./technical/DGUP.md#92-the-download-page).
+
 **"A file changed after the upload started, so the rest of it can't be read as it was."**
 - A file was edited, replaced or resized while it was uploading or paused. The Dropgate Client, like a browser, won't read on, so the upload never holds part of the old file and part of the new one. Upload the file again as it is now.
 

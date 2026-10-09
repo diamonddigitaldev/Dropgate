@@ -1,4 +1,5 @@
 import { filenames } from './dropgate-core.js';
+import { saveStream } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
 // The download page's half for an upload of several files. Every download it
@@ -204,7 +205,7 @@ async function downloadSingleFile(index, dlBtn) {
     const download = bundleState.opened.download({
       files: [index],
       timeoutMs: 0,
-      sink: () => streamSaver.createWriteStream(name, size ? { size } : undefined).getWriter(),
+      sink: () => saveStream(name, size ? { size } : undefined).getWriter(),
     });
     download.subscribe(({ percent, processedBytes, totalBytes }) => {
       if (fileProgressBar) fileProgressBar.style.width = `${percent}%`;
@@ -276,7 +277,7 @@ async function downloadAllAsZip() {
     const download = bundleState.opened.download({
       asZip: true,
       timeoutMs: 0,
-      sink: streamSaver.createWriteStream(zipName).getWriter(),
+      sink: saveStream(zipName).getWriter(),
     });
     // Core's snapshots never name a file, so the name comes from this page's own list.
     download.subscribe(({ percent, processedBytes, totalBytes, fileIndex }) => {
