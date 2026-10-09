@@ -6,12 +6,9 @@ import { after, before, describe, test } from 'node:test';
 import { startServer } from './helpers/harness.mjs';
 import { CLIENT_IP, USER_AGENT, createClient, createRecorder, fixtureFiles, runFixture } from './helpers/fixture.mjs';
 import { HOUR_MS, SMALL_CHUNKS, runDownloads, runUploads } from './helpers/dgup4.mjs';
-import { postJson, uploadV3Bundle } from './helpers/uploads.mjs';
 
-// Every field a stored record may have. A new field has to be added here deliberately.
-const FILE_FIELDS = new Set(['name', 'path', 'expiresAt', 'isEncrypted', 'maxDownloads', 'downloadCount', 'bundleId']);
-const BUNDLE_FIELDS = new Set(['encryptedManifest', 'files', 'isEncrypted', 'sealed', 'expiresAt', 'maxDownloads', 'downloadCount']);
-// Dropgate 4's record, for a file and a bundle alike: no path (the ID names the object), no creation time.
+// Every field a stored record may have, for a file and a bundle alike: no path (the ID names the object), no
+// creation time. A new field has to be added here deliberately.
 const OBJECT_FIELDS = new Set(['encrypted', 'size', 'meta', 'files', 'expiresAt', 'maxDownloads', 'downloadCount', 'manageTokenHash']);
 
 // CSP sources that stay on this server.
@@ -19,8 +16,7 @@ const LOCAL_SOURCE = /^('self'|'none'|'unsafe-inline'|data:|blob:|'nonce-[^']+')
 
 describe('what the server stores', () => {
     let server;
-    const stored = [];
-    let bundleRecords = [];
+    let stored = [];
 
     before(async () => {
         server = await startServer({ env: { ENABLE_UPLOAD: 'true', UPLOAD_PRESERVE_UPLOADS: 'true' } });
@@ -28,44 +24,32 @@ describe('what the server stores', () => {
         await upload(fixtureFiles.encrypted(), true);
         await upload(fixtureFiles.plain(), false);
         await upload(fixtureFiles.bundle(), true);
-
-        // A Dropgate 3 bundle, encrypted and sealed, on Dropgate 3's routes, which stay until they're deleted.
-        await uploadV3Bundle(server, { encrypted: true, sealed: true });
-        stored.push(
-            ...server.records('objects.sqlite').map((r) => ({ ...r, db: 'object' })),
-            ...server.records('file-database.sqlite').map((r) => ({ ...r, db: 'file' })),
-            ...server.records('bundle-database.sqlite').map((r) => ({ ...r, db: 'bundle' })),
-        );
-        bundleRecords = stored.filter((r) => r.db !== 'object');
+        stored = server.records('objects.sqlite');
     });
 
     after(() => server?.stop());
 
     test('every stored record holds only known fields, with no IP, user agent or creation time', () => {
         const problems = [];
-        for (const { db, id, value } of stored) {
-            const allowed = { object: OBJECT_FIELDS, file: FILE_FIELDS, bundle: BUNDLE_FIELDS }[db];
-            const extra = Object.keys(value).filter((k) => !allowed.has(k));
-            if (extra.length) problems.push(`${db} record ${id} has unknown field(s): ${extra.join(', ')}`);
+        for (const { id, value } of stored) {
+            const extra = Object.keys(value).filter((k) => !OBJECT_FIELDS.has(k));
+            if (extra.length) problems.push(`record ${id} has unknown field(s): ${extra.join(', ')}`);
             const text = JSON.stringify(value);
             for (const secret of [CLIENT_IP, USER_AGENT, '127.0.0.1']) {
-                if (text.includes(secret)) problems.push(`${db} record ${id} contains "${secret}"`);
+                if (text.includes(secret)) problems.push(`record ${id} contains "${secret}"`);
             }
         }
-        assert.equal(stored.filter((r) => r.db === 'object').length, 3, 'the uploads were stored, the bundle as one');
+        assert.equal(stored.length, 3, 'the uploads were stored, the bundle as one');
         assert.deepEqual(problems, []);
     });
 
-    test("Dropgate 3's encrypted bundle is stored as one record, with no per-file names or sizes", {
-        expectFailure: {
-            label: 'known issue until the v4 server rewrite: each member file gets its own record, with its encrypted name and size',
-            match: /per-file/,
-        },
-    }, () => {
-        const perFile = bundleRecords.filter((r) => r.db === 'file');
-        assert.equal(perFile.length, 0, `the bundle added ${perFile.length} per-file record(s) with a name and size`);
-        assert.equal(bundleRecords.length, 1, `the bundle added ${bundleRecords.length} records`);
-        assert.equal(bundleRecords[0].value.files, undefined, 'the bundle record lists per-file names and sizes');
+    test('an encrypted upload, a bundle\'s included, is one record with no file name or size in it', () => {
+        const encrypted = stored.filter((r) => r.value.encrypted);
+        assert.equal(encrypted.length, 2, 'the encrypted file and the encrypted bundle');
+        for (const { value } of encrypted) {
+            assert.equal(value.files, undefined, 'a file list in plain');
+            assert.equal(typeof value.meta, 'string', 'the sealed list');
+        }
     });
 });
 
@@ -209,23 +193,5 @@ describe('responses, and what is left after the download limit', () => {
         assert.equal((await fetch(`${server.baseUrl}/api/v4/objects/${bundle.id}`)).status, 404, 'the bundle is gone');
         assert.equal((await fetch(`${server.baseUrl}/api/v4/objects/${bundle.id}/leases`, { method: 'POST' })).status, 404, 'and no lease is given');
         assert.equal(fs.existsSync(path.join(server.uploadsDir, 'objects', bundle.id)), false, 'and none of it is stored');
-    });
-
-    test("Dropgate 3's encrypted bundle can no longer be fetched once its download limit is reached", {
-        expectFailure: {
-            label: 'known issue until the v4 server rewrite: member files stay downloadable until they expire',
-            match: /still downloadable/,
-        },
-    }, async () => {
-        const v3 = await uploadV3Bundle(server, { encrypted: true, sealed: true, maxDownloads: 1 });
-        await (await postJson(server, `/api/bundle/${v3.bundleId}/downloaded`, {})).arrayBuffer();
-        assert.equal((await fetch(`${server.baseUrl}/api/bundle/${v3.bundleId}/meta`)).status, 404, 'the bundle is gone');
-        const reachable = [];
-        for (const fileId of v3.memberIds) {
-            const res = await fetch(`${server.baseUrl}/api/file/${fileId}`);
-            await res.arrayBuffer();
-            if (res.status !== 404) reachable.push(fileId);
-        }
-        assert.deepEqual(reachable, [], `${reachable.length} member file(s) still downloadable after the limit`);
     });
 });

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { startServer, waitFor } from './helpers/harness.mjs';
-import { HOUR_MS, initUpload, postJson } from './helpers/uploads.mjs';
+import { answer, startBody, uploads } from './helpers/dgup4.mjs';
 
 const UPLOADS = { ENABLE_UPLOAD: 'true' };
 const MIB = 1024 * 1024;
@@ -35,6 +35,10 @@ async function withServer(env, check) {
 }
 
 const uploadInfo = async (server) => (await (await fetch(`${server.baseUrl}/api/info`)).json()).capabilities.upload;
+/** Starts an unencrypted upload of files of these sizes, without sending them, and gives the start's status. */
+const startOf = async (server, sizes) => (await answer(await uploads.start(server, startBody({
+    encrypted: false, size: sizes.reduce((a, b) => a + b, 0), files: sizes.map((size, i) => ({ name: `member-${i}.bin`, size })),
+})))).status;
 const linesNaming = (server, name) => (server.output.stdout + server.output.stderr).split(/\r?\n/).filter((l) => l.includes(name));
 
 test('UPLOAD_BUNDLE_SIZE_MODE=per-file stops the server, saying the setting was removed and the limit is the whole upload\'s', async () => {
@@ -62,23 +66,18 @@ test('any other UPLOAD_BUNDLE_SIZE_MODE starts the server with one warning that 
 
 test('the size limit applies to a bundle as a whole, in 1024s', async () => {
     await withServer({ ...UPLOADS, UPLOAD_MAX_FILE_SIZE_MB: '1', RATE_LIMIT_MAX_REQUESTS: '0' }, async (server) => {
-        assert.equal((await initUpload(server, MIB, 1)).status, 200, 'a file of exactly 1 MB');
-        assert.equal((await initUpload(server, MIB + 1, 1)).status, 413, 'a file a byte over');
-
-        const bundle = (sizes) => postJson(server, '/upload/init-bundle', {
-            fileCount: sizes.length, isEncrypted: false, lifetime: HOUR_MS,
-            files: sizes.map((size, i) => ({ filename: `member-${i}.bin`, totalSize: size, totalChunks: 1 })),
-        });
-        assert.equal((await bundle([MIB / 2, MIB / 2])).status, 200, 'two files making exactly 1 MB');
-        assert.equal((await bundle([MIB / 2, MIB / 2 + 1])).status, 413, 'two files, each under 1 MB, making a byte over');
+        assert.equal(await startOf(server, [MIB]), 201, 'a file of exactly 1 MB');
+        assert.equal(await startOf(server, [MIB + 1]), 413, 'a file a byte over');
+        assert.equal(await startOf(server, [MIB / 2, MIB / 2]), 201, 'two files making exactly 1 MB');
+        assert.equal(await startOf(server, [MIB / 2, MIB / 2 + 1]), 413, 'two files, each under 1 MB, making a byte over');
     });
 });
 
 test('the storage limit counts in 1024s', async () => {
     // A millionth of a GB: 1073.74 bytes in 1024s, where it would be 1000 in 1000s.
     await withServer({ ...UPLOADS, UPLOAD_MAX_STORAGE_GB: '0.000001', RATE_LIMIT_MAX_REQUESTS: '0' }, async (server) => {
-        assert.equal((await initUpload(server, 1073, 1)).status, 200);
-        assert.equal((await initUpload(server, 1, 1)).status, 507, 'the first upload holds the rest');
+        assert.equal(await startOf(server, [1073]), 201);
+        assert.equal(await startOf(server, [1]), 507, 'the first upload holds the rest');
     });
 });
 
@@ -100,6 +99,14 @@ test('any other UPLOAD_MAX_PAUSE_MINUTES stops the server with a clear error', a
         const { exitCode, output } = await refusedStart({ ...UPLOADS, UPLOAD_MAX_PAUSE_MINUTES: value });
         assert.equal(exitCode, 1, `with ${JSON.stringify(value)}`);
         assert.match(output, /\[ERROR\] Invalid UPLOAD_MAX_PAUSE_MINUTES environment variable\. It must be a whole number of minutes from 1 to 1440, or 0 to turn pausing off\./);
+    }
+});
+
+test('UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS is gone: the server starts with any value, even one Dropgate 3 refused, and never mentions it', async () => {
+    for (const value of ['100', '0', 'abc']) {
+        await withServer({ ...UPLOADS, UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS: value }, async (server) => {
+            assert.deepEqual(linesNaming(server, 'ZOMBIE'), [], `with ${JSON.stringify(value)}`);
+        });
     }
 });
 

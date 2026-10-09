@@ -193,24 +193,48 @@ const createDirIfNotExists = (dir) => {
     }
 };
 
-// Storage used is the uploads stored and the space reserved for those in
-// progress. So uploads in progress (tmp/, counted by their reservations), the
-// databases and the format marker don't count.
-const notStorage = new Set([storageMarker, tmpDir, path.join(uploadDir, 'db')]);
-
-const getDirSize = (dirPath) => {
+// Storage used is the uploads stored, in objects/, and the space reserved for
+// those in progress. So uploads in progress (tmp/, counted by their
+// reservations), the database and the format marker don't count.
+const getStoredSize = () => {
     let size = 0;
-    if (fs.existsSync(dirPath)) {
-        const files = fs.readdirSync(dirPath);
-        for (const file of files) {
-            const filePath = path.join(dirPath, file);
-            if (notStorage.has(filePath)) continue;
-            const stats = fs.statSync(filePath);
-            if (stats.isDirectory()) size += getDirSize(filePath);
-            else size += stats.size;
-        }
+    if (fs.existsSync(objectsDir)) {
+        for (const file of fs.readdirSync(objectsDir)) size += fs.statSync(path.join(objectsDir, file)).size;
     }
     return size;
+};
+
+// What a persistent Dropgate 3 server left in uploads/: its two databases, with
+// SQLite's own files beside them, and its stored files, named by their IDs.
+// Dropgate 4 can't serve any of it, and its links stopped working when 4 started.
+const V3_DATABASES = ['file-database.sqlite', 'bundle-database.sqlite'];
+const SQLITE_SIDE_FILES = ['', '-wal', '-shm', '-journal'];
+const V3_FILE_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/**
+ * Delete exactly Dropgate 3's layout in uploads/, and nothing else there.
+ * Says how many uploads went, and whether anything did; never which.
+ */
+const removeV3Leftovers = () => {
+    let uploads = 0;
+    let removed = false;
+    for (const entry of fs.readdirSync(uploadDir, { withFileTypes: true })) {
+        if (entry.isFile() && V3_FILE_NAME.test(entry.name)) {
+            fs.rmSync(path.join(uploadDir, entry.name), { force: true });
+            uploads++;
+            removed = true;
+        }
+    }
+    for (const database of V3_DATABASES) {
+        for (const suffix of SQLITE_SIDE_FILES) {
+            const file = path.join(uploadDir, 'db', database + suffix);
+            if (fs.existsSync(file) && fs.statSync(file).isFile()) {
+                fs.rmSync(file, { force: true });
+                removed = true;
+            }
+        }
+    }
+    return { uploads, removed };
 };
 
 let preserveUploads = false;
@@ -224,10 +248,6 @@ let maxFileDownloads = 1;
 let uploadChunkSizeBytes = 5 * 1024 * 1024;
 let maxPauseMinutes = 60;
 let currentDiskUsage = 0;
-let fileDatabase = null;
-let bundleDatabase = null;
-let ongoingUploads = null;
-let ongoingBundles = null;
 // Dropgate 4's stored uploads' records, by ID.
 let objectDatabase = null;
 // Dropgate 4's uploads in progress, by upload ID, in memory only: what each
@@ -253,17 +273,16 @@ const acquireQuotaLock = () => {
     return previousLock.then(() => release);
 };
 
-// The space held for the uploads in progress, Dropgate 3's and 4's alike.
+// The space held for the uploads in progress.
 const reservedBytes = () => {
     let total = 0;
-    ongoingUploads.forEach((u) => { total += u.reservedBytes || 0; });
     v4Uploads.forEach((u) => { total += u.size; });
     return total;
 };
 
 // Security: Limits to prevent DoS attacks
-const MAX_CHUNKS = 100000; // Maximum chunks per file (~500GB at 5MB chunks)
-const MAX_BUNDLE_FILES = 1000; // Maximum files per bundle
+const MAX_CHUNKS = 100000; // Maximum chunks per upload (~500GB at 5MB chunks)
+const MAX_BUNDLE_FILES = 1000; // Maximum files per upload
 
 if (enableUpload) {
     preserveUploads = process.env.UPLOAD_PRESERVE_UPLOADS === 'true';
@@ -340,7 +359,7 @@ if (enableUpload) {
         log('info', 'Clearing any existing uploads on startup...');
         cleanupDir(uploadDir);
     }
-    log('info', 'Clearing any zombie uploads and temp files...');
+    log('info', 'Clearing any uploads left in progress...');
     cleanupDir(tmpDir);
 
     createDirIfNotExists(uploadDir);
@@ -348,17 +367,20 @@ if (enableUpload) {
     createDirIfNotExists(objectsDir);
     if (preserveUploads) {
         createDirIfNotExists(path.join(uploadDir, 'db'));
+        // Default mode has just cleared them with everything else.
+        const leftovers = removeV3Leftovers();
+        if (leftovers.removed) {
+            log('info', `Removed ${leftovers.uploads} ${leftovers.uploads === 1 ? 'upload' : 'uploads'} left by Dropgate 3. Dropgate 4 can't serve them, and their links stopped working when it started.`);
+        }
     }
     fs.writeFileSync(storageMarker, `${JSON.stringify({ format: STORAGE_FORMAT })}\n`);
 
-    currentDiskUsage = getDirSize(uploadDir);
-    setInterval(() => { currentDiskUsage = getDirSize(uploadDir); }, 300000); // Sync every 5 minutes in case of discrepancies
+    currentDiskUsage = getStoredSize();
+    setInterval(() => { currentDiskUsage = getStoredSize(); }, 300000); // Sync every 5 minutes in case of discrepancies
     if (maxStorageGB !== 0) {
         log('info', `Current server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB`);
     }
 
-    fileDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'file-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
-    bundleDatabase = preserveUploads ? new QuickDB({ filePath: path.join(uploadDir, 'db', 'bundle-database.sqlite') }) : new QuickDB({ driver: new MemoryDriver() });
     if (preserveUploads) {
         const driver = new SqliteDriver(path.join(uploadDir, 'db', 'objects.sqlite'));
         // SQLite leaves a deleted record's bytes in the file until something
@@ -369,8 +391,6 @@ if (enableUpload) {
     } else {
         objectDatabase = new QuickDB({ driver: new MemoryDriver() });
     }
-    ongoingUploads = new Map();
-    ongoingBundles = new Map();
     v4Uploads = new Map();
     v4Finished = new Map();
     v4Leases = new Map();
@@ -399,8 +419,18 @@ const API_CORS = {
     exposedHeaders: ['ETag', 'Content-Range', 'Accept-Ranges', 'Retry-After', 'Content-Length'],
 };
 app.use('/api', cors(API_CORS));
-// Dropgate 3's upload routes, as they were, until they go.
-app.use('/upload', cors());
+
+// Dropgate 3's API paths. A Dropgate 3 client stops before them, at /api/info,
+// which says this server speaks version 4; anything that asks anyway is told
+// to update, whatever it sent, before any body is read.
+const fromDropgate3 = (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.status(410).json({ code: 'VERSION_UNSUPPORTED', error: 'This server runs Dropgate 4. Update the app to use it.' });
+};
+app.use('/upload', cors(API_CORS));
+app.use('/upload', fromDropgate3);
+app.use('/api/file', fromDropgate3);
+app.use('/api/bundle', fromDropgate3);
 // An upload's start carries its sealed file list, up to 1 MiB before base64url.
 const jsonBody = express.json({ limit: '1mb' });
 const uploadStartBody = express.json({ limit: '2mb' });
@@ -513,9 +543,7 @@ if (Number(rateLimitMaxRequests) > 0 && Number(rateLimitWindowMs) > 0) {
     });
 }
 
-// Verify chunk uploads are valid, otherwise apply rate limiting
 const apiRouter = express.Router();
-const uploadRouter = express.Router();
 // Dropgate 4's routes. Their answers are never cached.
 const v4Router = express.Router();
 v4Router.use((_req, res, next) => {
@@ -531,801 +559,9 @@ const noteRoute = (err, req, res, next) => {
     next(err);
 };
 
-let uploadAuth = null;
-
 // An upload is gone the moment it expires: every route answers as if it had
 // never existed, and the expiry sweep removes its bytes later.
 const isLive = (record) => Boolean(record) && !(record.expiresAt && record.expiresAt <= Date.now());
-const getLiveFile = async (fileId) => {
-    const record = await fileDatabase.get(fileId);
-    return isLive(record) ? record : null;
-};
-const getLiveBundle = async (bundleId) => {
-    const record = await bundleDatabase.get(bundleId);
-    return isLive(record) ? record : null;
-};
-
-if (enableUpload) {
-    uploadAuth = (req, res, next) => {
-        const uploadId = req.headers['x-upload-id'] || req.body?.uploadId;
-        if (uploadId && ongoingUploads.has(uploadId)) {
-            return next();
-        }
-        return limiter(req, res, next);
-    };
-
-    const downloadAuth = async (req, res, next) => {
-        const fileId = req.params.fileId;
-        const bundleId = req.params.bundleId;
-        if (fileId) {
-            if (await getLiveFile(fileId)) return next();
-        }
-        if (bundleId) {
-            if (await getLiveBundle(bundleId)) return next();
-        }
-        return limiter(req, res, next);
-    };
-
-    uploadRouter.post('/init', limiter, async (req, res) => {
-        const uploadId = uuidv4();
-        const { filename, lifetime, isEncrypted, totalSize, totalChunks, maxDownloads: clientMaxDownloads } = req.body;
-
-        if (isEncrypted && !uploadEnableE2EE) {
-            log('debug', 'Rejected an E2EE upload attempt because upload E2EE is disabled on the server.');
-            return res.status(400).json({ error: 'End-to-end encryption is not supported on this server.' });
-        }
-
-        // Validate filename
-        if (typeof filename !== 'string' || filename.trim().length === 0) {
-            return res.status(400).json({ error: 'Invalid filename. Must be a non-empty string.' });
-        }
-
-        // Validate isEncrypted (must be a boolean)
-        if (typeof isEncrypted !== 'boolean') {
-            return res.status(400).json({ error: 'Invalid isEncrypted. Must be a boolean.' });
-        }
-
-        // Validate file lifetime
-        if (typeof lifetime !== 'number' || !Number.isInteger(lifetime) || lifetime < 0) {
-            return res.status(400).json({ error: 'Invalid lifetime. Must be a non-negative integer (milliseconds).' });
-        }
-
-        // Validate Reservation Data
-        const size = parseInt(totalSize);
-        const chunks = parseInt(totalChunks);
-        if (typeof size !== 'number' || !Number.isInteger(size) || size <= 0) return res.status(400).json({ error: 'Invalid total size. Must be a positive integer.' });
-        if (typeof chunks !== 'number' || !Number.isInteger(chunks) || chunks <= 0) return res.status(400).json({ error: 'Invalid chunk count. Must be a positive integer.' });
-
-        // Check File Limit
-        if (size > MAX_FILE_SIZE_BYTES) {
-            return res.status(413).json({ error: `File exceeds limit of ${maxFileSizeMB} MB.` });
-        }
-
-        // Validate chunk count upper bound
-        if (chunks > MAX_CHUNKS) {
-            return res.status(400).json({ error: `Too many chunks. Maximum: ${MAX_CHUNKS}. Try increasing chunk size.` });
-        }
-
-        // Validate chunk count matches file size (prevents attack claiming many chunks for small file)
-        const expectedChunks = Math.ceil(size / uploadChunkSizeBytes);
-        if (Math.abs(chunks - expectedChunks) > 1) { // Allow ±1 for rounding and encryption overhead
-            return res.status(400).json({ error: 'Chunk count does not match file size.' });
-        }
-
-        // Validate lifetime against max
-        if (MAX_FILE_LIFETIME_MS !== Infinity) {
-            if (lifetime === 0) {
-                return res.status(400).json({ error: `Server does not allow unlimited file lifetime. Max: ${maxFileLifetimeHours} hours.` });
-            }
-            if (lifetime > MAX_FILE_LIFETIME_MS) {
-                return res.status(400).json({ error: `File lifetime exceeds limit of ${maxFileLifetimeHours} hours.` });
-            }
-        }
-
-        // Validate filename if not encrypted
-        if (!isEncrypted) {
-            // Security: Null bytes
-            if (filename.includes('\x00')) {
-                return res.status(400).json({ error: 'Filename contains null bytes.' });
-            }
-            // Security: Control characters
-            if (/[\x00-\x1F\x7F]/.test(filename)) {
-                return res.status(400).json({ error: 'Filename contains control characters.' });
-            }
-            // Security: Reserved Windows names
-            const reserved = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$/i;
-            if (reserved.test(filename)) {
-                return res.status(400).json({ error: 'Reserved filename not allowed.' });
-            }
-            // Security: Path components and traversal
-            if (filename === '.' || filename === '..' || /[\/\\]/.test(filename)) {
-                return res.status(400).json({ error: 'Invalid filename. Contains path components.' });
-            }
-            // Length check
-            if (filename.length > 255) {
-                return res.status(400).json({ error: 'Filename is too long.' });
-            }
-        }
-
-        // Validate maxDownloads
-        let effectiveMaxDownloads = maxFileDownloads; // Server default
-        if (clientMaxDownloads !== undefined) {
-            if (typeof clientMaxDownloads !== 'number' || !Number.isInteger(clientMaxDownloads) || clientMaxDownloads < 0) {
-                return res.status(400).json({ error: 'Invalid maxDownloads. Must be a non-negative integer.' });
-            }
-            if (maxFileDownloads === 1) {
-                effectiveMaxDownloads = 1;
-            } else if (maxFileDownloads === 0) {
-                effectiveMaxDownloads = clientMaxDownloads;
-            } else {
-                if (clientMaxDownloads === 0) {
-                    return res.status(400).json({ error: `Server does not allow unlimited downloads. Max: ${maxFileDownloads}.` });
-                }
-                if (clientMaxDownloads > maxFileDownloads) {
-                    return res.status(400).json({ error: `Max downloads exceeds server limit of ${maxFileDownloads}.` });
-                }
-                effectiveMaxDownloads = clientMaxDownloads;
-            }
-        }
-
-        // Check Storage Quota (CRITICAL: atomic section to prevent TOCTOU race)
-        const releaseLock = await acquireQuotaLock();
-        try {
-            const reservedSpace = reservedBytes();
-
-            if ((currentDiskUsage + reservedSpace + size) > MAX_STORAGE_BYTES) {
-                log('debug', `Upload rejected due to insufficient storage. Current usage: ${(currentDiskUsage / GIB).toFixed(2)} GB, Reserved: ${(reservedSpace / GIB).toFixed(2)} GB, Requested: ${(size / GIB).toFixed(2)} GB.`);
-                return res.status(507).json({ error: 'Server out of capacity. Try again later.' });
-            }
-
-            // Reserve immediately while holding lock
-            const tempFilePath = path.join(tmpDir, uploadId);
-            fs.writeFileSync(tempFilePath, '');
-
-            ongoingUploads.set(uploadId, {
-                filename,
-                isEncrypted,
-                lifetime: Number(lifetime) || 0,
-                maxDownloads: effectiveMaxDownloads,
-                tempFilePath,
-                totalSize: size,
-                totalChunks: chunks,
-                receivedChunks: new Set(),
-                reservedBytes: size,
-                expiresAt: Date.now() + (2 * 60 * 1000)
-            });
-        } finally {
-            releaseLock();
-        }
-
-        log('debug', `Initialised upload. Reserved ${(size / MIB).toFixed(2)} MB.`);
-        res.status(200).json({ uploadId });
-    });
-
-    uploadRouter.post('/init-bundle', limiter, async (req, res) => {
-        const bundleUploadId = uuidv4();
-        const { fileCount, files, lifetime, isEncrypted, maxDownloads: clientMaxDownloads } = req.body;
-
-        if (isEncrypted && !uploadEnableE2EE) {
-            return res.status(400).json({ error: 'End-to-end encryption is not supported on this server.' });
-        }
-
-        if (typeof isEncrypted !== 'boolean') {
-            return res.status(400).json({ error: 'Invalid isEncrypted. Must be a boolean.' });
-        }
-
-        if (typeof fileCount !== 'number' || !Number.isInteger(fileCount) || fileCount < 2) {
-            return res.status(400).json({ error: 'Invalid fileCount. Must be an integer >= 2.' });
-        }
-
-        if (!Array.isArray(files) || files.length !== fileCount) {
-            return res.status(400).json({ error: 'Files array must match fileCount.' });
-        }
-
-        // Bundle file count limit
-        if (fileCount > MAX_BUNDLE_FILES) {
-            return res.status(400).json({ error: `Too many files. Maximum: ${MAX_BUNDLE_FILES}.` });
-        }
-
-        if (typeof lifetime !== 'number' || !Number.isInteger(lifetime) || lifetime < 0) {
-            return res.status(400).json({ error: 'Invalid lifetime. Must be a non-negative integer (milliseconds).' });
-        }
-
-        if (MAX_FILE_LIFETIME_MS !== Infinity) {
-            if (lifetime === 0) {
-                return res.status(400).json({ error: `Server does not allow unlimited file lifetime. Max: ${maxFileLifetimeHours} hours.` });
-            }
-            if (lifetime > MAX_FILE_LIFETIME_MS) {
-                return res.status(400).json({ error: `File lifetime exceeds limit of ${maxFileLifetimeHours} hours.` });
-            }
-        }
-
-        // Validate maxDownloads (same logic as single-file init)
-        let effectiveMaxDownloads = maxFileDownloads;
-        if (clientMaxDownloads !== undefined) {
-            if (typeof clientMaxDownloads !== 'number' || !Number.isInteger(clientMaxDownloads) || clientMaxDownloads < 0) {
-                return res.status(400).json({ error: 'Invalid maxDownloads. Must be a non-negative integer.' });
-            }
-            if (maxFileDownloads === 1) {
-                effectiveMaxDownloads = 1;
-            } else if (maxFileDownloads === 0) {
-                effectiveMaxDownloads = clientMaxDownloads;
-            } else {
-                if (clientMaxDownloads === 0) {
-                    return res.status(400).json({ error: `Server does not allow unlimited downloads. Max: ${maxFileDownloads}.` });
-                }
-                if (clientMaxDownloads > maxFileDownloads) {
-                    return res.status(400).json({ error: `Max downloads exceeds server limit of ${maxFileDownloads}.` });
-                }
-                effectiveMaxDownloads = clientMaxDownloads;
-            }
-        }
-
-        // Validate each file entry and compute totals
-        let totalBundleSize = 0;
-        const fileUploadIds = [];
-        const fileEntries = [];
-
-        for (let i = 0; i < files.length; i++) {
-            const f = files[i];
-            if (typeof f.filename !== 'string' || f.filename.trim().length === 0) {
-                return res.status(400).json({ error: `Invalid filename for file at index ${i}.` });
-            }
-            const size = parseInt(f.totalSize);
-            const chunks = parseInt(f.totalChunks);
-            if (!Number.isInteger(size) || size <= 0) {
-                return res.status(400).json({ error: `Invalid totalSize for file at index ${i}.` });
-            }
-            if (!Number.isInteger(chunks) || chunks <= 0) {
-                return res.status(400).json({ error: `Invalid totalChunks for file at index ${i}.` });
-            }
-            if (!isEncrypted) {
-                if (f.filename.length > 255 || /[\/\\]/.test(f.filename)) {
-                    return res.status(400).json({ error: `Invalid filename at index ${i}. Contains illegal characters or is too long.` });
-                }
-            }
-            // Check for integer overflow before adding
-            if (!Number.isSafeInteger(totalBundleSize + size)) {
-                return res.status(413).json({ error: 'Bundle size overflow.' });
-            }
-            totalBundleSize += size;
-            const uploadId = uuidv4();
-            fileUploadIds.push(uploadId);
-            fileEntries.push({ uploadId, filename: f.filename, totalSize: size, totalChunks: chunks });
-        }
-
-        // The limit applies to the whole upload, all its files together
-        if (totalBundleSize > MAX_FILE_SIZE_BYTES) {
-            return res.status(413).json({ error: `Total bundle size exceeds limit of ${maxFileSizeMB} MB.` });
-        }
-
-        // Check storage quota for the entire bundle (CRITICAL: atomic section to prevent TOCTOU race)
-        const releaseLock = await acquireQuotaLock();
-        try {
-            const reservedSpace = reservedBytes();
-            if ((currentDiskUsage + reservedSpace + totalBundleSize) > MAX_STORAGE_BYTES) {
-                return res.status(507).json({ error: 'Server out of capacity. Try again later.' });
-            }
-
-            // Create individual upload sessions for each file
-            // For sealed (encrypted) bundles, individual files get unlimited downloads
-            // since their lifecycle is time-based and the bundle manifest controls discoverability.
-            const perFileMaxDownloads = isEncrypted ? 0 : effectiveMaxDownloads;
-
-            for (const entry of fileEntries) {
-                const tempFilePath = path.join(tmpDir, entry.uploadId);
-                fs.writeFileSync(tempFilePath, '');
-                ongoingUploads.set(entry.uploadId, {
-                    filename: entry.filename,
-                    isEncrypted,
-                    lifetime: Number(lifetime) || 0,
-                    maxDownloads: perFileMaxDownloads,
-                    tempFilePath,
-                    totalSize: entry.totalSize,
-                    totalChunks: entry.totalChunks,
-                    receivedChunks: new Set(),
-                    reservedBytes: entry.totalSize,
-                    expiresAt: Date.now() + (2 * 60 * 1000),
-                    bundleUploadId, // Link back to the bundle
-                });
-            }
-        } finally {
-            releaseLock();
-        }
-
-        // Track the bundle session
-        ongoingBundles.set(bundleUploadId, {
-            fileUploadIds,
-            fileCount,
-            isEncrypted,
-            sealedManifest: isEncrypted, // Encrypted bundles use sealed (opaque) manifests
-            lifetime: Number(lifetime) || 0,
-            maxDownloads: effectiveMaxDownloads,
-            completedFiles: new Set(),
-            completedFileResults: [], // { fileId, name, sizeBytes }
-            expiresAt: Date.now() + (2 * 60 * 1000), // 2 minute inactivity deadline (refreshed on each chunk)
-        });
-
-        log('debug', `Initialised bundle upload (${fileCount} files). Reserved ${(totalBundleSize / MIB).toFixed(2)} MB total.`);
-        res.status(200).json({ bundleUploadId, fileUploadIds });
-    });
-
-    uploadRouter.post('/cancel', uploadAuth, (req, res) => {
-        const { uploadId } = req.body;
-        if (!ongoingUploads.has(uploadId)) {
-            return res.status(404).json({ error: 'Upload session not found or already expired.' });
-        }
-
-        const session = ongoingUploads.get(uploadId);
-
-        // Clean up temp file
-        try {
-            fs.rmSync(session.tempFilePath, { force: true });
-        } catch (e) {
-            log('debug', `Failed to delete temp file during cancellation: ${e.message}`);
-        }
-
-        // Remove from ongoing uploads (releases reservation)
-        ongoingUploads.delete(uploadId);
-
-        log('debug', `Upload cancelled by client. Released ${(session.reservedBytes / MIB).toFixed(2)} MB.`);
-        res.status(200).json({ success: true });
-    });
-
-    uploadRouter.post('/chunk', uploadAuth, (req, res) => {
-        const uploadId = req.headers['x-upload-id'];
-        let chunkIndex = req.headers['x-chunk-index'];
-        const clientHash = req.headers['x-chunk-hash'];
-
-        if (!ongoingUploads.has(uploadId)) return res.status(410).send('Upload session expired or invalid.');
-        const session = ongoingUploads.get(uploadId);
-
-        // Validate Index
-        if (isNaN(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
-            return res.status(400).send('Invalid chunk index.');
-        }
-
-        chunkIndex = parseInt(chunkIndex);
-
-        // Validate Hash
-        if (typeof clientHash !== 'string' || !/^[a-f0-9]{64}$/.test(clientHash)) { // SHA-256 hash format
-            return res.status(400).send('Invalid chunk hash.');
-        }
-
-        // Note: duplicate chunk check moved to after integrity verification for security
-
-        const maxChunkBytes = uploadChunkSizeBytes + 1024;
-        const chunks = [];
-        let receivedBytes = 0;
-        let aborted = false;
-
-        req.on('data', (chunk) => {
-            receivedBytes += chunk.length;
-            // 1. Verify Size (chunk size + overhead limit)
-            if (receivedBytes > maxChunkBytes) {
-                aborted = true;
-                req.destroy(); // Stop reading immediately to prevent memory exhaustion
-                return res.status(413).send('Chunk too large.');
-            }
-            chunks.push(chunk);
-        });
-        req.on('end', () => {
-            if (aborted) return;
-            const buffer = Buffer.concat(chunks);
-            log('debug', `Received chunk ${chunkIndex + 1}/${session.totalChunks}. Size: ${(buffer.length / 1024).toFixed(2)} KB`);
-
-            // 2. Verify Integrity
-            const serverHash = crypto.createHash('sha256').update(buffer).digest('hex');
-            if (serverHash !== clientHash) return res.status(400).send('Integrity check failed.');
-
-            // Security: Mark chunk as received BEFORE writing to prevent duplicate write race
-            // This is CRITICAL - if two requests for the same chunk arrive concurrently,
-            // only the first should write. We check-and-add atomically here.
-            if (session.receivedChunks.has(chunkIndex)) {
-                return res.status(200).send('Chunk already received.');
-            }
-            session.receivedChunks.add(chunkIndex);
-
-            // Calculate Offset
-            const CHUNK_BASE = uploadChunkSizeBytes;
-            const OVERHEAD = session.isEncrypted ? 28 : 0;
-            const OFFSET = chunkIndex * (CHUNK_BASE + OVERHEAD);
-
-            // Validate offset doesn't exceed expected file size
-            const maxExpectedOffset = session.totalSize + (session.totalChunks * OVERHEAD);
-            if (OFFSET + buffer.length > maxExpectedOffset) {
-                session.receivedChunks.delete(chunkIndex); // Rollback
-                return res.status(400).send('Chunk offset exceeds file size.');
-            }
-
-            // Write
-            fs.open(session.tempFilePath, 'r+', (err, fd) => {
-                if (err) {
-                    session.receivedChunks.delete(chunkIndex); // Rollback on error
-                    return res.status(500).send('File IO error.');
-                }
-                fs.write(fd, buffer, 0, buffer.length, OFFSET, (writeErr) => {
-                    fs.close(fd, () => { });
-                    if (writeErr) {
-                        session.receivedChunks.delete(chunkIndex); // Rollback on error
-                        return res.status(500).send('Write failed.');
-                    }
-
-                    session.expiresAt = Date.now() + (2 * 60 * 1000); // Reset timeout to 2 mins
-
-                    // If this file belongs to a bundle, refresh all sibling upload sessions
-                    // so they don't get zombie-cleaned while waiting their turn.
-                    if (session.bundleUploadId) {
-                        const bundleSession = ongoingBundles.get(session.bundleUploadId);
-                        if (bundleSession) {
-                            bundleSession.expiresAt = Date.now() + (2 * 60 * 1000);
-                            const refreshedAt = Date.now() + (2 * 60 * 1000);
-                            for (const siblingId of bundleSession.fileUploadIds) {
-                                const sibling = ongoingUploads.get(siblingId);
-                                if (sibling && sibling !== session) {
-                                    sibling.expiresAt = refreshedAt;
-                                }
-                            }
-                        }
-                    }
-
-                    res.status(200).send('Chunk received.');
-                });
-            });
-        });
-    });
-
-    uploadRouter.post('/complete', uploadAuth, async (req, res) => {
-        const { uploadId } = req.body;
-        if (!ongoingUploads.has(uploadId)) return res.status(400).json({ error: 'Invalid upload ID.' });
-
-        const session = ongoingUploads.get(uploadId);
-
-        // 1. Verify Chunk Count
-        // We expect exactly N unique chunks.
-        if (session.receivedChunks.size !== session.totalChunks) {
-            log('debug', `Upload incomplete: ${session.receivedChunks.size}/${session.totalChunks} chunks.`);
-
-            return res.status(400).json({
-                error: `Upload incomplete. Server received ${session.receivedChunks.size} of ${session.totalChunks} chunks.`
-            });
-        }
-
-        const uploadInfo = ongoingUploads.get(uploadId);
-        const fileId = uuidv4();
-        const finalPath = path.join(uploadDir, fileId);
-
-        try {
-            const stats = fs.statSync(uploadInfo.tempFilePath);
-            if (stats.size === 0) {
-                log('debug', 'Rejected 0-byte file upload.');
-                fs.rmSync(uploadInfo.tempFilePath, { force: true }); // Clean up the empty temp file
-                ongoingUploads.delete(uploadId);
-                return res.status(400).json({ error: 'Empty files (0 bytes) cannot be uploaded.' });
-            } else if (stats.size !== uploadInfo.totalSize) {
-                log('debug', `Upload size mismatch. Expected: ${uploadInfo.totalSize}, Actual: ${stats.size}`);
-                fs.rmSync(uploadInfo.tempFilePath, { force: true }); // Clean up the invalid temp file
-                ongoingUploads.delete(uploadId);
-                return res.status(400).json({ error: 'Uploaded rejected. File size does not match expected size.' });
-            }
-        } catch (e) {
-            log('error', `Could not stat temp file for size check: ${e.message}`);
-            ongoingUploads.delete(uploadId);
-            fs.rmSync(uploadInfo.tempFilePath, { force: true }); // Attempt to clean up
-            return res.status(500).json({ error: 'Server error during file validation.' });
-        }
-
-        fs.renameSync(uploadInfo.tempFilePath, finalPath);
-
-        const stats = fs.statSync(finalPath); // Get final size
-        currentDiskUsage += stats.size; // Update global usage
-
-        const expiresAt = uploadInfo.lifetime > 0 ? Date.now() + uploadInfo.lifetime : null;
-
-        const fileRecord = {
-            name: uploadInfo.filename,
-            path: finalPath,
-            expiresAt: expiresAt,
-            isEncrypted: uploadInfo.isEncrypted,
-            maxDownloads: uploadInfo.maxDownloads,
-        };
-
-        // Only track download count when there's a limit (not unlimited)
-        if (uploadInfo.maxDownloads > 0) {
-            fileRecord.downloadCount = 0;
-        }
-
-        // If this file belongs to a bundle, track completion
-        if (uploadInfo.bundleUploadId) {
-            const bundleSession = ongoingBundles.get(uploadInfo.bundleUploadId);
-            if (bundleSession) {
-                // For sealed (encrypted) bundles, files are independent - no bundleId tag.
-                // For unsealed bundles, tag the file so the server can manage lifecycle.
-                if (!bundleSession.sealedManifest) {
-                    fileRecord.bundleId = 'pending'; // Will be set to actual bundleId on complete-bundle
-                }
-
-                bundleSession.completedFiles.add(uploadId);
-                bundleSession.completedFileResults.push({
-                    fileId,
-                    uploadId,
-                    name: uploadInfo.filename,
-                    sizeBytes: stats.size,
-                });
-                bundleSession.expiresAt = Date.now() + (2 * 60 * 1000); // Reset bundle deadline
-            }
-        }
-
-        await fileDatabase.set(fileId, fileRecord);
-
-        ongoingUploads.delete(uploadId); // Remove the reservation
-        log('debug', `[${uploadInfo.isEncrypted ? 'Encrypted' : 'Simple'}] File received.${maxStorageGB !== 0 ? ` Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.` : ''}`);
-        res.status(200).json({ id: fileId });
-    });
-
-    uploadRouter.post('/complete-bundle', limiter, async (req, res) => {
-        const { bundleUploadId, encryptedManifest } = req.body;
-        if (!bundleUploadId || !ongoingBundles.has(bundleUploadId)) {
-            return res.status(400).json({ error: 'Invalid bundle upload ID.' });
-        }
-
-        const bundleSession = ongoingBundles.get(bundleUploadId);
-
-        // Verify all files are completed
-        if (bundleSession.completedFiles.size !== bundleSession.fileCount) {
-            return res.status(400).json({
-                error: `Bundle incomplete. ${bundleSession.completedFiles.size} of ${bundleSession.fileCount} files completed.`
-            });
-        }
-
-        // For sealed (encrypted) bundles, the client must provide an encrypted manifest.
-        if (bundleSession.sealedManifest) {
-            if (typeof encryptedManifest !== 'string' || encryptedManifest.length === 0) {
-                return res.status(400).json({ error: 'Encrypted manifest is required for E2EE bundles.' });
-            }
-            // Enforce a reasonable size limit on the manifest blob (1MB)
-            if (encryptedManifest.length > 1024 * 1024) {
-                return res.status(413).json({ error: 'Encrypted manifest is too large.' });
-            }
-        }
-
-        const bundleId = uuidv4();
-
-        // Calculate total size for logging only
-        let totalSizeBytes = 0;
-        for (const result of bundleSession.completedFileResults) {
-            totalSizeBytes += result.sizeBytes;
-        }
-
-        const expiresAt = bundleSession.lifetime > 0 ? Date.now() + bundleSession.lifetime : null;
-
-        if (bundleSession.sealedManifest) {
-            // Sealed bundle: store only the encrypted manifest blob.
-            // The server cannot read the file list - only the downloader with the key can.
-            // Client will derive totalSizeBytes and fileCount from decrypted manifest.
-            const bundleRecord = {
-                encryptedManifest,
-                isEncrypted: true,
-                sealed: true,
-                expiresAt,
-                maxDownloads: bundleSession.maxDownloads,
-            };
-
-            // Only track download count when there's a limit (not unlimited)
-            if (bundleSession.maxDownloads > 0) {
-                bundleRecord.downloadCount = 0;
-            }
-
-            await bundleDatabase.set(bundleId, bundleRecord);
-        } else {
-            // Unsealed bundle: build and store plaintext file list (existing behavior)
-            const bundleFiles = [];
-            for (const result of bundleSession.completedFileResults) {
-                bundleFiles.push({
-                    fileId: result.fileId,
-                    name: result.name,
-                    sizeBytes: result.sizeBytes,
-                });
-
-                // Update the file record with the actual bundleId
-                const fileRecord = await fileDatabase.get(result.fileId);
-                if (fileRecord) {
-                    await fileDatabase.set(result.fileId, { ...fileRecord, bundleId });
-                }
-            }
-
-            const bundleRecord = {
-                files: bundleFiles,
-                isEncrypted: bundleSession.isEncrypted,
-                expiresAt,
-                maxDownloads: bundleSession.maxDownloads,
-            };
-
-            // Only track download count when there's a limit (not unlimited)
-            if (bundleSession.maxDownloads > 0) {
-                bundleRecord.downloadCount = 0;
-            }
-
-            await bundleDatabase.set(bundleId, bundleRecord);
-        }
-
-        ongoingBundles.delete(bundleUploadId);
-        log('debug', `Bundle created${bundleSession.sealedManifest ? ' (sealed)' : ''} (${bundleSession.fileCount} files, ${(totalSizeBytes / MIB).toFixed(2)} MB total). Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.`);
-        res.status(200).json({ bundleId });
-    });
-
-    apiRouter.get('/file/:fileId/meta', downloadAuth, async (req, res) => {
-        const fileId = req.params.fileId;
-        const fileInfo = await getLiveFile(fileId);
-
-        if (!fileInfo) {
-            return res.status(404).json({ error: 'File not found.' });
-        }
-
-        if (fileInfo.isEncrypted && !uploadEnableE2EE) {
-            return res.status(404).json({ error: 'File not found.' });
-        }
-
-        let fileSize = 0;
-        try {
-            fileSize = fs.statSync(fileInfo.path).size;
-        } catch (error) {
-            return res.status(404).json({ error: 'File not found.' });
-        }
-
-        const payload = {
-            sizeBytes: fileSize,
-            isEncrypted: fileInfo.isEncrypted
-        };
-
-        if (fileInfo.isEncrypted) {
-            payload.encryptedFilename = fileInfo.name;
-        } else {
-            payload.filename = fileInfo.name;
-        }
-
-        res.status(200).json(payload);
-    });
-
-    apiRouter.get('/file/:fileId', downloadAuth, async (req, res) => {
-        const fileId = req.params.fileId;
-        const fileInfo = await getLiveFile(fileId);
-
-        if (!fileInfo) {
-            return res.status(404).json({ error: 'File not found.' });
-        }
-
-        if (fileInfo.isEncrypted && !uploadEnableE2EE) {
-            return res.status(404).json({ error: 'File not found.' });
-        }
-
-        // Capture size before streaming
-        const fileSize = fs.statSync(fileInfo.path).size;
-        res.setHeader('Content-Length', fileSize);
-
-        if (!fileInfo.isEncrypted) {
-            res.setHeader('Content-Disposition', contentDisposition(fileInfo.name));
-            res.setHeader('Content-Type', 'application/octet-stream');
-        }
-
-        const readStream = fs.createReadStream(fileInfo.path);
-        readStream.pipe(res);
-
-        readStream.on('close', async () => {
-            // Skip download counting for files that belong to a bundle
-            // (bundle download count is tracked separately via /api/bundle/:bundleId/downloaded)
-            if (fileInfo.bundleId) {
-                log('debug', `[${fileInfo.isEncrypted ? 'Encrypted' : 'Simple'}] Bundle file data sent (individual download, no count increment).`);
-                return;
-            }
-
-            // Increment download count
-            const newDownloadCount = (fileInfo.downloadCount || 0) + 1;
-            const maxDl = fileInfo.maxDownloads ?? 1;
-
-            // Check if we should delete the file (maxDownloads reached)
-            if (maxDl > 0 && newDownloadCount >= maxDl) {
-                // Update storage immediately
-                currentDiskUsage = Math.max(0, currentDiskUsage - fileSize);
-
-                fs.rm(fileInfo.path, { force: true }, () => { });
-                await fileDatabase.delete(fileId);
-                log('debug', `[${fileInfo.isEncrypted ? 'Encrypted' : 'Simple'}] File data sent and deleted (${newDownloadCount}/${maxDl} downloads).${maxStorageGB !== 0 ? ` Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.` : ''}`);
-            } else {
-                // Update download count in database
-                await fileDatabase.set(fileId, {
-                    ...fileInfo,
-                    downloadCount: newDownloadCount,
-                });
-                log('debug', `[${fileInfo.isEncrypted ? 'Encrypted' : 'Simple'}] File data sent (${newDownloadCount}/${maxDl === 0 ? 'unlimited' : maxDl} downloads).`);
-            }
-        });
-    });
-
-    // ===== Bundle API Endpoints =====
-
-    apiRouter.get('/bundle/:bundleId/meta', downloadAuth, async (req, res) => {
-        const bundleId = req.params.bundleId;
-        const bundleInfo = await getLiveBundle(bundleId);
-
-        if (!bundleInfo) {
-            return res.status(404).json({ error: 'Bundle not found.' });
-        }
-
-        if (bundleInfo.isEncrypted && !uploadEnableE2EE) {
-            return res.status(404).json({ error: 'Bundle not found.' });
-        }
-
-        // Sealed bundles return only the encrypted manifest blob.
-        // The server cannot read the file list - the client must decrypt it.
-        // Client can derive totalSizeBytes and fileCount from the decrypted manifest.
-        if (bundleInfo.sealed) {
-            return res.status(200).json({
-                isEncrypted: true,
-                sealed: true,
-                encryptedManifest: bundleInfo.encryptedManifest,
-            });
-        }
-
-        // Unsealed bundles return the structured file list
-        // Client will derive totalSizeBytes and fileCount from the files array
-        const payload = {
-            isEncrypted: bundleInfo.isEncrypted,
-            files: bundleInfo.files.map(f => {
-                const entry = { fileId: f.fileId, sizeBytes: f.sizeBytes };
-                if (bundleInfo.isEncrypted) {
-                    entry.encryptedFilename = f.name;
-                } else {
-                    entry.filename = f.name;
-                }
-                return entry;
-            }),
-        };
-
-        res.status(200).json(payload);
-    });
-
-    apiRouter.post('/bundle/:bundleId/downloaded', downloadAuth, async (req, res) => {
-        const bundleId = req.params.bundleId;
-        const bundleInfo = await getLiveBundle(bundleId);
-
-        if (!bundleInfo) {
-            return res.status(404).json({ error: 'Bundle not found.' });
-        }
-
-        const newDownloadCount = (bundleInfo.downloadCount || 0) + 1;
-        const maxDl = bundleInfo.maxDownloads ?? 1;
-
-        if (maxDl > 0 && newDownloadCount >= maxDl) {
-            if (bundleInfo.sealed) {
-                // Sealed bundle: only delete the manifest record.
-                // Individual files are independent and expire on their own.
-                await bundleDatabase.delete(bundleId);
-                log('debug', `Sealed bundle manifest deleted (${newDownloadCount}/${maxDl} downloads). Member files will expire independently.`);
-            } else {
-                // Unsealed bundle: delete all member files and the bundle record
-                for (const f of bundleInfo.files) {
-                    const fileInfo = await fileDatabase.get(f.fileId);
-                    if (fileInfo) {
-                        try {
-                            const stats = fs.statSync(fileInfo.path);
-                            currentDiskUsage = Math.max(0, currentDiskUsage - stats.size);
-                        } catch (e) { }
-                        fs.rm(fileInfo.path, { force: true }, () => { });
-                        await fileDatabase.delete(f.fileId);
-                    }
-                }
-                await bundleDatabase.delete(bundleId);
-                log('debug', `Bundle downloaded and deleted (${newDownloadCount}/${maxDl} downloads). Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.`);
-            }
-        } else {
-            await bundleDatabase.set(bundleId, { ...bundleInfo, downloadCount: newDownloadCount });
-            log('debug', `Bundle downloaded (${newDownloadCount}/${maxDl === 0 ? 'unlimited' : maxDl} downloads).`);
-        }
-
-        res.status(200).json({ downloadCount: newDownloadCount, maxDownloads: maxDl });
-    });
-}
 
 // ===== Dropgate 4's uploads =====
 // One upload is one object, a file or a bundle alike: started, sent in chunks
@@ -2170,95 +1406,13 @@ apiRouter.get('/info', limiter, (req, res) => {
     });
 });
 
-apiRouter.post('/resolve', limiter, async (req, res) => {
-    const raw = String(req.body?.value || '').trim();
-    if (!raw) {
-        return res.status(400).json({ valid: false, error: 'Missing sharing code.' });
-    }
-
-    const isUrl = /^https?:\/\//i.test(raw);
-    const isUuid = (value) => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value);
-    const isP2PCode = (value) => /^[A-Z]{4}-\d{4}$/.test(value);
-    const normalizeP2P = (value) => value.replace(/\s+/g, '').toUpperCase();
-
-    if (isUrl) {
-        try {
-            const url = new URL(raw);
-            const origin = `${req.protocol}://${req.get('host')}`;
-            if (url.origin !== origin) {
-                return res.status(200).json({ valid: false, reason: 'URL must be from this server.' });
-            }
-
-            const path = decodeURIComponent(url.pathname || '');
-            if (path.startsWith('/p2p/')) {
-                const code = normalizeP2P(path.replace('/p2p/', ''));
-                if (!enableP2P) {
-                    return res.status(200).json({ valid: false, reason: 'Direct transfer is disabled on this server.' });
-                }
-                if (!isP2PCode(code)) {
-                    return res.status(200).json({ valid: false, reason: 'Invalid direct transfer code.' });
-                }
-                return res.status(200).json({ valid: true, type: 'p2p', target: `/p2p/${encodeURIComponent(code)}` });
-            }
-
-            if (path.startsWith('/b/')) {
-                const bundleId = path.slice(3);
-                if (isUuid(bundleId) && enableUpload && bundleDatabase && await getLiveBundle(bundleId)) {
-                    return res.status(200).json({ valid: true, type: 'bundle', target: `/b/${bundleId}` });
-                }
-            }
-
-            if (path.startsWith('/')) {
-                const id = path.slice(1);
-                if (isUuid(id)) {
-                    // Check bundles first, then files
-                    if (enableUpload && bundleDatabase && await getLiveBundle(id)) {
-                        return res.status(200).json({ valid: true, type: 'bundle', target: `/b/${id}` });
-                    }
-                    const fileInfo = enableUpload && fileDatabase ? await getLiveFile(id) : null;
-                    if (!fileInfo) {
-                        return res.status(200).json({ valid: false, reason: 'File not found.' });
-                    }
-                    return res.status(200).json({ valid: true, type: 'file', target: `/${id}` });
-                }
-            }
-
-            return res.status(200).json({ valid: false, reason: 'Unrecognised sharing link.' });
-        } catch {
-            return res.status(200).json({ valid: false, reason: 'Invalid URL.' });
-        }
-    }
-
-    const compact = raw.replace(/\s+/g, '');
-    if (isUuid(compact)) {
-        // Check bundles first, then files
-        if (enableUpload && bundleDatabase && await getLiveBundle(compact)) {
-            return res.status(200).json({ valid: true, type: 'bundle', target: `/b/${compact}` });
-        }
-        const fileInfo = enableUpload && fileDatabase ? await getLiveFile(compact) : null;
-        if (!fileInfo) {
-            return res.status(200).json({ valid: false, reason: 'File not found.' });
-        }
-        return res.status(200).json({ valid: true, type: 'file', target: `/${compact}` });
-    }
-
-    const p2pCode = normalizeP2P(compact);
-    if (isP2PCode(p2pCode)) {
-        if (!enableP2P) {
-            return res.status(200).json({ valid: false, reason: 'Direct transfer is disabled on this server.' });
-        }
-        return res.status(200).json({ valid: true, type: 'p2p', target: `/p2p/${encodeURIComponent(p2pCode)}` });
-    }
-
-    return res.status(200).json({ valid: false, reason: 'Unrecognised sharing code.' });
-});
-
-// Anything under /api/v4 that isn't a route is a JSON error, as every API error is.
-const v4NotFound = (_req, res) => res.status(404).json({ code: 'NOT_FOUND', error: 'There is nothing here.' });
+// Anything under /api that isn't a route is a JSON error, as every API error is.
+const apiNotFound = (_req, res) => res.set('Cache-Control', 'no-store').status(404).json({ code: 'NOT_FOUND', error: 'There is nothing here.' });
+apiRouter.use(apiNotFound);
 v4Router.use(noteRoute);
 apiRouter.use(noteRoute);
 app.use('/api/v4', v4Router);
-app.use('/api/v4', v4NotFound);
+app.use('/api/v4', apiNotFound);
 app.use('/api', apiRouter);
 
 // ===== PeerJS signalling server (PeerServer) =====
@@ -2287,9 +1441,6 @@ app.get('/', limiter, (req, res) => {
 
 // Download pages
 if (enableUpload) {
-    uploadRouter.use(noteRoute);
-    app.use('/upload', uploadRouter);
-
     // An upload's download page, for one file and several alike. It's the same
     // over HTTP and HTTPS: the page reads the upload's metadata itself, which
     // says how many files it has (once decrypted, for an encrypted one), and
@@ -2335,24 +1486,11 @@ app.use((err, req, res, _next) => {
 });
 
 if (enableUpload) {
-    const cleanupExpiredFiles = async () => {
+    // Every minute, the uploads whose lifetime has ended go: each is one object, a file or a bundle
+    // alike. They're already answered as missing; this removes their bytes and records. Their open
+    // leases end with them, uncounted.
+    const removeExpiredUploads = async () => {
         const now = Date.now();
-        const allFiles = await fileDatabase.all();
-        for (const record of allFiles) {
-            if (record.value?.expiresAt && record.value.expiresAt < now) {
-                // Skip files that belong to a bundle (they are cleaned up with the bundle)
-                if (record.value.bundleId) continue;
-                log('debug', 'File expired. Deleting...');
-                try {
-                    const stats = fs.statSync(record.value.path);
-                    currentDiskUsage = Math.max(0, currentDiskUsage - stats.size);
-                    fs.rmSync(record.value.path, { force: true });
-                } catch (e) { }
-                await fileDatabase.delete(record.id);
-            }
-        }
-
-        // Dropgate 4's uploads: each is one object, a file or a bundle alike. Its open leases end with it, uncounted.
         for (const record of await objectDatabase.all()) {
             if (record.value?.expiresAt && record.value.expiresAt < now) {
                 log('debug', 'Upload expired. Deleting...');
@@ -2363,94 +1501,8 @@ if (enableUpload) {
                 });
             }
         }
-
-        // Clean up expired bundles and their member files
-        const allBundles = await bundleDatabase.all();
-        for (const record of allBundles) {
-            if (record.value?.expiresAt && record.value.expiresAt < now) {
-                if (record.value.sealed) {
-                    // Sealed bundle: just delete the manifest record.
-                    // Member files are independent and handled by the file cleanup above.
-                    log('debug', 'Sealed bundle manifest expired. Deleting manifest record...');
-                } else {
-                    // Unsealed bundle: delete member files
-                    log('debug', `Bundle expired. Deleting ${record.value.files?.length || 0} member files...`);
-                    for (const f of (record.value.files || [])) {
-                        const fileInfo = await fileDatabase.get(f.fileId);
-                        if (fileInfo) {
-                            try {
-                                const stats = fs.statSync(fileInfo.path);
-                                currentDiskUsage = Math.max(0, currentDiskUsage - stats.size);
-                                fs.rmSync(fileInfo.path, { force: true });
-                            } catch (e) { }
-                            await fileDatabase.delete(f.fileId);
-                        }
-                    }
-                }
-                await bundleDatabase.delete(record.id);
-            }
-        }
     };
-
-    const cleanupZombieUploads = () => {
-        const now = Date.now();
-        for (const [id, session] of ongoingUploads.entries()) {
-            if (now > session.expiresAt) {
-                // Skip uploads whose parent bundle session is still alive —
-                // the bundle zombie cleanup handles them as a group.
-                if (session.bundleUploadId && ongoingBundles.has(session.bundleUploadId)) continue;
-
-                log('debug', 'Cleaning zombie upload.');
-                try {
-                    fs.rmSync(session.tempFilePath, { force: true });
-                } catch (e) { }
-                ongoingUploads.delete(id);
-            }
-        }
-
-        // Clean up zombie bundle sessions
-        for (const [id, session] of ongoingBundles.entries()) {
-            if (now > session.expiresAt) {
-                log('debug', 'Cleaning zombie bundle upload.');
-                // Clean up any individual upload sessions that belong to this bundle
-                for (const uploadId of session.fileUploadIds) {
-                    const uploadSession = ongoingUploads.get(uploadId);
-                    if (uploadSession) {
-                        try { fs.rmSync(uploadSession.tempFilePath, { force: true }); } catch (e) { }
-                        ongoingUploads.delete(uploadId);
-                    }
-                }
-                // Clean up any already-completed files from this bundle
-                for (const result of (session.completedFileResults || [])) {
-                    const fileInfo = fileDatabase.get(result.fileId);
-                    if (fileInfo) {
-                        try {
-                            const stats = fs.statSync(fileInfo.path);
-                            currentDiskUsage = Math.max(0, currentDiskUsage - stats.size);
-                            fs.rmSync(fileInfo.path, { force: true });
-                        } catch (e) { }
-                        fileDatabase.delete(result.fileId);
-                    }
-                }
-                ongoingBundles.delete(id);
-            }
-        }
-    };
-
-    setInterval(cleanupExpiredFiles, 60000);
-
-    const zombieCleanupIntervalMs = process.env.UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS ? process.env.UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS : 300000;
-    if (isNaN(zombieCleanupIntervalMs) || zombieCleanupIntervalMs < 0 || !Number.isInteger(Number(zombieCleanupIntervalMs))) {
-        log('error', 'Invalid UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS environment variable. It must be a non-negative integer.');
-        process.exit(1);
-    }
-
-    if (Number(zombieCleanupIntervalMs) > 0) {
-        setInterval(cleanupZombieUploads, Number(zombieCleanupIntervalMs));
-        log('info', `UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS: ${zombieCleanupIntervalMs} ms`);
-    } else {
-        log('warn', 'UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS is set to 0! Zombie upload cleanup is disabled.');
-    }
+    setInterval(removeExpiredUploads, 60000);
 }
 
 // Not being able to listen, such as when the port is taken, stops the server.

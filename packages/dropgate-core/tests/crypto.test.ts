@@ -4,7 +4,7 @@ import { join, relative } from 'node:path';
 import { inspect } from 'node:util';
 import { createCipheriv, createHmac } from 'node:crypto';
 import { DropgateClient, codes } from '../src/index.js';
-import { cryptoProvider, webCryptoProvider, sha256Hex } from '../src/crypto/index.js';
+import { cryptoProvider, webCryptoProvider } from '../src/crypto/index.js';
 import { newOperationId } from '../src/operation.js';
 import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
 
@@ -118,7 +118,7 @@ describe('The WebCrypto provider', () => {
   });
 
   it('hashes SHA-256 (FIPS 180-4 "abc"), and gives random bytes of any length', async () => {
-    expect(await sha256Hex(provider, new TextEncoder().encode('abc'))).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+    expect(hex(await provider.sha256(new TextEncoder().encode('abc')))).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
     const big = provider.randomBytes(200_000);
     expect(big.byteLength).toBe(200_000);
     expect(big.subarray(150_000).some((b) => b !== 0)).toBe(true);
@@ -136,7 +136,7 @@ describe('On a page served over plain HTTP (no crypto.subtle, no randomUUID)', (
     for (const id of ids) expect(id).toMatch(UUID_V4);
     expect(new Set(ids).size).toBe(50);
     const data = cryptoProvider().randomBytes(10_000);
-    expect(await sha256Hex(provider, data)).toBe(await sha256Hex(cryptoProvider(), data));
+    expect(hex(await provider.sha256(data))).toBe(hex(await cryptoProvider().sha256(data)));
     await expect(provider.generateKey()).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });
     await expect(provider.deriveContentKey(new Uint8Array(32), new Uint8Array(16), new Uint8Array(1))).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });
     await expect(provider.deriveMacKey(new Uint8Array(32), new Uint8Array(16), new Uint8Array(1))).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });

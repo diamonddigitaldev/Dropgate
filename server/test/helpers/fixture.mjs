@@ -125,10 +125,10 @@ export async function runFixture(server, { faults = false } = {}) {
     await page.close();
 
     if (faults) {
-        await recorder.fetch(`${server.baseUrl}/api/resolve`, {
+        await recorder.fetch(`${server.baseUrl}/api/v4/uploads`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: `{"value": ${BODY_MARKER}}`,
+            body: `{"files": ${BODY_MARKER}}`,
         });
         recorder.note(BODY_MARKER);
 

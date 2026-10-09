@@ -153,7 +153,7 @@ export async function startServer({ env = {}, clock = false, requests = false, p
         /**
          * Every record in one of the server's databases, as { id, value }.
          * Needs UPLOAD_PRESERVE_UPLOADS=true; the in-memory mode stores the same records.
-         * @param {'file-database.sqlite' | 'bundle-database.sqlite' | 'objects.sqlite'} name - Dropgate 3's two, or 4's one.
+         * @param {'objects.sqlite'} name - The server's one.
          */
         records: (name) => {
             const Database = createRequire(path.join(dir, 'server.js'))('better-sqlite3');

@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { startServer, waitFor } from './helpers/harness.mjs';
-import { initUpload, postJson, sendChunk } from './helpers/uploads.mjs';
+import { downloads, encryptedObject, fileBytes, uploadObject } from './helpers/dgup4.mjs';
 
 const ORIGIN = 'https://integrator.example';
 const ALLOWED = ['Content-Type', 'Content-Digest', 'Range', 'If-Range', 'Authorization', 'Dropgate-Upload', 'Dropgate-Lease', 'Dropgate-Manage-Token'];
@@ -40,32 +40,37 @@ describe('errors', () => {
     });
 
     test('a request body that can\'t be read answers 400 INVALID_REQUEST, and one too large 413 TOO_LARGE, quoting none of it', async () => {
-        const unreadable = await fetch(`${server.baseUrl}/upload/init`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"filename": zq7BODY',
-        });
-        assert.deepEqual(await jsonAnswer(unreadable), { status: 400, body: { code: 'INVALID_REQUEST', error: 'The request could not be read.' } });
+        for (const route of ['/api/v4/uploads', '/api/v4/upload/complete']) {
+            const unreadable = await fetch(server.baseUrl + route, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"files": zq7BODY',
+            });
+            assert.deepEqual(await jsonAnswer(unreadable), { status: 400, body: { code: 'INVALID_REQUEST', error: 'The request could not be read.' } }, route);
+        }
 
-        const tooLarge = await postJson(server, '/upload/init', { filename: 'zq7BODY'.repeat(200_000) });
+        const tooLarge = await fetch(`${server.baseUrl}/api/v4/upload/complete`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ files: 'zq7BODY'.repeat(200_000) }),
+        });
         assert.deepEqual(await jsonAnswer(tooLarge), { status: 413, body: { code: 'TOO_LARGE', error: 'The request is too large.' } });
     });
 
     test('an error while answering gives 500 SERVER_ERROR, and the log names the route\'s pattern, never its ID', async () => {
-        // A stored file that has gone from disk, as when an expiry races a download.
-        const { uploadId } = await initUpload(server, 1000, 1);
-        await sendChunk(server, uploadId, 0, new Uint8Array(1000).fill(1));
-        const { id } = await (await postJson(server, '/upload/complete', { uploadId })).json();
-        fs.rmSync(path.join(server.uploadsDir, id));
+        // A stored upload's object that can't be read: a folder where its file should be. (One
+        // that has gone from disk, as when an expiry races a download, is simply not there.)
+        const object = encryptedObject({ files: [{ name: 'unreadable.bin', bytes: fileBytes(1000) }], chunkSize: 5 * 1024 * 1024 });
+        const { id } = await uploadObject(server, object);
+        fs.rmSync(path.join(server.uploadsDir, 'objects', id));
+        fs.mkdirSync(path.join(server.uploadsDir, 'objects', id));
 
         const mark = server.mark();
-        const res = await fetch(`${server.baseUrl}/api/file/${id}`);
+        const res = await downloads.metadata(server, id);
         assert.deepEqual(await jsonAnswer(res), { status: 500, body: { code: 'SERVER_ERROR', error: 'Something went wrong on the server.' } });
 
         await waitFor(() => server.since(mark).stderr.includes('[ERROR]'), { what: 'the error\'s log line' });
         const { stdout, stderr } = server.since(mark);
         const lines = (stdout + stderr).split(/\r?\n/).filter(Boolean);
         assert.equal(lines.length, 1, `one line was written, not:\n${lines.join('\n')}`);
-        assert.match(lines[0], /\[ERROR\] Unexpected error while answering a request to GET \/api\/file\/:fileId \(Error, ENOENT\)\.$/);
-        assert.ok(!lines[0].includes(id), 'the log line holds the file\'s ID');
+        assert.match(lines[0], /\[ERROR\] Unexpected error while answering a request to GET \/api\/v4\/objects\/:id \(Error, E[A-Z]+\)\.$/);
+        assert.ok(!lines[0].includes(id), 'the log line holds the upload\'s ID');
     });
 });
 

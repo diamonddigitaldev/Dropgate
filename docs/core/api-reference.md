@@ -135,7 +135,7 @@ An upload or a download can pause, and later resume from where it stopped, with 
 * **It settles once the server has answered:** `pause()` resolves once the server holds it, and `resume()` once it's running again. Meanwhile `canPause` is `false`. If the server refuses the pause, nothing changes, and `pause()` rejects; if the server no longer has the upload, or the lease, the operation fails with `NOT_FOUND`, and so does the call. A resume the server can't be asked about stays paused. Each request is retried as a chunk is ([Retries](#retries)).
 * **The deadline:** paused, the snapshot's `deadline` is when the server stops holding it, in milliseconds since 1970: the server's own deadline, or its pause length from when it answered if that's later, so a server clock behind this one never ends a pause early. Pausing again while paused renews it from then. **Nothing resumes by itself:** still paused at the deadline, the operation fails with `NOT_FOUND`, "The server dropped this paused upload." (or download).
 * `cancel()` works while paused: an upload's server is told to discard it, and a download's sink is aborted and its lease released.
-* **What a pause holds is in memory only:** the operation's own state, an upload's sealed chunk that was stopped, and nothing more than the server already holds for the upload or the lease ([DGUP §19.5](../technical/DGUP.md#195-pause-and-resume)).
+* **What a pause holds is in memory only:** the operation's own state, an upload's sealed chunk that was stopped, and nothing more than the server already holds for the upload or the lease ([DGUP §5.4](../technical/DGUP.md#54-pause-and-resume)).
 
 `pause()` rejects with `PAUSE_UNAVAILABLE` before the server has taken the upload or given the download its lease, once it's finishing or has ended, or while a pause or resume is settling, and `CAPABILITY_UNSUPPORTED` on a server with pausing turned off; `resume()` rejects with `PAUSE_UNAVAILABLE` when it isn't paused. Neither changes anything then.
 
@@ -218,7 +218,7 @@ Its session has `peer`, `stop()`, `getStatus()`, `getBytesReceived()`, `getTotal
 
 Its result has `valid`, and `transport`, valid or not. A valid one has `type` and `target`, the path to open on the server: `hosted` for an upload's link or ID (`/<id>`, with the secret after its `#` still on it), `bundle` for a Dropgate 3 bundle's link (`/b/<id>#<key>`), whose page says it was made with an older version, or `p2p` for a direct transfer's code (`/p2p/<code>`, the code upper case). Whether the upload is there is for the page it opens to find out. One that isn't valid has `reason`, for people. It throws `VERSION_UNSUPPORTED` if the server's DGUP doesn't work with this client's, or `connect()`'s errors.
 
-**Changed in 4.0:** `resolve()` asks the server nothing about the input, where 3.x sent the ID or code to `/api/resolve`; a hosted upload's `type` is `hosted`, where 3.x said `file`.
+**Changed in 4.0:** `resolve()` asks the server nothing about the input, where 3.x sent the ID or code to the server to resolve (a Dropgate 4 server has no such route); a hosted upload's `type` is `hosted`, where 3.x said `file`.
 
 ### client.server
 

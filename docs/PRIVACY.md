@@ -13,14 +13,14 @@ The current log level is also exposed to clients via `GET /api/info` so users ca
 Dropgate is intentionally opinionated about avoiding identifying data.
 By design, Dropgate's own log messages **never** include:
 
-- File contents / Bundle manifests
+- File contents / file lists, sealed or not
 - File names
 - Encryption keys / URL fragments
-- Upload session IDs
+- Upload IDs, of uploads in progress
 - Download leases
 - Manage tokens, or their hashes
-- File IDs
-- Bundle IDs
+- The IDs of stored uploads
+- How many files an upload has
 - Client IP addresses
 - Per-request identifiers or headers
 
@@ -28,7 +28,7 @@ If you’re running a public instance, this is one of the key ways the project t
 
 **Everything the server writes goes through `LOG_LEVEL`,** errors included:
 
-- **Unexpected errors** are logged at `ERROR` by the kind of error and the route's pattern only, such as `GET /api/file/:fileId (Error, ENOENT)`: never the error's message or stack trace, which could hold the internal path of a stored file (and so its file ID) or part of a request body. The answer to the request says only that something went wrong.
+- **Unexpected errors** are logged at `ERROR` by the kind of error and the route's pattern only, such as `GET /api/v4/objects/:id (Error, EISDIR)`: never the error's message or stack trace, which could hold the internal path of a stored upload (and so its ID) or part of a request body. The answer to the request says only that something went wrong.
 - **A misconfigured reverse proxy,** one that passes a client address the rate limiter can't read (for example `IP:port`), is logged at `ERROR` by the rate limiter's error code, never the address.
 
 ---
@@ -39,23 +39,23 @@ Depending on your `LOG_LEVEL`, you may see:
 
 - Startup configuration (feature flags, limits, and server name)
 - Storage usage at startup (useful for capacity limits)
+- How many uploads a persistent Dropgate 3 server left, once, at the start that deletes them: Dropgate 4 can't serve them, and their links already don't work
 - Rate limit warnings
 - Internal errors, by their kind only (from Node.js / the OS)
 
 At `DEBUG` level you may also see:
 
-- Upload/download lifecycle events (init/chunk/complete/download)
+- Upload lifecycle events (start/chunk/finish/cancel), with sizes
 - An upload paused or resumed, and one that ended at its deadline, with its size
 - A download lease taken or paused, a download counted against its limit, and an upload deleted at its download limit or by its uploader
 - Chunk counts and chunk sizes
-- The number of files in a Dropgate 3 bundle, sent on Dropgate 3's routes (no Dropgate 4 upload's line gives how many files it has)
-- Cleanup of expired or incomplete uploads
+- Expired uploads being deleted
 
 **A paused upload** is kept only in the server's memory, with its temporary file and the storage it reserved, until its pause runs out (`UPLOAD_MAX_PAUSE_MINUTES`): then it goes at once. Nothing about it, not even that it exists, is written to a database, so a restart ends it, with `UPLOAD_PRESERVE_UPLOADS=true` too. No upload in progress, paused or not, records an IP address or when it started.
 
-**A download** of a Dropgate 4 upload takes a lease: a random ID, held only in the server's memory with the upload's ID, whether it has sent any bytes, whether it's paused, and when it runs out. It holds no IP address and nothing else about who asked, and none survives a restart. When it ends, it counts as one download if it sent anything; at the upload's download limit, the upload is deleted at once. A download page holds one lease for everything it downloads, an upload's files one by one and its ZIP, and releases it as the page closes. Its metadata (what a link preview or a download page reads first) takes no lease and counts nothing.
+**A download** of an upload takes a lease: a random ID, held only in the server's memory with the upload's ID, whether it has sent any bytes, whether it's paused, and when it runs out. It holds no IP address and nothing else about who asked, and none survives a restart. When it ends, it counts as one download if it sent anything; at the upload's download limit, the upload is deleted at once. A download page holds one lease for everything it downloads, an upload's files one by one and its ZIP, and releases it as the page closes. Its metadata (what a link preview or a download page reads first) takes no lease and counts nothing.
 
-**An uploader can delete their own upload** with its manage token, a random value only the page or app that uploaded it holds: in the Web UI, **Delete Upload** on the result screen, while the page is open. The server keeps only its SHA-256, and the token is sent only in the delete's own header, never in a URL. Deleting removes the upload's bytes and record at once, and downloads in progress stop. With `UPLOAD_PRESERVE_UPLOADS=true`, Dropgate 4's database writes zeros over a record as it deletes it, so an upload that's gone leaves nothing of itself in the file.
+**An uploader can delete their own upload** with its manage token, a random value only the page or app that uploaded it holds: in the Web UI, **Delete Upload** on the result screen, while the page is open. The server keeps only its SHA-256, and the token is sent only in the delete's own header, never in a URL. Deleting removes the upload's bytes and record at once, and downloads in progress stop. With `UPLOAD_PRESERVE_UPLOADS=true`, the database writes zeros over a record as it deletes it, so an upload that's gone leaves nothing of itself in the file.
 
 File sizes and capacity values may appear in logs because they’re necessary for understanding limits and diagnosing issues.
 
