@@ -1,8 +1,14 @@
-import { DropgateClient, decryptFilenameFromBase64 } from './dropgate-core.js';
+import { filenames } from './dropgate-core.js';
+import { saveStream } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
+
+// The download page's half for an upload of several files. Every download it
+// makes counts as one download of the upload, however many there are: core's
+// opened upload holds one lease from the first download until the page goes.
 
 const statusTitle = document.getElementById('status-title');
 const statusMessage = document.getElementById('status-message');
+const pageLead = document.getElementById('page-lead');
 const bundleDetails = document.getElementById('bundle-details');
 const bundleFileCount = document.getElementById('bundle-file-count');
 const bundleTotalSize = document.getElementById('bundle-total-size');
@@ -20,19 +26,31 @@ const progressFileName = document.getElementById('progress-file-name');
 const iconContainer = document.getElementById('icon-container');
 const card = document.getElementById('status-card');
 const encryptionStatement = document.getElementById('encryption-statement');
+const encryptionStatementTitle = document.getElementById('encryption-statement-title');
+const encryptionStatementText = document.getElementById('encryption-statement-text');
 
-const client = new DropgateClient({ clientVersion: '3.0.13', server: location.origin });
+// How often the page renews the lease its browser downloads are under: well
+// inside the 5 minutes the server holds one with no request.
+const LEASE_RENEW_MS = 2 * 60 * 1000;
 
 const bundleState = {
-  bundleId: null,
+  id: null,
+  opened: null,
   isEncrypted: false,
-  keyB64: null,
   filenames: [],
   files: [],
-  totalSizeBytes: 0,
+  // The lease the browser's own downloads are under, on a page with no secure context.
+  lease: null,
+  leaseTaking: null,
+  leaseTimer: null,
 };
 
 let fileListVisible = false;
+let formatBytes = (bytes) => `${bytes} bytes`;
+let takeLease = async () => { throw new Error('The download could not start.'); };
+
+/** Whether this page can stream a download through core: a secure context, with StreamSaver. */
+const canStream = () => window.isSecureContext && Boolean(window.streamSaver?.createWriteStream);
 
 function showError(title, message) {
   setStatusError({
@@ -48,29 +66,19 @@ function showError(title, message) {
   fileListContainer.style.display = 'none';
 }
 
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return '0 bytes';
-  if (bytes === 0) return '0 bytes';
-  const k = 1000;
-  const sizes = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const v = bytes / Math.pow(k, i);
-  return `${v.toFixed(v < 10 && i > 0 ? 2 : 1)} ${sizes[i]}`;
-}
-
 function toggleFileList() {
   fileListVisible = !fileListVisible;
   fileList.style.display = fileListVisible ? 'block' : 'none';
   toggleFileListBtn.innerHTML = fileListVisible
-    ? '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_less</span> Hide files'
-    : '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span> Show files';
+    ? '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_less</span> Hide Files'
+    : '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span> Show Files';
 }
 
 function buildFileList() {
   fileListItems.innerHTML = '';
   for (let i = 0; i < bundleState.filenames.length; i++) {
     const name = bundleState.filenames[i];
-    const size = bundleState.files[i].sizeBytes;
+    const size = bundleState.files[i].size;
 
     const li = document.createElement('li');
     li.className = 'list-group-item py-2';
@@ -92,12 +100,8 @@ function buildFileList() {
     sizeSpan.textContent = formatBytes(size);
     rightSide.appendChild(sizeSpan);
 
-    // Always use a button for individual downloads (routes through dropgate core)
-    const canStream = window.isSecureContext && window.streamSaver?.createWriteStream;
-    // For encrypted files, streaming is required
-    if (bundleState.isEncrypted && !canStream) {
-      // No download button — streaming not available
-    } else {
+    // An encrypted file needs streaming, to decrypt it here; without it there's no button.
+    if (!bundleState.isEncrypted || canStream()) {
       const dlBtn = document.createElement('button');
       dlBtn.className = 'btn btn-sm btn-outline-primary d-inline-flex align-items-center justify-content-center';
       dlBtn.title = `Download ${name}`;
@@ -127,100 +131,97 @@ function buildFileList() {
   }
 }
 
+/**
+ * The lease the browser's own downloads are under, taken at the first and
+ * renewed while the page is open, so every file it downloads counts as one.
+ */
+async function pageLease() {
+  if (bundleState.lease) return bundleState.lease;
+  bundleState.leaseTaking ??= takeLease(bundleState.id).finally(() => { bundleState.leaseTaking = null; });
+  bundleState.lease = await bundleState.leaseTaking;
+  bundleState.leaseTimer ??= setInterval(renewPageLease, LEASE_RENEW_MS);
+  return bundleState.lease;
+}
+
+async function renewPageLease() {
+  const lease = bundleState.lease;
+  if (!lease) return;
+  try {
+    const res = await fetch('/api/v4/lease/renew', {
+      method: 'POST',
+      credentials: 'omit',
+      headers: { Accept: 'application/json', 'Dropgate-Lease': lease },
+    });
+    // It ended (the upload went, or it ran out): the next download takes another.
+    if (res.status === 404 && bundleState.lease === lease) bundleState.lease = null;
+  } catch { /* Tried again in 2 minutes; the server holds it for 5. */ }
+}
+
+/** Hands file `index` to the browser to download itself, under the page's lease. */
+function browserDownload(lease, index) {
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.src = `/api/v4/leases/${encodeURIComponent(lease)}/files/${index}`;
+  document.body.appendChild(iframe);
+}
+
 async function downloadSingleFile(index, dlBtn) {
   const name = bundleState.filenames[index];
-  const fileId = bundleState.files[index].fileId;
-  const size = bundleState.files[index].sizeBytes;
+  const size = bundleState.files[index].size;
 
   const fileProgressEl = document.getElementById(`file-progress-${index}`);
   const fileProgressBar = document.getElementById(`file-progress-bar-${index}`);
   const fileProgressText = document.getElementById(`file-progress-text-${index}`);
+  const failed = (message) => {
+    if (fileProgressText) {
+      fileProgressText.textContent = message;
+      fileProgressText.classList.remove('text-success-emphasis');
+      fileProgressText.classList.add('text-danger-emphasis');
+    }
+  };
 
-  // Disable button during download
   if (dlBtn) dlBtn.disabled = true;
-
-  // Show per-file progress
   if (fileProgressEl) fileProgressEl.style.display = 'block';
   if (fileProgressBar) fileProgressBar.style.width = '0%';
   if (fileProgressText) fileProgressText.textContent = 'Starting...';
 
-  // Check if we can use streaming (required for encrypted, preferred for plaintext)
-  const canStream = window.isSecureContext && window.streamSaver?.createWriteStream;
-
-  if (bundleState.isEncrypted && !canStream) {
-    if (fileProgressText) {
-      fileProgressText.textContent = 'Encrypted files require a secure context (HTTPS).';
-      fileProgressText.classList.add('text-danger');
+  // With no secure context, an unencrypted file goes to the browser itself.
+  if (!canStream()) {
+    try {
+      browserDownload(await pageLease(), index);
+      if (fileProgressBar) fileProgressBar.style.width = '100%';
+      if (fileProgressText) fileProgressText.textContent = 'Download started. Check your browser downloads.';
+    } catch (error) {
+      console.error(error);
+      failed(error.message || 'The download could not start.');
+    } finally {
+      if (dlBtn) dlBtn.disabled = false;
     }
-    if (dlBtn) dlBtn.disabled = false;
     return;
   }
 
-  // For plaintext without streaming, check file existence first then fall back to direct download
-  if (!bundleState.isEncrypted && !canStream) {
-    try {
-      const metaRes = await fetch(`/api/file/${fileId}/meta`);
-      if (!metaRes.ok) {
-        if (fileProgressText) {
-          fileProgressText.textContent = metaRes.status === 404
-            ? 'File not found or has expired.'
-            : `Download failed (${metaRes.status}).`;
-          fileProgressText.classList.add('text-danger');
-        }
-        if (dlBtn) dlBtn.disabled = false;
-        return;
-      }
-      // File exists, use hidden iframe for download
-      const iframe = document.createElement('iframe');
-      iframe.style.display = 'none';
-      iframe.src = `/api/file/${fileId}`;
-      document.body.appendChild(iframe);
-      if (fileProgressBar) fileProgressBar.style.width = '100%';
-      if (fileProgressText) fileProgressText.textContent = 'Download started. Check your browser downloads.';
-      if (dlBtn) dlBtn.disabled = false;
-      return;
-    } catch (error) {
-      console.error('File check failed:', error);
-      if (fileProgressText) {
-        fileProgressText.textContent = 'Could not reach the server. Please try again.';
-        fileProgressText.classList.add('text-danger');
-      }
-      if (dlBtn) dlBtn.disabled = false;
-      return;
-    }
-  }
-
-  // Stream download via dropgate-core (both plaintext and encrypted)
+  // Streamed through core, under the page's one lease: only this file's chunks are asked for.
   try {
-    const fileStream = streamSaver.createWriteStream(name, size ? { size } : undefined);
-    const writer = fileStream.getWriter();
-
-    await client.downloadFiles({
-      fileId,
-      keyB64: bundleState.keyB64,
+    const download = bundleState.opened.download({
+      files: [index],
       timeoutMs: 0,
-      onProgress: ({ percent, processedBytes, totalBytes }) => {
-        if (fileProgressBar) fileProgressBar.style.width = `${percent}%`;
-        if (fileProgressText) fileProgressText.textContent = `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}`;
-      },
-      onData: async (chunk) => {
-        await writer.write(chunk);
-      },
+      sink: () => saveStream(name, size ? { size } : undefined).getWriter(),
     });
-
-    await writer.close();
+    download.subscribe(({ percent, processedBytes, totalBytes }) => {
+      if (fileProgressBar) fileProgressBar.style.width = `${percent}%`;
+      if (fileProgressText) fileProgressText.textContent = `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}`;
+    });
+    const outcome = await download.result;
+    if (outcome.status !== 'completed') throw outcome.error ?? new Error('Download cancelled.');
     if (fileProgressBar) fileProgressBar.style.width = '100%';
     if (fileProgressText) {
       fileProgressText.textContent = 'Download complete!';
-      fileProgressText.classList.remove('text-danger');
-      fileProgressText.classList.add('text-success');
+      fileProgressText.classList.remove('text-danger-emphasis');
+      fileProgressText.classList.add('text-success-emphasis');
     }
   } catch (error) {
     console.error('Single file download failed:', error);
-    if (fileProgressText) {
-      fileProgressText.textContent = error.message || `Failed to download "${name}".`;
-      fileProgressText.classList.add('text-danger');
-    }
+    failed(error.message || `Failed to download "${name}".`);
   } finally {
     if (dlBtn) dlBtn.disabled = false;
   }
@@ -239,39 +240,23 @@ async function downloadAllAsZip() {
     icon: bundleState.isEncrypted ? Icons.DOWNLOAD_ENCRYPTED : Icons.DOWNLOAD,
   });
 
-  // For encrypted bundles, require secure context
-  if (bundleState.isEncrypted) {
-    if (!window.isSecureContext || !window.streamSaver?.createWriteStream) {
-      showError('Secure Context Required', 'Encrypted bundles must be downloaded in a secure context (HTTPS).');
-      return;
-    }
-  }
-
-  // For plain bundles in non-secure context, fall back to sequential direct downloads
-  if (!bundleState.isEncrypted && (!window.isSecureContext || !window.streamSaver?.createWriteStream)) {
+  // With no secure context, each file goes to the browser itself, one after another, under the page's lease.
+  if (!canStream()) {
     progressContainer.style.display = 'none';
     statusTitle.textContent = 'Downloading Files...';
     statusMessage.textContent = 'Your browser will download each file individually.';
-
-    for (let i = 0; i < bundleState.files.length; i++) {
-      const fileId = bundleState.files[i].fileId;
-      // Use iframes for sequential downloads to avoid popup blockers
-      const iframe = document.createElement('iframe');
-      iframe.style.display = 'none';
-      iframe.src = `/api/file/${fileId}`;
-      document.body.appendChild(iframe);
-      // Stagger to avoid browser throttling
-      await new Promise(r => setTimeout(r, 500));
-    }
-
-    // Mark bundle as downloaded
     try {
-      await fetch(`/api/bundle/${bundleState.bundleId}/downloaded`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      });
-    } catch { /* Best effort */ }
+      const lease = await pageLease();
+      for (let i = 0; i < bundleState.files.length; i++) {
+        browserDownload(lease, i);
+        // Staggered, so the browser doesn't hold any back.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    } catch (error) {
+      console.error(error);
+      showError('Download Failed', error.message || 'The download could not start.');
+      return;
+    }
 
     setStatusSuccess({
       card,
@@ -285,31 +270,25 @@ async function downloadAllAsZip() {
   }
 
   try {
-    const zipName = `dropgate-bundle-${bundleState.bundleId}.zip`;
+    const zipName = `dropgate-bundle-${bundleState.id}.zip`;
     statusTitle.textContent = bundleState.isEncrypted ? 'Downloading & Decrypting' : 'Downloading';
     statusMessage.textContent = `Your browser will ask you where to save "${zipName}".`;
 
-    const fileStream = streamSaver.createWriteStream(zipName);
-    const writer = fileStream.getWriter();
-
-    await client.downloadFiles({
-      bundleId: bundleState.bundleId,
-      keyB64: bundleState.keyB64,
+    const download = bundleState.opened.download({
       asZip: true,
       timeoutMs: 0,
-      onProgress: (evt) => {
-        progressBar.style.width = `${evt.percent}%`;
-        progressText.textContent = `${formatBytes(evt.processedBytes)} / ${formatBytes(evt.totalBytes)}`;
-        if (evt.currentFileName) {
-          progressFileName.textContent = evt.currentFileName;
-        }
-      },
-      onData: async (chunk) => {
-        await writer.write(chunk);
-      },
+      sink: saveStream(zipName).getWriter(),
     });
-
-    await writer.close();
+    // Core's snapshots never name a file, so the name comes from this page's own list.
+    download.subscribe(({ percent, processedBytes, totalBytes, fileIndex }) => {
+      progressBar.style.width = `${percent}%`;
+      progressText.textContent = `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}`;
+      if (Number.isInteger(fileIndex) && bundleState.filenames[fileIndex] !== undefined) {
+        progressFileName.textContent = bundleState.filenames[fileIndex];
+      }
+    });
+    const outcome = await download.result;
+    if (outcome.status !== 'completed') throw outcome.error ?? new Error('Download cancelled.');
 
     progressBar.style.width = '100%';
     progressFileName.textContent = '';
@@ -337,89 +316,65 @@ async function downloadAllAsZip() {
       titleEl: statusTitle,
       messageEl: statusMessage,
       title: 'Download Failed',
-      message: error?.message || 'The bundle may have expired, or the download failed.',
+      message: error?.message || 'The upload may have expired, or the download failed.',
     });
   }
 }
 
-async function loadMetadata() {
-  const bundleId = document.body.dataset.bundleId;
-  if (!bundleId) {
-    showError('Invalid Link', 'The bundle ID is missing from this link.');
-    return;
-  }
+/**
+ * Shows an upload of several files, opened with core: its list, a button for
+ * each file, and Download All. `takeLease` takes a lease for the browser's
+ * own downloads, on a page with no secure context.
+ */
+export function showBundle({ id, opened, format, takeLease: take }) {
+  const meta = opened.metadata;
+  bundleState.id = id;
+  bundleState.opened = opened;
+  bundleState.isEncrypted = meta.encrypted;
+  bundleState.files = meta.files.map(({ size }) => ({ size }));
+  // Shown and saved under their safe names: the one file name rule.
+  bundleState.filenames = meta.files.map(({ name }) => filenames.sanitize(name));
+  formatBytes = format;
+  takeLease = take;
 
-  bundleState.bundleId = bundleId;
+  // Leaving the page closes the opened upload: its lease is released, and
+  // counts as one download if anything was downloaded. The browser's own
+  // downloads go on after the page, so their lease isn't released: it runs
+  // out by itself, 5 minutes after their last bytes.
+  window.addEventListener('pagehide', () => {
+    opened.close();
+    clearInterval(bundleState.leaseTimer);
+    bundleState.leaseTimer = null;
+  });
+  // Back from the back-forward cache, it's closed: the page starts again.
+  window.addEventListener('pageshow', (event) => { if (event.persisted) window.location.reload(); });
 
-  try {
-    // Get decryption key from URL hash if present
-    const hash = window.location.hash.substring(1);
-    bundleState.keyB64 = hash || null;
+  pageLead.textContent = 'This link contains multiple files.';
+  iconContainer.innerHTML = '<span class="material-icons-round">folder_zip</span>';
+  encryptionStatementTitle.textContent = 'End-to-End Encryption enabled for these files!';
+  encryptionStatementText.textContent = 'Your files will be decrypted locally in your browser using the key in the URL. The server never sees the decrypted data.';
 
-    // Use core library to fetch and process bundle metadata
-    const meta = await client.getBundleMetadata(bundleId, bundleState.keyB64);
+  bundleFileCount.textContent = `${meta.files.length}`;
+  bundleTotalSize.textContent = formatBytes(meta.totalSize);
+  bundleEncryption.textContent = meta.encrypted ? 'End-to-End Encrypted' : 'None';
 
-    bundleState.isEncrypted = Boolean(meta.isEncrypted);
-    bundleState.totalSizeBytes = meta.totalSizeBytes;
-
-    bundleFileCount.textContent = `${meta.fileCount}`;
-    bundleTotalSize.textContent = formatBytes(meta.totalSizeBytes);
-    bundleEncryption.textContent = meta.isEncrypted ? 'End-to-End Encrypted' : 'None';
-
-    if (meta.isEncrypted) {
-      encryptionStatement.style.display = 'block';
-
-      if (!window.isSecureContext) {
-        showError('Secure Connection Required', 'Encrypted bundles can only be downloaded over HTTPS.');
-        return;
-      }
-
-      if (!bundleState.keyB64) {
-        showError('Missing Decryption Key', 'The decryption key was not found in the URL.');
-        return;
-      }
-
-      // For sealed bundles, filenames are already decrypted by the core library
-      // For unsealed bundles, decrypt individual filenames
-      if (meta.sealed) {
-        bundleState.files = meta.files.map(f => ({
-          fileId: f.fileId,
-          sizeBytes: f.sizeBytes,
-        }));
-        // Core library maps decrypted manifest 'name' to 'filename' for consistency
-        bundleState.filenames = meta.files.map(f => f.filename || 'file');
-      } else {
-        bundleState.files = meta.files;
-        for (const f of meta.files) {
-          bundleState.filenames.push(await decryptFilenameFromBase64(crypto, f.encryptedFilename, bundleState.keyB64));
-        }
-      }
-    } else {
-      bundleState.files = meta.files;
-      for (const f of meta.files) {
-        bundleState.filenames.push(f.filename || 'file');
-      }
+  if (meta.encrypted) {
+    encryptionStatement.style.display = 'block';
+    if (!window.isSecureContext) {
+      showError('Secure Connection Required', 'Encrypted files can only be downloaded over HTTPS.');
+      return;
     }
-
-    // Show details
-    bundleDetails.style.display = 'block';
-    fileListContainer.style.display = 'block';
-    downloadActions.style.display = 'block';
-
-    buildFileList();
-    toggleFileListBtn.addEventListener('click', toggleFileList);
-    downloadAllButton.addEventListener('click', downloadAllAsZip);
-
-    statusTitle.textContent = 'Ready to Download';
-    statusMessage.textContent = `${meta.fileCount} file${meta.fileCount !== 1 ? 's' : ''} available. Click "Download All as ZIP" or expand the list to download individually.`;
-  } catch (error) {
-    console.error(error);
-    showError('Error', 'Could not load the bundle details. Please try again later.');
   }
-}
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', loadMetadata);
-} else {
-  loadMetadata();
+  bundleDetails.style.display = 'block';
+  fileListContainer.style.display = 'block';
+  downloadActions.style.display = 'block';
+  if (!canStream()) downloadAllButton.textContent = 'Download All';
+
+  buildFileList();
+  toggleFileListBtn.addEventListener('click', toggleFileList);
+  downloadAllButton.addEventListener('click', downloadAllAsZip);
+
+  statusTitle.textContent = 'Ready to Download';
+  statusMessage.textContent = `${meta.files.length} files available. Click "${downloadAllButton.textContent}" or expand the list to download individually.`;
 }

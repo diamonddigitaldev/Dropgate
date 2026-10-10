@@ -1,0 +1,388 @@
+name: CI
+
+on:
+  push:
+    branches: ['4.0.0']
+  pull_request:
+    branches: ['4.0.0']
+  # The release workflow runs all of this before it releases anything.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    name: Versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # Core, the server and the client are released together from one tag, so
+      # each one's package.json, package-lock.json and README badge must give the
+      # same version. Nothing to install.
+      - name: Check the versions match
+        run: node .github/scripts/check-versions.mjs
+
+  server:
+    name: Server tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          # The expected-failure tests use node:test's expectFailure, added in 24.14.
+          node-version: '^24.14'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      # Windows runners install global packages outside Node's own folder, and
+      # setup-node puts Node's folder, with its bundled npm, first on PATH.
+      - name: Put npm 12 first on PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npm prefix -g >> $env:GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          npm --version
+          npm ci
+
+      # The same run as `npm test`, with the TAP reporter so each expected failure's
+      # label shows in the log. The reporter has to come before the pattern, which
+      # `npm test -- --test-reporter=tap` can't do.
+      - name: Run tests
+        run: node --test --test-reporter=tap "test/*.test.mjs"
+
+  client:
+    name: Client tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          # The expected-failure tests use node:test's expectFailure, added in 24.14.
+          node-version: '^24.14'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      # Windows runners install global packages outside Node's own folder, and
+      # setup-node puts Node's folder, with its bundled npm, first on PATH.
+      - name: Put npm 12 first on PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npm prefix -g >> $env:GITHUB_PATH
+
+      # Electron downloads its binary the first time it runs, not on install, and
+      # these tests only read the source, so nothing large is downloaded here.
+      - name: Install dependencies
+        run: |
+          npm --version
+          npm ci
+
+      # The same run as `npm test`, with the TAP reporter so each expected failure's
+      # label shows in the log.
+      - name: Run tests
+        run: node --test --test-reporter=tap "test/*.test.mjs"
+
+  # The desktop app, built and checked on each platform, in client-build.yml,
+  # which the release workflow builds with too.
+  client-build:
+    name: Client build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    uses: ./.github/workflows/client-build.yml
+    with:
+      os: ${{ matrix.os }}
+
+  core:
+    name: Core typecheck, build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/dropgate-core
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/dropgate-core/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      - name: Install dependencies
+        run: |
+          npm --version
+          npm ci
+
+      # hosted.test.ts runs the real server, through the server suite's harness.
+      - name: Install the server's dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # The build also writes core's copies in the server and the client
+      # (scripts/copy-build.mjs). If that changed anything, a copy was edited by
+      # hand, or not built again after a change to core.
+      - name: Check the server's and client's copies of the build
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            git diff --stat
+            echo "The build changed the files above. Run npm run build in packages/dropgate-core and commit them."
+            exit 1
+          fi
+          echo "The server's and client's copies are this build."
+
+      # The verbose reporter lists every test, so each expected failure's name,
+      # which says what fixes it, shows in the log.
+      - name: Run tests
+        run: npx vitest run --reporter=verbose
+
+      # Core's ZIPs, read by readers that aren't core's: Info-ZIP's unzip -t and
+      # Python's zipfile. A small archive (accented, CJK and repeated names) must
+      # be the classic format; a member of 4 GiB + 1, offsets past 4 GiB and
+      # 65,536 members must be ZIP64. Each is read back whole (names, sizes,
+      # CRC-32, bytes), one at a time, since two are over 4 GiB.
+      - name: Read core's ZIPs with unzip and Python's zipfile
+        run: |
+          unzip -v | sed -n '1p'
+          python3 --version
+          dir="$RUNNER_TEMP/zips"
+          for kind in classic member-4gib offsets-4gib members-65536; do
+            node tests/zip-readers/write-archive.mjs "$kind" "$dir"
+            unzip -tq "$dir/$kind.zip"
+            python3 tests/zip-readers/check_archive.py "$dir/$kind.zip" "$dir/$kind.json"
+            rm -f "${dir:?}/${kind:?}.zip"
+          done
+
+  integration:
+    name: Integration tests (Chromium, Firefox, WebKit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tests/integration
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            tests/integration/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      # Each test starts the real server from server/, so it needs its dependencies.
+      - name: Install the server's dependencies
+        working-directory: server
+        run: |
+          npm --version
+          npm ci
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npx playwright --version
+
+      # Only the browsers the tests use, plus the system libraries they need. The
+      # tests run headless, so Chromium's headless shell is enough.
+      - name: Install browsers
+        run: npx playwright install --with-deps --only-shell chromium firefox webkit
+
+      # The list reporter prints every test's name, browser and result. Every test
+      # talks only to its own server on 127.0.0.1. The desktop app's tests run in
+      # their own job, below.
+      - name: Run tests
+        run: npx playwright test --project=chromium --project=firefox --project=webkit
+
+  desktop:
+    name: Desktop app tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: tests/integration
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            client/package-lock.json
+            tests/integration/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - name: Install npm 12
+        run: npm install -g npm@12
+
+      # Windows runners install global packages outside Node's own folder, and
+      # setup-node puts Node's folder, with its bundled npm, first on PATH.
+      - name: Put npm 12 first on PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npm prefix -g >> $env:GITHUB_PATH
+
+      # Each test starts the real server from server/, so it needs its dependencies.
+      - name: Install the server's dependencies
+        working-directory: server
+        run: |
+          npm --version
+          npm ci
+
+      # The tests launch the app from client/. Electron downloads its build the
+      # first time it's asked where it is, not on install, so that's done here.
+      - name: Install the desktop app's dependencies and Electron
+        working-directory: client
+        run: |
+          npm ci
+          node -e "console.log(require('electron'))"
+
+      # The updater only runs in a packaged app, so the update tests
+      # (desktop/updates.spec.mjs) run a build of the app made for them: its
+      # build config with the update address swapped for this machine's. On
+      # Windows they run its unpacked app, on Linux its AppImage, as a person
+      # would. It's never published or attached.
+      - name: Build the app for the update tests
+        working-directory: client
+        shell: bash
+        run: |
+          node ../.github/scripts/client-test-build-config.mjs "$RUNNER_TEMP/test-build.json"
+          npx --no-install electron-builder ${{ runner.os == 'Windows' && '--win' || '--linux AppImage' }} --publish never --config "$RUNNER_TEMP/test-build.json"
+          if [ "$RUNNER_OS" = Windows ]; then
+            # A Windows path (D:/a/…), not Git Bash's (/d/a/…), which Node can't launch.
+            app="$(pwd -W)/dist/win-unpacked/Dropgate Client.exe"
+          else
+            app=$(ls "$PWD"/dist/*.AppImage)
+            chmod +x "$app"
+          fi
+          [ -f "$app" ] || { echo "No packaged app at $app"; exit 1; }
+          echo "DROPGATE_PACKAGED_APP=$app" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npx playwright --version
+
+      # The app's links are opened in Chromium, headless. On Linux this also
+      # installs Xvfb, the virtual display the app's windows open on.
+      - name: Install Chromium
+        run: npx playwright install --with-deps --only-shell chromium
+
+      # One test at a time: in CI the app copies its links to the real clipboard,
+      # which every test shares, and the update tests share their server's port.
+      - name: Run tests
+        if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" npx playwright test --project=desktop --workers=1
+
+      - name: Run tests
+        if: runner.os == 'Windows'
+        run: npx playwright test --project=desktop --workers=1
+
+  server-image:
+    name: Server image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The image is built from server/ alone, as docker-compose builds it. The
+      # release workflow builds it for each platform it publishes.
+      - name: Build the image
+        run: docker build -t dropgate-server:ci server/
+
+      # It must carry core's build, which the core job checks against core's
+      # source, and start and answer on a port on 127.0.0.1 only.
+      - name: Check the image
+        run: bash .github/scripts/check-server-image.sh dropgate-server:ci
+
+  docs:
+    name: Docs checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: tests/docs
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '^24.14'
+
+      # Nothing to install: the checks have no dependencies. They read the
+      # repository's Markdown and source, and never fetch a link. The TAP
+      # reporter prints each check's name.
+      - name: Run checks
+        run: node --test --test-reporter=tap "*.test.mjs"

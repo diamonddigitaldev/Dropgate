@@ -1,10 +1,5 @@
-import {
-  DEFAULT_CHUNK_SIZE,
-  DropgateClient,
-  estimateTotalUploadSizeBytes,
-  isSecureContextForP2P,
-  lifetimeToMs,
-} from './dropgate-core.js';
+import { DropgateError, hosts, lifetime, sizes } from './dropgate-core.js';
+import { formatBytes, pageClient } from './page-common.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -54,6 +49,8 @@ const els = {
   progressSub: $('progressSub'),
   progressFill: $('progressFill'),
   progressBytes: $('progressBytes'),
+  pauseStandardUpload: $('pauseStandardUpload'),
+  resumeStandardUpload: $('resumeStandardUpload'),
   cancelStandardUpload: $('cancelStandardUpload'),
   cancelP2PSend: $('cancelP2PSend'),
 
@@ -66,6 +63,7 @@ const els = {
   cancelP2P: $('cancelP2P'),
 
   shareCard: $('shareCard'),
+  shareIcon: $('shareIcon'),
   shareTitle: $('shareTitle'),
   shareSub: $('shareSub'),
   shareLinkGroup: $('shareLinkGroup'),
@@ -73,15 +71,16 @@ const els = {
   copyShare: $('copyShare'),
   qrShare: $('qrShare'),
   newUpload: $('newUpload'),
+  deleteUpload: $('deleteUpload'),
+  deleteUploadModal: $('deleteUploadModal'),
+  confirmDeleteUpload: $('confirmDeleteUpload'),
 
   qrModal: $('qrModal'),
   qrCanvas: $('qrCanvas'),
 
   codeInput: $('codeInput'),
   codeGo: $('codeGo'),
-  statusAlert: $('statusAlert'),
-
-  toast: $('toast'),
+  toastHost: $('toast-host'),
 };
 
 const state = {
@@ -95,13 +94,15 @@ const state = {
   maxSizeMB: null,
   maxLifetimeHours: null,
   maxFileDownloads: 1,
-  bundleSizeMode: 'total',
   e2ee: false,
   peerjsPath: '/peerjs',
   iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }],
   p2pSession: null,
   p2pSecureOk: true,
-  uploadSession: null,
+  upload: null,
+  // The upload just finished, with the manage token that deletes it: held in
+  // this page's memory only, so a reload or "Send More Files" drops it.
+  uploaded: null,
 };
 
 // Title progress tracking
@@ -133,7 +134,7 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-const coreClient = new DropgateClient({ clientVersion: '3.0.13', server: location.origin });
+const coreClient = pageClient();
 
 function isFile(file) {
   return new Promise((resolve) => {
@@ -144,34 +145,57 @@ function isFile(file) {
   });
 }
 
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return '0 bytes';
-  if (bytes === 0) return '0 bytes';
-  const k = 1000;
-  const sizes = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const v = bytes / Math.pow(k, i);
-  return `${v.toFixed(v < 10 && i > 0 ? 2 : 1)} ${sizes[i]}`;
-}
+/** Each toast type's glyph, as electron-kit's. */
+const TOAST_ICONS = { info: 'info', success: 'check_circle', warning: 'warning', danger: 'error' };
 
-function showToast(text, type = 'info', timeoutMs = 4500) {
-  const el = els.statusAlert;
-  if (!el) { alert(text); return; }
-  el.textContent = String(text || '');
-  // Map type to Bootstrap alert class and add custom toast styling
-  let alertType = 'info';
-  if (type === 'warning') alertType = 'warning';
-  else if (type === 'error' || type === 'danger') alertType = 'danger';
-  else if (type === 'success') alertType = 'success';
-  else alertType = 'info';
-  el.className = `alert alert-${alertType} shadow-sm toast-notification toast-${alertType}`;
-  el.hidden = false;
-  if (timeoutMs > 0) {
-    const snap = el.textContent;
-    setTimeout(() => {
-      if (el.textContent === snap) el.hidden = true;
-    }, timeoutMs);
-  }
+/** How long a toast stays: electron-kit's --timing-toast. */
+const TOAST_MS = 4500;
+
+/**
+ * Show a toast, as electron-kit's kit.ui.toast() does: under the others, for
+ * 4.5 s or until its close button is pressed. A danger toast is announced at
+ * once (role="alert"); the rest politely, through the host's live region. The
+ * message is text, never markup.
+ * @param {string} text
+ * @param {'info' | 'success' | 'warning' | 'danger'} [type]
+ */
+function showToast(text, type = 'info') {
+  if (!Object.hasOwn(TOAST_ICONS, type)) type = 'info';
+  const icon = document.createElement('span');
+  icon.className = 'material-icons-round toast-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = TOAST_ICONS[type];
+
+  const body = document.createElement('div');
+  body.className = 'toast-body';
+  body.textContent = String(text || '');
+
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'toast-close';
+  close.title = 'Dismiss';
+  close.setAttribute('aria-label', 'Dismiss');
+  close.innerHTML = '<span class="material-icons-round" aria-hidden="true">close</span>';
+
+  const note = document.createElement('div');
+  note.className = `toast-note toast-${type}`;
+  if (type === 'danger') note.setAttribute('role', 'alert');
+  note.append(icon, body, close);
+  els.toastHost.append(note);
+
+  let closed = false;
+  const dismiss = () => {
+    if (closed) return;
+    closed = true;
+    clearTimeout(timer);
+    note.classList.add('leaving');
+    const gone = () => note.remove();
+    note.addEventListener('transitionend', gone, { once: true });
+    // In case nothing transitions (reduced motion, a hidden page).
+    setTimeout(gone, 1000);
+  };
+  close.addEventListener('click', dismiss);
+  const timer = setTimeout(dismiss, TOAST_MS);
 }
 
 function setHidden(el, hidden) {
@@ -281,17 +305,14 @@ function updateFileUI() {
 
 function areFilesTooLargeForStandard(files) {
   if (!files.length || !state.uploadEnabled) return false;
+  // The server's limit counts in 1024s.
   const maxBytes = Number.isFinite(state.maxSizeMB) && state.maxSizeMB > 0
-    ? state.maxSizeMB * 1000 * 1000
+    ? state.maxSizeMB * 1024 * 1024
     : null;
   if (!maxBytes) return false;
-  // Check total estimated size across all files
-  let totalEstimated = 0;
-  for (const file of files) {
-    const totalChunks = Math.ceil(file.size / DEFAULT_CHUNK_SIZE);
-    totalEstimated += estimateTotalUploadSizeBytes(file.size, totalChunks, Boolean(state.encrypt));
-  }
-  return totalEstimated > maxBytes;
+  // One file or several, an upload is stored as one object, checked whole.
+  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+  return sizes.estimateUpload(totalSize, { encrypted: Boolean(state.encrypt), chunkSize: state.info?.capabilities?.upload?.chunkSize, maxBytes }) > maxBytes;
 }
 
 function updateStartEnabled() {
@@ -418,17 +439,62 @@ function updateSecurityStatus() {
  * @returns {Promise<boolean>} True if user confirms, false if cancelled.
  */
 function showInsecureUploadModal() {
+  // If the modal doesn't exist, proceed anyway.
+  return confirmWithModal(els.insecureUploadModal, els.confirmInsecureUpload, true, els.startBtn);
+}
+
+/** The modal open now, which Escape closes: `{ modal, shown, closing }`. */
+let openModal = null;
+
+/**
+ * Closes the open modal, as Cancel. Bootstrap ignores hide() while a modal is
+ * still opening, so one asked to close then closes as soon as it's open.
+ */
+function closeOpenModal() {
+  if (!openModal) return;
+  if (openModal.shown) openModal.modal.hide();
+  else openModal.closing = true;
+}
+
+/**
+ * Show a modal. Its close button, its backdrop and Escape close it, each as
+ * Cancel, and the focus then goes back to what opened it, as electron-kit's
+ * prompts do. The opener is the button that was pressed: WebKit doesn't focus
+ * a button that's clicked.
+ * @returns The modal's Bootstrap instance.
+ */
+function showModal(modalEl, opener = document.activeElement) {
+  const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+  const open = { modal, shown: false, closing: false };
+  openModal = open;
+  modalEl.addEventListener('shown.bs.modal', () => {
+    open.shown = true;
+    if (open.closing) modal.hide();
+  }, { once: true });
+  modalEl.addEventListener('hidden.bs.modal', () => {
+    if (openModal === open) openModal = null;
+    // Unless it's gone or been turned off meanwhile, such as Delete once it's deleted.
+    if (opener instanceof HTMLElement && opener !== document.body) opener.focus();
+  }, { once: true });
+  modal.show();
+  return modal;
+}
+
+/**
+ * Show a modal asking to confirm, and return a promise.
+ * @returns {Promise<boolean>} True if `confirmEl` was clicked, false if the modal closed otherwise.
+ */
+function confirmWithModal(modalEl, confirmEl, withoutModal, opener) {
   return new Promise((resolve) => {
-    const modalEl = els.insecureUploadModal;
     if (!modalEl) {
-      resolve(true); // If modal doesn't exist, proceed anyway
+      resolve(withoutModal);
       return;
     }
 
-    const modal = new window.bootstrap.Modal(modalEl);
+    const modal = showModal(modalEl, opener);
 
     const cleanup = () => {
-      els.confirmInsecureUpload?.removeEventListener('click', onConfirm);
+      confirmEl?.removeEventListener('click', onConfirm);
       modalEl.removeEventListener('hidden.bs.modal', onHide);
     };
 
@@ -443,22 +509,20 @@ function showInsecureUploadModal() {
       resolve(false);
     };
 
-    els.confirmInsecureUpload?.addEventListener('click', onConfirm, { once: true });
+    confirmEl?.addEventListener('click', onConfirm, { once: true });
     modalEl.addEventListener('hidden.bs.modal', onHide, { once: true });
-
-    modal.show();
   });
 }
 
 function updateCapabilitiesUI() {
-  state.p2pSecureOk = isSecureContextForP2P(location.hostname, window.isSecureContext);
+  state.p2pSecureOk = hosts.isSecureForDirect(location.hostname, window.isSecureContext);
 
   // Upload
   if (state.uploadEnabled) {
-    const sizeLabel = state.bundleSizeMode === 'per-file' ? 'Max single file size' : 'Max upload size';
     const maxText = (state.maxSizeMB === 0)
       ? 'You can upload files of any size.'
-      : `${sizeLabel}: ${formatBytes(state.maxSizeMB * 1000 * 1000)}.`;
+      // The server's limit counts in 1024s, as every size the page shows does.
+      : `Max upload size: ${formatBytes(state.maxSizeMB * 1024 * 1024)}.`;
 
     const p2pAvailable = state.p2pEnabled && state.p2pSecureOk;
     els.maxUploadHint.textContent = p2pAvailable && state.maxSizeMB > 0
@@ -546,13 +610,12 @@ function applyLifetimeDefaults() {
 }
 
 async function loadServerInfo() {
-  const { serverInfo: info } = await coreClient.connect({ timeoutMs: 5000 });
+  const { serverInfo: info } = await coreClient.server.connect({ timeoutMs: 5000 });
   state.info = info;
 
   const upload = info?.capabilities?.upload;
   state.uploadEnabled = Boolean(upload?.enabled);
   state.maxSizeMB = state.uploadEnabled ? (upload?.maxSizeMB ?? null) : null;
-  state.bundleSizeMode = state.uploadEnabled ? (upload?.bundleSizeMode ?? 'total') : 'total';
   state.maxLifetimeHours = state.uploadEnabled ? (upload?.maxLifetimeHours ?? null) : null;
   state.maxFileDownloads = state.uploadEnabled ? (upload?.maxFileDownloads ?? 1) : 1;
   state.e2ee = state.uploadEnabled ? Boolean(upload?.e2ee) : false;
@@ -571,7 +634,7 @@ function lifetimeMsFromUI() {
   const unit = els.lifetimeUnit.value;
   if (unit === 'unlimited') return 0;
   const value = parseFloat(els.lifetimeValue.value);
-  return lifetimeToMs(value, unit);
+  return lifetime.toMs(value, unit);
 }
 
 function validateLifetimeInput() {
@@ -596,7 +659,7 @@ function validateLifetimeInput() {
   const maxMs = Number.isFinite(maxH) && maxH > 0 ? maxH * 60 * 60 * 1000 : null;
   if (maxMs && ms > maxMs) {
     els.lifetimeHelp.textContent = `File lifetime too long. Server limit: ${maxH} hours.`;
-    els.lifetimeHelp.className = 'form-text text-danger';
+    els.lifetimeHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
@@ -618,7 +681,7 @@ function validateMaxDownloadsInput() {
   // Handle invalid input
   if (isNaN(value) || value < 0) {
     els.maxDownloadsHelp.textContent = 'Must be a non-negative number.';
-    els.maxDownloadsHelp.className = 'form-text text-danger';
+    els.maxDownloadsHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
@@ -639,13 +702,13 @@ function validateMaxDownloadsInput() {
   // Server has limit > 1
   if (value === 0) {
     els.maxDownloadsHelp.textContent = `0 (unlimited) not allowed. Server limit: ${max} downloads.`;
-    els.maxDownloadsHelp.className = 'form-text text-danger';
+    els.maxDownloadsHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
   if (value > max) {
     els.maxDownloadsHelp.textContent = `Exceeds server limit of ${max} downloads.`;
-    els.maxDownloadsHelp.className = 'form-text text-danger';
+    els.maxDownloadsHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
@@ -680,18 +743,63 @@ function showProgress({ title, sub, percent, doneBytes, totalBytes, icon, iconCo
 
 function showShare({ link = '', title = 'Upload Complete', sub = 'Share this link with your recipient:', showLinkGroup = true } = {}) {
   showPanels('share');
+  setShareIcon('check_circle', 'text-success');
   if (els.shareTitle) els.shareTitle.textContent = title;
   if (els.shareSub) els.shareSub.textContent = sub;
   if (els.shareLinkGroup) setHidden(els.shareLinkGroup, !showLinkGroup);
-  els.shareCard.classList.remove('border-danger', 'border-success', 'border-primary');
+  els.shareCard.classList.remove('border-danger', 'border-success', 'border-primary', 'border-secondary');
   els.shareCard.classList.add('border', 'border-success');
   els.shareLink.value = link || '';
+  // Delete is there only for the upload this page just made, while it holds its manage token.
+  setHidden(els.deleteUpload, !state.uploaded);
+  setDisabled(els.deleteUpload, false);
   // Hide code entry when upload complete
   if (els.codeCard) setHidden(els.codeCard, true);
 }
 
+function setShareIcon(icon, color) {
+  if (!els.shareIcon) return;
+  els.shareIcon.className = `${color} mb-2`;
+  els.shareIcon.innerHTML = `<span class="material-icons-round">${icon}</span>`;
+}
+
+/** Deletes the upload this page just made, once confirmed, with the manage token only this page holds. */
+async function deleteUploaded() {
+  const uploaded = state.uploaded;
+  if (!uploaded) return;
+  const confirmed = await confirmWithModal(els.deleteUploadModal, els.confirmDeleteUpload, false, els.deleteUpload);
+  if (!confirmed || state.uploaded !== uploaded) return;
+
+  setDisabled(els.deleteUpload, true);
+  let alreadyGone = false;
+  try {
+    await coreClient.hosted.delete({ id: uploaded.id, manageToken: uploaded.manageToken });
+  } catch (err) {
+    // An upload that has expired, or been downloaded as many times as it allows, is already gone.
+    if (err?.code !== 'NOT_FOUND') {
+      setDisabled(els.deleteUpload, false);
+      showToast(err?.message || "The upload couldn't be deleted.", 'danger');
+      return;
+    }
+    alreadyGone = true;
+  }
+
+  state.uploaded = null;
+  setHidden(els.deleteUpload, true);
+  setHidden(els.shareLinkGroup, true);
+  els.shareLink.value = '';
+  setShareIcon('delete', 'text-body-secondary');
+  els.shareCard.classList.remove('border-success');
+  els.shareCard.classList.add('border-secondary');
+  if (els.shareTitle) els.shareTitle.textContent = 'Upload Deleted';
+  if (els.shareSub) els.shareSub.textContent = alreadyGone ? 'It was already gone from the server.' : 'It has been removed from the server, and its link no longer works.';
+  showToast(alreadyGone ? 'The upload was already gone.' : 'Upload deleted.', 'success');
+}
+
 function resetToMain() {
   stopP2P();
+  state.uploaded = null;
+  setHidden(els.deleteUpload, true);
   state.files = [];
   state.fileTooLargeForStandard = false;
   updateFileUI();
@@ -709,7 +817,7 @@ function stopP2P() {
   state.p2pSession = null;
 }
 
-function showQRModal(url) {
+function showQRModal(url, opener) {
   if (!els.qrModal || !els.qrCanvas) return;
 
   const QRCodeStylingCtor = globalThis.QRCodeStyling;
@@ -732,9 +840,7 @@ function showQRModal(url) {
   els.qrCanvas.innerHTML = '';
   qrCode.append(els.qrCanvas);
 
-  const modalEl = document.getElementById('qrModal');
-  const modal = new window.bootstrap.Modal(modalEl);
-  modal.show();
+  showModal(els.qrModal, opener);
 }
 
 function copyToClipboard(value) {
@@ -780,15 +886,15 @@ async function startStandardUpload() {
   }
 
   const encrypt = hasE2EE; // Auto-set encryption based on capability
+  // The server's limit counts in 1024s.
   const maxBytes = Number.isFinite(state.maxSizeMB) && state.maxSizeMB > 0
-    ? state.maxSizeMB * 1000 * 1000
+    ? state.maxSizeMB * 1024 * 1024
     : null;
   if (maxBytes) {
-    let totalEstimated = 0;
-    for (const f of files) {
-      const totalChunks = Math.ceil(f.size / DEFAULT_CHUNK_SIZE);
-      totalEstimated += estimateTotalUploadSizeBytes(f.size, totalChunks, encrypt);
-    }
+    // One file or several, an upload is stored as one object, checked whole.
+    const totalEstimated = sizes.estimateUpload(files.reduce((sum, f) => sum + f.size, 0), {
+      encrypted: encrypt, chunkSize: state.info?.capabilities?.upload?.chunkSize, maxBytes,
+    });
     if (totalEstimated > maxBytes) {
       if (state.p2pEnabled && state.p2pSecureOk) {
         setMode('p2p');
@@ -813,7 +919,7 @@ async function startStandardUpload() {
   showProgress({ title: 'Uploading', sub: 'Preparing...', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'cloud_upload', iconColor: 'text-primary' });
 
   try {
-    const session = await coreClient.uploadFiles({
+    const upload = coreClient.hosted.upload({
       files,
       encrypt,
       lifetimeMs,
@@ -821,83 +927,141 @@ async function startStandardUpload() {
         const val = parseInt(els.maxDownloadsValue.value, 10);
         return (Number.isInteger(val) && val >= 0) ? val : 1;
       })(),
-      onProgress: ({ phase, text, percent, currentFileName }) => {
-        const p = (typeof percent === 'number') ? percent : 0;
-        const sub = currentFileName ? `${text || phase} — ${currentFileName}` : (text || phase);
-
-        // Update title and store progress for visibility handler
-        updateTitleProgress(p);
-        currentTransferProgress = {
-          percent: p,
-          doneBytes: Math.floor((p / 100) * totalSize),
-          totalBytes: totalSize,
-          showProgress: (pct, done, total) => {
-            showProgress({
-              title: 'Uploading',
-              sub,
-              percent: pct,
-              doneBytes: done,
-              totalBytes: total,
-              icon: 'cloud_upload',
-              iconColor: 'text-primary',
-            });
-          }
-        };
-
-        showProgress({
-          title: 'Uploading',
-          sub,
-          percent: p,
-          doneBytes: Math.floor((p / 100) * totalSize),
-          totalBytes: totalSize,
-          icon: 'cloud_upload',
-          iconColor: 'text-primary',
-        });
-      },
-      onCancel: () => {
-        resetTitleProgress();
-        showToast('Upload cancelled.', 'warning');
-        resetToMain();
-      },
     });
 
-    // Store session and show cancel button
-    state.uploadSession = session;
+    // Where the upload is. Core's snapshots never name a file, so the name of
+    // the one an upload of several is on comes from this page's own list.
+    upload.subscribe((snapshot) => {
+      const { phase, text, percent, fileIndex, status, deadline } = snapshot;
+      const p = (typeof percent === 'number') ? percent : 0;
+      const paused = status === 'paused';
+      const onFile = files.length > 1 && phase === 'chunk';
+      const currentFileName = onFile ? files[fileIndex]?.name : null;
+      let sub = currentFileName ? `${text || phase} — ${currentFileName}` : (text || phase);
+      // Paused, the server holds the upload until its deadline, and nothing resumes it but Resume.
+      if (paused && text === 'Paused.' && deadline) sub = `Paused. The server keeps this upload until ${formatDeadline(deadline)}.`;
+      const view = paused
+        ? { title: 'Upload Paused', icon: 'pause_circle', iconColor: 'text-secondary' }
+        : { title: 'Uploading', icon: 'cloud_upload', iconColor: 'text-primary' };
+
+      // Update title and store progress for visibility handler
+      if (paused) document.title = `Paused - ${originalTitle}`;
+      else updateTitleProgress(p);
+      currentTransferProgress = {
+        percent: p,
+        doneBytes: Math.floor((p / 100) * totalSize),
+        totalBytes: totalSize,
+        showProgress: (pct, done, total) => {
+          showProgress({ ...view, sub, percent: pct, doneBytes: done, totalBytes: total });
+        }
+      };
+
+      showProgress({
+        ...view,
+        sub,
+        percent: p,
+        doneBytes: Math.floor((p / 100) * totalSize),
+        totalBytes: totalSize,
+      });
+      showPauseControls(snapshot);
+    });
+
+    // Store the upload and show cancel button
+    state.upload = upload;
     els.cancelStandardUpload.style.display = 'inline-block';
 
-    // Wire up cancel button
-    els.cancelStandardUpload.onclick = () => {
-      resetTitleProgress();
-      session.cancel('User cancelled upload.');
-      state.uploadSession = null;
-      els.cancelStandardUpload.style.display = 'none';
-    };
+    // Wire up the progress card's buttons
+    els.cancelStandardUpload.onclick = () => upload.cancel();
+    els.pauseStandardUpload.onclick = () => pauseOrResume(upload, 'pause');
+    els.resumeStandardUpload.onclick = () => pauseOrResume(upload, 'resume');
 
-    const result = await session.result;
+    // The upload's one outcome: completed, cancelled or failed.
+    const outcome = await upload.result;
 
-    // Hide cancel button on success
     els.cancelStandardUpload.style.display = 'none';
-    state.uploadSession = null;
-
-    resetTitleProgress();
-    showProgress({ title: 'Uploading', sub: 'Upload successful!', percent: 100, doneBytes: totalSize, totalBytes: totalSize, icon: 'cloud_upload' });
-    showShare({ link: result.downloadUrl });
-  } catch (err) {
-    // Hide cancel button on error
-    els.cancelStandardUpload.style.display = 'none';
-    state.uploadSession = null;
+    hidePauseControls();
+    state.upload = null;
     resetTitleProgress();
 
-    // Check if it was a cancellation (handle both native AbortError and DropgateAbortError)
-    if (err?.name === 'AbortError' || err?.code === 'ABORT_ERROR') {
-      // Already handled by onCancel
-      return;
+    if (outcome.status === 'completed') {
+      showProgress({ title: 'Uploading', sub: 'Upload successful!', percent: 100, doneBytes: totalSize, totalBytes: totalSize, icon: 'cloud_upload' });
+      // The manage token, for this page's Delete: in its memory only.
+      const { id, manageToken } = outcome.value;
+      state.uploaded = { id, manageToken };
+      showShare({ link: outcome.value.downloadUrl });
+    } else if (outcome.status === 'cancelled') {
+      showToast('Upload cancelled.', 'warning');
+      resetToMain();
+    } else {
+      showUploadFailed(outcome.error, totalSize);
     }
-
-    console.error(err);
-    showProgress({ title: 'Upload Failed', sub: err?.message || 'An error occurred during upload.', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'error', iconColor: 'text-danger' });
-    showToast(err?.message || 'Upload failed.', 'danger');
+  } catch (err) {
+    // Only an upload that never started gets here, such as one with no files.
+    els.cancelStandardUpload.style.display = 'none';
+    hidePauseControls();
+    state.upload = null;
+    resetTitleProgress();
+    showUploadFailed(err, totalSize);
   }
+}
+
+/** Whether the server lets an upload pause: its pause length is 0 when the operator has turned pausing off. */
+function pausingOn() {
+  return (state.info?.capabilities?.upload?.maxPauseMinutes ?? 0) > 0;
+}
+
+/**
+ * Pause while the upload runs, and Resume while it's paused, each usable only
+ * when core's snapshot says it can pause (or, paused, go on) now. Neither is
+ * there on a server with pausing turned off.
+ */
+function showPauseControls({ status, canPause }) {
+  const paused = status === 'paused';
+  const running = status === 'initializing' || status === 'uploading';
+  setHidden(els.pauseStandardUpload, !pausingOn() || !running);
+  setDisabled(els.pauseStandardUpload, !canPause);
+  setHidden(els.resumeStandardUpload, !paused);
+  setDisabled(els.resumeStandardUpload, !(paused && canPause));
+}
+
+function hidePauseControls() {
+  setHidden(els.pauseStandardUpload, true);
+  setHidden(els.resumeStandardUpload, true);
+}
+
+/** Pauses or resumes the upload. Its snapshots show the result; an upload that ends meanwhile shows its outcome. */
+async function pauseOrResume(upload, action) {
+  setDisabled(action === 'pause' ? els.pauseStandardUpload : els.resumeStandardUpload, true);
+  try {
+    await upload[action]();
+  } catch (err) {
+    const { status } = upload.snapshot;
+    const ended = !['initializing', 'uploading', 'paused', 'completing'].includes(status);
+    // It moved on before the click landed (it's finishing, or a pause is already settling).
+    if (ended || DropgateError.is(err, 'PAUSE_UNAVAILABLE')) return;
+    // The server refused the pause, or couldn't be asked to resume: nothing changed.
+    console.error(err);
+    showToast(err?.message || (action === 'pause' ? "The upload couldn't be paused." : "The upload couldn't be resumed."), 'warning');
+  } finally {
+    if (state.upload === upload) showPauseControls(upload.snapshot);
+  }
+}
+
+/** When a paused upload's server stops holding it, as a local time: "14:32", or "14:32 tomorrow". */
+function formatDeadline(ms) {
+  const at = new Date(ms);
+  const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const today = new Date();
+  if (at.toDateString() === today.toDateString()) return time;
+  const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  if (at.toDateString() === tomorrow.toDateString()) return `${time} tomorrow`;
+  return at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function showUploadFailed(err, totalSize) {
+  console.error(err);
+  showProgress({ title: 'Upload Failed', sub: err?.message || 'An error occurred during upload.', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'error', iconColor: 'text-danger' });
+  showToast(err?.message || 'Upload failed.', 'danger');
 }
 
 async function loadPeerJS() {
@@ -945,7 +1109,11 @@ async function startP2PSendFlow() {
   }
 
   els.tagline.textContent = 'Direct Transfer (P2P)';
-  state.p2pSession = await coreClient.p2pSend({
+  // Copy and the QR code read the link as it's shown, so they work as soon as
+  // the code shows, which is before the send below resolves.
+  els.copyP2PLink.onclick = () => copyToClipboard(els.p2pLink.value).then(() => showToast('Copied link.', 'success'));
+  els.qrP2PLink.onclick = () => showQRModal(els.p2pLink.value, els.qrP2PLink);
+  state.p2pSession = await coreClient.direct.send({
     file,
     Peer,
     onCode: (id) => {
@@ -1006,6 +1174,7 @@ async function startP2PSendFlow() {
       resetTitleProgress();
       els.cancelP2PSend.style.display = 'none';
       stopP2P();
+      state.uploaded = null;
       showShare({
         title: 'Transfer Complete',
         sub: `Your recipient has received the file${Array.isArray(file) ? 's' : ''}.`,
@@ -1036,8 +1205,6 @@ async function startP2PSendFlow() {
     },
   });
 
-  els.copyP2PLink.onclick = () => copyToClipboard(els.p2pLink.value).then(() => showToast('Copied link.', 'success'));
-  els.qrP2PLink.onclick = () => showQRModal(els.p2pLink.value);
   els.cancelP2P.onclick = () => {
     resetTitleProgress();
     stopP2P();
@@ -1173,8 +1340,9 @@ function wireUI() {
 
   // Share actions
   els.copyShare?.addEventListener('click', () => copyToClipboard(els.shareLink.value).then(() => showToast('Copied link.', 'success')));
-  els.qrShare?.addEventListener('click', () => showQRModal(els.shareLink.value));
+  els.qrShare?.addEventListener('click', () => showQRModal(els.shareLink.value, els.qrShare));
   els.newUpload?.addEventListener('click', resetToMain);
+  els.deleteUpload?.addEventListener('click', deleteUploaded);
 
   // Enter code
   const goWithCode = async () => {
@@ -1183,7 +1351,7 @@ function wireUI() {
 
     setDisabled(els.codeGo, true);
     try {
-      const result = await coreClient.resolveShareTarget(value, {
+      const result = await coreClient.links.resolve(value, {
         timeoutMs: 5000,
       });
       if (!result?.valid || !result?.target) {
@@ -1212,10 +1380,21 @@ function wireUI() {
   // Initial state
   setDisabled(els.codeGo, true);
 
-  // Reset on ESC
+  // Escape closes the modal that's open, as Cancel, wherever the focus is,
+  // and does nothing else; it's caught first, so Bootstrap's own handler on
+  // the modal never sees it. With no modal, Escape resets the page, but
+  // never under an upload, whose card (and, paused, its Resume) would go
+  // while it carries on.
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') resetToMain();
-  });
+    if (e.key !== 'Escape') return;
+    if (openModal) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeOpenModal();
+      return;
+    }
+    if (!state.upload) resetToMain();
+  }, true);
 }
 
 async function init() {

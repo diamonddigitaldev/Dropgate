@@ -1,8 +1,8 @@
 # DGDTP — Dropgate Direct Transfer Protocol
 
-**Protocol Version:** 3
-**Status:** Stable
-**Last Updated:** September 2026
+**Protocol Version:** 4.0, in development. Until it's finished, the messages below are version 3's, with `hello` carrying 4
+**Status:** In development
+**Last Updated:** October 2026
 
 ---
 
@@ -54,7 +54,7 @@ Codes follow the pattern `XXXX-0000`:
 
 ### 3.3 Generation
 
-Codes are generated using `crypto.getRandomValues()` when the Web Crypto API is available, falling back to `Math.random()` otherwise. The sender attempts code registration with the signalling server up to **4 times** (configurable), regenerating on collision.
+Codes are generated from secure random numbers (`crypto.getRandomValues()`, which every browser has, even on a page served over plain HTTP), and never from anything weaker: where there are none, no code is made. The sender attempts code registration with the signalling server up to **4 times** (configurable), regenerating on collision.
 
 ### 3.4 Validation
 
@@ -109,7 +109,7 @@ An honest server has **no visibility** into data channel content once the WebRTC
 
 ### 4.4 Secure Context Requirement
 
-The Dropgate Web UI only allows direct transfers in a secure context (HTTPS or `localhost`). This is Dropgate's own check, using the core library's `isSecureContextForP2P()` helper, not a browser restriction on WebRTC; the core library does not enforce it itself. The signalling server MUST be accessed over HTTPS in production. The `proxied: true` flag is set on the PeerJS server to indicate it operates behind a TLS-terminating reverse proxy.
+The Dropgate Web UI only allows direct transfers in a secure context (HTTPS or `localhost`). This is Dropgate's own check, using the core library's `hosts.isSecureForDirect()` helper, not a browser restriction on WebRTC; the core library does not enforce it itself. The signalling server MUST be accessed over HTTPS in production. The `proxied: true` flag is set on the PeerJS server to indicate it operates behind a TLS-terminating reverse proxy.
 
 ---
 
@@ -146,27 +146,31 @@ If a new connection arrives while an existing one is present:
 
 ## 6. Handshake
 
-Once the data channel is open, both peers exchange `hello` messages.
+Once the data channel is open, both peers exchange `hello` messages. The receiver sends its `hello` as soon as its channel opens. The sender waits for it before sending anything, then replies with its own.
+
+The sender waits because its channel can open before the receiver's, and a message sent in that gap is sometimes never delivered (seen in Chromium). The receiver would then never get the sender's `hello`, and would ignore the file details that follow it. Chromium also sometimes reports the sender's data channel open twice, so the sender starts only once per connection.
 
 ### 6.1 Hello Message
 
 ```json
 {
   "t": "hello",
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "sessionId": "<uuid>"
 }
 ```
 
 ### 6.2 Version Compatibility
 
-Protocol versions MUST match exactly. There is no backwards-compatibility negotiation. If a version mismatch is detected, the connection is terminated with an error:
+`protocolVersion` is the DGDTP major. Protocol versions MUST match exactly. There is no backwards-compatibility negotiation, so a peer older than Dropgate 4 is refused. If a version mismatch is detected, the connection is terminated with an error:
 
 ```
-Protocol version mismatch: sender v3, receiver v2
+Protocol version mismatch: sender v4, receiver v3
 ```
 
 In the current implementation only the sender performs this check. The receiver sends its version but does not compare it with the sender's.
+
+Before either peer starts, its client checks the server's `protocols.dgdtp` from `/api/info` ([DGUP §3.3](./DGUP.md#33-compatibility)): a server whose major differs, or that gives none, is not used for direct transfers.
 
 ### 6.3 Timeout
 
@@ -197,6 +201,7 @@ For transfers involving multiple files, the sender transmits a file list immedia
 
 - `fileCount` MUST NOT exceed **10,000**.
 - `totalSize` MUST equal the sum of all individual file sizes.
+- Every `name` MUST follow the file name rule DGUP shares: not empty, at most 255 bytes in UTF-8, and no control character, `/` or `\`. A `meta` message's `name` is checked the same way, and the sender checks its names before sending. A name that breaks it ends the transfer with `INVALID_FILENAME`. The receiver saves a file under a name sanitised for every OS ([File Names](../core/quick-start.md#file-names)).
 
 ### 7.2 File Metadata
 
@@ -339,10 +344,10 @@ Protocol version 3 introduced native multi-file transfer support.
 ```
 Sender                                      Receiver
   │                                           │
-  │  hello                                    │
-  │──────────────────────────────────────────►│
   │◄──────────────────────────────────────────│
   │                                     hello │
+  │  hello                                    │
+  │──────────────────────────────────────────►│
   │                                           │
   │  file_list                                │
   │──────────────────────────────────────────►│
@@ -398,7 +403,7 @@ Only after receiving the `file_end_ack` does the sender proceed to the next file
 
 ### 10.3 Browser-Side ZIP Streaming
 
-When a multi-file transfer is received in a browser, the Web UI creates a streaming ZIP archive. Each file's chunks are piped through a `StreamingZipWriter` and ultimately saved as a single `.zip` download.
+When a multi-file transfer is received in a browser, the Web UI creates a streaming ZIP archive. Each file's chunks are piped through the core library's streaming ZIP writer (`zip.writer()`) and ultimately saved as a single `.zip` download. Each file starts its member with the name and size from its `meta` message ([§7.2](#72-file-metadata)): the writer stores the name made safe, told apart from any other the same, and fails the transfer if the file's bytes don't come to that size. The archive is stored, not compressed, and uses ZIP64 only when it needs it (a file or the archive past 4 GiB, or 65,535 files or more), so a smaller one is the classic format every reader opens.
 
 ---
 
@@ -618,15 +623,23 @@ Invalid state transitions are logged as warnings but do not throw exceptions, pr
 
 When one peer encounters an error, it transmits an `error` message to the other peer before closing the connection. Both peers invoke their `onError` callbacks.
 
-### 17.3 Error Classes
+### 17.3 Error Codes
 
-| Class | Meaning |
+Core reports each error as a `DropgateError`, with one of these codes (the full list is in [core's docs](../core/errors.md)). A peer's own `message` isn't passed on: an `error` message from the other peer is reported as `PEER_FAILED`, with core's own wording.
+
+| Code | Meaning |
 |-------|---------|
-| `DropgateValidationError` | Invalid input: malformed code, unexpected sequence number, size mismatch. |
-| `DropgateNetworkError` | Connection failure, stalled acknowledgements, write queue overflow. |
-| `DropgateProtocolError` | Signalling error, PeerJS failure. |
-| `DropgateAbortError` | User-initiated cancellation. |
-| `DropgateTimeoutError` | Handshake timeout, end-ack timeout. |
+| `INVALID_ARGUMENT` | No code, no files, or no PeerJS `Peer` given. |
+| `INVALID_CODE` | The code isn't the shape of one. |
+| `CAPABILITY_UNSUPPORTED` | Direct transfer is disabled on the server. |
+| `INTEGRITY_FAILED` | Data before acceptance, an unexpected sequence number, or a size mismatch. |
+| `INVALID_MANIFEST` | Too many files, or a file list whose sizes don't add up. |
+| `CONNECTION_LOST` | The connection closed, acknowledgements stalled, or a confirmation never came. |
+| `OUTPUT_WRITE_FAILED` | The receiver's write queue overflowed. |
+| `TIMED_OUT` | The receiver didn't answer the handshake. |
+| `VERSION_UNSUPPORTED` | The peers' protocol versions differ. |
+| `PEER_FAILED` | The other peer sent an `error` message, or reported an incomplete transfer. |
+| `SERVER_UNREACHABLE` | The PeerJS signalling server couldn't be reached. |
 
 ---
 
@@ -716,7 +729,7 @@ The code is the only credential needed to connect, so treat a live code like a p
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `P2P_PROTOCOL_VERSION` | 3 | Current protocol version. |
+| `P2P_PROTOCOL_VERSION` | 4 | The DGDTP major, as `@dropgate/core` gives it in `DropgateClient.protocols.dgdtp`. |
 | `P2P_CHUNK_SIZE` | 65,536 | Default chunk size (bytes). |
 | `P2P_MAX_UNACKED_CHUNKS` | 64 | Flow control threshold. |
 | `P2P_END_ACK_TIMEOUT_MS` | 15,000 | End-ack base timeout. |
@@ -787,10 +800,11 @@ Sender                                      Receiver
   │  [PeerJS signalling: SDP + ICE]           │
   │◄═════════════════════════════════════════►│
   │                                           │
-  │  hello { v3, sessionId }                  │
-  │──────────────────────────────────────────►│
   │◄──────────────────────────────────────────│
-  │  hello { v3, sessionId }                  │
+  │  hello { v4, sessionId }                  │
+  │                                           │
+  │  hello { v4, sessionId }                  │
+  │──────────────────────────────────────────►│
   │                                           │
   │  meta { name, size, mime }                │
   │──────────────────────────────────────────►│

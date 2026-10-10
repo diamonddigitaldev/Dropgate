@@ -1,4 +1,4 @@
-import { DropgateNetworkError } from '../errors.js';
+import { DropgateError } from '../errors.js';
 import type { P2PCapabilities } from '../types.js';
 import type { PeerInstance, PeerOptions, P2PServerConfig } from './types.js';
 
@@ -81,5 +81,5 @@ export async function createPeerWithRetries(
     }
   }
 
-  throw lastError || new DropgateNetworkError('Could not establish PeerJS connection.');
+  throw lastError || new DropgateError({ code: 'SERVER_UNREACHABLE', message: 'Could not establish PeerJS connection.' });
 }

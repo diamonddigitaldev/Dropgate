@@ -1,169 +1,183 @@
-import { DropgateClient, lifetimeToMs } from './dropgate-core.js';
+// The page: Dropgate's Upload section and its Server tab, in the kit's frame
+// (kit.ui.mountShell()): the nav rail, the header, and the Settings view, with
+// Update and Credits after Dropgate's own tab. The drop zone, the action bar,
+// the prompts and the toasts are the kit's too. The settings are the kit's
+// (window.kitAPI), saved as they change. Share with Dropgate is main's, with
+// no window: the main window shows how a share goes (onUploadStatus), and
+// asks the Upload Security Warning for one to a server with no end-to-end
+// encryption, when main opens it to (onAskInsecure).
+//
+// The page runs no core and makes no request: it holds each file as the
+// handle main made for it, with its name and size, never its path, and main
+// runs each server check and upload in the transfer window, and tells the
+// page how they go (onUploadStatus).
 
-/**
- * A Blob-like object that reads a byte range from a file on disk via IPC,
- * only when the data is actually needed (i.e. when arrayBuffer() is called).
- */
-class LazyBlob {
-    constructor(filePath, start, end) {
-        this.filePath = filePath;
-        this.start = start;
-        this.end = end;
-        this.size = end - start;
-    }
+const api = window.electronAPI;
+const kitApi = window.kitAPI;
 
-    async arrayBuffer() {
-        const buffer = await window.electronAPI.readFileRange(this.filePath, this.start, this.end);
-        // IPC returns a Node.js Buffer (Uint8Array); convert to ArrayBuffer
-        if (buffer instanceof ArrayBuffer) return buffer;
-        return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-    }
+/** What Restart Now says while an upload runs, from this window or Share with Dropgate. */
+const BUSY_REASON = 'An upload is in progress.';
 
-    slice(start, end) {
-        const s = this.start + (start || 0);
-        const e = this.start + (end !== undefined ? end : this.size);
-        return new LazyBlob(this.filePath, s, e);
-    }
-}
-
-/**
- * A File-like object backed by a file path on disk.
- * Implements the subset of the File/Blob API that dropgate-core needs:
- * .name, .size, .type, .slice(start, end)
- */
-class LazyFile {
-    constructor(filePath, name, size) {
-        this.filePath = filePath;
-        this.name = name;
-        this.size = size;
-        this.type = '';
-    }
-
-    slice(start, end) {
-        return new LazyBlob(this.filePath, start || 0, end !== undefined ? end : this.size);
-    }
-}
+/** A file lifetime in ms, to hold it to the server's limit here: core's lifetime.toMs(), which the upload itself uses. */
+const LIFETIME_UNIT_MS = { minutes: 60_000, hours: 3_600_000, days: 86_400_000 };
+const lifetimeToMs = (value, unit) => (Number.isFinite(value) && value > 0 && LIFETIME_UNIT_MS[unit] ? Math.round(value * LIFETIME_UNIT_MS[unit]) : 0);
 
 document.addEventListener('DOMContentLoaded', async () => {
+    // The files the app is opened with (#93): "Open with", files dropped on its
+    // icon, a second launch. The kit can push them while the page is still
+    // setting itself up, so they wait for it.
+    const opened = [];
+    let addOpened = null;
+    kitApi.onFilesOpened((paths) => (addOpened ? addOpened(paths) : opened.push(...paths)));
+
     try {
-        const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
-        tooltipTriggerList.map(function (tooltipTriggerEl) {
-            return new bootstrap.Tooltip(tooltipTriggerEl);
-        });
-
         // --- DOM Element References ---
-        const dropZone = document.getElementById('drop-zone');
-        const fileInput = document.getElementById('file-input');
-        const selectFileBtn = document.getElementById('select-file-btn');
-        const browseMoreBtn = document.getElementById('browse-more-btn');
-        const btnClearAll = document.getElementById('btn-clear-all');
-        const dzEmpty = document.getElementById('dz-empty');
-        const dzHasFiles = document.getElementById('dz-has-files');
-        const dzFileCount = document.getElementById('dz-file-count');
-        const fileListSection = document.getElementById('file-list-section');
-        const fileListContainer = document.getElementById('file-list');
-        const fileChosenTotal = document.getElementById('file-chosen-total');
-        const maxUploadHint = document.getElementById('max-upload-hint');
-        const serverUrlInput = document.getElementById('server-url');
-        const testConnectionBtn = document.getElementById('test-connection-btn');
-        const connectionStatus = document.getElementById('connection-status');
-        const fileLifetimeValueInput = document.getElementById('file-lifetime-value');
-        const fileLifetimeUnitSelect = document.getElementById('file-lifetime-unit');
-        const fileLifetimeHelp = document.getElementById('file-lifetime-help');
-        const maxDownloadsValue = document.getElementById('max-downloads-value');
-        const maxDownloadsHelp = document.getElementById('max-downloads-help');
+        const $ = (id) => document.getElementById(id);
+        const uploadView = $('upload-view');
+        const emptyState = $('empty-state');
+        const fileInput = $('file-input');
+        const browseMoreBtn = $('browse-more-btn');
+        const fileListSection = $('file-list-section');
+        const fileListContainer = $('file-list');
+        const fileCount = $('file-count');
+        const fileChosenTotal = $('file-chosen-total');
+        const maxUploadHint = $('max-upload-hint');
+        const serverUrlInput = $('server-url');
+        const testConnectionBtn = $('test-connection-btn');
+        const connectionStatus = $('connection-status');
+        const fileLifetimeValueInput = $('file-lifetime-value');
+        const fileLifetimeUnitSelect = $('file-lifetime-unit');
+        const fileLifetimeHelp = $('file-lifetime-help');
+        const maxDownloadsValue = $('max-downloads-value');
+        const maxDownloadsHelp = $('max-downloads-help');
+        const securityStatus = $('security-status');
+        const securityIcon = $('security-icon');
+        const securityText = $('security-text');
+        const linkSection = $('link-section');
+        const downloadLinkInput = $('download-link');
+        const copyBtn = $('copy-btn');
+        const keepLogSwitch = $('keep-log-on-disk');
 
-        // Custom E2EE UI
-        const securityStatus = document.getElementById('security-status');
-        const securityIcon = document.getElementById('security-icon');
-        const securityText = document.getElementById('security-text');
-        const insecureUploadModal = document.getElementById('insecure-upload-modal');
-        const confirmInsecureBtn = document.getElementById('confirm-insecure-upload');
-        const uploadBtn = document.getElementById('upload-btn');
-        const cancelUploadBtn = document.getElementById('cancel-upload-btn');
-        const uploadStatus = document.getElementById('upload-status');
-        const progressBar = document.getElementById('progress-bar');
-        const linkSection = document.getElementById('link-section');
-        const downloadLinkInput = document.getElementById('download-link');
-        const copyBtn = document.getElementById('copy-btn');
+        // Share with Dropgate is Windows' right-click entry: elsewhere, the Server tab doesn't mention it.
+        if (!navigator.userAgent.includes('Windows')) $('server-help').textContent = 'Uploads go to this server.';
 
         let serverCapabilities = null;
         let selectedFiles = [];
         /** @type {{compatible:boolean, message?:string}} */
         let lastServerCheck = { compatible: false, message: '' };
-        let activeUploadSession = null;
+        // The upload this window shows, by the ID main made: its own, or one main tells it about.
+        let currentUpload = null;
+        // The upload this window started, until it ends.
+        let ownUpload = null;
+        // Whether this window shows an upload running: its own, or one main tells it about.
+        let uploading = false;
+        let uploadsAllowed = false;
 
-        // --- Core client (shared logic for Electron + Web UI) ---
-        const clientVersion = await window.electronAPI.getClientVersion();
-        /** @type {DropgateClient|null} */
-        let coreClient = null;
+        // --- The frame ---
+        const shell = kit.ui.mountShell({
+            title: 'Dropgate Client',
+            sections: [{ view: 'upload', label: 'Upload', icon: 'upload_file', element: uploadView }],
+            settingsTabs: [
+                { id: 'server', label: 'Server', render: (pane) => pane.append($('server-settings')) },
+                { id: 'privacy', label: 'Privacy', render: (pane) => pane.append($('privacy-settings')) },
+            ],
+            credits: { logo: 'img/dropgate.png' },
+            // Restart Now asks first while main has an upload running, paused, or waiting to (Share with Dropgate's too).
+            busy: async () => (await api.isBusy() ? BUSY_REASON : null),
+        });
 
-        /**
-         * Create or recreate the core client for a given server URL.
-         * Must be called whenever the server URL changes.
-         */
-        function createClient(serverUrl) {
-            if (!serverUrl) {
-                coreClient = null;
-                return;
-            }
-            coreClient = new DropgateClient({
-                clientVersion,
-                server: serverUrl,
-                fallbackToHttp: true,
+        // Files dropped anywhere in Upload, and the drop zone while there are none.
+        const { zone } = kit.ui.dropZone(uploadView, {
+            onPaths: (paths) => addPaths(paths),
+            icon: 'upload_file',
+            label: 'Drag & Drop Files Here',
+            onBrowse: () => fileInput.click(),
+        });
+        emptyState.append(zone);
+
+        const actions = kit.ui.actionBar({
+            run: { label: 'Upload', onClick: () => performUpload() },
+            // The upload this window shows, whichever window started it. One that has just ended is left to end.
+            abort: { onClick: () => currentUpload && api.cancelTransfer(currentUpload).catch(() => {}) },
+            clear: { onClick: () => clearFiles() },
+            progressLabel: 'Upload progress',
+        });
+        $('action-bar').append(actions.element);
+        actions.update({ canRun: false, canClear: false });
+
+        // Pause Upload and Resume Upload, beside Cancel while an upload runs, on
+        // a server that lets uploads pause. The kit's action bar has no place
+        // for them, so they're the app's own, as a transfer's own buttons are
+        // (Will, 2026-10-09). A click disables its own button until the next
+        // snapshot. The upload moving on before it landed is silent; any
+        // other refusal is core's reason, as a warning.
+        const pauseButton = (label, paused) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-outline-secondary';
+            button.textContent = label;
+            button.hidden = true;
+            button.addEventListener('click', async () => {
+                button.disabled = true;
+                if (!currentUpload) return;
+                const asked = paused ? api.pauseTransfer(currentUpload) : api.resumeTransfer(currentUpload);
+                const { message } = await asked.catch(() => ({}));
+                if (message) kit.ui.toast(message, { type: 'warning' });
             });
+            return button;
+        };
+        const pauseBtn = pauseButton('Pause Upload', true);
+        const resumeBtn = pauseButton('Resume Upload', false);
+        // Just before Cancel, the bar's danger button.
+        actions.element.querySelector('.kit-action-buttons > .btn-danger').before(pauseBtn, resumeBtn);
+
+        /** Pause while the upload runs, Resume while it's paused, each usable only when core says it can be now. */
+        function showPauseControls({ pausable = false, paused = false, canPause = false } = {}) {
+            pauseBtn.hidden = !pausable || paused;
+            pauseBtn.disabled = !canPause;
+            resumeBtn.hidden = !paused;
+            resumeBtn.disabled = !(paused && canPause);
         }
 
-        function isFile(file) {
-            return new Promise((resolve) => {
-                // A simple check for the presence of a file type can often identify files.
-                // Directories will have an empty string as their type.
-                if (file.type !== '') {
-                    return resolve(true);
-                }
-
-                // For files without a type, we can use FileReader.
-                // Reading a directory will result in an error.
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                    if (reader.error) {
-                        resolve(false);
-                    } else {
-                        resolve(true);
-                    }
-                };
-                reader.readAsArrayBuffer(file);
-            });
+        /** Say what's happening, on the action bar's status line. */
+        function setStatus(text) {
+            actions.update({ summary: text });
         }
 
-        function formatBytes(bytes) {
-            if (!Number.isFinite(bytes)) return '0 bytes';
-            if (bytes === 0) return '0 bytes';
-            const k = 1000;
-            const sizes = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            const v = bytes / Math.pow(k, i);
-            return `${v.toFixed(v < 10 && i > 0 ? 2 : 1)} ${sizes[i]}`;
+        // --- The server ---
+        // The app's own version, for display only.
+        const appVersion = await kitApi.getVersion();
+        // The server's address as the client reads it (https:// added if it had
+        // no scheme), from the last check that reached it. Checks are asked of
+        // the server by the transfer window, through main (api.checkServer()).
+        let serverBaseUrl = null;
+
+        /** Whether an address is plain HTTP, as typed: one without a scheme is HTTPS. */
+        const isPlainHttp = (serverUrl) => /^http:\/\//i.test(serverUrl);
+
+        /** Ask the server, through main: what it allows, or why it couldn't be reached. */
+        const checkServer = (serverUrl) => api.checkServer(serverUrl).catch(() => ({ ok: false }));
+
+        /** Why Test couldn't connect, and what to try. */
+        function connectionFailedText(serverUrl, error) {
+            if (error?.code === 'REDIRECT_NOT_FOLLOWED') return error.message;
+            const text = 'Connection failed. Check the URL, and that the server is running.';
+            return isPlainHttp(serverUrl) ? text : `${text} If the server only serves plain HTTP, enter its address starting with http://.`;
         }
 
         // --- Initial Settings Load ---
-        const settings = await window.electronAPI.getSettings();
-        serverUrlInput.value = settings.serverURL || '';
-
-        fileLifetimeValueInput.value = settings.lifetimeValue || 24;
-        fileLifetimeUnitSelect.value = settings.lifetimeUnit || 'hours';
+        const settings = await kitApi.getSettings();
+        serverUrlInput.value = settings.serverURL;
+        fileLifetimeValueInput.value = settings.lifetimeValue;
+        fileLifetimeUnitSelect.value = settings.lifetimeUnit;
         if (fileLifetimeUnitSelect.value === 'unlimited') {
             fileLifetimeValueInput.disabled = true;
             fileLifetimeValueInput.value = 0;
         }
-
-        // Load max downloads preference
-        if (settings.maxDownloads) {
-            maxDownloadsValue.value = settings.maxDownloads;
-        }
-
-        // Create initial client with loaded server URL
-        createClient(serverUrlInput.value.trim());
+        maxDownloadsValue.value = settings.maxDownloads;
+        // The kit's own setting: on, the redacted log is kept in debug.log too; off, that file is deleted.
+        keepLogSwitch.checked = settings.keepLogOnDisk;
+        keepLogSwitch.addEventListener('change', () => kitApi.setSettings({ keepLogOnDisk: keepLogSwitch.checked }));
 
         await checkServerCompatibility();
 
@@ -198,211 +212,198 @@ document.addEventListener('DOMContentLoaded', async () => {
         maxDownloadsValue.addEventListener('input', () => updateMaxDownloadsSettings());
         maxDownloadsValue.addEventListener('blur', () => updateMaxDownloadsSettings());
 
-        dropZone.addEventListener('click', (e) => {
-            if (e.target.closest('button')) return;
-            fileInput.click();
-        });
-        selectFileBtn.addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
-        browseMoreBtn.addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
-        btnClearAll.addEventListener('click', (e) => {
-            e.stopPropagation();
-            selectedFiles = [];
-            updateFileListUI();
-            updateUploadButtonState();
-        });
+        browseMoreBtn.addEventListener('click', () => fileInput.click());
+        // Files picked with Add More or Browse: by their paths, as a drop's are.
         fileInput.addEventListener('change', (e) => {
-            if (e.target.files && e.target.files.length) {
-                handleFiles(Array.from(e.target.files));
-                fileInput.value = '';
-            }
+            const picked = Array.from(e.target.files ?? []);
+            fileInput.value = '';
+            const paths = picked.map((file) => kitApi.getPathForFile(file)).filter(Boolean);
+            if (paths.length) addFromPaths(paths);
         });
-        dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.add('drag-over');
-        });
-        dropZone.addEventListener('dragleave', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.remove('drag-over');
-        });
-        dropZone.addEventListener('drop', async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            dropZone.classList.remove('drag-over');
 
-            const files = e.dataTransfer.files;
-            if (!files || files.length === 0) return;
-
-            // Filter out directories
-            const validFiles = [];
-            for (const f of Array.from(files)) {
-                if (await isFile(f)) {
-                    validFiles.push(f);
-                }
-            }
-
-            if (validFiles.length === 0) {
-                uploadStatus.textContent = 'Folders cannot be uploaded.';
-                uploadStatus.className = 'form-text mt-1 text-warning';
-                return;
-            }
-
-            handleFiles(validFiles);
-        });
+        // The server is kept as it's changed, and as Test finds it.
+        serverUrlInput.addEventListener('change', () => saveServer(serverUrlInput.value.trim()));
 
         testConnectionBtn.addEventListener('click', async () => {
             const serverUrl = serverUrlInput.value.trim();
             if (!serverUrl) {
                 updateUploadabilityState(false);
-                connectionStatus.textContent = 'Please enter a server URL.';
-                connectionStatus.className = 'form-text mt-1 text-warning';
+                connectionStatus.textContent = 'Enter a server URL.';
+                connectionStatus.className = 'form-text reserved text-warning-emphasis';
                 return;
             }
 
-            uploadStatus.textContent = '';
             testConnectionBtn.disabled = true;
-            testConnectionBtn.textContent = 'Testing...';
-            connectionStatus.textContent = 'Checking server...';
-            connectionStatus.className = 'form-text mt-1 text-muted';
+            testConnectionBtn.textContent = 'Testing…';
+            connectionStatus.textContent = 'Checking server…';
+            connectionStatus.className = 'form-text reserved';
 
             try {
-                // Recreate client with current URL (includes HTTP fallback)
-                createClient(serverUrl);
-                await coreClient.connect({ timeoutMs: 5000 });
+                const result = await checkServer(serverUrl);
+                if (!result.ok) {
+                    connectionStatus.textContent = connectionFailedText(serverUrl, result);
+                    updateUploadabilityState(false);
+                    connectionStatus.className = 'form-text reserved text-danger-emphasis';
+                    return;
+                }
+                serverBaseUrl = result.baseUrl;
 
-                const { secure } = coreClient.serverTarget;
-                if (secure) {
-                    connectionStatus.textContent = `Connection successful (HTTPS).`;
-                    connectionStatus.className = 'form-text mt-1 text-success';
+                if (serverBaseUrl.startsWith('https://')) {
+                    connectionStatus.textContent = 'Connection successful (HTTPS).';
+                    connectionStatus.className = 'form-text reserved text-success-emphasis';
                 } else {
-                    connectionStatus.textContent = `Connection successful (HTTP) — connection is insecure.`;
-                    connectionStatus.className = 'form-text mt-1 text-warning';
+                    connectionStatus.textContent = 'Connection successful (HTTP), but the connection is insecure.';
+                    connectionStatus.className = 'form-text reserved text-warning-emphasis';
                 }
 
-                // Update input to reflect resolved URL (may have changed due to HTTP fallback)
-                serverUrlInput.value = coreClient.baseUrl;
+                // The address as the client reads it: https:// added if it had no scheme.
+                serverUrlInput.value = serverBaseUrl;
+                await saveServer(serverBaseUrl);
 
                 await checkServerCompatibility();
-            } catch (error) {
-                connectionStatus.textContent = 'Connection failed. Check URL or if server is running.';
-                updateUploadabilityState(false);
-                connectionStatus.className = 'form-text mt-1 text-danger';
             } finally {
-                testConnectionBtn.disabled = false;
+                testConnectionBtn.disabled = uploading;
                 testConnectionBtn.textContent = 'Test';
             }
         });
 
-        copyBtn.addEventListener('click', () => {
-            downloadLinkInput.select();
-            document.execCommand('copy');
+        // Copied by main, kept out of the clipboard's history and sync: the link holds the key.
+        copyBtn.addEventListener('click', async () => {
+            try {
+                await api.copyLink(downloadLinkInput.value);
+                kit.ui.toast('Link copied.', { type: 'success' });
+            } catch {
+                kit.ui.toast("Couldn't copy the link.", { type: 'danger' });
+            }
         });
 
         // --- IPC Listeners (Communication from Main Process) ---
 
-        // Listens for UI update commands from main.js
-        window.electronAPI.onUpdateUI((event) => {
+        // An upload's progress and outcome, from this window or a hidden one.
+        api.onUploadStatus((event) => {
             switch (event.type) {
                 case 'progress':
                     {
-                        const { text, percent } = event.data;
-                        if (text) {
-                            uploadStatus.textContent = text;
-                            uploadStatus.className = 'form-text mt-1 text-muted';
-                        }
-                        if (percent !== undefined) {
-                            progressBar.style.width = percent.toFixed(2) + '%';
-                            progressBar.setAttribute('aria-valuenow', percent.toFixed(2));
-                            progressBar.textContent = percent.toFixed(0) + '%';
-                        }
-                        uploadBtn.disabled = true;
-                        uploadBtn.textContent = 'Uploading...';
-                        uploadBtn.style.display = 'none';
-                        cancelUploadBtn.style.display = 'block';
-                        cancelUploadBtn.onclick = () => window.electronAPI.cancelUpload();
-                        linkSection.style.display = 'none';
+                        const { id, status, paused, canPause, percent } = event.data;
+                        currentUpload = id;
+                        const text = progressLine(event.data);
+                        if (text) setStatus(text);
+                        uploading = true;
+                        actions.update({ running: true, ...(percent !== undefined ? { percent } : {}) });
+                        // Whether the server lets an upload pause: its pause length is 0 when the operator has turned pausing off.
+                        const pausable = (serverCapabilities?.upload?.maxPauseMinutes ?? 0) > 0 && ['initializing', 'uploading', 'paused'].includes(status);
+                        showPauseControls({ pausable, paused, canPause });
+                        linkSection.classList.add('d-none');
                         break;
                     }
                 case 'success':
                     {
                         const { link } = event.data;
                         downloadLinkInput.value = link;
-                        linkSection.style.display = 'block';
-                        uploadStatus.textContent = 'Upload successful!';
-                        uploadStatus.className = 'form-text mt-1 text-success';
-                        uploadBtn.style.display = 'block';
-                        cancelUploadBtn.style.display = 'none';
+                        linkSection.classList.remove('d-none');
+                        uploading = false;
+                        uploadEnded();
+                        showPauseControls();
+                        setStatus('Upload successful.');
+                        actions.update({ running: false, percent: 100 });
                         resetUI();
                         break;
                     }
                 case 'error':
                     {
                         const { error } = event.data;
-                        uploadStatus.textContent = `Upload failed: ${error}`;
-                        uploadStatus.className = 'form-text mt-1 text-danger';
-                        uploadBtn.style.display = 'block';
-                        cancelUploadBtn.style.display = 'none';
+                        uploading = false;
+                        uploadEnded();
+                        showPauseControls();
+                        setStatus(`Upload failed: ${error}`);
+                        actions.update({ running: false });
+                        kit.ui.toast(`Upload failed: ${error}`, { type: 'danger' });
+                        resetUI(false);
+                        break;
+                    }
+                case 'cancelled':
+                    {
+                        uploading = false;
+                        uploadEnded();
+                        showPauseControls();
+                        setStatus('Upload cancelled.');
+                        actions.update({ running: false });
                         resetUI(false);
                         break;
                     }
             }
         });
 
-        // Handles cancel requests forwarded from the main process (e.g. user
-        // clicked cancel in the main window while a background upload is running)
-        window.electronAPI.onCancelUpload(() => {
-            if (activeUploadSession) {
-                activeUploadSession.cancel('Upload cancelled.');
-                activeUploadSession = null;
+        /**
+         * The status line for an upload's progress: core's step, the file it's
+         * on when it's one of several (main's name for it: core's snapshots
+         * name none), or, paused, until when the server keeps it. Short, to fit
+         * the status line beside its buttons (Will, 2026-10-09).
+         */
+        function progressLine({ step, fileName, paused, deadline }) {
+            if (paused && step === 'Paused.' && deadline) return `Paused. Kept until ${formatDeadline(deadline)}.`;
+            return fileName ? `${step} — ${fileName}` : step;
+        }
+
+        /** An upload this window shows has ended: the window's own is done with. */
+        function uploadEnded() {
+            currentUpload = null;
+            if (ownUpload) {
+                ownUpload = null;
+                setUploadingState(false);
             }
+        }
+
+        // A file picked with the menu's Open File
+        api.onFileOpened((file) => {
+            if (file && file.handle) handleFiles([file]);
+        });
+        api.onFileOpenError((message) => kit.ui.toast(message, { type: 'danger' }));
+
+        // Share with Dropgate, to a server with no end-to-end encryption: main
+        // opened this window to ask. Upload Anyway starts it; anything else
+        // declines it.
+        api.onAskInsecure(async ({ id }) => {
+            if (await askUploadAnyway()) api.startTransfers([id]).catch(() => {});
+            else api.cancelTransfer(id).catch(() => {});
         });
 
-        // Listens for a file opened via the 'Open File' menu
-        window.electronAPI.onFileOpened((file) => {
-            if (file && file.filePath) {
-                const lazyFile = new LazyFile(file.filePath, file.name, file.size);
-                handleFiles([lazyFile]);
+        /** The Upload Security Warning, before an upload that won't be end-to-end encrypted. */
+        function askUploadAnyway() {
+            return kit.ui.confirm({
+                title: 'Upload Security Warning',
+                body: 'This server does not support end-to-end encryption. Your file will be uploaded without encryption.',
+                detail: 'The server administrator may be able to access your file contents.',
+                confirmLabel: 'Upload Anyway',
+                variant: 'warning',
+                icon: 'warning',
+            });
+        }
+
+        /** Files by path, from a drop, a pick or the app's launch: main checks each, and hands over the files as handles. */
+        async function addFromPaths(paths) {
+            const { files, folders } = await api.addFiles(paths);
+            if (folders > 0) kit.ui.toast(`Skipped ${kit.format.countOf(folders, 'folder')}: folders can't be uploaded.`, { type: 'warning' });
+            handleFiles(files);
+        }
+
+        /** Files dropped on Upload. */
+        async function addPaths(paths) {
+            if (uploading || !uploadsAllowed) return;
+            await addFromPaths(paths);
+        }
+
+        /** Files the app was opened with: added to Upload, as Open File's are, and shown there. */
+        async function addOpenedPaths(paths) {
+            if (uploading) {
+                kit.ui.toast(`Couldn't add ${kit.format.countOf(paths.length, 'file')}: an upload is running.`, { type: 'warning' });
+                return;
             }
-        });
-
-        // Listens for a background upload triggered from the context menu
-        window.electronAPI.onBackgroundUploadStart(async (details) => {
-            console.log('Background upload triggered with details:', details);
-
-            if (details && details.files && details.files.length > 0) {
-                selectedFiles = details.files.map(f => {
-                    console.log('File:', f.name, 'size:', f.size, 'bytes');
-                    return new LazyFile(f.filePath, f.name, f.size);
-                });
-                // Encryption is auto-determined by server capabilities later
-
-                const settings = await window.electronAPI.getSettings();
-                console.log('Settings loaded:', settings);
-
-                if (!settings.serverURL) {
-                    console.error('No server URL configured!');
-                    window.electronAPI.uploadFinished({
-                        status: 'error',
-                        error: 'Server URL is not configured.'
-                    });
-                    return;
-                }
-                serverUrlInput.value = settings.serverURL;
-                createClient(settings.serverURL);
-
-                console.log('Starting upload of', selectedFiles.length, 'file(s)...');
-                // Trigger the centralised upload function
-                await performUpload();
-            } else {
-                console.error('Invalid details received:', details);
-            }
-        });
+            shell.showView('upload');
+            await addFromPaths(paths);
+        }
 
         function handleFiles(newFiles) {
-            // Clear any previous error messages
-            uploadStatus.textContent = '';
-
             if (!newFiles || newFiles.length === 0) {
                 return;
             }
@@ -411,18 +412,42 @@ document.addEventListener('DOMContentLoaded', async () => {
             const valid = newFiles.filter(f => f.size > 0);
             const skipped = newFiles.length - valid.length;
             if (skipped > 0) {
-                uploadStatus.textContent = `Skipped ${skipped} empty (0 byte) file${skipped > 1 ? 's' : ''}.`;
-                uploadStatus.className = 'form-text mt-1 text-warning';
+                kit.ui.toast(`Skipped ${kit.format.countOf(skipped, 'empty file')}.`, { type: 'warning' });
             }
 
-            if (valid.length === 0) return;
+            // A file already in the list isn't added twice: main hands a window the
+            // same handle for the same file.
+            const listed = new Set(selectedFiles.map((f) => f.handle));
+            const fresh = valid.filter((f) => {
+                if (listed.has(f.handle)) return false;
+                listed.add(f.handle);
+                return true;
+            });
+            const repeated = valid.length - fresh.length;
+            if (repeated > 0) {
+                kit.ui.toast(`Skipped ${kit.format.countOf(repeated, 'file')} already in the list.`, { type: 'warning' });
+            }
+
+            if (fresh.length === 0) return;
 
             // Append to existing selection
-            selectedFiles = [...selectedFiles, ...valid];
+            selectedFiles = [...selectedFiles, ...fresh];
             updateFileListUI();
-            linkSection.style.display = 'none';
+            linkSection.classList.add('d-none');
 
             // Only enable upload if all conditions are met
+            updateUploadButtonState();
+        }
+
+        /** Main forgets the files this window is done with. */
+        function revoke(files) {
+            for (const f of files) api.revokeFileAccess(f.handle).catch(() => {});
+        }
+
+        function clearFiles() {
+            revoke(selectedFiles);
+            selectedFiles = [];
+            updateFileListUI();
             updateUploadButtonState();
         }
 
@@ -430,24 +455,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             const count = selectedFiles.length;
             const isEmpty = count === 0;
 
-            // Toggle drop zone states
-            dzEmpty.classList.toggle('d-none', !isEmpty);
-            dzHasFiles.classList.toggle('d-none', isEmpty);
+            emptyState.classList.toggle('d-none', !isEmpty);
             fileListSection.classList.toggle('d-none', isEmpty);
-
             if (isEmpty) return;
 
-            dzFileCount.textContent = count === 1 ? '1 File Selected' : `${count} Files Selected`;
+            fileCount.textContent = `${kit.format.countOf(count, 'file')} selected`;
 
-            fileListContainer.innerHTML = '';
-            for (let i = 0; i < selectedFiles.length; i++) {
-                const f = selectedFiles[i];
-
+            fileListContainer.replaceChildren();
+            selectedFiles.forEach((f, i) => {
                 const row = document.createElement('div');
                 row.className = 'file-row';
 
                 const icon = document.createElement('span');
                 icon.className = 'material-icons-round text-secondary';
+                icon.setAttribute('aria-hidden', 'true');
                 icon.textContent = 'insert_drive_file';
 
                 const name = document.createElement('span');
@@ -457,41 +478,42 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 const size = document.createElement('span');
                 size.className = 'file-row-size';
-                size.textContent = formatBytes(f.size);
+                size.textContent = kit.format.formatBytes(f.size);
 
                 const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
                 removeBtn.className = 'file-remove-btn';
                 removeBtn.title = 'Remove file';
-                removeBtn.innerHTML = '<span class="material-icons-round">close</span>';
-                removeBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    selectedFiles.splice(i, 1);
+                removeBtn.setAttribute('aria-label', `Remove ${f.name}`);
+                removeBtn.disabled = uploading;
+                const removeIcon = document.createElement('span');
+                removeIcon.className = 'material-icons-round';
+                removeIcon.setAttribute('aria-hidden', 'true');
+                removeIcon.textContent = 'close';
+                removeBtn.append(removeIcon);
+                removeBtn.addEventListener('click', () => {
+                    revoke(selectedFiles.splice(i, 1));
                     updateFileListUI();
                     updateUploadButtonState();
                 });
 
-                row.appendChild(icon);
-                row.appendChild(name);
-                row.appendChild(size);
-                row.appendChild(removeBtn);
-                fileListContainer.appendChild(row);
-            }
+                row.append(icon, name, size, removeBtn);
+                fileListContainer.append(row);
+            });
 
             const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
-            fileChosenTotal.textContent = `Total: ${formatBytes(totalSize)}`;
+            fileChosenTotal.textContent = kit.format.formatBytes(totalSize);
         }
 
-        // Trigger for uploads started from the UI
-        uploadBtn.addEventListener('click', performUpload);
-
         /**
-         * The main upload logic.
-         * It reports progress and final status back to the main process via IPC.
+         * Start an upload of the files listed: checked here, and run by main in
+         * the transfer window, which tells this window how it goes
+         * (onUploadStatus). One stopped before it starts is told to main too.
          */
         async function performUpload() {
             const serverCheck = await checkServerCompatibility();
             if (!serverCheck.compatible) {
-                window.electronAPI.uploadFinished({ status: 'error', error: serverCheck.message || 'Server is not compatible.' });
+                api.uploadFinished({ status: 'error', error: serverCheck.message || 'Server is not compatible.' });
                 return;
             }
 
@@ -501,29 +523,27 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
 
             if (!selectedFiles.length) {
-                window.electronAPI.uploadFinished({ status: 'error', error: 'No files selected.' });
+                api.uploadFinished({ status: 'error', error: 'No files selected.' });
                 return;
             }
 
             // Double check lifetime against server before starting
             if (!validateLifetimeInput()) {
-                window.electronAPI.uploadFinished({
+                api.uploadFinished({
                     status: 'error',
-                    error: uploadStatus.textContent || 'Invalid file lifetime.'
+                    error: fileLifetimeHelp.textContent || 'Invalid file lifetime.'
                 });
                 return;
             }
 
-            const isTargetSecure = coreClient?.baseUrl?.startsWith('https://') ?? false;
-            const hasE2EE = serverCapabilities?.upload?.e2ee && isTargetSecure;
+            const isTargetSecure = serverBaseUrl?.startsWith('https://') ?? false;
+            const hasE2EE = Boolean(serverCapabilities?.upload?.e2ee && isTargetSecure);
 
             // Check if E2EE is available - show warning if not
             if (!hasE2EE) {
-                // Show the window if it's hidden (background upload) so user can see the modal
-                window.electronAPI.showWindow();
-                const confirmed = await showInsecureUploadModal();
+                const confirmed = await askUploadAnyway();
                 if (!confirmed) {
-                    window.electronAPI.uploadFinished({
+                    api.uploadFinished({
                         status: 'error',
                         error: 'Upload cancelled by user (insecure connection).'
                     });
@@ -531,86 +551,37 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             }
 
-            const encrypt = hasE2EE; // Auto-set encryption based on capability
-
-            const lifetimeMs = getLifetimeInMs();
+            // Auto-set encryption based on capability
+            const encrypt = hasE2EE;
             saveSettings();
 
-            // Revoke main-process file access for any LazyFile instances after upload ends
-            const revokeAllLazyFiles = () => {
-                for (const f of selectedFiles) {
-                    if (f instanceof LazyFile) {
-                        window.electronAPI.revokeFileAccess(f.filePath);
-                    }
-                }
-            };
-
             try {
-                const session = await coreClient.uploadFiles({
-                    files: selectedFiles.length === 1 ? selectedFiles[0] : selectedFiles,
-                    lifetimeMs,
-                    maxDownloads: (() => {
-                        const val = parseInt(maxDownloadsValue.value, 10);
-                        return (Number.isInteger(val) && val >= 0) ? val : 1;
-                    })(),
-                    encrypt: encrypt,
-                    onProgress: (evt) => {
-                        const payload = {};
-                        if (evt?.text) {
-                            payload.text = evt.currentFileName
-                                ? `${evt.text} — ${evt.currentFileName}`
-                                : evt.text;
-                        }
-                        if (evt?.percent !== undefined) payload.percent = evt.percent;
-                        if (Object.keys(payload).length) window.electronAPI.uploadProgress(payload);
+                const unit = fileLifetimeUnitSelect.value;
+                const { id } = await api.addUpload({
+                    files: selectedFiles.map((f) => f.handle),
+                    options: {
+                        lifetime: { value: unit === 'unlimited' ? 0 : parseFloat(fileLifetimeValueInput.value), unit },
+                        maxDownloads: (() => {
+                            const val = parseInt(maxDownloadsValue.value, 10);
+                            return (Number.isInteger(val) && val >= 0) ? val : 1;
+                        })(),
+                        encrypt,
                     },
-                    onCancel: () => {
-                        uploadStatus.textContent = 'Upload cancelled.';
-                        uploadStatus.className = 'form-text mt-1 text-warning';
-                        // Swap buttons back
-                        uploadBtn.style.display = 'block';
-                        cancelUploadBtn.style.display = 'none';
-                        activeUploadSession = null;
-                        setUploadingState(false);
-                        resetUI(false);
-                    }
                 });
-
-                // Store session and swap buttons
-                activeUploadSession = session;
-                uploadBtn.style.display = 'none';
-                cancelUploadBtn.style.display = 'block';
+                ownUpload = id;
+                currentUpload = id;
+                uploading = true;
+                actions.update({ running: true });
                 setUploadingState(true);
-
-                // Wire up cancel button
-                cancelUploadBtn.onclick = () => {
-                    if (activeUploadSession) {
-                        activeUploadSession.cancel('User cancelled upload.');
-                        activeUploadSession = null;
-                        cancelUploadBtn.style.display = 'none';
-                        uploadBtn.style.display = 'block';
-                    }
-                };
-
-                const result = await session.result;
-
-                // Swap buttons back on success
-                uploadBtn.style.display = 'block';
-                cancelUploadBtn.style.display = 'none';
-                activeUploadSession = null;
-                setUploadingState(false);
-
-                revokeAllLazyFiles();
-                window.electronAPI.uploadFinished({ status: 'success', link: result.downloadUrl });
+                await api.startTransfers([id]);
             } catch (error) {
-                // Swap buttons back on error
-                uploadBtn.style.display = 'block';
-                cancelUploadBtn.style.display = 'none';
-                activeUploadSession = null;
+                // Only an upload that never started gets here.
+                ownUpload = null;
+                currentUpload = null;
+                uploading = false;
+                actions.update({ running: false });
                 setUploadingState(false);
-
-                revokeAllLazyFiles();
-                window.electronAPI.uploadFinished({
+                api.uploadFinished({
                     status: 'error',
                     error: error?.message || String(error)
                 });
@@ -619,85 +590,59 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // --- Utility Functions ---
 
+        /** When a paused upload's server stops holding it, as a local time: "14:32", or "14:32 tomorrow". */
+        function formatDeadline(ms) {
+            const at = new Date(ms);
+            const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+            const today = new Date();
+            if (at.toDateString() === today.toDateString()) return time;
+            const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+            if (at.toDateString() === tomorrow.toDateString()) return `${time} tomorrow`;
+            return at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+        }
+
         /**
          * Update the security status card based on E2EE and HTTPS availability.
          */
         function updateSecurityStatus() {
-            if (!securityStatus || !securityIcon || !securityText) return;
-            // Electron context note: window.isSecureContext can be true for localhost http,
-            // but for real security we care about HTTPS or just trusting the capability check context if local.
-            // For simplicity, we trust the server capability flag + check protocol if remote.
-
-            // In Electron renderer, location.protocol serves file:// usually or http/https if loaded remotely.
-            // But here we are making requests to 'serverUrlInput.value'.
-            // So we need to check the active server URL protocol.
-            const isTargetSecure = coreClient?.baseUrl?.startsWith('https://') ?? false;
+            // What counts is the server's address: its capability, and whether it's reached over HTTPS.
+            const isTargetSecure = serverBaseUrl?.startsWith('https://') ?? false;
             const hasE2EE = serverCapabilities?.upload?.e2ee && isTargetSecure;
 
             if (hasE2EE) {
                 // Green: Full E2EE
                 securityIcon.textContent = 'verified';
-                securityIcon.className = 'material-icons-round text-success';
+                securityIcon.className = 'material-icons-round text-success-emphasis';
                 securityText.textContent = 'Your upload will be end-to-end encrypted.';
                 securityStatus.className = 'security-status-card security-green mb-3';
             } else if (isTargetSecure) {
                 // Yellow: HTTPS but no E2EE
                 securityIcon.textContent = 'warning';
-                securityIcon.className = 'material-icons-round text-warning';
-                securityText.textContent = "This server doesn't support encryption. Your upload is protected in transit via HTTPS.";
+                securityIcon.className = 'material-icons-round text-warning-emphasis';
+                securityText.textContent = "This server doesn't support encryption. Your upload is protected in transit by HTTPS.";
                 securityStatus.className = 'security-status-card security-yellow mb-3';
             } else {
                 // Red: HTTP, no encryption at all
                 securityIcon.textContent = 'gpp_bad';
-                securityIcon.className = 'material-icons-round text-danger';
+                securityIcon.className = 'material-icons-round text-danger-emphasis';
                 securityText.textContent = 'This connection is not secure. Your upload will not be encrypted.';
                 securityStatus.className = 'security-status-card security-red mb-3';
             }
         }
 
-        /**
-         * Show the insecure upload warning modal and return a promise.
-         * @returns {Promise<boolean>} True if user confirms, false if cancelled.
-         */
-        function showInsecureUploadModal() {
-            return new Promise((resolve) => {
-                if (!insecureUploadModal) {
-                    resolve(true);
-                    return;
-                }
-
-                const modal = new bootstrap.Modal(insecureUploadModal);
-
-                const cleanup = () => {
-                    confirmInsecureBtn?.removeEventListener('click', onConfirm);
-                    insecureUploadModal.removeEventListener('hidden.bs.modal', onHide);
-                };
-
-                const onConfirm = () => {
-                    cleanup();
-                    modal.hide();
-                    resolve(true);
-                };
-
-                const onHide = () => {
-                    cleanup();
-                    resolve(false);
-                };
-
-                confirmInsecureBtn?.addEventListener('click', onConfirm, { once: true });
-                insecureUploadModal.addEventListener('hidden.bs.modal', onHide, { once: true });
-
-                modal.show();
-            });
+        /** Keep the upload options, as they change. A value that isn't a number yet is left as it was. */
+        function saveSettings() {
+            const changes = { lifetimeUnit: fileLifetimeUnitSelect.value };
+            const lifetime = parseFloat(fileLifetimeValueInput.value);
+            if (Number.isFinite(lifetime)) changes.lifetimeValue = lifetime;
+            const downloads = parseInt(maxDownloadsValue.value, 10);
+            if (Number.isInteger(downloads)) changes.maxDownloads = downloads;
+            return kitApi.setSettings(changes);
         }
 
-        function saveSettings() {
-            window.electronAPI.setSettings({
-                serverURL: serverUrlInput.value,
-                lifetimeValue: fileLifetimeValueInput.value,
-                lifetimeUnit: fileLifetimeUnitSelect.value,
-                maxDownloads: maxDownloadsValue.value
-            });
+        /** Keep the server. */
+        function saveServer(url) {
+            return kitApi.setSettings({ serverURL: url });
         }
 
         function getLifetimeInMs() {
@@ -708,85 +653,61 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         async function checkServerCompatibility() {
-            uploadStatus.textContent = '';
             const inputUrl = serverUrlInput.value.trim();
             if (!inputUrl) {
-                const message = 'No server URL provided.';
-                uploadStatus.textContent = message;
-                uploadStatus.className = 'form-text mt-1 text-warning';
-                uploadBtn.disabled = true;
+                const message = 'No server URL. Add one in Settings, under Server.';
                 updateUploadabilityState(false, message);
                 lastServerCheck = { compatible: false, message };
                 return lastServerCheck;
             }
 
-            try {
-                // Recreate client if URL changed (client handles HTTP fallback internally)
-                createClient(inputUrl);
-                const compat = await coreClient.connect({ timeoutMs: 5000 });
-
-                // Update input to reflect resolved URL (may have changed due to HTTP fallback or protocol auto-detect)
-                serverUrlInput.value = coreClient.baseUrl;
-
-                const { serverInfo } = compat;
-
-                if (!serverInfo || !serverInfo?.version || !serverInfo?.capabilities) {
-                    const message = 'Error: Cannot determine server version or capabilities.';
-                    uploadStatus.textContent = message;
-                    uploadStatus.className = 'form-text mt-1 text-danger';
-                    uploadBtn.disabled = true;
-                    lastServerCheck = { compatible: false, message };
-                    return lastServerCheck;
-                }
-
-                serverCapabilities = serverInfo.capabilities;
-
-                // Check if uploads are explicitly disabled by the server
-                if (serverCapabilities.upload && serverCapabilities.upload.enabled === false) {
-                    const message = 'File uploads are disabled on this server.';
-                    updateUploadabilityState(false, message);
-                    lastServerCheck = { compatible: false, message };
-                    return lastServerCheck;
-                } else {
-                    updateUploadabilityState(true);
-                }
-
-                applyServerLimits();
-
-                if (!compat.compatible) {
-                    uploadBtn.disabled = true;
-                    uploadStatus.textContent = compat.message;
-                    uploadStatus.className = 'form-text mt-1 text-danger';
-                    lastServerCheck = { compatible: false, message: compat.message };
-                    updateUploadabilityState(false, compat.message);
-                    return lastServerCheck;
-                }
-
-                // compatible
-                uploadStatus.textContent = compat.message;
-
-                // warning when client is newer
-                if (compat.message.toLowerCase().includes('newer')) {
-                    uploadStatus.className = 'form-text mt-1 text-warning';
-                } else {
-                    uploadStatus.className = 'form-text mt-1 text-info';
-                }
-
-                // Update button state based on all factors
-                lastServerCheck = { compatible: true, message: compat.message };
-                updateUploadButtonState();
-
-                return lastServerCheck;
-            } catch (error) {
+            const compat = await checkServer(inputUrl);
+            if (!compat.ok) {
                 const message = 'Could not connect to the server.';
-                uploadStatus.textContent = message;
-                uploadStatus.className = 'form-text mt-1 text-danger';
-                uploadBtn.disabled = true;
-                console.error('Compatibility check failed:', error);
                 lastServerCheck = { compatible: false, message };
                 updateUploadabilityState(false, message);
                 return lastServerCheck;
             }
+            serverBaseUrl = compat.baseUrl;
+            // The address as the client reads it: https:// added if it had no scheme.
+            serverUrlInput.value = serverBaseUrl;
+
+            const { serverInfo } = compat;
+
+            if (!serverInfo || !serverInfo?.version || !serverInfo?.capabilities) {
+                const message = 'Cannot determine the server\'s version or capabilities.';
+                updateUploadabilityState(false, message);
+                lastServerCheck = { compatible: false, message };
+                return lastServerCheck;
+            }
+
+            serverCapabilities = serverInfo.capabilities;
+
+            // Check if uploads are explicitly disabled by the server
+            if (serverCapabilities.upload && serverCapabilities.upload.enabled === false) {
+                const message = 'File uploads are disabled on this server.';
+                updateUploadabilityState(false, message);
+                lastServerCheck = { compatible: false, message };
+                return lastServerCheck;
+            }
+            updateUploadabilityState(true);
+
+            applyServerLimits();
+
+            // Uploads need the server's hosted transfer protocol to work with this app's.
+            if (!compat.dgup.compatible) {
+                lastServerCheck = { compatible: false, message: compat.dgup.message };
+                updateUploadabilityState(false, compat.dgup.message);
+                return lastServerCheck;
+            }
+
+            // compatible
+            const message = `Server: v${compat.serverVersion}${serverInfo.name ? ` (${serverInfo.name})` : ''}, Client: v${appVersion}.`;
+            setStatus(message);
+            lastServerCheck = { compatible: true, message };
+            updateUploadButtonState();
+
+            return lastServerCheck;
         }
 
         function validateLifetimeInput() {
@@ -797,8 +718,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // If server allows unlimited, and user selected unlimited, we are good.
             if (limitHours === 0 && unit === 'unlimited') {
-                fileLifetimeHelp.textContent = 'No lifetime limit enforced by the server.';
-                fileLifetimeHelp.className = 'form-text mt-1 text-muted';
+                setHelp(fileLifetimeHelp, 'No lifetime limit enforced by the server.');
                 return true;
             }
 
@@ -812,20 +732,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             const limitMs = limitHours * 60 * 60 * 1000;
 
             if (limitHours > 0 && currentMs > limitMs) {
-                fileLifetimeHelp.textContent = `File lifetime too long. Server limit: ${limitHours} hours.`;
-                fileLifetimeHelp.className = 'form-text mt-1 text-danger';
+                setHelp(fileLifetimeHelp, `File lifetime too long. Server limit: ${hours(limitHours)}.`, 'danger');
                 return false;
-            } else {
-                // Valid
-                if (limitHours === 0) {
-                    fileLifetimeHelp.textContent = 'No lifetime limit enforced by the server.';
-                } else {
-                    fileLifetimeHelp.textContent = `Max: ${limitHours} hours`;
-                }
-                fileLifetimeHelp.className = 'form-text mt-1 text-muted';
-
-                return true;
             }
+            setHelp(fileLifetimeHelp, limitHours === 0 ? 'No lifetime limit enforced by the server.' : `Max: ${hours(limitHours)}`);
+            return true;
         }
 
         function validateMaxDownloadsInput() {
@@ -836,43 +747,46 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // Handle invalid input
             if (isNaN(value) || value < 0) {
-                maxDownloadsHelp.textContent = 'Max downloads must be a non-negative number.';
-                maxDownloadsHelp.className = 'form-text mt-1 text-danger';
+                setHelp(maxDownloadsHelp, 'Max downloads must be 0 or more.', 'danger');
                 return false;
             }
 
             // Server allows unlimited (0) - any value is valid
             if (maxFileDownloads === 0) {
-                maxDownloadsHelp.textContent = '0 = unlimited downloads';
-                maxDownloadsHelp.className = 'form-text mt-1 text-muted'; // or text-body-secondary
+                setHelp(maxDownloadsHelp, '0 means unlimited downloads.');
                 return true;
             }
 
             // Server has limit of 1 - input should be disabled anyway (handled by applyServerLimits)
             if (maxFileDownloads === 1) {
-                maxDownloadsHelp.textContent = 'Server enforces single-use download links.';
-                maxDownloadsHelp.className = 'form-text mt-1 text-muted';
+                setHelp(maxDownloadsHelp, 'Server enforces single-use download links.');
                 return true;
             }
 
             // Server has limit > 1
             if (value === 0) {
-                maxDownloadsHelp.textContent = `0 (unlimited) not allowed. Server limit: ${maxFileDownloads} downloads.`;
-                maxDownloadsHelp.className = 'form-text mt-1 text-danger';
+                setHelp(maxDownloadsHelp, `0 (unlimited) not allowed. Server limit: ${kit.format.countOf(maxFileDownloads, 'download')}.`, 'danger');
                 return false;
             }
 
             if (value > maxFileDownloads) {
-                maxDownloadsHelp.textContent = `Exceeds server limit of ${maxFileDownloads} downloads.`;
-                maxDownloadsHelp.className = 'form-text mt-1 text-danger';
+                setHelp(maxDownloadsHelp, `Exceeds the server's limit of ${kit.format.countOf(maxFileDownloads, 'download')}.`, 'danger');
                 return false;
             }
 
-            // Valid
-            maxDownloadsHelp.textContent = `Max: ${maxFileDownloads} downloads`;
-            maxDownloadsHelp.className = 'form-text mt-1 text-muted';
-
+            setHelp(maxDownloadsHelp, `Max: ${kit.format.countOf(maxFileDownloads, 'download')}`);
             return true;
+        }
+
+        /** A number of hours: a server's limit can be part of one, which countOf() would round. */
+        function hours(n) {
+            return Number.isInteger(n) ? kit.format.countOf(n, 'hour') : `${n} hours`;
+        }
+
+        /** A field's help line, plain, or in a tone. */
+        function setHelp(element, text, tone) {
+            element.textContent = text;
+            element.className = `form-text reserved${tone ? ` text-${tone}-emphasis` : ''}`;
         }
 
         function updateUploadButtonState() {
@@ -882,43 +796,36 @@ document.addEventListener('DOMContentLoaded', async () => {
             const isServerCompatible = lastServerCheck.compatible;
             const isFileSelected = selectedFiles.length > 0;
 
-            if (isFileSelected && isServerCompatible && isLifetimeValid && isDownloadsValid) {
-                uploadBtn.disabled = false;
-            } else {
-                uploadBtn.disabled = true;
-            }
+            actions.update({
+                canRun: isFileSelected && isServerCompatible && isLifetimeValid && isDownloadsValid && !uploading,
+                canClear: isFileSelected && !uploading,
+            });
         }
 
         // Update UI based on whether uploads are enabled
         function updateUploadabilityState(enabled, message = '') {
+            uploadsAllowed = enabled;
             if (!enabled) {
-                if (message) {
-                    uploadStatus.textContent = message;
-                    uploadStatus.className = 'form-text mt-1 text-danger';
-                }
+                if (message) setStatus(message);
 
                 // Clear loading text and hide security badge
-                fileLifetimeHelp.textContent = '';
-                maxDownloadsHelp.textContent = '';
+                setHelp(fileLifetimeHelp, '');
+                setHelp(maxDownloadsHelp, '');
                 maxUploadHint.textContent = '';
-                securityStatus.style.display = 'none';
+                securityStatus.classList.add('d-none');
 
-                // Disable UI interactions
-                uploadBtn.disabled = true;
-                selectFileBtn.disabled = true;
-                dropZone.style.opacity = '0.5';
-                dropZone.style.pointerEvents = 'none';
+                actions.update({ canRun: false });
+                emptyState.classList.add('disabled');
+                browseMoreBtn.disabled = true;
 
                 // Disable inputs
                 fileLifetimeValueInput.disabled = true;
                 fileLifetimeUnitSelect.disabled = true;
                 maxDownloadsValue.disabled = true;
             } else {
-                // Re-enable UI
-                selectFileBtn.disabled = false;
-                dropZone.style.opacity = '1';
-                dropZone.style.pointerEvents = 'auto';
-                securityStatus.style.display = 'flex'; // Restore if enabled
+                emptyState.classList.remove('disabled');
+                browseMoreBtn.disabled = false;
+                securityStatus.classList.remove('d-none');
 
                 // Inputs will be further refined by applyServerLimits, but enable them generally here
                 fileLifetimeValueInput.disabled = false;
@@ -938,7 +845,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 // Server has a limit: Disable "Unlimited"
                 if (unlimitedOption) {
                     unlimitedOption.disabled = true;
-                    unlimitedOption.textContent = 'Unlimited (Disabled by Server)';
+                    unlimitedOption.textContent = 'Unlimited (not allowed by the server)';
                 }
 
                 // If currently selected is unlimited, switch to hours
@@ -947,23 +854,15 @@ document.addEventListener('DOMContentLoaded', async () => {
                     fileLifetimeValueInput.disabled = false;
                     fileLifetimeValueInput.value = Math.min(24, limitHours);
                 }
-            } else {
+            } else if (unlimitedOption) {
                 // Server allows unlimited
-                if (unlimitedOption) {
-                    unlimitedOption.disabled = false;
-                    unlimitedOption.textContent = 'Unlimited';
-                }
+                unlimitedOption.disabled = false;
+                unlimitedOption.textContent = 'Unlimited';
             }
 
-            // Update size limit hint based on bundle size mode
-            const maxSizeBytes = serverCapabilities.upload.maxSizeMB * 1000 * 1000;
-            const sizeMode = serverCapabilities.upload.bundleSizeMode || 'total';
-            const sizeLabel = sizeMode === 'per-file' ? 'Max single file size' : 'Max upload size';
-            if (maxSizeBytes === 0) {
-                maxUploadHint.textContent = 'You can upload files of any size.';
-            } else {
-                maxUploadHint.textContent = `${sizeLabel}: ${formatBytes(maxSizeBytes)}.`;
-            }
+            // The server's limit, as its operator set it, in MB.
+            const maxSizeMB = serverCapabilities.upload.maxSizeMB;
+            maxUploadHint.textContent = maxSizeMB === 0 ? 'You can upload files of any size.' : `Max upload size: ${maxSizeMB} MB.`;
 
             // Update Security Status UI (Auto-managed E2EE)
             updateSecurityStatus();
@@ -980,17 +879,17 @@ document.addEventListener('DOMContentLoaded', async () => {
                 maxDownloadsValue.value = '1';
                 maxDownloadsValue.min = '1';
                 maxDownloadsValue.disabled = true;
-                maxDownloadsHelp.textContent = 'Server enforces single-use download links.';
+                setHelp(maxDownloadsHelp, 'Server enforces single-use download links.');
             } else if (maxFileDownloads === 0) {
                 // Server allows unlimited
                 maxDownloadsValue.disabled = false;
                 maxDownloadsValue.min = '0';
-                maxDownloadsHelp.textContent = '0 = unlimited downloads';
+                setHelp(maxDownloadsHelp, '0 means unlimited downloads.');
             } else {
                 // Server has a limit > 1 (0 is not allowed)
                 maxDownloadsValue.disabled = false;
                 maxDownloadsValue.min = '1';
-                maxDownloadsHelp.textContent = `Max: ${maxFileDownloads} downloads`;
+                setHelp(maxDownloadsHelp, `Max: ${kit.format.countOf(maxFileDownloads, 'download')}`);
 
                 // Auto-clamp if needed (if current is 0/unlimited or exceeds limit)
                 if (currentValue === 0 || currentValue > maxFileDownloads) {
@@ -1002,60 +901,47 @@ document.addEventListener('DOMContentLoaded', async () => {
             validateLifetimeInput();
         }
 
-        // Helper to reset the UI state after an upload completes or fails
         /**
          * Lock or unlock the UI while an upload is in progress.
-         * Only the cancel-upload button remains interactive during upload.
+         * Only Cancel stays usable while it runs.
          */
-        function setUploadingState(uploading) {
-            // Drop zone
-            dropZone.style.opacity = uploading ? '0.5' : '1';
-            dropZone.style.pointerEvents = uploading ? 'none' : 'auto';
-            selectFileBtn.disabled = uploading;
-            browseMoreBtn.disabled = uploading;
-            btnClearAll.disabled = uploading;
-            fileInput.disabled = uploading;
-
-            // File list remove buttons
-            fileListContainer.querySelectorAll('.file-remove-btn').forEach(btn => {
-                btn.disabled = uploading;
-                btn.style.pointerEvents = uploading ? 'none' : 'auto';
-            });
-
-            // Server URL & test button
-            serverUrlInput.disabled = uploading;
-            testConnectionBtn.disabled = uploading;
-
-            // File lifetime
-            fileLifetimeValueInput.disabled = uploading;
-            fileLifetimeUnitSelect.disabled = uploading;
-
-            // Max downloads
-            maxDownloadsValue.disabled = uploading;
+        function setUploadingState(running) {
+            emptyState.classList.toggle('disabled', running);
+            browseMoreBtn.disabled = running;
+            fileInput.disabled = running;
+            fileListContainer.querySelectorAll('.file-remove-btn').forEach(btn => { btn.disabled = running; });
+            serverUrlInput.disabled = running;
+            testConnectionBtn.disabled = running;
+            fileLifetimeValueInput.disabled = running;
+            fileLifetimeUnitSelect.disabled = running;
+            maxDownloadsValue.disabled = running;
+            if (!running) applyServerLimits();
+            updateUploadButtonState();
         }
 
+        // Helper to reset the UI state after an upload completes or fails
         function resetUI(clearFile = true) {
-            uploadBtn.textContent = 'Upload';
             if (clearFile) {
+                revoke(selectedFiles);
                 selectedFiles = [];
                 updateFileListUI();
                 fileInput.value = '';
-                uploadBtn.disabled = true;
-            } else {
-                // Keep disabled state consistent with current server compatibility + lifetime limits
-                updateUploadButtonState();
             }
+            updateUploadButtonState();
 
             setTimeout(() => {
-                progressBar.style.width = '0%';
-                progressBar.setAttribute('aria-valuenow', 0);
-                progressBar.textContent = '';
+                if (!uploading) actions.update({ percent: 0 });
             }, 3000);
         }
 
-        window.electronAPI.rendererReady();
+        // From now on the files the app is opened with go straight in; any that came early, now.
+        addOpened = (paths) => addOpenedPaths(paths);
+        if (opened.length > 0) addOpened(opened.splice(0));
+
+        await shell.ready;
+        await api.rendererReady();
     } catch (error) {
-        console.error('FATAL ERROR in renderer initialisation:', error);
-        alert('Fatal error initialising renderer: ' + error.message);
+        console.error('The page could not set itself up:', error);
+        window.kit?.ui.toast(`Dropgate Client could not start: ${error.message}`, { type: 'danger', timeout: 0 });
     }
 });
