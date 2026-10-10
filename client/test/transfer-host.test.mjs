@@ -87,6 +87,7 @@ test('the file service runs only while an upload there reads or is paused, and e
     host.upload(first, SERVER, OPTIONS, FILES);
     const [win] = main.windows;
     await ready(win);
+    main.processes[0].spawn();
     host.upload(second, SERVER, OPTIONS, FILES);
     assert.equal(main.processes.length, 1, 'one file service for both');
     await finish(win, first);
@@ -94,13 +95,16 @@ test('the file service runs only while an upload there reads or is paused, and e
     await finish(win, second);
     assert.equal(main.processes[0].killed, true);
 
-    // A new upload: a new file service, and a new port to it, before the upload's work.
+    // A new upload: a new file service, and, once it has spawned, a new port to it, then the upload's work.
     const third = randomUUID();
+    const before = win.webContents.sent.length;
     host.upload(third, SERVER, OPTIONS, FILES);
     assert.equal(main.processes.length, 2);
-    const sent = win.webContents.sent.map(([channel]) => channel);
-    assert.deepEqual(sent.filter((channel) => channel === ENGINE.PORT).length, 2);
-    assert.ok(sent.lastIndexOf(ENGINE.PORT) < sent.lastIndexOf(ENGINE.UPLOAD), 'the port goes before the upload that reads through it');
+    host.cancel(third);
+    assert.deepEqual(win.webContents.sent.slice(before), [], 'nothing until the file service has spawned');
+    main.processes[1].spawn();
+    assert.deepEqual(win.webContents.sent.slice(before).map(([channel]) => channel), [ENGINE.PORT, ENGINE.UPLOAD, ENGINE.CANCEL],
+        'the port, then the upload that reads through it, then what came for it meanwhile');
     host.close();
 });
 
@@ -117,10 +121,12 @@ test('quitting asks the transfer window to cancel everything there, and waits fo
     host.upload(randomUUID(), SERVER, OPTIONS, FILES);
     const [win] = main.windows;
     await ready(win);
+    main.processes[0].spawn();
     let done = false;
     const quitting = host.quit().then(() => {
         done = true;
     });
+    await new Promise(setImmediate);
     assert.ok(win.webContents.sent.some(([channel]) => channel === ENGINE.QUIT));
     await answer(win, ENGINE.QUIT);
     await quitting;

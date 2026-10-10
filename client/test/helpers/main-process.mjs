@@ -105,7 +105,19 @@ export function fakeMain({ settings = {} } = {}) {
         },
         utilityProcess: {
             fork() {
-                const child = { messages: [], killed: false, postMessage: (message) => child.messages.push(message), kill() { child.killed = true; }, on() {} };
+                // It spawns when a test says so (spawn()), as a real one does a moment after fork().
+                const child = {
+                    messages: [],
+                    killed: false,
+                    spawned: [],
+                    postMessage: (message) => child.messages.push(message),
+                    kill() { child.killed = true; },
+                    on() {},
+                    once(event, listener) {
+                        if (event === 'spawn') child.spawned.push(listener);
+                    },
+                    spawn: () => child.spawned.splice(0).forEach((listener) => listener()),
+                };
                 processes.push(child);
                 return child;
             },

@@ -151,7 +151,9 @@ test('the file service is a utility process with no session, given one end of th
     assert.match(host, /fileService\.postMessage\(\{ type: FILE_SERVICE\.PORT \}, \[port2\]\);/);
     assert.match(host, /win\.webContents\.postMessage\(ENGINE\.PORT, null, \[windowPort\]\);/);
     // The transfer window gets each file's grant, name and size, never its path.
-    assert.match(host, /send\(ENGINE\.UPLOAD, \{ id, server, options, files: granted\.map\(\(\{ handle, name, size \}\) => \(\{ handle, name, size \}\)\) \}\);/);
+    // Once it has its port to the file service: the file service has spawned.
+    assert.match(host, /onceHanded\(\(\) => send\(ENGINE\.UPLOAD, \{ id, server, options, files: granted\.map\(\(\{ handle, name, size \}\) => \(\{ handle, name, size \}\)\) \}\)\);/);
+    assert.match(host, /service\.once\('spawn', \(\) => \{/);
     assert.match(host, /fileService\.postMessage\(\{ type: FILE_SERVICE\.GRANT_READ, handle, path: filePath, size, mtimeMs \}\);/);
     assert.match(host, /fileService\?\.postMessage\(\{ type: FILE_SERVICE\.REVOKE, handle \}\);/);
     assert.deepEqual(Object.values(FILE_SERVICE).sort(), ['grant-read', 'port', 'revoke']);

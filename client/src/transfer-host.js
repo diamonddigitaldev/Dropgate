@@ -50,9 +50,13 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
     let win = null;
     /** @type {Electron.UtilityProcess | null} */
     let fileService = null;
-    /** The transfer window's end of the channel to the file service, until it's ready for it. */
+    /** The transfer window's end of the channel to the file service, until both are ready for it. */
     let windowPort = null;
     let ready = false;
+    /** Whether the file service has spawned: its end of the channel has reached it. */
+    let serviceSpawned = false;
+    /** Work that reads through the port not handed over yet, sent once it is. */
+    let afterPort = [];
     /** What's waiting for the transfer window to be ready: [channel, payload]. */
     let queued = [];
     /** Whether main is closing them: as the app quits, or the transfer window has had nothing to do for a while. */
@@ -112,11 +116,24 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         idleSoon();
     }, { session });
 
-    /** Hand the transfer window its port to the file service, once it's ready for it. */
+    /**
+     * Hand the transfer window its port to the file service, once both are
+     * ready for it: the transfer window's page has set itself up, and the file
+     * service has spawned, so the channel's two ends are never on their way
+     * at once (with the file service's still waiting for it to start, main
+     * stopped answering in CI). Then the work waiting for it goes.
+     */
     function handPort() {
-        if (!ready || !windowPort) return;
+        if (!ready || !serviceSpawned || !windowPort) return;
         win.webContents.postMessage(ENGINE.PORT, null, [windowPort]);
         windowPort = null;
+        for (const work of afterPort.splice(0)) work();
+    }
+
+    /** Work that reads from the file service: sent once the transfer window has its port, so it never reads on one gone. */
+    function onceHanded(work) {
+        if (windowPort) afterPort.push(work);
+        else work();
     }
 
     /**
@@ -128,9 +145,15 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
     function grantReads(granted) {
         const fresh = !fileService;
         if (fresh) {
-            fileService = utilityProcess.fork(path.join(__dirname, 'file-service.js'), [], {
+            const service = utilityProcess.fork(path.join(__dirname, 'file-service.js'), [], {
                 serviceName: 'Dropgate Client File Service',
                 stdio: 'ignore',
+            });
+            fileService = service;
+            service.once('spawn', () => {
+                if (fileService !== service) return;
+                serviceSpawned = true;
+                handPort();
             });
         }
         for (const { handle, path: filePath, size, mtimeMs } of granted) {
@@ -148,7 +171,9 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
     function stopFileService() {
         fileService?.kill();
         fileService = null;
+        serviceSpawned = false;
         windowPort = null;
+        afterPort = [];
     }
 
     /** With nothing running there and no call waiting, the transfer window closes after a while; any work calls that off. */
@@ -271,7 +296,7 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
             const granted = files.map((file) => ({ ...file, handle: randomUUID() }));
             running.set(id, granted.map((file) => file.handle));
             grantReads(granted);
-            send(ENGINE.UPLOAD, { id, server, options, files: granted.map(({ handle, name, size }) => ({ handle, name, size })) });
+            onceHanded(() => send(ENGINE.UPLOAD, { id, server, options, files: granted.map(({ handle, name, size }) => ({ handle, name, size })) }));
         },
 
         /** Pause or resume an upload: the answer is core's reason when it couldn't, or nothing. */
@@ -279,7 +304,8 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         resume: (id) => (known(id) ? call(ENGINE.RESUME, { id }) : Promise.resolve({})),
 
         cancel(id) {
-            if (known(id)) send(ENGINE.CANCEL, { id });
+            // After its upload's work, if that's still waiting for the port.
+            if (known(id)) onceHanded(() => send(ENGINE.CANCEL, { id }));
         },
 
         /** Whether an upload is running there, paused or not. */
@@ -299,7 +325,9 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
             const waited = new Promise((resolve) => {
                 timer = setTimeout(resolve, TRANSFERS.QUIT_WAIT_MS);
             });
-            await Promise.race([call(ENGINE.QUIT, {}).catch(() => {}), waited]);
+            // After any upload's work still waiting for the port, so it's cancelled too.
+            const asked = new Promise((resolve) => onceHanded(resolve)).then(() => call(ENGINE.QUIT, {}));
+            await Promise.race([asked.catch(() => {}), waited]);
             clearTimeout(timer);
         },
 
