@@ -194,7 +194,10 @@ describe('leases', () => {
         assert.deepEqual(Object.keys(body), ['lease', 'deadline', 'etag']);
         assert.match(body.lease, /^[A-Za-z0-9_-]{43}$/);
         assert.equal(Buffer.from(body.lease, 'base64url').length, 32);
-        assert.ok(body.deadline >= asked + QUIET_MS && body.deadline <= Date.now() + QUIET_MS);
+        // The server's clock and this process's are read separately, and on Windows they can disagree by a few ms,
+        // so the deadline may sit just outside the window this process saw.
+        const CLOCKS_MS = 50;
+        assert.ok(body.deadline >= asked + QUIET_MS - CLOCKS_MS && body.deadline <= Date.now() + QUIET_MS + CLOCKS_MS);
         assert.equal(body.etag, `"${id}"`);
         assert.notEqual(await takeLease(server, id), body.lease);
     });
