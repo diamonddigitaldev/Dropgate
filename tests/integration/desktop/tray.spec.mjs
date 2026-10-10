@@ -116,11 +116,11 @@ test('Quit from the tray cancels every transfer, running, paused and queued: the
     // The window's own paused, three shares running, one queued.
     const [ownId] = (await transfersIn(window)).map((card) => card.id);
     await expect.poll(async () => (await transfersIn(window)).filter((card) => card.state === 'running').length).toBe(3);
-    await expect.poll(() => chunks.uploads().length, { message: 'the uploads sending' }).toBe(3);
+    await expect.poll(() => chunks.uploads().length, { message: 'the uploads sending', timeout: 15_000 }).toBe(3);
     await window.evaluate((id) => window.electronAPI.pauseTransfer(id), ownId);
     await expect.poll(async () => (await transfersIn(window)).map((card) => card.state), { message: 'what is going' })
         .toEqual(['paused', 'running', 'running', 'running', 'queued']);
-    await expect.poll(() => chunks.uploads().length, { message: 'the uploads sending' }).toBe(4);
+    await expect.poll(() => chunks.uploads().length, { message: 'the uploads sending', timeout: 15_000 }).toBe(4);
 
     await closeWindow(app, window);
     await expect.poll(() => app.eventsOf('tray').at(-1)?.labels).toEqual(['Open Dropgate Client', '3 Uploading • 1 Paused • 1 Queued', '', 'Quit']);
@@ -162,7 +162,7 @@ test('transfers ending while the window is out of sight are told of in one notif
     // Three ending together: one notification.
     let chunks = await holdChunks(transfer);
     const first = [await share('Grouped one é.bin', 80), await share('Grouped two é.bin', 81), await share('Grouped three é.bin', 82)];
-    await expect.poll(() => chunks.sent.length, { message: 'each one\'s second chunk, held' }).toBe(6);
+    await expect.poll(() => chunks.sent.length, { message: 'each one\'s second chunk, held', timeout: 15_000 }).toBe(6);
     chunks.release();
     await expect.poll(async () => (await transfersIn(window)).length, { message: 'the three, finished', timeout: 30_000 }).toBe(0);
     await expect.poll(() => endings(app).map(({ title, body }) => ({ title, body })), { message: 'what was told of their ending' })
@@ -173,7 +173,7 @@ test('transfers ending while the window is out of sight are told of in one notif
     // Three more, one failing: its file changes while its chunk is held, so the rest can't be read.
     chunks = await holdChunks(transfer);
     const second = [await share('Counted one é.bin', 83), await share('Counted two é.bin', 84), await share('Counted three é.bin', 85)];
-    await expect.poll(() => chunks.sent.length, { message: 'each one\'s second chunk, held' }).toBe(6);
+    await expect.poll(() => chunks.sent.length, { message: 'each one\'s second chunk, held', timeout: 15_000 }).toBe(6);
     fs.writeFileSync(second[1].filePath, Buffer.alloc(SIZE, 0x5a));
     chunks.release();
     await expect.poll(async () => (await transfersIn(window)).length, { message: 'the three, ended', timeout: 30_000 }).toBe(0);

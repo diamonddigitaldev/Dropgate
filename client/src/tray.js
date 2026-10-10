@@ -49,10 +49,16 @@ function createTray({ icon, open, quit }) {
         update(counts) {
             if (tray) draw(counts);
         },
-        /** Take the icon away: the window is open again, or the app is quitting. */
+        /**
+         * Take the icon away: the window is open again, or the app is quitting.
+         * Destroyed once the event that asked has returned: Open and Quit ask
+         * from the icon's own menu, and on Linux destroying a tray inside its
+         * menu's click took the app down with it.
+         */
         hide() {
-            tray?.destroy();
+            const gone = tray;
             tray = null;
+            if (gone) setImmediate(() => gone.destroy());
         },
         get showing() {
             return tray !== null;

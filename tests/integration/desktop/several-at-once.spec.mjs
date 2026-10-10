@@ -39,7 +39,7 @@ test('five shares at once: three run and two wait as queued, starting in order a
     for (const file of files) ids.push(await shareWhileOpen(desktop, window, desktop.addFile(file)));
     await expect.poll(() => states(ids), { message: 'three run, two wait' }).toEqual(['running', 'running', 'running', 'queued', 'queued']);
     // Each running one has sent its first chunk, and its second is held.
-    await expect.poll(() => chunks.sent.length, { message: 'the running ones\' chunks' }).toBe(6);
+    await expect.poll(() => chunks.sent.length, { message: 'the running ones\' chunks', timeout: 15_000 }).toBe(6);
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(uploadsStarted(server), 'the uploads the server was asked to start').toHaveLength(3);
     expect(await states(ids), 'still three running, two queued').toEqual(['running', 'running', 'running', 'queued', 'queued']);

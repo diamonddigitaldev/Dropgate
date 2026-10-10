@@ -429,7 +429,10 @@ class Desktop {
         }
 
         for (const [i, run] of this.runs.entries()) {
-            sections.push(section(`What run ${i + 1} of the app wrote down:`, () => run.events()
+            // How it ended, if it has: a signal means it crashed or was killed, rather than quit.
+            const { exitCode, signalCode } = run.app.process();
+            const ended = signalCode ? `, and ended with ${signalCode}` : exitCode !== null ? `, and exited with ${exitCode}` : '';
+            sections.push(section(`What run ${i + 1} of the app wrote down${ended}:`, () => run.events()
                 .map(({ at, event, ...rest }) => `  ${ms(at)}  ${event} ${JSON.stringify(rest)}`).join('\n') || '  nothing'));
         }
 
