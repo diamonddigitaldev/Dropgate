@@ -8,6 +8,7 @@
 // one side drops its messages, with no error in main.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { balancedBlock, constructorOptions, readSource } from './helpers/source.mjs';
@@ -77,7 +78,9 @@ test('engine channels are "domain:action" under engine:, none the window\'s or t
     assert.equal(new Set(values).size, values.length);
     for (const channel of values) assert.match(channel, /^engine:[a-z][a-z0-9]*(-[a-z0-9]+)*$/);
     for (const channel of Object.values(IPC)) assert.ok(!values.includes(channel), `${channel} is the window's`);
-    const { CHANNELS } = require('@diamonddigitaldev/electron-kit/main');
+    // The kit's channel list, from its own file: its main module would load Electron, which these tests don't install.
+    const kitFolder = path.dirname(require.resolve('@diamonddigitaldev/electron-kit/package.json'));
+    const { CHANNELS } = require(path.join(kitFolder, 'main', 'channels.js'));
     for (const channel of Object.values(CHANNELS)) assert.ok(!values.includes(channel), `${channel} is the kit's`);
 });
 
@@ -86,7 +89,7 @@ test('main answers every engine channel through kit.ipc.handle() for the transfe
     const calls = handled(host, 'ENGINE');
     assert.ok(calls.every(({ name }) => name), 'every handler in transfer-host.js is an engine channel');
     assert.deepEqual(calls.map(({ name }) => ENGINE[name]).sort(), Object.values(ENGINE).filter((c) => !ENGINE_PUSHES.includes(c)).sort());
-    for (const { name, call } of calls) assert.match(call, /\n {4}\}, \{ session \}\);\n/, `ENGINE.${name} is answered for the transfer session only`);
+    for (const { name, call } of calls) assert.match(call, /\r?\n {4}\}, \{ session \}\);\r?\n/,`ENGINE.${name} is answered for the transfer session only`);
     assert.match(host, /const session = kit\.sessions\.isolated\('transfer'\);/, 'its own isolated session, in memory');
     // What main sends it: its work, by send() and call(), and the port, by postMessage().
     const sent = unique([...host.matchAll(/(?:send|call|postMessage)\(ENGINE\.([A-Z_]+)/g)].map((m) => ENGINE[m[1]]));
