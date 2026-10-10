@@ -5,8 +5,10 @@
 // app or Chromium would write them. Settings are the one thing the app keeps,
 // and they name no file.
 //
-// Each file is opened with the app, as "Open with" does, so main hands it to
-// the page and the page reads it through main, as it does every file on disk.
+// Each file is opened with the app, as "Open with" does, so main hands the
+// page its handle, and the upload reads it through the file service, as it
+// does every file on disk. The upload runs in the app's transfer window, so
+// that's where its chunks are held.
 import fs from 'node:fs';
 import path from 'node:path';
 import { holdsPlaintext, madeUpFile } from '../helpers/files.mjs';
@@ -80,7 +82,7 @@ test('quit with an upload paused part-way, nothing in the profile holds the file
     const file = madeUpFile('Board minutes, unsigned.bin', 12_000_000, 52);
     const { app, window, filePath } = await launchWith(desktop, file);
     const uploadIds = new Set();
-    await window.route('**/api/v4/upload/chunks/*', (route) => {
+    await (await app.transferWindow()).route('**/api/v4/upload/chunks/*', (route) => {
         uploadIds.add(route.request().headers()['dropgate-upload']);
         const index = Number(new URL(route.request().url()).pathname.split('/').pop());
         return index === 0 ? route.continue() : undefined;

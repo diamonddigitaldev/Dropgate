@@ -335,7 +335,7 @@ An upload reads each file one chunk at a time through a `FileSource`: `name`, `s
 | `sources.fileHandle(handle, { name, type? })` | A promise of a FileSource reading a Node.js `FileHandle` (from `fs/promises`' `open()`). Its size is the file's when called. Like a browser's `File`, it can't be read once the file changes: each read checks the file's size and modification time are still what they were, and fails `SOURCE_UNAVAILABLE` if not, so a file edited during an upload, or while it's paused, is never sent part old, part new. Closing the handle once the upload has ended is yours to do |
 | `sources.blob(blob, name?)` | A FileSource reading a browser `File` or `Blob`. `upload()` does this itself |
 
-A FileSource of your own that reads files on disk should refuse a file that has changed since it was chosen in the same way, throwing a `DropgateError` with `SOURCE_UNAVAILABLE`. The Dropgate Client does: its page reads each range through its main process, which compares the file's size and modification time with those when it was chosen.
+A FileSource of your own that reads files on disk should refuse a file that has changed since it was chosen in the same way, throwing a `DropgateError` with `SOURCE_UNAVAILABLE`. The Dropgate Client does: its transfer window reads each range from its file service, which compares the file's size and modification time with those when it was chosen.
 
 ## Errors
 

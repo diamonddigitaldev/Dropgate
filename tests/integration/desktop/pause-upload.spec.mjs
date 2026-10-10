@@ -7,8 +7,10 @@
 // paused can't be read on, so it's never sent part old, part new. Pause isn't
 // there on a server with pausing turned off.
 //
-// Each file is opened with the app, as "Open with" does, so main hands it to
-// the page and the page reads it through main, as it does every file on disk.
+// Each file is opened with the app, as "Open with" does, so main hands the
+// page its handle, and the upload reads it through the file service, as it
+// does every file on disk. The upload runs in the app's transfer window, so
+// that's where its chunks are held, and its clock moved.
 import fs from 'node:fs';
 import { madeUpFile, summary } from '../helpers/files.mjs';
 import { expect, securityWarning, test, uploadButton, uploadStatus } from '../helpers/desktop.mjs';
@@ -42,7 +44,8 @@ async function holdChunks(window) {
 /**
  * Launch the app with a made-up file, as "Open with" does, point it at the
  * server, and start uploading the file, without waiting for the end. Returns
- * the app, its window, the file and its path on disk.
+ * the app, its window, the transfer window the upload runs in, the file and
+ * its path on disk.
  */
 async function startUpload(desktop, name, seed, { encrypted, clock = false }) {
     const file = madeUpFile(name, SIZE, seed);
@@ -50,16 +53,17 @@ async function startUpload(desktop, name, seed, { encrypted, clock = false }) {
     const filePath = desktop.addFile(file);
     const app = await desktop.launch(filePath);
     const window = await app.window();
-    // The window's clock is moved forward rather than waited on.
-    if (clock) await window.clock.install();
     await desktop.setUp(window);
+    // The upload's clock, where core and the paused upload's notification run, is moved forward rather than waited on.
+    const uploader = await app.transferWindow();
+    if (clock) await uploader.clock.install();
     await expect(window.locator('#file-list .file-row-name')).toHaveText([name]);
     await expect(window.locator('#security-text')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
-    const chunks = await holdChunks(window);
+    const chunks = await holdChunks(uploader);
     await uploadButton(window).click();
     if (!encrypted) await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();
     await expect.poll(() => chunks.sent.length, { message: 'the second chunk should be on its way' }).toBe(2);
-    return { app, window, file, filePath, chunks };
+    return { app, window, uploader, file, filePath, chunks };
 }
 
 const pauseButton = (window) => window.locator('#action-bar').getByRole('button', { name: 'Pause Upload', exact: true });
@@ -77,7 +81,7 @@ test.describe('on a server with HTTPS, keeping a paused upload 30 minutes', () =
     test.use({ tlsProxy: true, serverEnv: { UPLOAD_MAX_PAUSE_MINUTES: '30' } });
 
     test('a paused upload shows until when the server keeps it, waits, resumes, and its link downloads byte for byte', async ({ desktop, server, page }) => {
-        const { app, window, file, chunks } = await startUpload(desktop, 'Paused sealed é.bin', 41, { encrypted: true });
+        const { app, window, uploader, file, chunks } = await startUpload(desktop, 'Paused sealed é.bin', 41, { encrypted: true });
 
         await expect(pauseButton(window)).toBeEnabled();
         await expect(resumeButton(window)).toBeHidden();
@@ -116,7 +120,7 @@ test.describe('on a server with HTTPS, keeping a paused upload 30 minutes', () =
         expect(all.filter((r) => r.route.startsWith('PUT /api/v4/upload/chunks/')).map((r) => r.route.split('/').pop()), 'chunks the server got')
             .toEqual(['0', '1', '2']);
 
-        await window.unrouteAll({ behavior: 'ignoreErrors' });
+        await uploader.unrouteAll({ behavior: 'ignoreErrors' });
         await page.goto(desktop.receivingUrl(link));
         await expect(page.locator('#file-name')).toHaveText(file.name);
         const got = await download(page, page.locator('#download-button'));
@@ -129,16 +133,16 @@ test.describe('on a server keeping a paused upload 6 minutes', () => {
     test.use({ serverEnv: { UPLOAD_MAX_PAUSE_MINUTES: '6' } });
 
     test('a notification comes 5 minutes before the deadline, naming no file, and the upload stays paused', async ({ desktop, server }) => {
-        const { app, window, chunks } = await startUpload(desktop, 'Warned about é.bin', 42, { encrypted: false, clock: true });
+        const { app, window, uploader, chunks } = await startUpload(desktop, 'Warned about é.bin', 42, { encrypted: false, clock: true });
         const [deadline] = await shownTimes(window, 6);
         await pauseButton(window).click();
         await expect(uploadStatus(window)).toHaveText(/^Paused\. Kept until .+\.$/);
 
-        await window.clock.fastForward(MINUTE - 5_000);
+        await uploader.clock.fastForward(MINUTE - 5_000);
         await window.waitForTimeout(500);
         expect(pauseNotifications(app), 'notifications before the 5 minutes').toEqual([]);
 
-        await window.clock.fastForward(10_000);
+        await uploader.clock.fastForward(10_000);
         await expect.poll(() => pauseNotifications(app).length, { message: 'the notification, 5 minutes before' }).toBe(1);
         const [{ body }] = pauseNotifications(app);
         expect(body).toMatch(/^The server drops it at .+ unless it's resumed\.$/);
@@ -153,15 +157,15 @@ test.describe('on a server keeping a paused upload 6 minutes', () => {
         await cancelButton(window).click();
         await expect(uploadStatus(window)).toHaveText(/upload cancelled/i);
         expect(pauseNotifications(app), 'notifications, in the end').toHaveLength(1);
-        await window.unrouteAll({ behavior: 'ignoreErrors' });
+        await uploader.unrouteAll({ behavior: 'ignoreErrors' });
     });
 
     test('resumed before then, no notification comes', async ({ desktop }) => {
-        const { app, window, chunks } = await startUpload(desktop, 'Resumed in time é.bin', 46, { encrypted: false, clock: true });
+        const { app, window, uploader, chunks } = await startUpload(desktop, 'Resumed in time é.bin', 46, { encrypted: false, clock: true });
         await pauseButton(window).click();
         await expect(resumeButton(window)).toBeEnabled();
         // Half a minute paused, while no request is on its way to time out.
-        await window.clock.fastForward(30_000);
+        await uploader.clock.fastForward(30_000);
 
         // The stopped chunk goes through, and the one after it is held, so the upload runs on.
         chunks.holdFrom(2);
@@ -171,13 +175,13 @@ test.describe('on a server keeping a paused upload 6 minutes', () => {
         await expect(pauseButton(window)).toBeVisible();
 
         // Past when the notification would have come had it stayed paused, but before the held chunk could time out.
-        await window.clock.fastForward(35_000);
+        await uploader.clock.fastForward(35_000);
         await window.waitForTimeout(500);
         expect(pauseNotifications(app), 'notifications after resuming').toEqual([]);
 
         await cancelButton(window).click();
         await expect(uploadStatus(window)).toHaveText(/upload cancelled/i);
-        await window.unrouteAll({ behavior: 'ignoreErrors' });
+        await uploader.unrouteAll({ behavior: 'ignoreErrors' });
     });
 });
 
@@ -185,13 +189,13 @@ test.describe('on a server keeping a paused upload 1 minute', () => {
     test.use({ serverEnv: { UPLOAD_MAX_PAUSE_MINUTES: '1' }, serverClock: true });
 
     test('the notification comes as it pauses, and at the deadline the upload ends, saying the server dropped it', async ({ desktop, server }) => {
-        const { app, window, chunks } = await startUpload(desktop, 'Paused too long é.bin', 43, { encrypted: false, clock: true });
+        const { app, window, uploader, chunks } = await startUpload(desktop, 'Paused too long é.bin', 43, { encrypted: false, clock: true });
         await pauseButton(window).click();
         await expect(uploadStatus(window)).toHaveText(/^Paused\. Kept until .+\.$/);
         // Less than 5 minutes is left, so it says so at once.
         await expect.poll(() => pauseNotifications(app).length, { message: 'the notification, as it pauses' }).toBe(1);
 
-        await window.clock.fastForward(MINUTE + 5_000);
+        await uploader.clock.fastForward(MINUTE + 5_000);
         await server.advanceClock(MINUTE + 5_000);
         await expect(uploadStatus(window)).toHaveText('Upload failed: The server dropped this paused upload.');
         await expect(window.locator('#action-bar').getByRole('button', { name: /pause|resume|cancel/i })).toHaveCount(0);
@@ -206,7 +210,7 @@ test.describe('on a server keeping a paused upload 1 minute', () => {
         const uploadId = requests(server).find((r) => r.route.startsWith('PUT /api/v4/upload/chunks/')).headers['dropgate-upload'];
         const status = await fetch(new URL('/api/v4/upload', server.baseUrl), { headers: { 'Dropgate-Upload': uploadId } });
         expect(status.status, 'the upload, asked for on the server').toBe(404);
-        await window.unrouteAll({ behavior: 'ignoreErrors' });
+        await uploader.unrouteAll({ behavior: 'ignoreErrors' });
     });
 });
 
@@ -214,7 +218,7 @@ test.describe('on a server keeping a paused upload 30 minutes', () => {
     test.use({ serverEnv: { UPLOAD_MAX_PAUSE_MINUTES: '30' } });
 
     test("a file edited while its upload is paused can't be read on, and none of the edit is sent", async ({ desktop, server }) => {
-        const { app, window, file, filePath, chunks } = await startUpload(desktop, 'Edited while paused é.bin', 44, { encrypted: false });
+        const { app, window, uploader, file, filePath, chunks } = await startUpload(desktop, 'Edited while paused é.bin', 44, { encrypted: false });
         await pauseButton(window).click();
         await expect(resumeButton(window)).toBeEnabled();
 
@@ -231,7 +235,7 @@ test.describe('on a server keeping a paused upload 30 minutes', () => {
         expect(chunks.sent.map(({ index }) => index), 'chunks the app sent').toEqual([0, 1, 1]);
         const got = requests(server).filter((r) => r.route.startsWith('PUT /api/v4/upload/chunks/'));
         expect(got.every((r) => !r.body.includes(Buffer.alloc(64, 0x5a))), 'no chunk holds the edit').toBe(true);
-        await window.unrouteAll({ behavior: 'ignoreErrors' });
+        await uploader.unrouteAll({ behavior: 'ignoreErrors' });
     });
 });
 
@@ -239,13 +243,13 @@ test.describe('with pausing turned off on the server', () => {
     test.use({ serverEnv: { UPLOAD_MAX_PAUSE_MINUTES: '0' } });
 
     test('an upload has no Pause', async ({ desktop, server }) => {
-        const { window } = await startUpload(desktop, 'Not paused é.bin', 45, { encrypted: false });
+        const { window, uploader } = await startUpload(desktop, 'Not paused é.bin', 45, { encrypted: false });
         await expect(cancelButton(window)).toBeVisible();
         await expect(window.locator('#action-bar').getByRole('button', { name: /pause|resume/i })).toHaveCount(0);
 
         await cancelButton(window).click();
         await expect(uploadStatus(window)).toHaveText(/upload cancelled/i);
         expect(requests(server).filter((r) => r.route.startsWith('POST /api/v4/upload/pause'))).toEqual([]);
-        await window.unrouteAll({ behavior: 'ignoreErrors' });
+        await uploader.unrouteAll({ behavior: 'ignoreErrors' });
     });
 });

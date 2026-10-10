@@ -89,6 +89,14 @@ test('channel names are "domain:action", unique, and none is one of the kit\'s',
     for (const channel of Object.values(CHANNELS)) assert.ok(!values.includes(channel), `${channel} is the kit's`);
 });
 
+test('the window\'s bridge takes a path on one channel only, files:add: a file is a handle from then on', () => {
+    const params = Object.fromEntries([...preload.matchAll(/^\s{4}(\w+): \(([^)]*)\) =>/gm)].map((m) => [m[1], m[2]]));
+    assert.deepEqual(Object.keys(params).sort(), Object.keys(bridgeCalls().exposed.electronAPI).sort(), 'every bridge method\'s parameters are read');
+    assert.deepEqual(Object.entries(params).filter(([, p]) => /path/i.test(p)).map(([name]) => name), ['addFiles']);
+    assert.equal(bridgeCalls().made.addFiles[0].channel, IPC.FILES_ADD);
+    assert.deepEqual(Object.values(IPC).filter((channel) => /path/i.test(channel)), [], 'no channel is named for a path');
+});
+
 test('the page only calls what the bridges have', () => {
     const exposed = new Set(Object.keys(bridgeCalls().exposed.electronAPI));
     const called = unique([...renderer.matchAll(/\bapi\.(\w+)/g)].map((m) => m[1]));

@@ -1,6 +1,10 @@
 // The client's own bridge, window.electronAPI. The shared one, window.kitAPI
-// (the version, the settings, links out, the updater, the theme), is the
-// kit's, which it registers on the app's session.
+// (the version, the settings, links out, the updater, the theme, a file's
+// path), is the kit's, which it registers on the app's session.
+//
+// The window holds no path but the ones it hands main once (addFiles), and
+// asks no server anything itself: main runs checks and uploads in the
+// transfer window, which has a bridge of its own (transfer-preload.js).
 //
 // This runs in a sandboxed preload, where require() can only load "electron"
 // and a few others. Requiring ./constants here would leave the bridge
@@ -12,21 +16,20 @@ const CH = {
     WINDOW_READY: 'window:ready',
     WINDOW_SHOW: 'window:show',
     FILES_ADD: 'files:add',
-    FILE_READ_RANGE: 'file:read-range',
     FILE_REVOKE: 'file:revoke',
-    UPLOAD_PROGRESS: 'upload:progress',
+    SERVER_CHECK: 'server:check',
+    TRANSFER_ADD_UPLOAD: 'transfer:add-upload',
+    TRANSFER_START: 'transfer:start',
+    TRANSFER_PAUSE: 'transfer:pause',
+    TRANSFER_RESUME: 'transfer:resume',
+    TRANSFER_CANCEL: 'transfer:cancel',
     UPLOAD_FINISHED: 'upload:finished',
-    UPLOAD_CANCEL: 'upload:cancel',
-    UPLOAD_PAUSE: 'upload:pause',
-    UPLOAD_PAUSE_ENDING: 'upload:pause-ending',
     UPLOAD_BUSY: 'upload:busy',
     LINK_COPY: 'link:copy',
     FILE_OPENED: 'file:opened',
     FILE_OPEN_ERROR: 'file:open-error',
     UPLOAD_BACKGROUND_START: 'upload:background-start',
     UPLOAD_STATUS: 'upload:status',
-    UPLOAD_CANCEL_REQUESTED: 'upload:cancel-requested',
-    UPLOAD_PAUSE_REQUESTED: 'upload:pause-requested',
 };
 
 /** Listen for a push from main; the callback gets its value, never the IPC event. */
@@ -36,19 +39,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     rendererReady: () => ipcRenderer.invoke(CH.WINDOW_READY),
     showWindow: () => ipcRenderer.invoke(CH.WINDOW_SHOW),
     addFiles: (paths) => ipcRenderer.invoke(CH.FILES_ADD, paths),
-    readFileRange: (filePath, start, end) => ipcRenderer.invoke(CH.FILE_READ_RANGE, filePath, start, end),
-    revokeFileAccess: (filePath) => ipcRenderer.invoke(CH.FILE_REVOKE, filePath),
-    uploadProgress: (progress) => ipcRenderer.invoke(CH.UPLOAD_PROGRESS, progress),
+    revokeFileAccess: (handle) => ipcRenderer.invoke(CH.FILE_REVOKE, handle),
+    checkServer: (url) => ipcRenderer.invoke(CH.SERVER_CHECK, url),
+    addUpload: (upload) => ipcRenderer.invoke(CH.TRANSFER_ADD_UPLOAD, upload),
+    startTransfers: (ids) => ipcRenderer.invoke(CH.TRANSFER_START, { ids }),
+    pauseTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_PAUSE, { id }),
+    resumeTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_RESUME, { id }),
+    cancelTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_CANCEL, { id }),
     uploadFinished: (result) => ipcRenderer.invoke(CH.UPLOAD_FINISHED, result),
-    cancelUpload: () => ipcRenderer.invoke(CH.UPLOAD_CANCEL),
-    pauseUpload: (paused) => ipcRenderer.invoke(CH.UPLOAD_PAUSE, paused),
-    pauseEnding: (deadline) => ipcRenderer.invoke(CH.UPLOAD_PAUSE_ENDING, deadline),
     isUploading: () => ipcRenderer.invoke(CH.UPLOAD_BUSY),
     copyLink: (link) => ipcRenderer.invoke(CH.LINK_COPY, link),
     onFileOpened: (callback) => on(CH.FILE_OPENED, callback),
     onFileOpenError: (callback) => on(CH.FILE_OPEN_ERROR, callback),
     onBackgroundUploadStart: (callback) => on(CH.UPLOAD_BACKGROUND_START, callback),
     onUploadStatus: (callback) => on(CH.UPLOAD_STATUS, callback),
-    onCancelUpload: (callback) => on(CH.UPLOAD_CANCEL_REQUESTED, callback),
-    onPauseUpload: (callback) => on(CH.UPLOAD_PAUSE_REQUESTED, callback),
 });

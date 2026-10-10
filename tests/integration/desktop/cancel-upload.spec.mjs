@@ -1,7 +1,8 @@
 // Cancelling an upload in the desktop app. The upload's outcome is
 // "cancelled", so the app says so, not that it failed (v3 said "Upload failed:
 // Upload cancelled.", with a failure notification), and the server is told to
-// discard what it has.
+// discard what it has. The file is picked from disk, as a person picks one, and
+// the upload runs in the app's transfer window, where its chunks are held.
 import { madeUpFile } from '../helpers/files.mjs';
 import { expect, securityWarning, test, uploadButton, uploadStatus } from '../helpers/desktop.mjs';
 
@@ -19,13 +20,14 @@ test('cancelling an upload says it was cancelled, not that it failed, and the se
 
     // The first chunk goes through; the second waits until the app gives up on it.
     let chunks = 0;
-    await window.route('**/api/v4/upload/chunks/*', (route) => {
+    const uploader = await app.transferWindow();
+    await uploader.route('**/api/v4/upload/chunks/*', (route) => {
         chunks += 1;
         if (chunks === 1) return route.continue();
         return undefined;
     });
 
-    await window.locator('#file-input').setInputFiles([file]);
+    await window.locator('#file-input').setInputFiles([desktop.addFile(file)]);
     await uploadButton(window).click();
     await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();
     await expect.poll(() => chunks, { message: 'the second chunk should be on its way' }).toBe(2);
@@ -43,5 +45,5 @@ test('cancelling an upload says it was cancelled, not that it failed, and the se
     expect(server.storedFiles(), 'files the server holds').toEqual([]);
     expect(chunks, 'no chunk after the cancel').toBe(2);
 
-    await window.unrouteAll({ behavior: 'ignoreErrors' });
+    await uploader.unrouteAll({ behavior: 'ignoreErrors' });
 });

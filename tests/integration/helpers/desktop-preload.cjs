@@ -10,10 +10,17 @@
 //   { at, pid, event: 'clipboard-written' }           the copy finished (or error)
 //   { at, pid, event: 'clipboard-read-back', text }   what the clipboard held after
 //                                                      (or error, if it couldn't be read)
-//   { at, pid, event: 'window', id }                   a window was created
+//   { at, pid, event: 'window', id, session }          a window was created, in the app's UI session
+//                                                      ('ui') or one of its isolated ones ('isolated')
 //   { at, pid, event: 'window-shown', id }             it was shown
 //   { at, pid, event: 'window-ready', id }             it finished setting itself up
 //   { at, pid, event: 'upload-finished', status, error }
+//   { at, pid, event: 'request', url, session, persistent, page }
+//                                                      a request to a server, as its session sent it: from
+//                                                      which session, and which page (null: main's own)
+//   { at, pid, event: 'ipc-large', channel, bytes }    a message to or from main bigger than IPC_LARGE
+//   { at, pid, event: 'ipc-sizes', sizes }             as it quits: the biggest message main sent or got
+//                                                      on each channel, in bytes, and how many
 //   { at, pid, event: 'exit', code }
 //
 // Unless DROPGATE_TEST_REAL_CLIPBOARD is 1, the clipboard and notifications are
@@ -28,10 +35,17 @@
 // every session the app creates is pointed at DROPGATE_TEST_DICTIONARY_URL
 // instead, an address on this machine: if the app ever asks again, it asks
 // there (desktop/dictionaries.spec.mjs).
+//
+// Every request to a server is written down with the session that sent it,
+// from that session's own request hooks (webRequest): Chromium's net log
+// names no session. And every message main sends or gets, over IPC or to and
+// from its utility processes, is measured (v8's serialisation, as structured
+// clone copies it), so a test can tell main never carries a file's bytes.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, clipboard, ipcMain, Notification, session } = require('electron');
+const v8 = require('node:v8');
+const { app, BrowserWindow, clipboard, ipcMain, Notification, session, utilityProcess } = require('electron');
 
 // Take this preload's own "-r <path>" back out of the command line, so the app
 // sees only the arguments it would be given when launched normally.
@@ -96,19 +110,79 @@ Notification.prototype.show = function (...args) {
 
 app.on('browser-window-created', (_event, win) => {
     const { id } = win;
-    record({ event: 'window', id });
+    record({ event: 'window', id, session: win.webContents.session === session.defaultSession ? 'ui' : 'isolated' });
     win.on('show', () => record({ event: 'window-shown', id }));
 });
 
+// Each request to a server, as the session that sends it sees it. The app
+// hooks no request itself, so these listeners are the sessions' only ones.
+const watchRequests = (ses) => ses.webRequest.onSendHeaders(({ url, webContents }) => {
+    if (!/^(https?|wss?):/.test(url)) return;
+    const page = webContents && !webContents.isDestroyed() ? path.basename(new URL(webContents.getURL()).pathname) || null : null;
+    record({ event: 'request', url, session: ses === session.defaultSession ? 'ui' : 'isolated', persistent: ses.isPersistent(), page });
+});
+app.on('session-created', watchRequests);
+app.whenReady().then(() => watchRequests(session.defaultSession));
+
+// The size of every message main sends or gets: over IPC (both ways), to its
+// pages, and to and from its utility processes. The biggest on each channel
+// is written down as the app quits, and any over IPC_LARGE at once.
+const IPC_LARGE = 64 * 1024;
+const sizes = {};
+function measure(channel, value) {
+    let bytes;
+    try {
+        bytes = v8.serialize(value).length;
+    } catch {
+        // Something structured clone can't copy (a port, a function) carries no file.
+        bytes = 0;
+    }
+    const seen = sizes[channel] ?? { max: 0, count: 0 };
+    sizes[channel] = { max: Math.max(seen.max, bytes), count: seen.count + 1 };
+    if (bytes > IPC_LARGE) record({ event: 'ipc-large', channel, bytes });
+}
+app.on('web-contents-created', (_event, contents) => {
+    const send = contents.send;
+    contents.send = function (channel, ...args) {
+        measure(`main → page ${channel}`, args);
+        return send.call(this, channel, ...args);
+    };
+    const postMessage = contents.postMessage;
+    contents.postMessage = function (channel, message, transfer) {
+        measure(`main → page ${channel}`, message);
+        return postMessage.call(this, channel, message, transfer);
+    };
+});
+const fork = utilityProcess.fork;
+utilityProcess.fork = function (...args) {
+    const child = fork.apply(this, args);
+    const postMessage = child.postMessage;
+    child.postMessage = function (message, transfer) {
+        measure(`main → utility ${message?.type}`, message);
+        return postMessage.call(this, message, transfer);
+    };
+    child.on('message', (message) => measure('utility → main', message));
+    return child;
+};
+
 // The app answers its own channels with ipcMain.handle(), through the kit
 // (kit.ipc.handle()). Wrapping it here, before the app starts, writes each one
-// down before the app acts on it. A window says it's ready once it has loaded
-// its settings and set up its buttons.
+// down before the app acts on it, and measures what it's sent and answers. A
+// window says it's ready once it has loaded its settings and set up its
+// buttons. An upload ends in the transfer window (engine:finished), or, one a
+// window stopped before it started, in that window (upload:finished).
 const handle = ipcMain.handle.bind(ipcMain);
-ipcMain.handle = (channel, listener) => handle(channel, (event, ...args) => {
+ipcMain.handle = (channel, listener) => handle(channel, async (event, ...args) => {
+    measure(`page → main ${channel}`, args);
     if (channel === 'window:ready') record({ event: 'window-ready', id: BrowserWindow.fromWebContents(event.sender)?.id });
     if (channel === 'upload:finished') record({ event: 'upload-finished', status: args[0]?.status, error: args[0]?.error });
-    return listener(event, ...args);
+    if (channel === 'engine:finished') record({ event: 'upload-finished', status: args[1]?.status, error: args[1]?.message });
+    const answer = await listener(event, ...args);
+    measure(`main → page ${channel} (its answer)`, answer);
+    return answer;
 });
 
-process.on('exit', (code) => record({ event: 'exit', code }));
+process.on('exit', (code) => {
+    record({ event: 'ipc-sizes', sizes });
+    record({ event: 'exit', code });
+});

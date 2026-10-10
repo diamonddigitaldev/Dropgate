@@ -130,6 +130,19 @@ export class DesktopApp {
     }
 
     /**
+     * The transfer window's page: hidden, in a session of its own, where the
+     * app's server checks and uploads run, so it's where their requests are
+     * held (route()) and their clock moved (clock). The app starts it the
+     * first time it has work for it, such as Test.
+     */
+    async transferWindow() {
+        const isTransfer = (page) => page.url().endsWith('/transfer.html');
+        await expect.poll(() => this.app.windows().some(isTransfer),
+            { message: 'whether the transfer window has opened', timeout: 15_000 }).toBe(true);
+        return this.app.windows().find(isTransfer);
+    }
+
+    /**
      * Everything the preload wrote down for this run, in order.
      * @returns {{ at: number, event: string, [key: string]: any }[]}
      */
@@ -302,7 +315,9 @@ class Desktop {
 
     /**
      * Upload files from Upload with the action bar's Upload button, and return
-     * the link the window shows.
+     * the link the window shows. Each file is written to the test's folder and
+     * picked from there, as a person picks one: the window hands main each
+     * file's path, and never reads a file itself.
      * @param {import('@playwright/test').Page} window
      * @param {{ name: string, mimeType: string, buffer: Buffer }[]} files
      * @param {{ encrypted: boolean }} opts - Whether the window should say the upload will be
@@ -312,7 +327,7 @@ class Desktop {
     async upload(window, files, { encrypted }) {
         this.secrets.addFiles(files, { storedByServer: !encrypted });
         await expect(window.locator('#security-text')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
-        await window.locator('#file-input').setInputFiles(files);
+        await window.locator('#file-input').setInputFiles(files.map((file) => this.addFile(file)));
         await uploadButton(window).click();
         if (!encrypted) await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();
         await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });

@@ -1,11 +1,13 @@
-const { app, BrowserWindow, dialog, clipboard, ClipboardItem, Notification } = require('electron');
+const { app, BrowserWindow, dialog, clipboard, ClipboardItem, Notification, webContents } = require('electron');
+const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 
 const { APP_NAME, IPC, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS } = require('./constants');
 const { menuItems } = require('./menu');
-const { FileReads } = require('./core/file-reads');
+const { Handles } = require('./core/handles');
+const { createTransferHost } = require('./transfer-host');
 
 // The house frame (electron-kit): one instance, the shared preload
 // (window.kitAPI) on the app's session, the settings, the log, the menu, the
@@ -32,8 +34,14 @@ const { FileReads } = require('./core/file-reads');
 // - A link is copied to the clipboard marked to stay out of Windows'
 //   clipboard history and cloud clipboard, and out of KDE's: it holds the key.
 //   Notifications say how many files, never which.
+// - The window holds no path and runs no core. A file dropped, picked or
+//   opened becomes a handle main made (core/handles.js); an upload is started
+//   here and runs in the transfer window, which makes every request to a
+//   server and reads its files from the file service, which main grants each
+//   one (transfer-host.js). Main relays how it goes to the window, and never
+//   carries a file's bytes.
 // Share with Dropgate (Windows' context menu) launches the app with a file's
-// path and --upload: it uploads the file in a hidden window, without opening
+// path and --upload: it uploads the file from a hidden window, without opening
 // the main one, and quits once it's done. Windows starts one launch per file
 // selected, so the files of every launch reaching the app within 500 ms of the
 // last are uploaded together, as one bundle; one launch can carry several.
@@ -71,16 +79,31 @@ let uploadQueue = [];
 let isUploading = false;
 let activeUploadNotification = null;
 
-// The windows running an upload, by webContents id, so Restart Now can ask first.
-const uploadingIn = new Set();
-
 // Electron 43+ opens file dialogs in Downloads unless told otherwise. Remember the
 // last folder for this session only, so it's never written to disk.
 let lastOpenDialogDir;
 
-// The files the page may read ranges of: those main handed it, from Open File,
-// a drop, or Share with Dropgate. One changed since can't be read (core/file-reads.js).
-const fileReads = new FileReads();
+// The files handed to each window, from Open File, a drop, a pick, or Share
+// with Dropgate: the window gets a handle, and main keeps the path (core/handles.js).
+const handles = new Handles();
+
+// The uploads, by the ID main made: waiting to start, or running in the
+// transfer window. Each keeps the window that made it, and its files' paths,
+// names and sizes; the transfer window gets a read grant for each file, never
+// its path.
+const uploads = new Map();
+
+// The transfer window and the file service (transfer-host.js), once the app is ready.
+let host = null;
+
+// The app's own windows: the main one, and Share with Dropgate's hidden ones.
+const appWindows = new Set();
+
+/** An upload's statuses while it's still going. */
+const GOING = ['initializing', 'uploading', 'paused', 'completing'];
+
+/** A file lifetime's units: the page's choices, which core takes. */
+const LIFETIME_UNITS = ['minutes', 'hours', 'days', 'unlimited'];
 
 // Batch collection for multi-file context menu selections.
 // Windows launches one process per selected file; we debounce them into a single bundle.
@@ -97,14 +120,41 @@ const mainWindow = () => kit.windows.main();
 const ICON = path.join(__dirname, 'img', 'dropgate');
 
 function createWindow() {
-    return kit.windows.createMain({
+    return watchWindow(kit.windows.createMain({
         page: path.join(__dirname, 'index.html'),
         size: { width: WINDOW.WIDTH, height: WINDOW.HEIGHT },
         min: { width: WINDOW.MIN_WIDTH, height: WINDOW.MIN_HEIGHT },
         title: APP_NAME,
         icon: ICON,
         webPreferences: { preload: path.join(__dirname, 'preload.js') },
+    }));
+}
+
+/**
+ * One of the app's windows. The files handed to it, and an upload it made but
+ * never started, go with it. When the last one closes, the transfer host
+ * closes too: its window is hidden, and would keep the app running with
+ * nothing open, so the app quits with its windows, as it always has. (Share
+ * with Dropgate makes its next window as the last one closes, so this waits a
+ * turn.)
+ */
+function watchWindow(win) {
+    if (appWindows.has(win)) return win;
+    appWindows.add(win);
+    const owner = win.webContents.id;
+    win.webContents.once('destroyed', () => {
+        handles.dropOwner(owner);
+        for (const [id, upload] of uploads) {
+            if (upload.owner === owner && !upload.started) uploads.delete(id);
+        }
     });
+    win.on('closed', () => {
+        appWindows.delete(win);
+        setImmediate(() => {
+            if (appWindows.size === 0) host?.close();
+        });
+    });
+    return win;
 }
 
 function showNotification(title, body) {
@@ -119,8 +169,11 @@ function showNotification(title, body) {
     return notification;
 }
 
-/** A file on disk, handed to the page: it may read it from now on, as it is now. */
-const handOver = (filePath) => fileReads.handOver(filePath);
+/** A file on disk, handed to a window as a handle: it may upload it from now on, as it is now. */
+const handOver = (win, filePath) => handles.add(win.webContents.id, filePath);
+
+/** The server an upload or a check goes to: plain HTTP only for an address typed with http://. */
+const serverOf = (url) => ({ url, allowInsecure: /^http:\/\//i.test(url) });
 
 if (kit.primary) {
     // A second launch: the kit restores and focuses the main window, if there is
@@ -135,6 +188,19 @@ if (kit.primary) {
     });
 
     kit.ready.then(() => {
+        host = createTransferHost({
+            kit,
+            appInfo: { name: APP_NAME, version: app.getVersion() },
+            onUpdate: uploadUpdated,
+            onPauseEnding: pauseEnding,
+            onFinished: (id, { status, link, message }) => {
+                const upload = uploads.get(id);
+                uploads.delete(id);
+                finishUpload(status === 'error' ? { status, error: message } : { status, ...(link ? { link } : {}) }, upload?.owner);
+            },
+        });
+        // What runs in the transfer window ends as the app quits: nothing of it is kept.
+        app.on('before-quit', () => host.close());
         if (!wasLaunchedForBackgroundTask) createWindow();
         readyForShares = true;
         handleArgs(process.argv);
@@ -218,8 +284,27 @@ function copyPrivately(link) {
     return clipboard.write([new ClipboardItem(item)]);
 }
 
-kit.ipc.handle(IPC.UPLOAD_PROGRESS, (event, progressData) => {
-    uploadingIn.add(event.sender.id);
+/**
+ * An upload's snapshot, from the transfer window, to the main window: its
+ * status line and buttons, and the window's title and taskbar. Core's
+ * snapshots never name a file, so the name of the one an upload of several is
+ * on is main's own.
+ */
+function uploadUpdated(id, snapshot) {
+    const upload = uploads.get(id);
+    const { status, phase, fileIndex } = snapshot;
+    if (!upload || !GOING.includes(status)) return;
+    const progressData = {
+        id,
+        status,
+        // The step alone, with no file name, for the window's title.
+        step: snapshot.text,
+        fileName: upload.files.length > 1 && phase === 'chunk' ? upload.files[fileIndex]?.name ?? null : null,
+        percent: snapshot.percent,
+        paused: status === 'paused',
+        canPause: snapshot.canPause === true,
+        deadline: snapshot.deadline ?? null,
+    };
     const main = mainWindow();
     // Send to main window if it exists
     if (main) {
@@ -230,17 +315,23 @@ kit.ipc.handle(IPC.UPLOAD_PROGRESS, (event, progressData) => {
         if (progressData.paused) {
             main.setTitle(`${APP_NAME} — Paused`);
             main.setProgressBar((progressData.percent ?? 0) / 100, { mode: 'paused' });
-        } else if (progressData.percent !== undefined) {
+        } else if (typeof progressData.percent === 'number') {
             main.setTitle(`${APP_NAME} — Uploading ${progressData.percent.toFixed(0)}%`);
             main.setProgressBar(progressData.percent / 100);
         } else if (progressData.step) {
             main.setTitle(`${APP_NAME} — ${progressData.step}`);
         }
     }
-});
+}
 
-kit.ipc.handle(IPC.UPLOAD_FINISHED, (event, result) => {
-    uploadingIn.delete(event.sender.id);
+/**
+ * An upload's one outcome, from the transfer window, or the reason a window
+ * stopped it before it started: the link copied, the main window told, and
+ * Share with Dropgate's hidden window closed.
+ * @param {{ status: 'success', link: string } | { status: 'cancelled' } | { status: 'error', error: string }} result
+ * @param {number | undefined} owner - The webContents id of the window that made it.
+ */
+function finishUpload(result, owner) {
     kit.log.info(`Upload finished: ${result.status}`);
     const main = mainWindow();
 
@@ -264,7 +355,8 @@ kit.ipc.handle(IPC.UPLOAD_FINISHED, (event, result) => {
         activeUploadNotification = null;
     }
 
-    const uploaderWindow = BrowserWindow.fromWebContents(event.sender);
+    const contents = owner === undefined ? null : webContents.fromId(owner);
+    const uploaderWindow = contents ? BrowserWindow.fromWebContents(contents) : null;
     const isFocused = main?.isFocused() ?? false;
 
     if (result.status === 'success') {
@@ -292,9 +384,25 @@ kit.ipc.handle(IPC.UPLOAD_FINISHED, (event, result) => {
         kit.log.info('Background task complete, quitting app');
         app.quit();
     }
+}
+
+// A window stopped an upload before it started: no server, or the security warning declined.
+kit.ipc.handle(IPC.UPLOAD_FINISHED, (event, result) => {
+    if (result?.status !== 'error' || typeof result.error !== 'string') throw new Error('Expected why the upload never started.');
+    finishUpload({ status: 'error', error: result.error }, event.sender.id);
 });
 
-kit.ipc.handle(IPC.UPLOAD_CANCEL, () => {
+/** The upload a request names, by the ID main made. */
+function uploadOf(request) {
+    const id = request?.id;
+    if (typeof id !== 'string' || !uploads.has(id)) throw new Error('Expected an upload.');
+    return id;
+}
+
+// Cancel, from any window: the upload may be running for a hidden window
+// (Share with Dropgate) while the person clicks Cancel in the main one.
+kit.ipc.handle(IPC.TRANSFER_CANCEL, (_event, request) => {
+    const id = uploadOf(request);
     const main = mainWindow();
     if (main) {
         main.setTitle(APP_NAME);
@@ -307,12 +415,24 @@ kit.ipc.handle(IPC.UPLOAD_CANCEL, () => {
         activeUploadNotification = null;
     }
 
-    // Broadcast cancellation to all windows — the upload may be running in a
-    // background window while the user clicks cancel in the main window.
-    for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send(IPC.UPLOAD_CANCEL_REQUESTED);
-    }
+    if (uploads.get(id).started) host.cancel(id);
+    else uploads.delete(id);
 });
+
+// Pause Upload and Resume Upload, from any window. The answer is core's reason
+// when it couldn't, which the window shows.
+kit.ipc.handle(IPC.TRANSFER_PAUSE, (_event, request) => host.pause(uploadOf(request)));
+kit.ipc.handle(IPC.TRANSFER_RESUME, (_event, request) => host.resume(uploadOf(request)));
+
+/**
+ * A paused upload's server drops it at its deadline, and nothing resumes it by
+ * itself, so the transfer window says so 5 minutes before (or as it pauses,
+ * when the pause is shorter). The notification gives the time, never a file.
+ */
+function pauseEnding(_id, deadline) {
+    const time = new Date(deadline).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    showNotification('Upload Still Paused', `The server drops it at ${time} unless it's resumed.`);
+}
 
 // The page's Copy button: the same copy as an upload's.
 kit.ipc.handle(IPC.LINK_COPY, (_event, link) => {
@@ -320,52 +440,82 @@ kit.ipc.handle(IPC.LINK_COPY, (_event, link) => {
     return copyPrivately(link);
 });
 
-// Restart Now asks first while any window, the main one or a hidden one, uploads.
-kit.ipc.handle(IPC.UPLOAD_BUSY, () => uploadingIn.size > 0);
+// Restart Now asks first while an upload runs for any window, paused or not.
+kit.ipc.handle(IPC.UPLOAD_BUSY, () => [...uploads.values()].some((upload) => upload.started));
 
-// Lazy file reading: the page asks for one range of bytes at a time, never a
-// whole file. A file changed since it was handed over answers { changed: true }.
-kit.ipc.handle(IPC.FILE_READ_RANGE, (_event, filePath, start, end) => fileReads.read(filePath, start, end));
-
-kit.ipc.handle(IPC.FILE_REVOKE, (_event, filePath) => {
-    fileReads.revoke(filePath);
-});
-
-// Pause Upload and Resume Upload, from any window: passed on to whichever window runs the upload, as Cancel is.
-kit.ipc.handle(IPC.UPLOAD_PAUSE, (_event, paused) => {
-    if (typeof paused !== 'boolean') throw new Error('Expected whether to pause.');
-    for (const win of BrowserWindow.getAllWindows()) {
-        if (!win.isDestroyed()) win.webContents.send(IPC.UPLOAD_PAUSE_REQUESTED, paused);
-    }
-});
-
-// A paused upload's server drops it at its deadline, and nothing resumes it by
-// itself, so the window running it says so 5 minutes before (or as it pauses,
-// when the pause is shorter). The notification gives the time, never a file.
-kit.ipc.handle(IPC.UPLOAD_PAUSE_ENDING, (_event, deadline) => {
-    if (!Number.isFinite(deadline)) throw new Error('Expected a deadline.');
-    const time = new Date(deadline).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    showNotification('Upload Still Paused', `The server drops it at ${time} unless it's resumed.`);
-});
-
-// Files dropped on Upload: the kit's drop zone hands the page their paths
-// (kitAPI.getPathForFile, from the File the person dropped). Folders aren't
-// uploaded, and are counted so the page can say so.
-kit.ipc.handle(IPC.FILES_ADD, (_event, paths) => {
+// Files dropped on Upload, picked with its file input, or opened with the app:
+// the page has their paths from the kit (kitAPI.getPathForFile, from the File
+// the person dropped or picked), and gets a handle for each. This is the one
+// channel that takes a path. Folders aren't uploaded, and are counted so the
+// page can say so.
+kit.ipc.handle(IPC.FILES_ADD, (event, paths) => {
     if (!Array.isArray(paths) || !paths.every((p) => typeof p === 'string' && path.isAbsolute(p))) {
         throw new Error('Expected a list of paths.');
     }
+    const win = BrowserWindow.fromWebContents(event.sender);
     const files = [];
     let folders = 0;
     for (const filePath of paths) {
         try {
             if (fs.statSync(filePath).isDirectory()) folders++;
-            else files.push(handOver(filePath));
+            else files.push(handOver(win, filePath));
         } catch {
             // Gone since it was dropped: nothing to add.
         }
     }
     return { files, folders };
+});
+
+// The window is done with a file: removed from its list, or uploaded.
+kit.ipc.handle(IPC.FILE_REVOKE, (event, handle) => {
+    handles.revoke(event.sender.id, handle);
+});
+
+// Test, and the check before an upload: asked of the server by the transfer window.
+kit.ipc.handle(IPC.SERVER_CHECK, (_event, url) => {
+    if (typeof url !== 'string' || url.trim() === '' || url.length > 2048) throw new Error('Expected a server address.');
+    return host.check(serverOf(url.trim()));
+});
+
+/** An upload's options, as the page sets them: checked, and copied. */
+function uploadOptions(options) {
+    const { lifetime, maxDownloads, encrypt } = options ?? {};
+    if (!LIFETIME_UNITS.includes(lifetime?.unit) || typeof lifetime.value !== 'number' || !Number.isFinite(lifetime.value) || lifetime.value < 0) {
+        throw new Error('Expected a file lifetime.');
+    }
+    if (!Number.isSafeInteger(maxDownloads) || maxDownloads < 0) throw new Error('Expected a download limit.');
+    if (typeof encrypt !== 'boolean') throw new Error('Expected whether to encrypt.');
+    return { lifetime: { value: lifetime.value, unit: lifetime.unit }, maxDownloads, encrypt };
+}
+
+// An upload of files handed to this window, waiting to start.
+kit.ipc.handle(IPC.TRANSFER_ADD_UPLOAD, (event, request) => {
+    const { files, options } = request ?? {};
+    if (!Array.isArray(files) || files.length === 0) throw new Error('Expected files to upload.');
+    const held = files.map((handle) => handles.get(event.sender.id, handle));
+    if (held.some((file) => !file)) throw new Error('Expected files handed to this window.');
+    const id = randomUUID();
+    uploads.set(id, {
+        owner: event.sender.id,
+        files: held.map(({ path: filePath, name, size, mtimeMs }) => ({ path: filePath, name, size, mtimeMs })),
+        options: uploadOptions(options),
+        started: false,
+    });
+    return { id };
+});
+
+// Start uploads this window made, in the transfer window, to the server in Settings.
+kit.ipc.handle(IPC.TRANSFER_START, (event, request) => {
+    const ids = request?.ids;
+    const waiting = (id) => uploads.get(id)?.owner === event.sender.id && !uploads.get(id).started;
+    if (!Array.isArray(ids) || ids.length === 0 || !ids.every(waiting)) throw new Error('Expected uploads waiting to start.');
+    const { serverURL } = kit.settings.get();
+    if (!serverURL) throw new Error('Server URL is not configured.');
+    for (const id of ids) {
+        const upload = uploads.get(id);
+        upload.started = true;
+        host.upload(id, serverOf(serverURL), upload.options, upload.files);
+    }
 });
 
 kit.ipc.handle(IPC.WINDOW_SHOW, (event) => {
@@ -386,7 +536,7 @@ kit.ipc.handle(IPC.WINDOW_READY, (event) => {
     const { filePaths } = pendingBackgroundUploads.get(windowId);
     pendingBackgroundUploads.delete(windowId);
     try {
-        const files = filePaths.map(handOver);
+        const files = filePaths.map((filePath) => handOver(senderWindow, filePath));
         activeUploadNotification = showNotification('Upload Started', `Uploading ${countOf(files.length, 'file')}…`);
         senderWindow.webContents.send(IPC.UPLOAD_BACKGROUND_START, { files });
     } catch (error) {
@@ -416,16 +566,16 @@ async function handleOpenDialog() {
     const filePath = filePaths[0];
     lastOpenDialogDir = path.dirname(filePath);
     try {
-        win.webContents.send(IPC.FILE_OPENED, handOver(filePath));
+        win.webContents.send(IPC.FILE_OPENED, handOver(win, filePath));
     } catch (error) {
         kit.log.warn(`Couldn't read the file picked with Open File (${error?.code ?? 'error'}).`);
         win.webContents.send(IPC.FILE_OPEN_ERROR, `Could not read ${path.basename(filePath)}.`);
     }
 }
 
-// BACKGROUND UPLOAD: a hidden window, in the app's session, runs the upload
-// with the page's own code. It has no menu of its own: the house menu is the
-// main window's.
+// BACKGROUND UPLOAD: a hidden window, in the app's session, starts the upload
+// with the page's own code, and it runs in the transfer window as any other.
+// It has no menu of its own: the house menu is the main window's.
 function triggerBackgroundUpload(filePaths) {
     // Filter out any files that no longer exist
     const validPaths = filePaths.filter(fp => fs.existsSync(fp));
@@ -454,16 +604,15 @@ function triggerBackgroundUpload(filePaths) {
         icon: `${ICON}${process.platform === 'win32' ? '.ico' : '.png'}`,
     });
     backgroundWindow.removeMenu();
+    watchWindow(backgroundWindow);
 
     const windowId = backgroundWindow.id;
-    const contentsId = backgroundWindow.webContents.id;
 
     // Store the pending upload BEFORE loading the file
     pendingBackgroundUploads.set(windowId, { filePaths: validPaths });
 
     // Clean up if window is closed before upload starts
     backgroundWindow.on('closed', () => {
-        uploadingIn.delete(contentsId);
         if (pendingBackgroundUploads.has(windowId)) {
             pendingBackgroundUploads.delete(windowId);
             isUploading = false;

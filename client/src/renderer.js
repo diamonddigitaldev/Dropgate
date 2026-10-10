@@ -1,46 +1,24 @@
-import { DropgateClient, DropgateError, lifetime } from './dropgate-core.js';
-
 // The page: Dropgate's Upload section and its Server tab, in the kit's frame
 // (kit.ui.mountShell()): the nav rail, the header, and the Settings view, with
 // Update and Credits after Dropgate's own tab. The drop zone, the action bar,
 // the prompts and the toasts are the kit's too. The settings are the kit's
 // (window.kitAPI), saved as they change. The same page runs hidden for Share
 // with Dropgate, which main hands its files (onBackgroundUploadStart).
+//
+// The page runs no core and makes no request: it holds each file as the
+// handle main made for it, with its name and size, never its path, and main
+// runs each server check and upload in the transfer window, and tells the
+// page how they go (onUploadStatus).
 
 const api = window.electronAPI;
 const kitApi = window.kitAPI;
 
-/**
- * A file on disk, as one of core's file sources: core asks for one range of
- * bytes at a time (read()), and main reads just that range, for a file it has
- * handed this page. Like a browser's File, it can't be read once the file has
- * changed since it was chosen (main checks its size and modification time), so
- * a file edited during an upload, or while it's paused, is never sent part
- * old, part new: the upload fails SOURCE_UNAVAILABLE, as core's own
- * sources.fileHandle() does.
- */
-class LazyFile {
-    constructor(filePath, name, size) {
-        this.filePath = filePath;
-        this.name = name;
-        this.size = size;
-    }
-
-    async read(start, end) {
-        // IPC gives a Uint8Array (main's Buffer); core checks it has every byte asked for.
-        const bytes = await api.readFileRange(this.filePath, start, end);
-        if (bytes?.changed) {
-            throw new DropgateError({
-                code: 'SOURCE_UNAVAILABLE',
-                message: "A file changed after the upload started, so the rest of it can't be read as it was.",
-            });
-        }
-        return bytes;
-    }
-}
-
 /** What Restart Now says while an upload runs, in this window or another. */
 const BUSY_REASON = 'An upload is in progress.';
+
+/** A file lifetime in ms, to hold it to the server's limit here: core's lifetime.toMs(), which the upload itself uses. */
+const LIFETIME_UNIT_MS = { minutes: 60_000, hours: 3_600_000, days: 86_400_000 };
+const lifetimeToMs = (value, unit) => (Number.isFinite(value) && value > 0 && LIFETIME_UNIT_MS[unit] ? Math.round(value * LIFETIME_UNIT_MS[unit]) : 0);
 
 document.addEventListener('DOMContentLoaded', async () => {
     // The files the app is opened with (#93): "Open with", files dropped on its
@@ -85,11 +63,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         let selectedFiles = [];
         /** @type {{compatible:boolean, message?:string}} */
         let lastServerCheck = { compatible: false, message: '' };
-        let activeUpload = null;
-        // Tells main where the upload this window runs is (performUpload()), so the buttons can be set again after a click.
-        let reportUpload = null;
-        // The notification before a paused upload's server drops it: its timer, and the deadline it's for.
-        let pauseEnding = { timer: null, deadline: null };
+        // The upload this window shows, by the ID main made: its own, or one main tells it about.
+        let currentUpload = null;
+        // The upload this window started, until it ends.
+        let ownUpload = null;
         // Whether this window shows an upload running: its own, or one main tells it about.
         let uploading = false;
         let uploadsAllowed = false;
@@ -118,8 +95,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const actions = kit.ui.actionBar({
             run: { label: 'Upload', onClick: () => performUpload() },
-            // Main passes it on to whichever window runs the upload.
-            abort: { onClick: () => api.cancelUpload() },
+            // The upload this window shows, whichever window started it. One that has just ended is left to end.
+            abort: { onClick: () => currentUpload && api.cancelTransfer(currentUpload).catch(() => {}) },
             clear: { onClick: () => clearFiles() },
             progressLabel: 'Upload progress',
         });
@@ -129,17 +106,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Pause Upload and Resume Upload, beside Cancel while an upload runs, on
         // a server that lets uploads pause. The kit's action bar has no place
         // for them, so they're the app's own, as a transfer's own buttons are
-        // (Will, 2026-10-09). Main passes a click on to whichever window runs
-        // the upload, as it does Cancel.
+        // (Will, 2026-10-09). A click disables its own button until the next
+        // snapshot. The upload moving on before it landed is silent; any
+        // other refusal is core's reason, as a warning.
         const pauseButton = (label, paused) => {
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'btn btn-outline-secondary';
             button.textContent = label;
             button.hidden = true;
-            button.addEventListener('click', () => {
+            button.addEventListener('click', async () => {
                 button.disabled = true;
-                api.pauseUpload(paused);
+                if (!currentUpload) return;
+                const asked = paused ? api.pauseTransfer(currentUpload) : api.resumeTransfer(currentUpload);
+                const { message } = await asked.catch(() => ({}));
+                if (message) kit.ui.toast(message, { type: 'warning' });
             });
             return button;
         };
@@ -161,33 +142,19 @@ document.addEventListener('DOMContentLoaded', async () => {
             actions.update({ summary: text });
         }
 
-        // --- Core client (shared logic for Electron + Web UI) ---
-        // The app's own name and version, for display only: core works out
-        // compatibility with the server itself, and never sends these.
-        const appInfo = { name: 'Dropgate Client', version: await kitApi.getVersion() };
-        /** @type {DropgateClient|null} */
-        let coreClient = null;
+        // --- The server ---
+        // The app's own version, for display only.
+        const appVersion = await kitApi.getVersion();
+        // The server's address as the client reads it (https:// added if it had
+        // no scheme), from the last check that reached it. Checks are asked of
+        // the server by the transfer window, through main (api.checkServer()).
+        let serverBaseUrl = null;
 
         /** Whether an address is plain HTTP, as typed: one without a scheme is HTTPS. */
         const isPlainHttp = (serverUrl) => /^http:\/\//i.test(serverUrl);
 
-        /**
-         * Create or recreate the core client for a given server URL.
-         * Must be called whenever the server URL changes.
-         */
-        function createClient(serverUrl) {
-            if (!serverUrl) {
-                coreClient = null;
-                return;
-            }
-            coreClient = new DropgateClient({
-                server: serverUrl,
-                // Only an address typed with http:// is used over plain HTTP, and
-                // then as it is: an https:// one is never retried over HTTP.
-                allowInsecure: isPlainHttp(serverUrl),
-                appInfo,
-            });
-        }
+        /** Ask the server, through main: what it allows, or why it couldn't be reached. */
+        const checkServer = (serverUrl) => api.checkServer(serverUrl).catch(() => ({ ok: false }));
 
         /** Why Test couldn't connect, and what to try. */
         function connectionFailedText(serverUrl, error) {
@@ -209,9 +176,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         // The kit's own setting: on, the redacted log is kept in debug.log too; off, that file is deleted.
         keepLogSwitch.checked = settings.keepLogOnDisk;
         keepLogSwitch.addEventListener('change', () => kitApi.setSettings({ keepLogOnDisk: keepLogSwitch.checked }));
-
-        // Create initial client with loaded server URL
-        createClient(serverUrlInput.value.trim());
 
         await checkServerCompatibility();
 
@@ -247,11 +211,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         maxDownloadsValue.addEventListener('blur', () => updateMaxDownloadsSettings());
 
         browseMoreBtn.addEventListener('click', () => fileInput.click());
+        // Files picked with Add More or Browse: by their paths, as a drop's are.
         fileInput.addEventListener('change', (e) => {
-            if (e.target.files && e.target.files.length) {
-                handleFiles(Array.from(e.target.files));
-                fileInput.value = '';
-            }
+            const picked = Array.from(e.target.files ?? []);
+            fileInput.value = '';
+            const paths = picked.map((file) => kitApi.getPathForFile(file)).filter(Boolean);
+            if (paths.length) addFromPaths(paths);
         });
 
         // The server is kept as it's changed, and as Test finds it.
@@ -272,11 +237,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             connectionStatus.className = 'form-text reserved';
 
             try {
-                // Recreate client with current URL
-                createClient(serverUrl);
-                await coreClient.server.connect({ timeoutMs: 5000 });
+                const result = await checkServer(serverUrl);
+                if (!result.ok) {
+                    connectionStatus.textContent = connectionFailedText(serverUrl, result);
+                    updateUploadabilityState(false);
+                    connectionStatus.className = 'form-text reserved text-danger-emphasis';
+                    return;
+                }
+                serverBaseUrl = result.baseUrl;
 
-                if (coreClient.server.baseUrl.startsWith('https://')) {
+                if (serverBaseUrl.startsWith('https://')) {
                     connectionStatus.textContent = 'Connection successful (HTTPS).';
                     connectionStatus.className = 'form-text reserved text-success-emphasis';
                 } else {
@@ -285,14 +255,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
 
                 // The address as the client reads it: https:// added if it had no scheme.
-                serverUrlInput.value = coreClient.server.baseUrl;
-                await saveServer(coreClient.server.baseUrl);
+                serverUrlInput.value = serverBaseUrl;
+                await saveServer(serverBaseUrl);
 
                 await checkServerCompatibility();
-            } catch (error) {
-                connectionStatus.textContent = connectionFailedText(serverUrl, error);
-                updateUploadabilityState(false);
-                connectionStatus.className = 'form-text reserved text-danger-emphasis';
             } finally {
                 testConnectionBtn.disabled = uploading;
                 testConnectionBtn.textContent = 'Test';
@@ -316,11 +282,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             switch (event.type) {
                 case 'progress':
                     {
-                        const { text, percent } = event.data;
+                        const { id, status, paused, canPause, percent } = event.data;
+                        currentUpload = id;
+                        const text = progressLine(event.data);
                         if (text) setStatus(text);
                         uploading = true;
                         actions.update({ running: true, ...(percent !== undefined ? { percent } : {}) });
-                        showPauseControls(event.data);
+                        // Whether the server lets an upload pause: its pause length is 0 when the operator has turned pausing off.
+                        const pausable = (serverCapabilities?.upload?.maxPauseMinutes ?? 0) > 0 && ['initializing', 'uploading', 'paused'].includes(status);
+                        showPauseControls({ pausable, paused, canPause });
                         linkSection.classList.add('d-none');
                         break;
                     }
@@ -330,6 +300,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         downloadLinkInput.value = link;
                         linkSection.classList.remove('d-none');
                         uploading = false;
+                        uploadEnded();
                         showPauseControls();
                         setStatus('Upload successful.');
                         actions.update({ running: false, percent: 100 });
@@ -340,6 +311,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     {
                         const { error } = event.data;
                         uploading = false;
+                        uploadEnded();
                         showPauseControls();
                         setStatus(`Upload failed: ${error}`);
                         actions.update({ running: false });
@@ -350,6 +322,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 case 'cancelled':
                     {
                         uploading = false;
+                        uploadEnded();
                         showPauseControls();
                         setStatus('Upload cancelled.');
                         actions.update({ running: false });
@@ -359,43 +332,36 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         });
 
-        // Cancel the upload this window runs (main passes on a Cancel from any window).
-        api.onCancelUpload(() => {
-            if (activeUpload) {
-                activeUpload.cancel();
-                activeUpload = null;
-            }
-        });
+        /**
+         * The status line for an upload's progress: core's step, the file it's
+         * on when it's one of several (main's name for it: core's snapshots
+         * name none), or, paused, until when the server keeps it. Short, to fit
+         * the status line beside its buttons (Will, 2026-10-09).
+         */
+        function progressLine({ step, fileName, paused, deadline }) {
+            if (paused && step === 'Paused.' && deadline) return `Paused. Kept until ${formatDeadline(deadline)}.`;
+            return fileName ? `${step} — ${fileName}` : step;
+        }
 
-        // Pause or resume the upload this window runs (main passes on Pause Upload and Resume Upload from any window).
-        api.onPauseUpload(async (paused) => {
-            const upload = activeUpload;
-            if (!upload) return;
-            try {
-                await (paused ? upload.pause() : upload.resume());
-            } catch (error) {
-                const ended = !['initializing', 'uploading', 'paused', 'completing'].includes(upload.snapshot.status);
-                // It moved on before the click landed: it's finishing, or a pause is already settling.
-                if (!ended && !DropgateError.is(error, 'PAUSE_UNAVAILABLE')) {
-                    // The server refused the pause, or couldn't be asked to resume: nothing changed.
-                    kit.ui.toast(error?.message || (paused ? "The upload couldn't be paused." : "The upload couldn't be resumed."), { type: 'warning' });
-                }
-            } finally {
-                // The buttons, as the upload is now: a click disabled its own.
-                if (activeUpload === upload) reportUpload?.(upload.snapshot);
+        /** An upload this window shows has ended: the window's own is done with. */
+        function uploadEnded() {
+            currentUpload = null;
+            if (ownUpload) {
+                ownUpload = null;
+                setUploadingState(false);
             }
-        });
+        }
 
         // A file picked with the menu's Open File
         api.onFileOpened((file) => {
-            if (file && file.filePath) handleFiles([new LazyFile(file.filePath, file.name, file.size)]);
+            if (file && file.handle) handleFiles([file]);
         });
         api.onFileOpenError((message) => kit.ui.toast(message, { type: 'danger' }));
 
         // Share with Dropgate: main hands this hidden window its files.
         api.onBackgroundUploadStart(async (details) => {
             if (!details?.files?.length) return;
-            selectedFiles = details.files.map(f => new LazyFile(f.filePath, f.name, f.size));
+            selectedFiles = details.files.map(({ handle, name, size }) => ({ handle, name, size }));
 
             const saved = await kitApi.getSettings();
             if (!saved.serverURL) {
@@ -403,16 +369,20 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
             serverUrlInput.value = saved.serverURL;
-            createClient(saved.serverURL);
             await performUpload();
         });
 
-        /** Files dropped on Upload, by path: main checks each, and hands over the files. */
-        async function addPaths(paths) {
-            if (uploading || !uploadsAllowed) return;
+        /** Files by path, from a drop, a pick or the app's launch: main checks each, and hands over the files as handles. */
+        async function addFromPaths(paths) {
             const { files, folders } = await api.addFiles(paths);
             if (folders > 0) kit.ui.toast(`Skipped ${kit.format.countOf(folders, 'folder')}: folders can't be uploaded.`, { type: 'warning' });
-            handleFiles(files.map((f) => new LazyFile(f.filePath, f.name, f.size)));
+            handleFiles(files);
+        }
+
+        /** Files dropped on Upload. */
+        async function addPaths(paths) {
+            if (uploading || !uploadsAllowed) return;
+            await addFromPaths(paths);
         }
 
         /** Files the app was opened with: added to Upload, as Open File's are, and shown there. */
@@ -422,9 +392,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
             shell.showView('upload');
-            const { files, folders } = await api.addFiles(paths);
-            if (folders > 0) kit.ui.toast(`Skipped ${kit.format.countOf(folders, 'folder')}: folders can't be uploaded.`, { type: 'warning' });
-            handleFiles(files.map((f) => new LazyFile(f.filePath, f.name, f.size)));
+            await addFromPaths(paths);
         }
 
         function handleFiles(newFiles) {
@@ -439,14 +407,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 kit.ui.toast(`Skipped ${kit.format.countOf(skipped, 'empty file')}.`, { type: 'warning' });
             }
 
-            // A file already in the list isn't added twice: by its path, or, picked with
-            // Select Files, by its name, size and date.
-            const keyOf = (f) => (f instanceof LazyFile ? `path:${f.filePath}` : `pick:${f.name}:${f.size}:${f.lastModified}`);
-            const listed = new Set(selectedFiles.map(keyOf));
+            // A file already in the list isn't added twice: main hands a window the
+            // same handle for the same file.
+            const listed = new Set(selectedFiles.map((f) => f.handle));
             const fresh = valid.filter((f) => {
-                const key = keyOf(f);
-                if (listed.has(key)) return false;
-                listed.add(key);
+                if (listed.has(f.handle)) return false;
+                listed.add(f.handle);
                 return true;
             });
             const repeated = valid.length - fresh.length;
@@ -465,10 +431,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             updateUploadButtonState();
         }
 
+        /** Main forgets the files this window is done with. */
+        function revoke(files) {
+            for (const f of files) api.revokeFileAccess(f.handle);
+        }
+
         function clearFiles() {
-            for (const f of selectedFiles) {
-                if (f instanceof LazyFile) api.revokeFileAccess(f.filePath);
-            }
+            revoke(selectedFiles);
             selectedFiles = [];
             updateFileListUI();
             updateUploadButtonState();
@@ -515,8 +484,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 removeIcon.textContent = 'close';
                 removeBtn.append(removeIcon);
                 removeBtn.addEventListener('click', () => {
-                    const [removed] = selectedFiles.splice(i, 1);
-                    if (removed instanceof LazyFile) api.revokeFileAccess(removed.filePath);
+                    revoke(selectedFiles.splice(i, 1));
                     updateFileListUI();
                     updateUploadButtonState();
                 });
@@ -530,8 +498,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         /**
-         * The main upload logic.
-         * It reports progress and final status back to the main process via IPC.
+         * Start an upload of the files listed: checked here, and run by main in
+         * the transfer window, which tells this window how it goes
+         * (onUploadStatus). One stopped before it starts is told to main too.
          */
         async function performUpload() {
             const serverCheck = await checkServerCompatibility();
@@ -559,8 +528,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
 
-            const isTargetSecure = coreClient?.server.baseUrl.startsWith('https://') ?? false;
-            const hasE2EE = serverCapabilities?.upload?.e2ee && isTargetSecure;
+            const isTargetSecure = serverBaseUrl?.startsWith('https://') ?? false;
+            const hasE2EE = Boolean(serverCapabilities?.upload?.e2ee && isTargetSecure);
 
             // Check if E2EE is available - show warning if not
             if (!hasE2EE) {
@@ -583,97 +552,36 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             }
 
-            const encrypt = hasE2EE; // Auto-set encryption based on capability
-
-            const lifetimeMs = getLifetimeInMs();
+            // Auto-set encryption based on capability
+            const encrypt = hasE2EE;
             saveSettings();
 
-            // Revoke main-process file access for any LazyFile instances after upload ends
-            const revokeAllLazyFiles = () => {
-                for (const f of selectedFiles) {
-                    if (f instanceof LazyFile) api.revokeFileAccess(f.filePath);
-                }
-            };
-
             try {
-                const files = [...selectedFiles];
-                const upload = coreClient.hosted.upload({
-                    files: files.length === 1 ? files[0] : files,
-                    lifetimeMs,
-                    maxDownloads: (() => {
-                        const val = parseInt(maxDownloadsValue.value, 10);
-                        return (Number.isInteger(val) && val >= 0) ? val : 1;
-                    })(),
-                    encrypt: encrypt,
+                const unit = fileLifetimeUnitSelect.value;
+                const { id } = await api.addUpload({
+                    files: selectedFiles.map((f) => f.handle),
+                    options: {
+                        lifetime: { value: unit === 'unlimited' ? 0 : parseFloat(fileLifetimeValueInput.value), unit },
+                        maxDownloads: (() => {
+                            const val = parseInt(maxDownloadsValue.value, 10);
+                            return (Number.isInteger(val) && val >= 0) ? val : 1;
+                        })(),
+                        encrypt,
+                    },
                 });
-
-                // Whether the server lets an upload pause: its pause length is 0 when the operator has turned pausing off.
-                const pausable = (serverCapabilities?.upload?.maxPauseMinutes ?? 0) > 0;
-
-                // Where the upload is, while it runs. Core's snapshots never
-                // name a file, so the name of the one an upload of several is
-                // on comes from this page's own list.
-                const report = (snapshot) => {
-                    const { status, text, deadline } = snapshot;
-                    if (status !== 'paused') warnBeforeDeadline(null);
-                    if (!['initializing', 'uploading', 'paused', 'completing'].includes(status)) return;
-                    const paused = status === 'paused';
-                    const onFile = files.length > 1 && snapshot.phase === 'chunk';
-                    const fileName = onFile ? files[snapshot.fileIndex]?.name : null;
-                    let line = fileName ? `${text} — ${fileName}` : text;
-                    // Paused, the server holds the upload until its deadline, and nothing resumes it but Resume Upload.
-                    // Short, to fit the status line beside its buttons (Will, 2026-10-09).
-                    if (paused && text === 'Paused.' && deadline) {
-                        line = `Paused. Kept until ${formatDeadline(deadline)}.`;
-                        warnBeforeDeadline(deadline);
-                    }
-                    api.uploadProgress({
-                        text: line,
-                        // The step alone, with no file name, for the window's title.
-                        step: text,
-                        percent: snapshot.percent,
-                        pausable: pausable && ['initializing', 'uploading', 'paused'].includes(status),
-                        paused,
-                        canPause: snapshot.canPause,
-                    });
-                };
-                reportUpload = report;
-                report(upload.snapshot);
-                upload.subscribe(report);
-
-                activeUpload = upload;
+                ownUpload = id;
+                currentUpload = id;
                 uploading = true;
                 actions.update({ running: true });
                 setUploadingState(true);
-
-                // The upload's one outcome: completed, cancelled or failed.
-                const outcome = await upload.result;
-
-                warnBeforeDeadline(null);
-                reportUpload = null;
-                activeUpload = null;
-                setUploadingState(false);
-                revokeAllLazyFiles();
-
-                if (outcome.status === 'completed') {
-                    api.uploadFinished({ status: 'success', link: outcome.value.downloadUrl });
-                } else if (outcome.status === 'cancelled') {
-                    uploading = false;
-                    actions.update({ running: false });
-                    api.uploadFinished({ status: 'cancelled' });
-                } else {
-                    uploading = false;
-                    actions.update({ running: false });
-                    api.uploadFinished({ status: 'error', error: outcome.error.message });
-                }
+                await api.startTransfers([id]);
             } catch (error) {
                 // Only an upload that never started gets here.
-                activeUpload = null;
+                ownUpload = null;
+                currentUpload = null;
                 uploading = false;
                 actions.update({ running: false });
                 setUploadingState(false);
-
-                revokeAllLazyFiles();
                 api.uploadFinished({
                     status: 'error',
                     error: error?.message || String(error)
@@ -682,25 +590,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         // --- Utility Functions ---
-
-        /** How long before a paused upload's deadline the notification comes. */
-        const PAUSE_WARNING_MS = 5 * 60 * 1000;
-
-        /**
-         * The notification that a paused upload's server will drop it, 5
-         * minutes before its deadline, or at once when less is left (Will,
-         * 2026-10-09): nothing resumes it by itself. With null, or a new
-         * deadline, the one waiting is called off. Pausing again renews the
-         * deadline, and so the notification.
-         */
-        function warnBeforeDeadline(deadline) {
-            if (deadline === pauseEnding.deadline) return;
-            clearTimeout(pauseEnding.timer);
-            pauseEnding = { timer: null, deadline };
-            if (deadline === null) return;
-            const wait = Math.max(0, deadline - PAUSE_WARNING_MS - Date.now());
-            pauseEnding.timer = setTimeout(() => api.pauseEnding(deadline), wait);
-        }
 
         /** When a paused upload's server stops holding it, as a local time: "14:32", or "14:32 tomorrow". */
         function formatDeadline(ms) {
@@ -718,7 +607,7 @@ document.addEventListener('DOMContentLoaded', async () => {
          */
         function updateSecurityStatus() {
             // What counts is the server's address: its capability, and whether it's reached over HTTPS.
-            const isTargetSecure = coreClient?.server.baseUrl.startsWith('https://') ?? false;
+            const isTargetSecure = serverBaseUrl?.startsWith('https://') ?? false;
             const hasE2EE = serverCapabilities?.upload?.e2ee && isTargetSecure;
 
             if (hasE2EE) {
@@ -761,7 +650,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const unit = fileLifetimeUnitSelect.value;
             if (unit === 'unlimited') return 0;
             const value = parseFloat(fileLifetimeValueInput.value);
-            return lifetime.toMs(value, unit);
+            return lifetimeToMs(value, unit);
         }
 
         async function checkServerCompatibility() {
@@ -773,56 +662,53 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return lastServerCheck;
             }
 
-            try {
-                // Recreate client if URL changed
-                createClient(inputUrl);
-                const compat = await coreClient.server.connect({ timeoutMs: 5000 });
-
-                // The address as the client reads it: https:// added if it had no scheme.
-                serverUrlInput.value = coreClient.server.baseUrl;
-
-                const { serverInfo } = compat;
-
-                if (!serverInfo || !serverInfo?.version || !serverInfo?.capabilities) {
-                    const message = 'Cannot determine the server\'s version or capabilities.';
-                    updateUploadabilityState(false, message);
-                    lastServerCheck = { compatible: false, message };
-                    return lastServerCheck;
-                }
-
-                serverCapabilities = serverInfo.capabilities;
-
-                // Check if uploads are explicitly disabled by the server
-                if (serverCapabilities.upload && serverCapabilities.upload.enabled === false) {
-                    const message = 'File uploads are disabled on this server.';
-                    updateUploadabilityState(false, message);
-                    lastServerCheck = { compatible: false, message };
-                    return lastServerCheck;
-                }
-                updateUploadabilityState(true);
-
-                applyServerLimits();
-
-                // Uploads need the server's hosted transfer protocol to work with this app's.
-                if (!compat.dgup.compatible) {
-                    lastServerCheck = { compatible: false, message: compat.dgup.message };
-                    updateUploadabilityState(false, compat.dgup.message);
-                    return lastServerCheck;
-                }
-
-                // compatible
-                const message = `Server: v${compat.serverVersion}${serverInfo.name ? ` (${serverInfo.name})` : ''}, Client: v${appInfo.version}.`;
-                setStatus(message);
-                lastServerCheck = { compatible: true, message };
-                updateUploadButtonState();
-
-                return lastServerCheck;
-            } catch (error) {
+            const compat = await checkServer(inputUrl);
+            if (!compat.ok) {
                 const message = 'Could not connect to the server.';
                 lastServerCheck = { compatible: false, message };
                 updateUploadabilityState(false, message);
                 return lastServerCheck;
             }
+            serverBaseUrl = compat.baseUrl;
+            // The address as the client reads it: https:// added if it had no scheme.
+            serverUrlInput.value = serverBaseUrl;
+
+            const { serverInfo } = compat;
+
+            if (!serverInfo || !serverInfo?.version || !serverInfo?.capabilities) {
+                const message = 'Cannot determine the server\'s version or capabilities.';
+                updateUploadabilityState(false, message);
+                lastServerCheck = { compatible: false, message };
+                return lastServerCheck;
+            }
+
+            serverCapabilities = serverInfo.capabilities;
+
+            // Check if uploads are explicitly disabled by the server
+            if (serverCapabilities.upload && serverCapabilities.upload.enabled === false) {
+                const message = 'File uploads are disabled on this server.';
+                updateUploadabilityState(false, message);
+                lastServerCheck = { compatible: false, message };
+                return lastServerCheck;
+            }
+            updateUploadabilityState(true);
+
+            applyServerLimits();
+
+            // Uploads need the server's hosted transfer protocol to work with this app's.
+            if (!compat.dgup.compatible) {
+                lastServerCheck = { compatible: false, message: compat.dgup.message };
+                updateUploadabilityState(false, compat.dgup.message);
+                return lastServerCheck;
+            }
+
+            // compatible
+            const message = `Server: v${compat.serverVersion}${serverInfo.name ? ` (${serverInfo.name})` : ''}, Client: v${appVersion}.`;
+            setStatus(message);
+            lastServerCheck = { compatible: true, message };
+            updateUploadButtonState();
+
+            return lastServerCheck;
         }
 
         function validateLifetimeInput() {
@@ -1037,6 +923,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Helper to reset the UI state after an upload completes or fails
         function resetUI(clearFile = true) {
             if (clearFile) {
+                revoke(selectedFiles);
                 selectedFiles = [];
                 updateFileListUI();
                 fileInput.value = '';
