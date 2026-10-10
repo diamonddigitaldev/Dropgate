@@ -3,9 +3,9 @@
 // its clock mocked:
 // - the transfer window starts with the first check or upload, and closes 30
 //   seconds after the last of its work ends, unless more comes first;
-// - the file service starts with the first upload, and stops as the last
-//   upload there ends (a paused one keeps it), each start handing the
-//   transfer window a new port;
+// - the file service starts and stops with the transfer window, holding a
+//   grant only while its upload runs or is paused, and the transfer window
+//   gets its port once its page is ready;
 // - quitting asks the transfer window to cancel everything, and waits at most
 //   5 seconds for its answer.
 import assert from 'node:assert/strict';
@@ -48,64 +48,56 @@ test('the transfer window closes 30 seconds after the last of its work ends, and
     assert.equal(TRANSFERS.WINDOW_IDLE_MS, 30_000);
     const { main, host, ready, answer, finish } = setUp();
 
-    // A check starts it, with no file service: nothing reads.
+    // A check starts it, and the file service with it.
     const checking = host.check(SERVER);
     const [win] = main.windows;
     await ready(win);
-    assert.deepEqual(main.processes, [], 'no file service for a check');
+    assert.equal(main.processes.length, 1);
     await answer(win, ENGINE.CHECK, { ok: true });
     await checking;
     mock.timers.tick(29_000);
     assert.equal(win.destroyed, false);
 
-    // An upload just in time keeps it, and starts the file service.
+    // An upload just in time keeps it.
     const id = randomUUID();
     host.upload(id, SERVER, OPTIONS, FILES);
     mock.timers.tick(5_000);
     assert.equal(win.destroyed, false);
-    assert.equal(main.processes.length, 1);
 
     // Running, even for long, it stays.
     mock.timers.tick(10 * 60_000);
     assert.equal(win.destroyed, false);
 
-    // It ends: the file service stops at once, the window 30 seconds later.
+    // It ends: 30 seconds later the window closes, and the file service with it.
     await finish(win, id);
-    assert.equal(main.processes[0].killed, true);
     mock.timers.tick(29_999);
-    assert.equal(win.destroyed, false);
+    assert.deepEqual([win.destroyed, main.processes[0].killed], [false, false]);
     mock.timers.tick(1);
-    assert.equal(win.destroyed, true);
+    assert.deepEqual([win.destroyed, main.processes[0].killed], [true, true]);
 });
 
-test('the file service runs only while an upload there reads or is paused, and each start hands the transfer window a new port', async (t) => {
+test('the file service lives with the transfer window, holding a grant only while its upload runs, and the window gets its port once ready', async (t) => {
     t.after(() => mock.timers.reset());
     mock.timers.enable({ apis: ['setTimeout'] });
     const { main, host, ready, finish } = setUp();
     const first = randomUUID();
-    const second = randomUUID();
     host.upload(first, SERVER, OPTIONS, FILES);
     const [win] = main.windows;
+    const [service] = main.processes;
+    assert.equal(win.webContents.sent.filter(([channel]) => channel === ENGINE.PORT).length, 0, 'no port before its page is ready');
     await ready(win);
-    main.processes[0].spawn();
+    const sent = win.webContents.sent.map(([channel]) => channel);
+    assert.ok(sent.indexOf(ENGINE.PORT) >= 0 && sent.indexOf(ENGINE.PORT) < sent.indexOf(ENGINE.UPLOAD), 'the port, then the upload that reads through it');
+
+    const second = randomUUID();
     host.upload(second, SERVER, OPTIONS, FILES);
     assert.equal(main.processes.length, 1, 'one file service for both');
     await finish(win, first);
-    assert.equal(main.processes[0].killed, false, 'the second still reads');
     await finish(win, second);
-    assert.equal(main.processes[0].killed, true);
-
-    // A new upload: a new file service, and, once it has spawned, a new port to it, then the upload's work.
-    const third = randomUUID();
-    const before = win.webContents.sent.length;
-    host.upload(third, SERVER, OPTIONS, FILES);
-    assert.equal(main.processes.length, 2);
-    host.cancel(third);
-    assert.deepEqual(win.webContents.sent.slice(before), [], 'nothing until the file service has spawned');
-    main.processes[1].spawn();
-    assert.deepEqual(win.webContents.sent.slice(before).map(([channel]) => channel), [ENGINE.PORT, ENGINE.UPLOAD, ENGINE.CANCEL],
-        'the port, then the upload that reads through it, then what came for it meanwhile');
+    assert.deepEqual(service.messages.map((m) => m.type), ['port', 'grant-read', 'grant-read', 'revoke', 'revoke'], 'each grant revoked as its upload ends');
+    assert.equal(service.killed, false, 'it stays while the transfer window does');
     host.close();
+    assert.equal(service.killed, true);
 });
 
 test('quitting asks the transfer window to cancel everything there, and waits for its answer, or 5 seconds at most', async (t) => {
@@ -121,7 +113,6 @@ test('quitting asks the transfer window to cancel everything there, and waits fo
     host.upload(randomUUID(), SERVER, OPTIONS, FILES);
     const [win] = main.windows;
     await ready(win);
-    main.processes[0].spawn();
     let done = false;
     const quitting = host.quit().then(() => {
         done = true;

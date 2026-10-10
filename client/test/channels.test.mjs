@@ -355,7 +355,7 @@ test('the transfer window\'s channels take its own page only, an upload running 
 
     // Nothing above reached main's callbacks, or revoked the upload's read grant.
     assert.deepEqual(work, []);
-    assert.deepEqual(main.processes[0].messages.map((m) => m.type), ['grant-read', 'port'], 'the grants first, so they are held before any read');
+    assert.deepEqual(main.processes[0].messages.map((m) => m.type), ['port', 'grant-read']);
 
     // And each, well formed, goes through.
     await main.invoke(ENGINE.ANSWER, page, call, { ok: false, code: null, message: 'Unreachable.' });

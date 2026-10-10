@@ -75,7 +75,11 @@ export function fakeMain({ settings = {} } = {}) {
         }
 
         removeMenu() {}
-        on() {}
+        listeners = [];
+        on(event, listener) {
+            this.listeners.push([event, listener]);
+        }
+
         loadFile(page) {
             this.page = page;
         }
@@ -84,8 +88,10 @@ export function fakeMain({ settings = {} } = {}) {
             return this.destroyed;
         }
 
+        // As Electron's: destroyed, it's closed.
         destroy() {
             this.destroyed = true;
+            for (const [event, listener] of this.listeners) if (event === 'closed') listener();
         }
     }
 
@@ -105,19 +111,7 @@ export function fakeMain({ settings = {} } = {}) {
         },
         utilityProcess: {
             fork() {
-                // It spawns when a test says so (spawn()), as a real one does a moment after fork().
-                const child = {
-                    messages: [],
-                    killed: false,
-                    spawned: [],
-                    postMessage: (message) => child.messages.push(message),
-                    kill() { child.killed = true; },
-                    on() {},
-                    once(event, listener) {
-                        if (event === 'spawn') child.spawned.push(listener);
-                    },
-                    spawn: () => child.spawned.splice(0).forEach((listener) => listener()),
-                };
+                const child = { messages: [], killed: false, postMessage: (message) => child.messages.push(message), kill() { child.killed = true; }, on() {} };
                 processes.push(child);
                 return child;
             },
