@@ -21,7 +21,19 @@
 //   { at, pid, event: 'ipc-large', channel, bytes }    a message to or from main bigger than IPC_LARGE
 //   { at, pid, event: 'ipc-sizes', sizes }             as it quits: the biggest message main sent or got
 //                                                      on each channel, in bytes, and how many
+//   { at, pid, event: 'transfer-changed', id, state }  main sent the window a transfer (transfer:changed):
+//                                                      its ID and state only
+//   { at, pid, event: 'tray', tooltip, labels }        the tray icon shows, or its menu changed
+//   { at, pid, event: 'tray-gone' }                    the tray icon was taken away
+//   { at, pid, event: 'power-save', action, type, id } the power-save blocker started or stopped
+//   { at, pid, event: 'csp', message }                 a page's console said its Content Security Policy refused something
 //   { at, pid, event: 'exit', code }
+//
+// The tray icon is kept in globalThis.__dropgateTray, with its menu, so a test
+// can click its items from main (app.evaluate()). And a test can say whether
+// the app's main window counts as focused, with globalThis.__dropgateFocused
+// (true or false; unset, it's the window's own): which window has the focus
+// on a test machine isn't the test's to set.
 //
 // Unless DROPGATE_TEST_REAL_CLIPBOARD is 1, the clipboard and notifications are
 // only written down: nothing is copied and nothing is shown, so running the tests
@@ -45,7 +57,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const v8 = require('node:v8');
-const { app, BrowserWindow, clipboard, ipcMain, Notification, session, utilityProcess } = require('electron');
+const { app, BrowserWindow, clipboard, ipcMain, Notification, powerSaveBlocker, session, Tray, utilityProcess } = require('electron');
 
 // Take this preload's own "-r <path>" back out of the command line, so the app
 // sees only the arguments it would be given when launched normally.
@@ -114,6 +126,47 @@ app.on('browser-window-created', (_event, win) => {
     win.on('show', () => record({ event: 'window-shown', id }));
 });
 
+// Whether a window of the app's own (the UI session's) is focused, as the test says, when it says.
+const isFocused = BrowserWindow.prototype.isFocused;
+BrowserWindow.prototype.isFocused = function (...args) {
+    const said = globalThis.__dropgateFocused;
+    if (typeof said === 'boolean' && !this.isDestroyed() && this.webContents.session === session.defaultSession) return said;
+    return isFocused.apply(this, args);
+};
+
+// The tray icon: its tooltip and menu as they change, and when it goes.
+const setToolTip = Tray.prototype.setToolTip;
+Tray.prototype.setToolTip = function (tooltip, ...rest) {
+    this.__tooltip = tooltip;
+    return setToolTip.call(this, tooltip, ...rest);
+};
+const setContextMenu = Tray.prototype.setContextMenu;
+Tray.prototype.setContextMenu = function (menu, ...rest) {
+    globalThis.__dropgateTray = this;
+    this.__menu = menu;
+    record({ event: 'tray', tooltip: this.__tooltip ?? null, labels: menu?.items.map((item) => item.label) ?? [] });
+    return setContextMenu.call(this, menu, ...rest);
+};
+const destroyTray = Tray.prototype.destroy;
+Tray.prototype.destroy = function (...args) {
+    if (globalThis.__dropgateTray === this) globalThis.__dropgateTray = null;
+    record({ event: 'tray-gone' });
+    return destroyTray.apply(this, args);
+};
+
+// The power-save blocker, as the app starts and stops it.
+const startBlocker = powerSaveBlocker.start.bind(powerSaveBlocker);
+const stopBlocker = powerSaveBlocker.stop.bind(powerSaveBlocker);
+powerSaveBlocker.start = (type) => {
+    const id = startBlocker(type);
+    record({ event: 'power-save', action: 'start', type, id });
+    return id;
+};
+powerSaveBlocker.stop = (id) => {
+    record({ event: 'power-save', action: 'stop', id });
+    return stopBlocker(id);
+};
+
 // Each request to a server, as the session that sends it sees it. The app
 // hooks no request itself, so these listeners are the sessions' only ones.
 const watchRequests = (ses) => ses.webRequest.onSendHeaders(({ url, webContents }) => {
@@ -157,8 +210,14 @@ app.on('web-contents-created', (_event, contents) => {
         if (channel === 'upload:status' && OUTCOMES.includes(push?.type) && !reportedByPage) {
             record({ event: 'upload-finished', status: push.type, error: push.data?.error });
         }
+        if (channel === 'transfer:changed') record({ event: 'transfer-changed', id: push?.id, state: push?.state });
         return send.call(this, channel, ...args);
     };
+    // What a page's CSP refused, as Chromium tells its console. (Electron 44 gives the details on the event.)
+    contents.on('console-message', (details, ...legacy) => {
+        const message = typeof details?.message === 'string' ? details.message : String(legacy[1] ?? '');
+        if (/Content Security Policy/i.test(message)) record({ event: 'csp', page: path.basename(new URL(contents.getURL() || 'about:blank').pathname), message });
+    });
     const postMessage = contents.postMessage;
     contents.postMessage = function (channel, message, transfer) {
         measure(`main → page ${channel}`, message);

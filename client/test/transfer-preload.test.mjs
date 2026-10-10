@@ -149,7 +149,7 @@ test('the file service is a utility process with no session, given one end of th
     assert.doesNotMatch(fork, /session|partition|execArgv|env/, 'nothing but its name and quiet stdio');
     assert.match(host, /const \{ port1, port2 \} = new MessageChannelMain\(\);/);
     assert.match(host, /fileService\.postMessage\(\{ type: FILE_SERVICE\.PORT \}, \[port2\]\);/);
-    assert.match(host, /event\.sender\.postMessage\(ENGINE\.PORT, null, \[windowPort\]\);/);
+    assert.match(host, /win\.webContents\.postMessage\(ENGINE\.PORT, null, \[windowPort\]\);/);
     // The transfer window gets each file's grant, name and size, never its path.
     assert.match(host, /send\(ENGINE\.UPLOAD, \{ id, server, options, files: granted\.map\(\(\{ handle, name, size \}\) => \(\{ handle, name, size \}\)\) \}\);/);
     assert.match(host, /fileService\.postMessage\(\{ type: FILE_SERVICE\.GRANT_READ, handle, path: filePath, size, mtimeMs \}\);/);

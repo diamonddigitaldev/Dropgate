@@ -157,9 +157,9 @@ test('the window\'s bridge takes a path on files:add only: on every other channe
         return answered;
     }, filePath);
     expect(Object.keys(answers), 'the bridge\'s methods tried').toEqual(expect.arrayContaining(['addFiles', 'addUpload', 'checkServer', 'copyLink', 'revokeFileAccess']));
-    // The two that take nothing (test/preload.test.mjs), and files:add given its list.
+    // The three that take nothing (test/preload.test.mjs), and files:add given its list.
     expect(Object.entries(answers).filter(([, answer]) => answer === 'answered').map(([name]) => name).sort(), 'what the bridge answered, handed a path')
-        .toEqual(['addFiles, as a list', 'isBusy', 'rendererReady']);
+        .toEqual(['addFiles, as a list', 'isBusy', 'listTransfers', 'rendererReady']);
 
     expect(server.requests().slice(before), 'requests to the server after').toEqual([]);
     expect(app.eventsOf('clipboard'), 'what the app copied').toEqual([]);

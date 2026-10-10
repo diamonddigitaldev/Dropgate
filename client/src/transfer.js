@@ -24,24 +24,27 @@ const GOING = ['initializing', 'uploading', 'paused', 'completing'];
 
 // --- The file service ---
 
-/** The file service's port, once main has handed it over: taken only from this window's own preload. */
-const port = new Promise((resolve) => {
-    window.addEventListener('message', function take(event) {
-        if (event.source !== window || event.data !== 'engine:port' || !event.ports?.[0]) return;
-        window.removeEventListener('message', take);
-        resolve(event.ports[0]);
-    });
-});
-
+// The file service's port, taken only from this window's own preload. Main
+// starts the file service for the first upload that reads, and stops it once
+// none is left, so each time it starts again this page is handed a new port,
+// before the upload that needs it.
 let nextRequest = 0;
 const waiting = new Map();
-port.then((p) => {
+let takePort;
+let port = new Promise((resolve) => {
+    takePort = resolve;
+});
+window.addEventListener('message', (event) => {
+    if (event.source !== window || event.data !== 'engine:port' || !event.ports?.[0]) return;
+    const [p] = event.ports;
     p.onmessage = ({ data }) => {
         const answer = waiting.get(data?.id);
         if (!answer) return;
         waiting.delete(data.id);
         answer(data);
     };
+    takePort(p);
+    port = Promise.resolve(p);
 });
 
 /** Ask the file service, and wait for its answer. */
@@ -95,6 +98,19 @@ let started = null;
 const clients = new Map();
 const keyOf = (server) => `${server.allowInsecure ? 'insecure' : 'secure'} ${server.url}`;
 
+/**
+ * Every request core has going, so quitting can wait for them: a cancelled
+ * upload tells its server as it ends, and the request that does isn't part of
+ * its outcome.
+ */
+const requests = new Set();
+function countedFetch(input, init) {
+    const request = fetch(input, init);
+    requests.add(request);
+    request.then(() => requests.delete(request), () => requests.delete(request));
+    return request;
+}
+
 async function newClient(server) {
     const { appInfo } = await started;
     const client = new DropgateClient({
@@ -103,6 +119,7 @@ async function newClient(server) {
         // then as it is: an https:// one is never retried over HTTP.
         allowInsecure: server.allowInsecure,
         appInfo,
+        fetchFn: countedFetch,
     });
     clients.set(keyOf(server), client);
     return client;
@@ -235,6 +252,19 @@ async function pauseOrResume({ id, call }, pause) {
 engine.onPause((work) => pauseOrResume(work, true));
 engine.onResume((work) => pauseOrResume(work, false));
 engine.onCancel(({ id }) => uploads.get(id)?.operation.cancel());
+
+// The app is quitting: every upload is cancelled, each server told (core
+// asks it to drop the upload), and main is answered once they've all ended
+// and every request still going has finished: the ones telling the servers
+// among them. Nothing here outlives the app.
+engine.onQuit(async ({ call }) => {
+    // Each upload's own operation: a check makes a new client, so an upload's may no longer be in clients.
+    const operations = [...uploads.values()].map(({ operation }) => operation);
+    for (const operation of operations) operation.cancel();
+    await Promise.allSettled(operations.map((operation) => operation.result));
+    while (requests.size > 0) await Promise.allSettled([...requests]);
+    engine.answer(call, {});
+});
 
 // Ready: main hands over the file service's port, then the work waiting.
 started = engine.ready();

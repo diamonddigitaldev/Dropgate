@@ -23,11 +23,13 @@ const CH = {
     TRANSFER_RESUME: 'transfer:resume',
     TRANSFER_CANCEL: 'transfer:cancel',
     TRANSFER_BUSY: 'transfer:busy',
+    TRANSFERS_LIST: 'transfers:list',
     UPLOAD_FINISHED: 'upload:finished',
     LINK_COPY: 'link:copy',
     FILE_OPENED: 'file:opened',
     FILE_OPEN_ERROR: 'file:open-error',
     TRANSFER_ASK_INSECURE: 'transfer:ask-insecure',
+    TRANSFER_CHANGED: 'transfer:changed',
     UPLOAD_STATUS: 'upload:status',
 };
 
@@ -46,9 +48,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     cancelTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_CANCEL, { id }),
     uploadFinished: (result) => ipcRenderer.invoke(CH.UPLOAD_FINISHED, result),
     isBusy: () => ipcRenderer.invoke(CH.TRANSFER_BUSY),
+    listTransfers: () => ipcRenderer.invoke(CH.TRANSFERS_LIST),
     copyLink: (link) => ipcRenderer.invoke(CH.LINK_COPY, link),
     onFileOpened: (callback) => on(CH.FILE_OPENED, callback),
     onFileOpenError: (callback) => on(CH.FILE_OPEN_ERROR, callback),
     onAskInsecure: (callback) => on(CH.TRANSFER_ASK_INSECURE, callback),
+    onTransferChanged: (callback) => on(CH.TRANSFER_CHANGED, callback),
     onUploadStatus: (callback) => on(CH.UPLOAD_STATUS, callback),
 });

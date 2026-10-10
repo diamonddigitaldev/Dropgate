@@ -3,14 +3,21 @@
 const { randomUUID } = require('crypto');
 const path = require('path');
 const { BrowserWindow, MessageChannelMain, utilityProcess } = require('electron');
-const { ENGINE, FILE_SERVICE } = require('./constants');
+const { ENGINE, FILE_SERVICE, TRANSFERS } = require('./constants');
 const { answerOf, deadlineOf, isId, outcomeOf, snapshotOf } = require('./core/payloads');
 
 // The transfer host: the hidden transfer window, which runs core and makes
 // every request Dropgate makes, and the file service, which reads the files
-// it sends. Main starts both on demand, the first time there's work for them,
-// and hands each one end of one MessageChannel, so a file's bytes go from the
-// file service to the transfer window and never through main.
+// it sends. Main starts each on demand, and hands each one end of one
+// MessageChannel, so a file's bytes go from the file service to the transfer
+// window and never through main.
+//
+// - The transfer window starts with the first server check or upload, and
+//   closes TRANSFERS.WINDOW_IDLE_MS after the last of its work ends (no upload
+//   running or paused there, no call waiting), unless more comes first.
+// - The file service starts with the first upload that reads, and stops as
+//   the last upload there ends: a paused one keeps it, and its descriptors.
+//   Each time it starts, the transfer window is handed a new port to it.
 //
 // - The transfer window is sandboxed, isolated and without Node, in the kit's
 //   isolated "transfer" session (in memory, no permission ever granted, no
@@ -43,13 +50,15 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
     let win = null;
     /** @type {Electron.UtilityProcess | null} */
     let fileService = null;
-    /** The file service's end of the channel, until the transfer window is ready for its own. */
+    /** The transfer window's end of the channel to the file service, until it's ready for it. */
     let windowPort = null;
     let ready = false;
     /** What's waiting for the transfer window to be ready: [channel, payload]. */
     let queued = [];
-    /** Whether main is closing them, as the app quits. */
+    /** Whether main is closing them: as the app quits, or the transfer window has had nothing to do for a while. */
     let closing = false;
+    /** The timer that closes the transfer window once it has had nothing to do for a while. */
+    let idleTimer = null;
     /** The uploads running there, with the read grants each was given. */
     const running = new Map();
     /** The calls waiting for the transfer window's answer. */
@@ -64,11 +73,8 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
 
     kit.ipc.handle(ENGINE.READY, (event) => {
         fromTransferWindow(event);
-        if (windowPort) {
-            event.sender.postMessage(ENGINE.PORT, null, [windowPort]);
-            windowPort = null;
-        }
         ready = true;
+        handPort();
         for (const [channel, payload] of queued.splice(0)) win.webContents.send(channel, payload);
         return { appInfo };
     }, { session });
@@ -103,19 +109,74 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         const checked = answerOf(answer.kind, value);
         calls.delete(call);
         answer.resolve(checked);
+        idleSoon();
     }, { session });
 
-    /** Start the file service and the transfer window, if they aren't running. */
+    /** Hand the transfer window its port to the file service, once it's ready for it. */
+    function handPort() {
+        if (!ready || !windowPort) return;
+        win.webContents.postMessage(ENGINE.PORT, null, [windowPort]);
+        windowPort = null;
+    }
+
+    /**
+     * Grant the file service an upload's files, starting it if it isn't
+     * running. A new one gets its channel to the transfer window after the
+     * grants: it takes main's messages in order, so it holds them before the
+     * first read can reach it.
+     */
+    function grantReads(granted) {
+        const fresh = !fileService;
+        if (fresh) {
+            fileService = utilityProcess.fork(path.join(__dirname, 'file-service.js'), [], {
+                serviceName: 'Dropgate Client File Service',
+                stdio: 'ignore',
+            });
+        }
+        for (const { handle, path: filePath, size, mtimeMs } of granted) {
+            fileService.postMessage({ type: FILE_SERVICE.GRANT_READ, handle, path: filePath, size, mtimeMs });
+        }
+        if (fresh) {
+            const { port1, port2 } = new MessageChannelMain();
+            fileService.postMessage({ type: FILE_SERVICE.PORT }, [port2]);
+            windowPort = port1;
+            handPort();
+        }
+    }
+
+    /** Stop the file service: nothing reads now. */
+    function stopFileService() {
+        fileService?.kill();
+        fileService = null;
+        windowPort = null;
+    }
+
+    /** With nothing running there and no call waiting, the transfer window closes after a while; any work calls that off. */
+    function idleSoon() {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+        if (!win || running.size > 0 || calls.size > 0) return;
+        idleTimer = setTimeout(() => {
+            idleTimer = null;
+            if (running.size === 0 && calls.size === 0) close();
+        }, TRANSFERS.WINDOW_IDLE_MS);
+    }
+
+    /** Stop the transfer window and the file service: whatever runs there ends with them, untold. */
+    function close() {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+        closing = true;
+        if (win && !win.isDestroyed()) win.destroy();
+        else stopped('The transfer window stopped.');
+    }
+
+    /** Start the transfer window, if it isn't running. */
     function start() {
+        clearTimeout(idleTimer);
+        idleTimer = null;
         if (win) return;
         closing = false;
-        fileService = utilityProcess.fork(path.join(__dirname, 'file-service.js'), [], {
-            serviceName: 'Dropgate Client File Service',
-            stdio: 'ignore',
-        });
-        const { port1, port2 } = new MessageChannelMain();
-        fileService.postMessage({ type: FILE_SERVICE.PORT }, [port2]);
-        windowPort = port1;
 
         win = new BrowserWindow({
             show: false,
@@ -149,13 +210,10 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
      * app quits.
      */
     function stopped(message) {
-        const service = fileService;
         win = null;
-        fileService = null;
-        windowPort = null;
         ready = false;
         queued = [];
-        service?.kill();
+        stopFileService();
         for (const id of [...running.keys()]) {
             running.delete(id);
             if (!closing) onFinished(id, { status: 'error', message });
@@ -173,7 +231,7 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         else queued.push([channel, payload]);
     }
 
-    /** Send work that's answered, and wait for its answer: a check's, or a pause's or a resume's. */
+    /** Send work that's answered, and wait for its answer: a check's, or a pause's, a resume's or a quit's (all three { message? }). */
     function call(channel, payload) {
         const id = randomUUID();
         const kind = channel === ENGINE.CHECK ? 'check' : 'pause';
@@ -183,11 +241,13 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         });
     }
 
-    /** An upload has ended: its read grants are revoked. */
+    /** An upload has ended: its read grants are revoked, and with nothing else reading, the file service stops. */
     function end(id) {
         const grants = running.get(id) ?? [];
         running.delete(id);
         for (const handle of grants) fileService?.postMessage({ type: FILE_SERVICE.REVOKE, handle });
+        if (running.size === 0) stopFileService();
+        idleSoon();
     }
 
     return {
@@ -210,9 +270,7 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
             start();
             const granted = files.map((file) => ({ ...file, handle: randomUUID() }));
             running.set(id, granted.map((file) => file.handle));
-            for (const { handle, path: filePath, size, mtimeMs } of granted) {
-                fileService.postMessage({ type: FILE_SERVICE.GRANT_READ, handle, path: filePath, size, mtimeMs });
-            }
+            grantReads(granted);
             send(ENGINE.UPLOAD, { id, server, options, files: granted.map(({ handle, name, size }) => ({ handle, name, size })) });
         },
 
@@ -229,12 +287,24 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
             return running.size > 0;
         },
 
-        /** Stop the transfer window and the file service, as the app quits: whatever runs there ends with them. */
-        close() {
-            closing = true;
-            if (win && !win.isDestroyed()) win.destroy();
-            else stopped('The transfer window stopped.');
+        /**
+         * The app is quitting: the transfer window cancels everything there,
+         * telling each server, and answers once it has (or after
+         * TRANSFERS.QUIT_WAIT_MS, whichever comes first). Its uploads' outcomes
+         * reach onFinished as they end.
+         */
+        async quit() {
+            if (!win || running.size === 0) return;
+            let timer;
+            const waited = new Promise((resolve) => {
+                timer = setTimeout(resolve, TRANSFERS.QUIT_WAIT_MS);
+            });
+            await Promise.race([call(ENGINE.QUIT, {}).catch(() => {}), waited]);
+            clearTimeout(timer);
         },
+
+        /** Stop the transfer window and the file service, as the app quits: whatever runs there ends with them. */
+        close,
     };
 }
 

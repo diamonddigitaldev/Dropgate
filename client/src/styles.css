@@ -38,6 +38,11 @@ textarea,
     display: none;
 }
 
+/* An icon beside a small button's label (Add More), at the label's size: the page's CSP allows no inline style. */
+.button-icon {
+    font-size: 16px;
+}
+
 .upload-view.drag-over .file-list {
     border-color: rgba(var(--accent-rgb), var(--wash-active-border));
     background-color: rgba(var(--accent-rgb), var(--wash-active-fill));

@@ -4,6 +4,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- The page asks nothing of any server (the transfer window does): only its own
+         scripts, styles, fonts and images, and Bootstrap's data: SVGs (its switches and selects). -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
     <title>Dropgate Client</title>
     <link rel="stylesheet" href="../node_modules/bootstrap/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="../node_modules/material-icons/iconfont/round.css">
@@ -32,7 +35,7 @@
                     <span id="file-count" class="fw-semibold"></span>
                     <span id="file-chosen-total" class="small text-body-secondary"></span>
                     <button id="browse-more-btn" class="btn btn-sm btn-secondary d-inline-flex align-items-center gap-1 ms-auto" type="button">
-                        <span class="material-icons-round" aria-hidden="true" style="font-size:16px">add</span>Add More
+                        <span class="material-icons-round button-icon" aria-hidden="true">add</span>Add More
                     </button>
                 </div>
                 <div id="file-list" class="file-list"></div>

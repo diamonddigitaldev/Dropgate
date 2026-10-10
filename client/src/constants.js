@@ -30,18 +30,20 @@ const IPC = Object.freeze({
     TRANSFER_PAUSE: 'transfer:pause',           // ({ id }) -> { message? }, core's reason when it couldn't
     TRANSFER_RESUME: 'transfer:resume',         // ({ id }) -> { message? }
     TRANSFER_CANCEL: 'transfer:cancel',         // ({ id }) a running upload, or one waiting: a share's question declined
-    TRANSFER_BUSY: 'transfer:busy',             // () -> whether any upload runs, is paused, or is waiting to (a share under way), for Restart Now
+    TRANSFER_BUSY: 'transfer:busy',             // () -> whether any transfer runs, is paused or is queued (or a share is under way), for Restart Now
+    TRANSFERS_LIST: 'transfers:list',           // () -> every transfer in main's registry, as transfer:changed draws it, as the page sets itself up
     UPLOAD_FINISHED: 'upload:finished',         // ({ status: 'error', error }) an upload the page stopped before it started (no server, the warning declined)
     LINK_COPY: 'link:copy',                     // (link) copy it, kept out of the clipboard's history and sync
     // Main to page.
     FILE_OPENED: 'file:opened',                 // push: { handle, name, size }, a file picked with Open File
     FILE_OPEN_ERROR: 'file:open-error',         // push: the message, when the file picked can't be read
     TRANSFER_ASK_INSECURE: 'transfer:ask-insecure', // push: { id }, a share to a server with no end-to-end encryption: the Upload Security Warning, answered with transfer:start or transfer:cancel
-    UPLOAD_STATUS: 'upload:status',             // push: { type: 'progress' | 'success' | 'cancelled' | 'error', data }, any upload, to the main window
+    TRANSFER_CHANGED: 'transfer:changed',       // push: a transfer as it is now, for drawing (core/transfers.js' view()), at most TRANSFERS.UPDATES_PER_SECOND times a second each
+    UPLOAD_STATUS: 'upload:status',             // push: { type: 'success' | 'cancelled' | 'error', data: { id?, link? | error? } }, an upload's outcome, to the main window
 });
 
 /** The pushes, which main sends and the page only listens for. */
-const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.UPLOAD_STATUS]);
+const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.TRANSFER_CHANGED, IPC.UPLOAD_STATUS]);
 
 /**
  * The channels between main and the transfer window: a hidden, sandboxed
@@ -62,16 +64,17 @@ const ENGINE = Object.freeze({
     RESUME: 'engine:resume',                    // { id, call }, answered with engine:answer
     CANCEL: 'engine:cancel',                    // { id }
     CHECK: 'engine:check',                      // { call, server: { url, allowInsecure } }, answered with engine:answer
+    QUIT: 'engine:quit',                        // { call } the app is quitting: cancel everything (its servers told), then answer with engine:answer
     // The transfer window to main.
     READY: 'engine:ready',                      // () its page has set itself up: main hands it the port, then its work
     UPDATE: 'engine:update',                    // (id, snapshot) core's snapshot, which names no file and holds no key
     PAUSE_ENDING: 'engine:pause-ending',        // (id, deadline) a paused upload's server drops it at this time (ms since 1970): notify
     FINISHED: 'engine:finished',                // (id, { status: 'success', link } | { status: 'cancelled' } | { status: 'error', message })
-    ANSWER: 'engine:answer',                    // (call, value) the answer to a check, a pause or a resume
+    ANSWER: 'engine:answer',                    // (call, value) the answer to a check, a pause, a resume or a quit
 });
 
 /** What main sends the transfer window, which its page only listens for. */
-const ENGINE_PUSHES = Object.freeze([ENGINE.PORT, ENGINE.UPLOAD, ENGINE.PAUSE, ENGINE.RESUME, ENGINE.CANCEL, ENGINE.CHECK]);
+const ENGINE_PUSHES = Object.freeze([ENGINE.PORT, ENGINE.UPLOAD, ENGINE.PAUSE, ENGINE.RESUME, ENGINE.CANCEL, ENGINE.CHECK, ENGINE.QUIT]);
 
 /**
  * The messages between main and the file service (a utilityProcess, over
@@ -122,4 +125,26 @@ const WINDOW = Object.freeze({ WIDTH: 900, HEIGHT: 900, MIN_WIDTH: 720, MIN_HEIG
 /** How long Share with Dropgate gathers files before it uploads them as one: Windows starts one process per file selected. */
 const BATCH_DEBOUNCE_MS = 500;
 
-module.exports = { APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, READ_PIECE_BYTES, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS };
+/**
+ * How main's registry runs transfers, and how it tells of them (17 §4, §5):
+ * - up to TRANSFERS_AT_ONCE run at once, uploads and downloads together; the
+ *   rest wait as queued, in the order added, and a paused one takes no place
+ *   (Settings > Transfers' slider sets it from phase 7's piece 5);
+ * - each transfer reaches the window at most TRANSFER_UPDATES_PER_SECOND times
+ *   a second (transfer:changed);
+ * - transfers ending within NOTICE_GROUP_MS of the first are told of in one
+ *   notification;
+ * - the transfer window closes TRANSFER_WINDOW_IDLE_MS after the last of its
+ *   work ends;
+ * - quitting waits up to QUIT_WAIT_MS for the transfer window to cancel
+ *   everything on its servers.
+ */
+const TRANSFERS = Object.freeze({
+    AT_ONCE: 3,
+    UPDATES_PER_SECOND: 4,
+    NOTICE_GROUP_MS: 5_000,
+    WINDOW_IDLE_MS: 30_000,
+    QUIT_WAIT_MS: 5_000,
+});
+
+module.exports = { APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, READ_PIECE_BYTES, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS };

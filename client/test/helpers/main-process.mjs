@@ -105,7 +105,7 @@ export function fakeMain({ settings = {} } = {}) {
         },
         utilityProcess: {
             fork() {
-                const child = { messages: [], postMessage: (message) => child.messages.push(message), kill() {}, on() {} };
+                const child = { messages: [], killed: false, postMessage: (message) => child.messages.push(message), kill() { child.killed = true; }, on() {} };
                 processes.push(child);
                 return child;
             },

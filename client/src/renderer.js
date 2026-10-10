@@ -10,7 +10,12 @@
 // The page runs no core and makes no request: it holds each file as the
 // handle main made for it, with its name and size, never its path, and main
 // runs each server check and upload in the transfer window, and tells the
-// page how they go (onUploadStatus).
+// page how they go: each transfer as it is (onTransferChanged), and each
+// upload's outcome (onUploadStatus).
+//
+// Main runs several transfers at once (its registry); this page shows one at
+// a time, as it always has: its own upload, or else the first going that main
+// tells it of, until that one ends, and then the next.
 
 const api = window.electronAPI;
 const kitApi = window.kitAPI;
@@ -106,7 +111,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         actions.update({ canRun: false, canClear: false });
 
         // Pause Upload and Resume Upload, beside Cancel while an upload runs, on
-        // a server that lets uploads pause. The kit's action bar has no place
+        // a server that lets uploads pause. Resumed while every place is taken,
+        // it waits as queued. The kit's action bar has no place
         // for them, so they're the app's own, as a transfer's own buttons are
         // (Will, 2026-10-09). A click disables its own button until the next
         // snapshot. The upload moving on before it landed is silent; any
@@ -279,23 +285,45 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // --- IPC Listeners (Communication from Main Process) ---
 
-        // An upload's progress and outcome, from this window or a hidden one.
+        // A transfer as it is now, from main's registry: drawn if it's the one this window shows.
+        api.onTransferChanged((card) => showTransfer(card));
+
+        /** Draw a transfer, if it's the one this window shows: its own, or else the first going it's told of. */
+        function showTransfer(card) {
+            if (card.kind !== 'upload' || card.state === 'waiting') return;
+            if ((ownUpload && card.id !== ownUpload) || (currentUpload && card.id !== currentUpload)) return;
+            currentUpload = card.id;
+            uploading = true;
+            linkSection.classList.add('d-none');
+            if (card.state === 'queued') {
+                // Waiting for a place: TRANSFERS.AT_ONCE run at once.
+                setStatus('Queued.');
+                actions.update({ running: true });
+                showPauseControls();
+                return;
+            }
+            const { status, canPause, percent } = card;
+            const paused = card.state === 'paused';
+            const fileName = card.files.length > 1 && card.phase === 'chunk' ? card.files[card.fileIndex]?.name ?? null : null;
+            const text = progressLine({ step: card.step, fileName, paused, deadline: card.deadline });
+            if (text) setStatus(text);
+            actions.update({ running: true, ...(percent !== null ? { percent } : {}) });
+            // Whether the server lets an upload pause: its pause length is 0 when the operator has turned pausing off.
+            const pausable = (serverCapabilities?.upload?.maxPauseMinutes ?? 0) > 0 && ['initializing', 'uploading', 'paused'].includes(status);
+            showPauseControls({ pausable, paused, canPause });
+        }
+
+        /** Show the first transfer still going, if any: the one shown has ended, or the window has just opened. */
+        async function showNextTransfer() {
+            const going = (await api.listTransfers().catch(() => [])).find((card) => card.kind === 'upload' && card.state !== 'waiting');
+            if (going && !currentUpload) showTransfer(going);
+        }
+
+        // An upload's outcome: the one this window shows, or one main ended before it started (it has no ID).
         api.onUploadStatus((event) => {
+            const { id } = event.data ?? {};
+            if (id && id !== currentUpload && id !== ownUpload) return;
             switch (event.type) {
-                case 'progress':
-                    {
-                        const { id, status, paused, canPause, percent } = event.data;
-                        currentUpload = id;
-                        const text = progressLine(event.data);
-                        if (text) setStatus(text);
-                        uploading = true;
-                        actions.update({ running: true, ...(percent !== undefined ? { percent } : {}) });
-                        // Whether the server lets an upload pause: its pause length is 0 when the operator has turned pausing off.
-                        const pausable = (serverCapabilities?.upload?.maxPauseMinutes ?? 0) > 0 && ['initializing', 'uploading', 'paused'].includes(status);
-                        showPauseControls({ pausable, paused, canPause });
-                        linkSection.classList.add('d-none');
-                        break;
-                    }
                 case 'success':
                     {
                         const { link } = event.data;
@@ -345,13 +373,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             return fileName ? `${step} — ${fileName}` : step;
         }
 
-        /** An upload this window shows has ended: the window's own is done with. */
+        /** An upload this window shows has ended: the window's own is done with, and the next going is shown. */
         function uploadEnded() {
             currentUpload = null;
             if (ownUpload) {
                 ownUpload = null;
                 setUploadingState(false);
             }
+            showNextTransfer();
         }
 
         // A file picked with the menu's Open File
@@ -937,6 +966,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         // From now on the files the app is opened with go straight in; any that came early, now.
         addOpened = (paths) => addOpenedPaths(paths);
         if (opened.length > 0) addOpened(opened.splice(0));
+
+        // A window opened while transfers are going (Share with Dropgate's, with no window until now) shows one.
+        await showNextTransfer();
 
         await shell.ready;
         await api.rendererReady();

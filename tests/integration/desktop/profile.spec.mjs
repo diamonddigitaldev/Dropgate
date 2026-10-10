@@ -9,43 +9,13 @@
 // page its handle, and the upload reads it through the file service, as it
 // does every file on disk. The upload runs in the app's transfer window, so
 // that's where its chunks are held.
-import fs from 'node:fs';
 import path from 'node:path';
-import { holdsPlaintext, madeUpFile } from '../helpers/files.mjs';
+import { madeUpFile } from '../helpers/files.mjs';
 import { expect, test, uploadButton, uploadStatus } from '../helpers/desktop.mjs';
+import { heldIn } from '../helpers/profile.mjs';
 
 // End-to-end encrypted, so the link carries a key.
 test.use({ tlsProxy: true });
-
-/** Every file under a folder, with its bytes. */
-function filesUnder(dir) {
-    return fs.readdirSync(dir, { recursive: true, withFileTypes: true })
-        .filter((entry) => entry.isFile())
-        .map((entry) => path.join(entry.parentPath, entry.name))
-        .map((file) => ({ file, bytes: fs.readFileSync(file) }));
-}
-
-/** Each way a text could be written: as it is, URL-encoded, JSON-escaped, with / for \, in UTF-8 and UTF-16. */
-function forms(text) {
-    const texts = new Set([text, encodeURIComponent(text), JSON.stringify(text).slice(1, -1), text.replaceAll('\\', '/')]);
-    return [...texts].flatMap((t) => [Buffer.from(t, 'utf8'), Buffer.from(t, 'utf16le')]);
-}
-
-/** The files in the profile holding any of the texts, or any part of the bytes. */
-function heldIn(profile, { texts, bytes }) {
-    const found = [];
-    for (const { file, bytes: held } of filesUnder(profile)) {
-        const name = path.relative(profile, file);
-        for (const text of texts) {
-            if (forms(text).some((form) => held.includes(form))) found.push(`${name}: "${text}"`);
-        }
-        for (const plaintext of bytes) {
-            // A piece every 64 KiB: a cache of any of it would hold one.
-            if (holdsPlaintext(held, plaintext, { every: 65_536 })) found.push(`${name}: the file's bytes`);
-        }
-    }
-    return found;
-}
 
 /** Launch the app with a made-up file, as "Open with" does, and point it at the server. */
 async function launchWith(desktop, file) {

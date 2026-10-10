@@ -186,6 +186,17 @@ test('the page links the kit\'s styles after Bootstrap\'s and before its own, an
     assert.ok(!fs.existsSync(new URL('credits.html', SRC)), 'Credits is the last tab of Settings: the window is gone');
 });
 
+test('the main window\'s page has a CSP: its own scripts, styles, fonts and images, Bootstrap\'s data: SVGs, and no request at all', () => {
+    const raw = fs.readFileSync(new URL('index.html', SRC), 'utf8');
+    const [, csp] = raw.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)">/) ?? [];
+    assert.equal(csp, "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'");
+    assert.ok(raw.indexOf('Content-Security-Policy') < raw.indexOf('<link'), 'the CSP comes before anything it governs');
+    // Nothing inline that the CSP would refuse: every script and style is a file.
+    assert.deepEqual([...html.matchAll(/<script[^>]*>/g)].map((m) => m[0]).filter((tag) => !/\bsrc="/.test(tag)), [], 'an inline script');
+    assert.doesNotMatch(html, /<style\b|\sstyle="|\son[a-z]+="/i, 'an inline style or handler');
+    assert.doesNotMatch(renderer, /setAttribute\('style'|\.cssText\b|insertAdjacentHTML|innerHTML/, 'the page writes no inline style or markup');
+});
+
 test('the shell and the shared parts are the kit\'s: no modal, drop zone, progress bar or theme script of the client\'s own', () => {
     for (const call of ['kit.ui.mountShell(', 'kit.ui.dropZone(', 'kit.ui.actionBar(', 'kit.ui.confirm(', 'kit.ui.toast(', 'kit.format.countOf(', 'kit.format.formatBytes(']) {
         assert.ok(renderer.includes(call), `renderer.js uses ${call}`);

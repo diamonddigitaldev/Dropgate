@@ -8,8 +8,8 @@
 // - A payload of the wrong kind, an unsafe number, a path where a handle or an
 //   ID goes, or a handle or an upload main never made (or made for another
 //   window, or that has ended) is refused before anything is done: nothing
-//   reaches the transfer host, the handles, the uploads, the clipboard or
-//   main's callbacks.
+//   reaches the transfer host, the handles, the registry of transfers, the
+//   clipboard or main's callbacks.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -22,6 +22,7 @@ import { fakeMain } from './helpers/main-process.mjs';
 const require = createRequire(import.meta.url);
 const { ENGINE, ENGINE_PUSHES, IPC, PUSHES } = require('../src/constants.js');
 const { Handles } = require('../src/core/handles.js');
+const { Transfers } = require('../src/core/transfers.js');
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-channels-'));
 after(() => fs.rmSync(folder, { recursive: true, force: true }));
@@ -56,21 +57,21 @@ function setUp({ settings = { serverURL: 'https://dropgate.test' } } = {}) {
             return real(...args);
         };
     }
-    const uploads = new Map();
+    const transfers = new Transfers({ atOnce: 3, start: record('run'), resume: record('resumeQueued') });
     const transferHost = {
         check: record('host.check', Promise.resolve({ ok: true })),
-        pause: record('host.pause', Promise.resolve({})),
-        resume: record('host.resume', Promise.resolve({})),
     };
 
     const { answerWindowChannels } = main.load('../src/window-channels.js');
     answerWindowChannels({
         kit: main.kit,
         handles,
-        uploads,
+        transfers,
         host: () => transferHost,
         windowReady: record('windowReady'),
         start: record('start'),
+        pause: record('pause', Promise.resolve({})),
+        resume: record('resume', Promise.resolve({})),
         cancel: record('cancel'),
         busy: record('busy', false),
         failed: record('failed'),
@@ -85,16 +86,16 @@ function setUp({ settings = { serverURL: 'https://dropgate.test' } } = {}) {
         onPauseEnding: record('onPauseEnding'),
         onFinished: record('onFinished'),
     });
-    return { main, work, handles, uploads, host };
+    return { main, work, handles, transfers, host };
 }
 
 /** Each payload, invoked on a channel from a page, is refused with this message, and nothing is done. */
-async function refusesAll({ main, work, uploads }, channel, page, payloads, message) {
+async function refusesAll({ main, work, transfers }, channel, page, payloads, message) {
     for (const args of payloads) {
-        const before = { work: work.length, uploads: uploads.size };
+        const before = { work: work.length, transfers: transfers.list().length };
         await assert.rejects(main.invoke(channel, page, ...args), message, `${channel} with ${describe(args)}`);
         assert.deepEqual(work.slice(before.work), [], `what was done for ${channel} with ${describe(args)}`);
-        assert.equal(uploads.size, before.uploads, `main's uploads after ${channel} with ${describe(args)}`);
+        assert.equal(transfers.list().length, before.transfers, `main's transfers after ${channel} with ${describe(args)}`);
     }
 }
 
@@ -211,11 +212,17 @@ test('transfer:add-upload takes handles this window holds and options in range, 
         /Expected whether to encrypt\./);
 
     const { id } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, lifetime(0.5, 'hours'));
-    assert.deepEqual(setup.uploads.get(id), {
+    assert.deepEqual(setup.transfers.get(id), {
+        id,
+        kind: 'upload',
         owner: page.sender.id,
         files: [{ path: FILE, name: 'Secret plans é.bin', size: 1000, mtimeMs: fs.statSync(FILE).mtimeMs }],
         options: { ...OPTIONS, lifetime: { value: 0.5, unit: 'hours' } },
+        state: 'waiting',
         started: false,
+        snapshot: null,
+        resumeWhenFree: false,
+        resuming: false,
     });
 });
 
@@ -230,11 +237,15 @@ test('transfer:start takes uploads waiting that this window made, or a share it 
     const mine = await add(page);
     const theirs = await add(other);
     const started = await add(page);
-    setup.uploads.get(started).started = true;
-    const asked = randomUUID();
-    setup.uploads.set(asked, { owner: null, share: true, server: SERVER, files: [], options: OPTIONS, started: false, ask: { owner: page.sender.id } });
-    const askedOfOther = randomUUID();
-    setup.uploads.set(askedOfOther, { owner: null, share: true, server: SERVER, files: [], options: OPTIONS, started: false, ask: { owner: other.sender.id } });
+    setup.transfers.start(started, SERVER);
+    const share = (owner) => {
+        const card = setup.transfers.add({ owner: null, share: {}, server: SERVER, files: [], options: OPTIONS });
+        card.ask = { owner };
+        return card.id;
+    };
+    const asked = share(page.sender.id);
+    const askedOfOther = share(other.sender.id);
+    setup.work.length = 0;
 
     await refusesAll(setup, IPC.TRANSFER_START, page, [
         [], [[mine]], [{ ids: mine }], [{ ids: [] }], [{ ids: [mine, mine] }], [{ ids: [FILE] }], [{ ids: [randomUUID()] }],
@@ -255,8 +266,7 @@ test('transfer:start takes uploads waiting that this window made, or a share it 
 test('transfer:pause, transfer:resume and transfer:cancel take one upload main made, by its ID', async () => {
     const setup = setUp();
     const page = setup.main.windowPage();
-    const id = randomUUID();
-    setup.uploads.set(id, { owner: null, files: [], options: OPTIONS, started: true });
+    const { id } = setup.transfers.add({ owner: null, files: [], options: OPTIONS });
     for (const channel of [IPC.TRANSFER_PAUSE, IPC.TRANSFER_RESUME, IPC.TRANSFER_CANCEL]) {
         await refusesAll(setup, channel, page, [
             [], [id], [{ id: 42 }], [{ id: FILE }], [{ id: randomUUID() }], [{ id: id.toUpperCase() }], [{ id, extra: true }], [{ ids: [id] }],
@@ -265,7 +275,22 @@ test('transfer:pause, transfer:resume and transfer:cancel take one upload main m
     await setup.main.invoke(IPC.TRANSFER_PAUSE, page, { id });
     await setup.main.invoke(IPC.TRANSFER_RESUME, page, { id });
     await setup.main.invoke(IPC.TRANSFER_CANCEL, page, { id });
-    assert.deepEqual(setup.work.slice(-3), [['host.pause', id], ['host.resume', id], ['cancel', id]]);
+    assert.deepEqual(setup.work.slice(-3), [['pause', id], ['resume', id], ['cancel', id]]);
+});
+
+test('transfers:list gives every transfer as the window draws it: names and sizes, never a path', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const { files: [file] } = await setup.main.invoke(IPC.FILES_ADD, page, [FILE]);
+    const { id } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, { files: [file.handle], options: OPTIONS });
+    setup.transfers.start(id, SERVER);
+    setup.transfers.updated(id, SNAPSHOT);
+    const list = await setup.main.invoke(IPC.TRANSFERS_LIST, page);
+    assert.deepEqual(list, [{
+        id, kind: 'upload', state: 'running', files: [{ name: 'Secret plans é.bin', size: 1000 }], status: 'uploading',
+        step: SNAPSHOT.text, phase: 'chunk', percent: 33.3, fileIndex: 0, canPause: true, deadline: null,
+    }]);
+    assert.doesNotMatch(JSON.stringify(list), new RegExp(path.basename(folder)), 'no folder in what the window gets');
 });
 
 test('link:copy takes a link to the web, and upload:finished why an upload never started', async () => {
@@ -330,7 +355,7 @@ test('the transfer window\'s channels take its own page only, an upload running 
 
     // Nothing above reached main's callbacks, or revoked the upload's read grant.
     assert.deepEqual(work, []);
-    assert.deepEqual(main.processes[0].messages.map((m) => m.type), ['port', 'grant-read']);
+    assert.deepEqual(main.processes[0].messages.map((m) => m.type), ['grant-read', 'port'], 'the grants first, so they are held before any read');
 
     // And each, well formed, goes through.
     await main.invoke(ENGINE.ANSWER, page, call, { ok: false, code: null, message: 'Unreachable.' });
@@ -344,4 +369,6 @@ test('the transfer window\'s channels take its own page only, an upload running 
     // An upload that has ended is unknown from then on.
     await refusesAll(setup, ENGINE.UPDATE, page, [[id, SNAPSHOT]], /Expected a snapshot of an upload running\./);
     await refusesAll(setup, ENGINE.FINISHED, page, [[id, { status: 'cancelled' }]], /Expected how an upload running finished\./);
+    // Its idle timer would hold the test open.
+    host.close();
 });

@@ -499,6 +499,65 @@ export const uploadButton = (window) => window.locator('#action-bar').getByRole(
 export const securityWarning = (window) => window.getByRole('alertdialog', { name: 'Upload Security Warning' });
 
 /**
+ * Every transfer in main's registry, as the window is sent them (transfers:list):
+ * each one's ID, kind, state and files' names and sizes.
+ * @param {import('@playwright/test').Page} window
+ */
+export const transfersIn = (window) => window.evaluate(() => window.electronAPI.listTransfers());
+
+/**
+ * Share a file with the app open, as Windows' right-click entry does, and wait
+ * for main to have made its transfer (the window is sent a transfer it hadn't
+ * been): each share is a transfer of its own this way, however soon the next
+ * one comes (launches within 500 ms of each other would be one bundle).
+ * Returns the transfer's ID.
+ * @param {Desktop} desktop
+ * @param {import('@playwright/test').Page} _window - The open app's window, where the share shows.
+ * @param {string} file - Its full path.
+ */
+export async function shareWhileOpen(desktop, _window, file) {
+    const app = desktop.runs.at(-1);
+    const sent = () => new Set(app.eventsOf('transfer-changed').map(({ id }) => id));
+    const before = sent();
+    expect(await desktop.launchAgain(file, '--upload'), "the second launch's exit code").toBe(0);
+    const made = () => [...sent()].filter((id) => !before.has(id));
+    await expect.poll(made, { message: 'the share, in main\'s registry', timeout: 15_000 }).toHaveLength(1);
+    return made()[0];
+}
+
+/**
+ * Hold every upload's chunks from `from` on (the first goes through, by
+ * default), in the transfer window, where uploads run, until `release()`,
+ * which sends on every one still held. Each chunk the app sends is noted with
+ * the upload's ID, from its header.
+ * @param {import('@playwright/test').Page} transfer
+ */
+export async function holdChunks(transfer, { from = 1 } = {}) {
+    const sent = [];
+    const held = [];
+    let holding = true;
+    await transfer.route('**/api/v4/upload/chunks/*', (route) => {
+        const index = Number(new URL(route.request().url()).pathname.split('/').pop());
+        sent.push({ upload: route.request().headers()['dropgate-upload'], index });
+        if (holding && index >= from) {
+            held.push(route);
+            return undefined;
+        }
+        return route.continue();
+    });
+    return {
+        sent,
+        /** The uploads that have sent a chunk, by ID, in the order they began. */
+        uploads: () => [...new Set(sent.map(({ upload }) => upload))],
+        /** Let every chunk through from now, and send on those held (one paused or cancelled meanwhile is gone). */
+        release: () => {
+            holding = false;
+            for (const route of held.splice(0)) route.continue().catch(() => {});
+        },
+    };
+}
+
+/**
  * The body of every upload the server was asked to start, in order: one file
  * or several, each upload is one POST /api/v4/uploads.
  * @param {{ requests: () => { method: string, url: string, body: Buffer }[] }} server
