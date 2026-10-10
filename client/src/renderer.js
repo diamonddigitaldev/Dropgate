@@ -2,8 +2,10 @@
 // (kit.ui.mountShell()): the nav rail, the header, and the Settings view, with
 // Update and Credits after Dropgate's own tab. The drop zone, the action bar,
 // the prompts and the toasts are the kit's too. The settings are the kit's
-// (window.kitAPI), saved as they change. The same page runs hidden for Share
-// with Dropgate, which main hands its files (onBackgroundUploadStart).
+// (window.kitAPI), saved as they change. Share with Dropgate is main's, with
+// no window: the main window shows how a share goes (onUploadStatus), and
+// asks the Upload Security Warning for one to a server with no end-to-end
+// encryption, when main opens it to (onAskInsecure).
 //
 // The page runs no core and makes no request: it holds each file as the
 // handle main made for it, with its name and size, never its path, and main
@@ -13,7 +15,7 @@
 const api = window.electronAPI;
 const kitApi = window.kitAPI;
 
-/** What Restart Now says while an upload runs, in this window or another. */
+/** What Restart Now says while an upload runs, from this window or Share with Dropgate. */
 const BUSY_REASON = 'An upload is in progress.';
 
 /** A file lifetime in ms, to hold it to the server's limit here: core's lifetime.toMs(), which the upload itself uses. */
@@ -80,8 +82,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 { id: 'privacy', label: 'Privacy', render: (pane) => pane.append($('privacy-settings')) },
             ],
             credits: { logo: 'img/dropgate.png' },
-            // Restart Now asks first while an upload runs here, or in a hidden window (Share with Dropgate).
-            busy: async () => (uploading || await api.isUploading() ? BUSY_REASON : null),
+            // Restart Now asks first while main has an upload running, paused, or waiting to (Share with Dropgate's too).
+            busy: async () => (await api.isBusy() ? BUSY_REASON : null),
         });
 
         // Files dropped anywhere in Upload, and the drop zone while there are none.
@@ -358,19 +360,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         api.onFileOpenError((message) => kit.ui.toast(message, { type: 'danger' }));
 
-        // Share with Dropgate: main hands this hidden window its files.
-        api.onBackgroundUploadStart(async (details) => {
-            if (!details?.files?.length) return;
-            selectedFiles = details.files.map(({ handle, name, size }) => ({ handle, name, size }));
-
-            const saved = await kitApi.getSettings();
-            if (!saved.serverURL) {
-                api.uploadFinished({ status: 'error', error: 'Server URL is not configured.' });
-                return;
-            }
-            serverUrlInput.value = saved.serverURL;
-            await performUpload();
+        // Share with Dropgate, to a server with no end-to-end encryption: main
+        // opened this window to ask. Upload Anyway starts it; anything else
+        // declines it.
+        api.onAskInsecure(async ({ id }) => {
+            if (await askUploadAnyway()) api.startTransfers([id]).catch(() => {});
+            else api.cancelTransfer(id).catch(() => {});
         });
+
+        /** The Upload Security Warning, before an upload that won't be end-to-end encrypted. */
+        function askUploadAnyway() {
+            return kit.ui.confirm({
+                title: 'Upload Security Warning',
+                body: 'This server does not support end-to-end encryption. Your file will be uploaded without encryption.',
+                detail: 'The server administrator may be able to access your file contents.',
+                confirmLabel: 'Upload Anyway',
+                variant: 'warning',
+                icon: 'warning',
+            });
+        }
 
         /** Files by path, from a drop, a pick or the app's launch: main checks each, and hands over the files as handles. */
         async function addFromPaths(paths) {
@@ -433,7 +441,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         /** Main forgets the files this window is done with. */
         function revoke(files) {
-            for (const f of files) api.revokeFileAccess(f.handle);
+            for (const f of files) api.revokeFileAccess(f.handle).catch(() => {});
         }
 
         function clearFiles() {
@@ -533,16 +541,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             // Check if E2EE is available - show warning if not
             if (!hasE2EE) {
-                // Show the window if it's hidden (background upload) so user can see the prompt
-                await api.showWindow();
-                const confirmed = await kit.ui.confirm({
-                    title: 'Upload Security Warning',
-                    body: 'This server does not support end-to-end encryption. Your file will be uploaded without encryption.',
-                    detail: 'The server administrator may be able to access your file contents.',
-                    confirmLabel: 'Upload Anyway',
-                    variant: 'warning',
-                    icon: 'warning',
-                });
+                const confirmed = await askUploadAnyway();
                 if (!confirmed) {
                     api.uploadFinished({
                         status: 'error',

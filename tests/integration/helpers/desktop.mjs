@@ -116,13 +116,17 @@ export class DesktopApp {
     }
 
     /**
-     * The first window the app opens (its main window, or the one a background
-     * upload runs in), once it has finished setting itself up (window:ready). Until
-     * then it may still be filling in its saved settings over what a test types,
-     * and its buttons may do nothing.
+     * The app's main window, once it has finished setting itself up
+     * (window:ready). Until then it may still be filling in its saved settings
+     * over what a test types, and its buttons may do nothing. The hidden
+     * transfer window can open first (Share with Dropgate checks the server
+     * before it opens the main window to ask anything), so it's passed over.
      */
     async window() {
-        const window = await this.app.firstWindow();
+        const isMain = (page) => page.url().endsWith('/index.html');
+        await expect.poll(() => this.app.windows().some(isMain),
+            { message: 'whether the main window has opened', timeout: 15_000 }).toBe(true);
+        const window = this.app.windows().find(isMain);
         const id = await (await this.app.browserWindow(window)).evaluate((win) => win.id);
         await expect.poll(() => this.eventsOf('window-ready').some((e) => e.id === id),
             { message: 'whether the window has finished setting itself up', timeout: 15_000 }).toBe(true);

@@ -94,8 +94,9 @@ test('main answers every engine channel through kit.ipc.handle() for the transfe
     // What main sends it: its work, by send() and call(), and the port, by postMessage().
     const sent = unique([...host.matchAll(/(?:send|call|postMessage)\(ENGINE\.([A-Z_]+)/g)].map((m) => ENGINE[m[1]]));
     assert.deepEqual(sent.sort(), [...ENGINE_PUSHES].sort());
-    // main.js answers only the window's own channels, never an engine one.
+    // main.js and window-channels.js answer only the window's own channels, never an engine one.
     assert.doesNotMatch(main, /\bENGINE\b/);
+    assert.doesNotMatch(readSource('window-channels.js'), /\bENGINE\b/);
 });
 
 test('the transfer window is hidden, sandboxed, isolated and without Node, in its own session with its own preload, and can\'t navigate or open a window', () => {

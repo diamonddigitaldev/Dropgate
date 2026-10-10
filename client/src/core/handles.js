@@ -5,6 +5,17 @@ const fs = require('fs');
 const path = require('path');
 
 /**
+ * A file on disk as main keeps it while it's handed over or shared: its path,
+ * name, size and modification time now. Throws if it can't be read.
+ * @param {string} filePath
+ * @returns {{ path: string, name: string, size: number, mtimeMs: number }}
+ */
+function describeFile(filePath) {
+    const { size, mtimeMs } = fs.statSync(filePath);
+    return { path: filePath, name: path.basename(filePath), size, mtimeMs };
+}
+
+/**
  * The files main has handed a window, as opaque handles: a window holds a
  * file's handle, name and size, never its path, and a handle works only for
  * the window it was handed to. Each keeps the file's size and modification
@@ -24,12 +35,11 @@ class Handles {
      * @returns {{ handle: string, name: string, size: number }}
      */
     add(owner, filePath) {
-        const { size, mtimeMs } = fs.statSync(filePath);
+        const file = describeFile(filePath);
         let handle = [...this.#byHandle].find(([, held]) => held.owner === owner && held.path === filePath)?.[0];
         handle ??= randomUUID();
-        const name = path.basename(filePath);
-        this.#byHandle.set(handle, { owner, path: filePath, name, size, mtimeMs });
-        return { handle, name, size };
+        this.#byHandle.set(handle, { owner, ...file });
+        return { handle, name: file.name, size: file.size };
     }
 
     /**
@@ -55,4 +65,4 @@ class Handles {
     }
 }
 
-module.exports = { Handles };
+module.exports = { Handles, describeFile };

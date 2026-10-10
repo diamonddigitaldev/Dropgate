@@ -17,6 +17,7 @@ const { IPC, PUSHES } = require('../src/constants.js');
 const PRELOAD = fileURLToPath(new URL('../src/preload.js', import.meta.url));
 const preload = readSource('preload.js');
 const main = readSource('main.js');
+const channels = readSource('window-channels.js');
 const renderer = readSource('renderer.js');
 const html = readSource('index.html');
 
@@ -66,9 +67,14 @@ test('the preload\'s inlined channel table is constants.js\' map', () => {
     assert.deepEqual(table, { ...IPC });
 });
 
-test('every request from the page is answered in main.js, through kit.ipc.handle(), which answers the app\'s own page only', () => {
-    assert.ok(!/\bipcMain\b/.test(main), 'main.js must not register a handler straight on ipcMain: it would answer any page');
-    const handled = [...main.matchAll(/kit\.ipc\.handle\(IPC\.([A-Z_]+)/g)].map((m) => IPC[m[1]]);
+test('every request from the page is answered in window-channels.js, through kit.ipc.handle(), which answers the app\'s own page in the UI session only', () => {
+    for (const [name, code] of [['main.js', main], ['window-channels.js', channels]]) {
+        assert.ok(!/\bipcMain\b/.test(code), `${name} must not register a handler straight on ipcMain: it would answer any page`);
+    }
+    assert.doesNotMatch(main, /kit\.ipc\.handle\(/, 'main.js answers the window through window-channels.js');
+    assert.match(main, /^answerWindowChannels\(\{$/m);
+    assert.doesNotMatch(channels, /\bsession\b/, 'the window\'s channels are the UI session\'s: none is answered in another');
+    const handled = [...channels.matchAll(/kit\.ipc\.handle\(IPC\.([A-Z_]+)/g)].map((m) => IPC[m[1]]);
     assert.equal(handled.length, unique(handled).length, 'each channel is handled once');
     assert.deepEqual(handled.sort(), Object.values(IPC).filter((c) => !PUSHES.includes(c)).sort());
 });

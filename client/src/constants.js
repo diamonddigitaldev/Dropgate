@@ -21,28 +21,27 @@ const APP_NAME = 'Dropgate Client';
  */
 const IPC = Object.freeze({
     // Page to main.
-    WINDOW_READY: 'window:ready',               // () the page has set itself up; main sends a background upload its files then
-    WINDOW_SHOW: 'window:show',                 // () show the asking window, hidden for a background upload, to ask the person something
+    WINDOW_READY: 'window:ready',               // () the page has set itself up; main sends it a question waiting for it then (transfer:ask-insecure)
     FILES_ADD: 'files:add',                     // (paths) dropped, picked or opened files' paths -> { files: [{ handle, name, size }], folders }
     FILE_REVOKE: 'file:revoke',                 // (handle) the page is done with it
     SERVER_CHECK: 'server:check',               // (url) -> { ok: true, baseUrl, serverVersion, serverInfo, dgup } | { ok: false, code, message }, asked of the server by the transfer window
     TRANSFER_ADD_UPLOAD: 'transfer:add-upload', // ({ files: [handle], options: { lifetime: { value, unit }, maxDownloads, encrypt } }) -> { id }, an upload waiting to start
-    TRANSFER_START: 'transfer:start',           // ({ ids }) start them, in the transfer window
+    TRANSFER_START: 'transfer:start',           // ({ ids }) start them, in the transfer window: the page's own, or a share's it was asked about (Upload Anyway)
     TRANSFER_PAUSE: 'transfer:pause',           // ({ id }) -> { message? }, core's reason when it couldn't
     TRANSFER_RESUME: 'transfer:resume',         // ({ id }) -> { message? }
-    TRANSFER_CANCEL: 'transfer:cancel',         // ({ id })
+    TRANSFER_CANCEL: 'transfer:cancel',         // ({ id }) a running upload, or one waiting: a share's question declined
+    TRANSFER_BUSY: 'transfer:busy',             // () -> whether any upload runs, is paused, or is waiting to (a share under way), for Restart Now
     UPLOAD_FINISHED: 'upload:finished',         // ({ status: 'error', error }) an upload the page stopped before it started (no server, the warning declined)
-    UPLOAD_BUSY: 'upload:busy',                 // () -> whether an upload is running anywhere, for Restart Now
     LINK_COPY: 'link:copy',                     // (link) copy it, kept out of the clipboard's history and sync
     // Main to page.
     FILE_OPENED: 'file:opened',                 // push: { handle, name, size }, a file picked with Open File
     FILE_OPEN_ERROR: 'file:open-error',         // push: the message, when the file picked can't be read
-    UPLOAD_BACKGROUND_START: 'upload:background-start', // push: { files: [{ handle, name, size }] }, Share with Dropgate
+    TRANSFER_ASK_INSECURE: 'transfer:ask-insecure', // push: { id }, a share to a server with no end-to-end encryption: the Upload Security Warning, answered with transfer:start or transfer:cancel
     UPLOAD_STATUS: 'upload:status',             // push: { type: 'progress' | 'success' | 'cancelled' | 'error', data }, any upload, to the main window
 });
 
 /** The pushes, which main sends and the page only listens for. */
-const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.UPLOAD_BACKGROUND_START, IPC.UPLOAD_STATUS]);
+const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.UPLOAD_STATUS]);
 
 /**
  * The channels between main and the transfer window: a hidden, sandboxed

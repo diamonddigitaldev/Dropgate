@@ -98,7 +98,7 @@ test.describe('on a server with HTTPS', () => {
         expect(link, 'the link').toMatch(new RegExp(`^${desktop.serverUrl}/[^/#?]+#.+`));
         secrets.addLink(link);
         expect(notifications.at(-1), 'the last notification').toMatchObject({ title: expect.stringMatching(/success/i), body: expect.stringMatching(/copied/i) });
-        expect(app.eventsOf('window').filter((w) => w.session === 'ui'), 'windows the app opened, beside its transfer window').toHaveLength(1);
+        expect(app.eventsOf('window').filter((w) => w.session === 'ui'), 'windows the app opened, beside its transfer window').toHaveLength(0);
         expect(app.eventsOf('window-shown'), 'windows shown').toEqual([]);
 
         expect(uploadsStarted(server).map(({ encrypted, lifetimeMs }) => ({ encrypted, lifetimeMs })),
@@ -134,6 +134,7 @@ test.describe('on a server with HTTPS', () => {
         }
         secrets.addLink(link);
         expect(app.running, 'whether the app is still open').toBe(true);
+        expect(app.eventsOf('window').filter((w) => w.session === 'ui'), 'windows the app opened, beside its transfer window: the main one').toHaveLength(1);
         expect(uploadsStarted(server).map(({ encrypted, lifetimeMs }) => ({ encrypted, lifetimeMs })),
             'the upload the server was asked to start').toEqual([{ encrypted: true, lifetimeMs: THIRTY_MINUTES }]);
 
@@ -155,7 +156,7 @@ test.describe('on a server with HTTPS', () => {
         const { link, notifications } = expectLinkCopied(app, shared);
         secrets.addLink(link);
         expect(notifications.map((n) => n.body), "the notifications' bodies").toEqual(expect.arrayContaining(['Preparing 3 files…', 'Uploading 3 files…']));
-        expect(app.eventsOf('window').filter((w) => w.session === 'ui'), 'windows the app opened, beside its transfer window').toHaveLength(1);
+        expect(app.eventsOf('window').filter((w) => w.session === 'ui'), 'windows the app opened, beside its transfer window').toHaveLength(0);
         // One encrypted upload of them all, which tells the server nothing of how many files it holds.
         expect(uploadsStarted(server).map((body) => Object.keys(body).sort()), 'the uploads the server was asked to start')
             .toEqual([['encrypted', 'header', 'lifetimeMs', 'manageTokenHash', 'maxDownloads', 'meta', 'size']]);
@@ -178,6 +179,7 @@ test.describe('on a server with HTTPS', () => {
         const { link } = expectLinkCopied(app, shared);
         await expect(window.locator('#download-link'), 'the link the open app shows').toHaveValue(link);
         secrets.addLink(link);
+        expect(app.eventsOf('window').filter((w) => w.session === 'ui'), 'windows the app opened, beside its transfer window: the main one').toHaveLength(1);
         // One encrypted upload of them all, which tells the server nothing of how many files it holds.
         expect(uploadsStarted(server).map((body) => Object.keys(body).sort()), 'the uploads the server was asked to start')
             .toEqual([['encrypted', 'header', 'lifetimeMs', 'manageTokenHash', 'maxDownloads', 'meta', 'size']]);
@@ -198,6 +200,7 @@ test.describe('on a server without HTTPS', () => {
         const window = await app.window();
         await expect(securityWarning(window)).toBeVisible();
         await expect.poll(() => app.eventsOf('window-shown').length, { message: 'windows shown for the warning' }).toBe(1);
+        expect(app.eventsOf('window').filter((w) => w.session === 'ui'), 'windows the app opened, beside its transfer window: the main one, to ask').toHaveLength(1);
         await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();
         expect(await app.exited(), "the app's exit code").toBe(0);
 

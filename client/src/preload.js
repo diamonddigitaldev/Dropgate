@@ -14,7 +14,6 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const CH = {
     WINDOW_READY: 'window:ready',
-    WINDOW_SHOW: 'window:show',
     FILES_ADD: 'files:add',
     FILE_REVOKE: 'file:revoke',
     SERVER_CHECK: 'server:check',
@@ -23,12 +22,12 @@ const CH = {
     TRANSFER_PAUSE: 'transfer:pause',
     TRANSFER_RESUME: 'transfer:resume',
     TRANSFER_CANCEL: 'transfer:cancel',
+    TRANSFER_BUSY: 'transfer:busy',
     UPLOAD_FINISHED: 'upload:finished',
-    UPLOAD_BUSY: 'upload:busy',
     LINK_COPY: 'link:copy',
     FILE_OPENED: 'file:opened',
     FILE_OPEN_ERROR: 'file:open-error',
-    UPLOAD_BACKGROUND_START: 'upload:background-start',
+    TRANSFER_ASK_INSECURE: 'transfer:ask-insecure',
     UPLOAD_STATUS: 'upload:status',
 };
 
@@ -37,7 +36,6 @@ const on = (channel, callback) => ipcRenderer.on(channel, (_event, value) => cal
 
 contextBridge.exposeInMainWorld('electronAPI', {
     rendererReady: () => ipcRenderer.invoke(CH.WINDOW_READY),
-    showWindow: () => ipcRenderer.invoke(CH.WINDOW_SHOW),
     addFiles: (paths) => ipcRenderer.invoke(CH.FILES_ADD, paths),
     revokeFileAccess: (handle) => ipcRenderer.invoke(CH.FILE_REVOKE, handle),
     checkServer: (url) => ipcRenderer.invoke(CH.SERVER_CHECK, url),
@@ -47,10 +45,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     resumeTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_RESUME, { id }),
     cancelTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_CANCEL, { id }),
     uploadFinished: (result) => ipcRenderer.invoke(CH.UPLOAD_FINISHED, result),
-    isUploading: () => ipcRenderer.invoke(CH.UPLOAD_BUSY),
+    isBusy: () => ipcRenderer.invoke(CH.TRANSFER_BUSY),
     copyLink: (link) => ipcRenderer.invoke(CH.LINK_COPY, link),
     onFileOpened: (callback) => on(CH.FILE_OPENED, callback),
     onFileOpenError: (callback) => on(CH.FILE_OPEN_ERROR, callback),
-    onBackgroundUploadStart: (callback) => on(CH.UPLOAD_BACKGROUND_START, callback),
+    onAskInsecure: (callback) => on(CH.TRANSFER_ASK_INSECURE, callback),
     onUploadStatus: (callback) => on(CH.UPLOAD_STATUS, callback),
 });

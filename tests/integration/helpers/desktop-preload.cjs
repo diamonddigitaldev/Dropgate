@@ -14,7 +14,7 @@
 //                                                      ('ui') or one of its isolated ones ('isolated')
 //   { at, pid, event: 'window-shown', id }             it was shown
 //   { at, pid, event: 'window-ready', id }             it finished setting itself up
-//   { at, pid, event: 'upload-finished', status, error }
+//   { at, pid, event: 'upload-finished', status, error }  an upload's outcome (see below)
 //   { at, pid, event: 'request', url, session, persistent, page }
 //                                                      a request to a server, as its session sent it: from
 //                                                      which session, and which page (null: main's own)
@@ -141,10 +141,22 @@ function measure(channel, value) {
     sizes[channel] = { max: Math.max(seen.max, bytes), count: seen.count + 1 };
     if (bytes > IPC_LARGE) record({ event: 'ipc-large', channel, bytes });
 }
+// An upload's outcome a page told main of (engine:finished, upload:finished)
+// is written down as main hears it. One main came to itself (Share with
+// Dropgate stopped before it started: no server, the server's check, the
+// warning declined) is written down as main tells the main window of it
+// (upload:status), when it has one. While a page's report is being handled,
+// main's own push of it isn't written down again.
+let reportedByPage = false;
+const OUTCOMES = ['success', 'cancelled', 'error'];
 app.on('web-contents-created', (_event, contents) => {
     const send = contents.send;
     contents.send = function (channel, ...args) {
         measure(`main → page ${channel}`, args);
+        const [push] = args;
+        if (channel === 'upload:status' && OUTCOMES.includes(push?.type) && !reportedByPage) {
+            record({ event: 'upload-finished', status: push.type, error: push.data?.error });
+        }
         return send.call(this, channel, ...args);
     };
     const postMessage = contents.postMessage;
@@ -170,14 +182,24 @@ utilityProcess.fork = function (...args) {
 // down before the app acts on it, and measures what it's sent and answers. A
 // window says it's ready once it has loaded its settings and set up its
 // buttons. An upload ends in the transfer window (engine:finished), or, one a
-// window stopped before it started, in that window (upload:finished).
+// window stopped before it started, in that window (upload:finished), or in
+// main itself (above).
 const handle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, listener) => handle(channel, async (event, ...args) => {
     measure(`page → main ${channel}`, args);
     if (channel === 'window:ready') record({ event: 'window-ready', id: BrowserWindow.fromWebContents(event.sender)?.id });
     if (channel === 'upload:finished') record({ event: 'upload-finished', status: args[0]?.status, error: args[0]?.error });
     if (channel === 'engine:finished') record({ event: 'upload-finished', status: args[1]?.status, error: args[1]?.message });
-    const answer = await listener(event, ...args);
+    const reporting = channel === 'upload:finished' || channel === 'engine:finished';
+    // The handler tells the main window as it runs, before its first await.
+    if (reporting) reportedByPage = true;
+    let pending;
+    try {
+        pending = listener(event, ...args);
+    } finally {
+        if (reporting) reportedByPage = false;
+    }
+    const answer = await pending;
     measure(`main → page ${channel} (its answer)`, answer);
     return answer;
 });

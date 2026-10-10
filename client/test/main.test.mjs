@@ -96,26 +96,32 @@ test('v3\'s settings are dropped, once, and the client\'s defaults are ones the 
     assert.equal(typeof SETTINGS_DEFAULTS.maxDownloads, 'number', 'v3 kept Max Downloads as text');
 });
 
-test('the main window is the kit\'s, and Share with Dropgate\'s hidden window keeps the house\'s security settings', () => {
+test('every window the client makes keeps the house\'s security settings: the main window is the kit\'s, and the only other is the transfer window', () => {
     assert.match(main, /kit\.windows\.createMain\(\{/);
     assert.match(main, /webPreferences: \{ preload: path\.join\(__dirname, 'preload\.js'\) \}/);
 
-    // Checked per window, so a new window can't leave out a setting unnoticed.
-    const windows = constructorOptions(main, 'BrowserWindow');
-    assert.equal(windows.length, 1, 'expected one window of the client\'s own: the hidden one for Share with Dropgate');
-    for (const options of windows) {
-        assert.ok(options, 'a window isn\'t given an object literal, so its settings can\'t be checked');
+    // Every BrowserWindow in the client's main process, checked one by one, so a new window can't leave out a
+    // setting unnoticed. Share with Dropgate makes none: it once made a hidden window of the app's own page.
+    const sources = [
+        ...fs.readdirSync(SRC).filter((f) => f.endsWith('.js') && f !== 'dropgate-core.js'),
+        ...fs.readdirSync(new URL('core/', SRC)).map((f) => `core/${f}`),
+    ];
+    const made = sources.flatMap((file) => constructorOptions(readSource(file), 'BrowserWindow').map((options) => ({ file, options })));
+    assert.deepEqual(made.map(({ file }) => file), ['transfer-host.js'], 'the one window the client makes itself: the transfer window');
+    for (const { file, options } of made) {
+        assert.ok(options, `a window in ${file} isn't given an object literal, so its settings can't be checked`);
         const prefs = balancedBlock(options, options.indexOf('{', options.search(/webPreferences:\s*\{/)));
         assert.match(prefs, /preload:/);
         assert.match(prefs, /sandbox:\s*true/);
         assert.match(prefs, /contextIsolation:\s*true/);
         assert.match(prefs, /nodeIntegration:\s*false/);
     }
-    assert.match(main, /backgroundWindow\.removeMenu\(\)/, 'the house menu is the main window\'s');
 
-    // Nothing anywhere in main.js turns them back off, for any window.
-    for (const setting of [/contextIsolation:\s*false/, /nodeIntegration:\s*true/, /sandbox:\s*false/, /webSecurity:\s*false/]) {
-        assert.doesNotMatch(main, setting);
+    // Nothing anywhere in the client's main process turns them back off, for any window.
+    for (const file of sources) {
+        for (const setting of [/contextIsolation:\s*false/, /nodeIntegration:\s*true/, /sandbox:\s*false/, /webSecurity:\s*false/]) {
+            assert.doesNotMatch(readSource(file), setting, file);
+        }
     }
 });
 

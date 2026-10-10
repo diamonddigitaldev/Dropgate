@@ -4,6 +4,7 @@ const { randomUUID } = require('crypto');
 const path = require('path');
 const { BrowserWindow, MessageChannelMain, utilityProcess } = require('electron');
 const { ENGINE, FILE_SERVICE } = require('./constants');
+const { answerOf, deadlineOf, isId, outcomeOf, snapshotOf } = require('./core/payloads');
 
 // The transfer host: the hidden transfer window, which runs core and makes
 // every request Dropgate makes, and the file service, which reads the files
@@ -18,14 +19,12 @@ const { ENGINE, FILE_SERVICE } = require('./constants');
 //   window, and its timers aren't slowed while it's hidden: core's timeouts
 //   and a paused upload's deadline run on them.
 // - Its channels are answered for its page in that session only
-//   (kit.ipc.handle(…, { session })), and each message's upload must be one
-//   main started there.
+//   (kit.ipc.handle(…, { session })), each message's upload must be one main
+//   started there, and each payload is checked before anything is done with
+//   it (core/payloads.js): the page is never trusted.
 // - The file service is a utility process with no window and no session. It
 //   reads a file only for a grant main made as its upload started, with the
 //   path main holds, and the grant is revoked as the upload ends.
-
-/** A UUID main made: an upload's ID, or a call's. */
-const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * Start answering the transfer window's channels. Call once the app is ready
@@ -56,10 +55,15 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
     /** The calls waiting for the transfer window's answer. */
     const calls = new Map();
 
-    const known = (id) => typeof id === 'string' && running.has(id);
+    const known = (id) => isId(id) && running.has(id);
+
+    /** Refuse any page but the transfer window main made: the session is its alone, and so is each channel. */
+    const fromTransferWindow = (event) => {
+        if (!win || win.isDestroyed() || event.sender !== win.webContents) throw new Error('Not the transfer window.');
+    };
 
     kit.ipc.handle(ENGINE.READY, (event) => {
-        if (!win || event.sender !== win.webContents) throw new Error('Not the transfer window.');
+        fromTransferWindow(event);
         if (windowPort) {
             event.sender.postMessage(ENGINE.PORT, null, [windowPort]);
             windowPort = null;
@@ -69,27 +73,36 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         return { appInfo };
     }, { session });
 
-    kit.ipc.handle(ENGINE.UPDATE, (_event, id, snapshot) => {
-        if (!known(id) || typeof snapshot !== 'object' || snapshot === null) throw new Error('Expected a snapshot of an upload running.');
-        onUpdate(id, snapshot);
+    /** Refuse a message about an upload main didn't start there, or that has ended. */
+    const runningId = (id, refusal) => {
+        if (!known(id)) throw new Error(refusal);
+        return id;
+    };
+
+    kit.ipc.handle(ENGINE.UPDATE, (event, id, snapshot) => {
+        fromTransferWindow(event);
+        onUpdate(runningId(id, 'Expected a snapshot of an upload running.'), snapshotOf(snapshot));
     }, { session });
 
-    kit.ipc.handle(ENGINE.PAUSE_ENDING, (_event, id, deadline) => {
-        if (!known(id) || !Number.isFinite(deadline)) throw new Error('Expected a deadline of an upload running.');
-        onPauseEnding(id, deadline);
+    kit.ipc.handle(ENGINE.PAUSE_ENDING, (event, id, deadline) => {
+        fromTransferWindow(event);
+        onPauseEnding(runningId(id, 'Expected a deadline of an upload running.'), deadlineOf(deadline));
     }, { session });
 
-    kit.ipc.handle(ENGINE.FINISHED, (_event, id, result) => {
-        if (!known(id) || !['success', 'cancelled', 'error'].includes(result?.status)) throw new Error('Expected how an upload running finished.');
-        end(id);
-        onFinished(id, result);
+    kit.ipc.handle(ENGINE.FINISHED, (event, id, result) => {
+        fromTransferWindow(event);
+        const outcome = outcomeOf(result);
+        end(runningId(id, 'Expected how an upload running finished.'));
+        onFinished(id, outcome);
     }, { session });
 
-    kit.ipc.handle(ENGINE.ANSWER, (_event, call, value) => {
-        const answer = typeof call === 'string' ? calls.get(call) : undefined;
+    kit.ipc.handle(ENGINE.ANSWER, (event, call, value) => {
+        fromTransferWindow(event);
+        const answer = isId(call) ? calls.get(call) : undefined;
         if (!answer) throw new Error('Expected the answer to a call.');
+        const checked = answerOf(answer.kind, value);
         calls.delete(call);
-        answer.resolve(value);
+        answer.resolve(checked);
     }, { session });
 
     /** Start the file service and the transfer window, if they aren't running. */
@@ -160,11 +173,12 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         else queued.push([channel, payload]);
     }
 
-    /** Send work that's answered, and wait for its answer. */
+    /** Send work that's answered, and wait for its answer: a check's, or a pause's or a resume's. */
     function call(channel, payload) {
         const id = randomUUID();
+        const kind = channel === ENGINE.CHECK ? 'check' : 'pause';
         return new Promise((resolve, reject) => {
-            calls.set(id, { resolve, reject });
+            calls.set(id, { kind, resolve, reject });
             send(channel, { ...payload, call: id });
         });
     }
@@ -192,7 +206,7 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
          * @param {{ path: string, name: string, size: number, mtimeMs: number }[]} files
          */
         upload(id, server, options, files) {
-            if (!ID.test(id) || running.has(id)) throw new Error('Expected a new upload.');
+            if (!isId(id) || running.has(id)) throw new Error('Expected a new upload.');
             start();
             const granted = files.map((file) => ({ ...file, handle: randomUUID() }));
             running.set(id, granted.map((file) => file.handle));

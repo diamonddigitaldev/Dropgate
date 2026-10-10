@@ -3,7 +3,8 @@
 // server, server checks included. The app's window runs no core and asks no
 // server anything, and main never carries a file's bytes: the file service
 // reads them, and hands them to the transfer window over a channel of their
-// own.
+// own. The app's window hands main a file's path on one channel only,
+// files:add, and holds a handle after.
 //
 // Which session sent a request comes from that session's own request hooks
 // (the test preload's): Chromium's net log names no session. The net log
@@ -129,6 +130,42 @@ test('through an upload, a pause and a resume, every request to the server comes
     await expect(page.locator('#file-name')).toHaveText(file.name);
     const got = await download(page, page.locator('#download-button'));
     expect(summary(got.bytes)).toEqual(summary(file.buffer));
+});
+
+test('the window\'s bridge takes a path on files:add only: on every other channel a path is refused, and nothing is read, sent or copied', async ({ desktop, server }) => {
+    const file = madeUpFile('Never by its path é.bin', 1_000, 73);
+    desktop.secrets.addFiles([file]);
+    const filePath = desktop.addFile(file);
+    const app = await desktop.launch();
+    const window = await app.window();
+    await desktop.setUp(window);
+    const before = server.requests().length;
+
+    // Every method of the bridge, handed the path as its argument, and the ones taking a request with the path where
+    // a handle or an upload's ID goes. Main's pushes (on…) take a listener, not a value.
+    const answers = await window.evaluate(async (filePath) => {
+        const api = window.electronAPI;
+        const options = { lifetime: { value: 1, unit: 'hours' }, maxDownloads: 1, encrypt: false };
+        const calls = Object.fromEntries(Object.entries(api).filter(([name]) => !/^on[A-Z]/.test(name)).map(([name, fn]) => [name, () => fn(filePath)]));
+        Object.assign(calls, {
+            'addUpload, a path for a handle': () => api.addUpload({ files: [filePath], options }),
+            'startTransfers, a path for an upload': () => api.startTransfers([filePath]),
+            'addFiles, as a list': () => api.addFiles([filePath]),
+        });
+        const answered = {};
+        for (const [name, call] of Object.entries(calls)) answered[name] = await call().then(() => 'answered', () => 'refused');
+        return answered;
+    }, filePath);
+    expect(Object.keys(answers), 'the bridge\'s methods tried').toEqual(expect.arrayContaining(['addFiles', 'addUpload', 'checkServer', 'copyLink', 'revokeFileAccess']));
+    // The two that take nothing (test/preload.test.mjs), and files:add given its list.
+    expect(Object.entries(answers).filter(([, answer]) => answer === 'answered').map(([name]) => name).sort(), 'what the bridge answered, handed a path')
+        .toEqual(['addFiles, as a list', 'isBusy', 'rendererReady']);
+
+    expect(server.requests().slice(before), 'requests to the server after').toEqual([]);
+    expect(app.eventsOf('clipboard'), 'what the app copied').toEqual([]);
+    await app.quit();
+    const [{ sizes }] = app.eventsOf('ipc-sizes');
+    expect(Object.keys(sizes).filter((channel) => /grant-read|engine:upload/.test(channel)), 'files granted, or uploads sent to the transfer window').toEqual([]);
 });
 
 test('main never carries a file\'s bytes: through an upload of 12 MB, no message to or from it is bigger than a snapshot', async ({ desktop }) => {
