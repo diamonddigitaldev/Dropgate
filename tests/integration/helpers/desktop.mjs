@@ -105,8 +105,15 @@ export class DesktopApp {
         this.netLog = netLog;
         /** How its process ended, once it has: { code, signal }. */
         this.ended = null;
-        app.process().once('exit', (code, signal) => {
+        /** The end of what it wrote to stderr, but D-Bus's complaints: a crash's own lines are there. */
+        this.stderr = [];
+        const child = app.process();
+        child.once('exit', (code, signal) => {
             this.ended = { code, signal };
+        });
+        child.stderr?.on('data', (chunk) => {
+            const lines = String(chunk).split(/\r?\n/).filter((line) => line.trim() && !/dbus\/(bus|object_proxy)\.cc/.test(line));
+            this.stderr = [...this.stderr, ...lines].slice(-40);
         });
         const context = app.context();
         context.on('request', (request) => {
@@ -438,6 +445,10 @@ class Desktop {
             const ended = run.ended?.signal ? `, and ended with ${run.ended.signal}` : run.ended ? `, and exited with ${run.ended.code}` : '';
             sections.push(section(`What run ${i + 1} of the app wrote down${ended}:`, () => run.events()
                 .map(({ at, event, ...rest }) => `  ${ms(at)}  ${event} ${JSON.stringify(rest)}`).join('\n') || '  nothing'));
+        }
+
+        for (const [i, run] of this.runs.entries()) {
+            sections.push(section(`The end of what run ${i + 1} wrote to stderr:`, () => run.stderr.map((line) => `  ${line}`).join('\n') || '  nothing'));
         }
 
         sections.push(section("The end of the app's debug.log:", () => {

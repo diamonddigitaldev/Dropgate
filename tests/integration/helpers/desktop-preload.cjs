@@ -57,7 +57,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const v8 = require('node:v8');
-const { app, BrowserWindow, clipboard, ipcMain, Notification, powerSaveBlocker, session, Tray, utilityProcess } = require('electron');
+const electron = require('electron');
+
+const { app, BrowserWindow, clipboard, ipcMain, Notification, session, utilityProcess } = electron;
 
 // Take this preload's own "-r <path>" back out of the command line, so the app
 // sees only the arguments it would be given when launched normally.
@@ -134,38 +136,47 @@ BrowserWindow.prototype.isFocused = function (...args) {
     return isFocused.apply(this, args);
 };
 
-// The tray icon: its tooltip and menu as they change, and when it goes.
-const setToolTip = Tray.prototype.setToolTip;
-Tray.prototype.setToolTip = function (tooltip, ...rest) {
-    this.__tooltip = tooltip;
-    return setToolTip.call(this, tooltip, ...rest);
-};
-const setContextMenu = Tray.prototype.setContextMenu;
-Tray.prototype.setContextMenu = function (menu, ...rest) {
-    globalThis.__dropgateTray = this;
-    this.__menu = menu;
-    record({ event: 'tray', tooltip: this.__tooltip ?? null, labels: menu?.items.map((item) => item.label) ?? [] });
-    return setContextMenu.call(this, menu, ...rest);
-};
-const destroyTray = Tray.prototype.destroy;
-Tray.prototype.destroy = function (...args) {
-    if (globalThis.__dropgateTray === this) globalThis.__dropgateTray = null;
-    record({ event: 'tray-gone' });
-    return destroyTray.apply(this, args);
-};
+// The tray icon and the power-save blocker are wrapped once the app is ready,
+// before the app's own code can use them, and not touched before: Electron
+// makes them when they're first asked for, and they're for a ready app only.
+// (Asked for as this preload loaded, the app crashed in CI on Linux, or
+// stopped answering on Windows, part-way through an upload.)
+app.whenReady().then(() => {
+    const { powerSaveBlocker, Tray } = electron;
 
-// The power-save blocker, as the app starts and stops it: only written down,
-// never the system's own. On CI's runners, with it, the app crashed (Ubuntu)
-// or stopped answering (Windows) soon after the first upload started it.
-let nextBlocker = 0;
-powerSaveBlocker.start = (type) => {
-    const id = nextBlocker++;
-    record({ event: 'power-save', action: 'start', type, id });
-    return id;
-};
-powerSaveBlocker.stop = (id) => {
-    record({ event: 'power-save', action: 'stop', id });
-};
+    // The tray icon: its tooltip and menu as they change, and when it goes.
+    const setToolTip = Tray.prototype.setToolTip;
+    Tray.prototype.setToolTip = function (tooltip, ...rest) {
+        this.__tooltip = tooltip;
+        return setToolTip.call(this, tooltip, ...rest);
+    };
+    const setContextMenu = Tray.prototype.setContextMenu;
+    Tray.prototype.setContextMenu = function (menu, ...rest) {
+        globalThis.__dropgateTray = this;
+        this.__menu = menu;
+        record({ event: 'tray', tooltip: this.__tooltip ?? null, labels: menu?.items.map((item) => item.label) ?? [] });
+        return setContextMenu.call(this, menu, ...rest);
+    };
+    const destroyTray = Tray.prototype.destroy;
+    Tray.prototype.destroy = function (...args) {
+        if (globalThis.__dropgateTray === this) globalThis.__dropgateTray = null;
+        record({ event: 'tray-gone' });
+        return destroyTray.apply(this, args);
+    };
+
+    // The power-save blocker, as the app starts and stops it.
+    const startBlocker = powerSaveBlocker.start.bind(powerSaveBlocker);
+    const stopBlocker = powerSaveBlocker.stop.bind(powerSaveBlocker);
+    powerSaveBlocker.start = (type) => {
+        const id = startBlocker(type);
+        record({ event: 'power-save', action: 'start', type, id });
+        return id;
+    };
+    powerSaveBlocker.stop = (id) => {
+        record({ event: 'power-save', action: 'stop', id });
+        return stopBlocker(id);
+    };
+});
 
 // Each request to a server, as the session that sends it sees it. The app
 // hooks no request itself, so these listeners are the sessions' only ones.
