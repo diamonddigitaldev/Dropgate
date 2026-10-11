@@ -103,6 +103,11 @@ export class DesktopApp {
         this.app = app;
         this.eventsFile = eventsFile;
         this.netLog = netLog;
+        /** How its process ended, once it has: { code, signal }. */
+        this.ended = null;
+        app.process().once('exit', (code, signal) => {
+            this.ended = { code, signal };
+        });
         const context = app.context();
         context.on('request', (request) => {
             if (toServer(request.url())) this.unfinished.set(request, Date.now());
@@ -430,8 +435,7 @@ class Desktop {
 
         for (const [i, run] of this.runs.entries()) {
             // How it ended, if it has: a signal means it crashed or was killed, rather than quit.
-            const { exitCode, signalCode } = run.app.process();
-            const ended = signalCode ? `, and ended with ${signalCode}` : exitCode !== null ? `, and exited with ${exitCode}` : '';
+            const ended = run.ended?.signal ? `, and ended with ${run.ended.signal}` : run.ended ? `, and exited with ${run.ended.code}` : '';
             sections.push(section(`What run ${i + 1} of the app wrote down${ended}:`, () => run.events()
                 .map(({ at, event, ...rest }) => `  ${ms(at)}  ${event} ${JSON.stringify(rest)}`).join('\n') || '  nothing'));
         }

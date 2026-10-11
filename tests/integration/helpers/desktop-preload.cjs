@@ -154,17 +154,17 @@ Tray.prototype.destroy = function (...args) {
     return destroyTray.apply(this, args);
 };
 
-// The power-save blocker, as the app starts and stops it.
-const startBlocker = powerSaveBlocker.start.bind(powerSaveBlocker);
-const stopBlocker = powerSaveBlocker.stop.bind(powerSaveBlocker);
+// The power-save blocker, as the app starts and stops it: only written down,
+// never the system's own. On CI's runners, with it, the app crashed (Ubuntu)
+// or stopped answering (Windows) soon after the first upload started it.
+let nextBlocker = 0;
 powerSaveBlocker.start = (type) => {
-    const id = startBlocker(type);
+    const id = nextBlocker++;
     record({ event: 'power-save', action: 'start', type, id });
     return id;
 };
 powerSaveBlocker.stop = (id) => {
     record({ event: 'power-save', action: 'stop', id });
-    return stopBlocker(id);
 };
 
 // Each request to a server, as the session that sends it sees it. The app
