@@ -338,9 +338,15 @@ jobs:
 
       # One test at a time: in CI the app copies its links to the real clipboard,
       # which every test shares, and the update tests share their server's port.
+      # On Linux, inside a D-Bus session of their own, as a desktop gives an app:
+      # the runner's own session bus address can't be parsed, and the app's
+      # power-save blocker, taskbar progress and notifications talk to the bus.
+      # Without one, Electron crashed (SIGSEGV) early in an upload, now and then.
       - name: Run tests
         if: runner.os == 'Linux'
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" npx playwright test --project=desktop --workers=1
+        run: |
+          command -v dbus-run-session || sudo apt-get install -y --no-install-recommends dbus-bin dbus-daemon
+          dbus-run-session -- xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" npx playwright test --project=desktop --workers=1
 
       - name: Run tests
         if: runner.os == 'Windows'
