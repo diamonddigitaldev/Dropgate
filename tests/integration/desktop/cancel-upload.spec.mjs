@@ -4,7 +4,7 @@
 // discard what it has. The file is picked from disk, as a person picks one, and
 // the upload runs in the app's transfer window, where its chunks are held.
 import { madeUpFile } from '../helpers/files.mjs';
-import { expect, securityWarning, test, uploadButton, uploadStatus } from '../helpers/desktop.mjs';
+import { cardButton, expect, securityWarning, test, uploadButton, uploadCard, uploadStatus } from '../helpers/desktop.mjs';
 
 // Three 5 MiB chunks.
 const SIZE = 12_000_000;
@@ -31,10 +31,10 @@ test('cancelling an upload says it was cancelled, not that it failed, and the se
     await uploadButton(window).click();
     await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();
     await expect.poll(() => chunks, { message: 'the second chunk should be on its way' }).toBe(2);
-    await window.locator('#action-bar').getByRole('button', { name: 'Cancel', exact: true }).click();
+    await cardButton(uploadCard(window), 'Cancel').click();
 
-    await expect(uploadStatus(window)).toHaveText(/upload cancelled/i);
-    await expect(uploadButton(window), 'ready to upload again').toBeVisible();
+    await expect(uploadStatus(window)).toHaveText(/^Cancelled$/);
+    await expect(cardButton(uploadCard(window), 'Retry'), 'ready to upload again').toBeVisible();
     await expect(window.getByText(/upload failed/i)).toHaveCount(0);
     await expect.poll(() => app.eventsOf('upload-finished').map(({ status, error }) => ({ status, error })),
         { message: 'how the upload finished' }).toEqual([{ status: 'cancelled', error: undefined }]);

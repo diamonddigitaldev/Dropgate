@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { madeUpFile } from '../helpers/files.mjs';
-import { expect, holdChunks, shareWhileOpen, test, transfersIn, uploadButton } from '../helpers/desktop.mjs';
+import { expect, goingIn, holdChunks, shareWhileOpen, test, transfersIn, uploadButton, uploadCard } from '../helpers/desktop.mjs';
 import { heldIn } from '../helpers/profile.mjs';
 
 // Three 5 MiB chunks: the first goes through, the rest are held.
@@ -54,7 +54,7 @@ async function startUpload(desktop, file) {
     const app = await desktop.launch(filePath);
     const window = await app.window();
     await desktop.setUp(window);
-    await expect(window.locator('#file-list .file-row-name')).toHaveText([file.name]);
+    await expect(uploadCard(window).locator('.kit-card-name')).toHaveText([file.name]);
     const chunks = await holdChunks(await app.transferWindow());
     await uploadButton(window).click();
     await expect.poll(() => chunks.sent.length, { message: 'the second chunk should be on its way' }).toBe(2);
@@ -164,7 +164,7 @@ test('transfers ending while the window is out of sight are told of in one notif
     const first = [await share('Grouped one é.bin', 80), await share('Grouped two é.bin', 81), await share('Grouped three é.bin', 82)];
     await expect.poll(() => chunks.sent.length, { message: 'each one\'s second chunk, held', timeout: 15_000 }).toBe(6);
     chunks.release();
-    await expect.poll(async () => (await transfersIn(window)).length, { message: 'the three, finished', timeout: 30_000 }).toBe(0);
+    await expect.poll(async () => (await goingIn(window)).length, { message: 'the three, finished', timeout: 30_000 }).toBe(0);
     await expect.poll(() => endings(app).map(({ title, body }) => ({ title, body })), { message: 'what was told of their ending' })
         .toEqual([{ title: '3 Uploads Finished', body: 'The latest link is copied to the clipboard.' }]);
     await transfer.unrouteAll({ behavior: 'ignoreErrors' });
@@ -176,7 +176,7 @@ test('transfers ending while the window is out of sight are told of in one notif
     await expect.poll(() => chunks.sent.length, { message: 'each one\'s second chunk, held', timeout: 15_000 }).toBe(6);
     fs.writeFileSync(second[1].filePath, Buffer.alloc(SIZE, 0x5a));
     chunks.release();
-    await expect.poll(async () => (await transfersIn(window)).length, { message: 'the three, ended', timeout: 30_000 }).toBe(0);
+    await expect.poll(async () => (await goingIn(window)).length, { message: 'the three, ended', timeout: 30_000 }).toBe(0);
     await expect.poll(() => endings(app).slice(1).map(({ title, body }) => ({ title, body })), { message: 'what was told of their ending' })
         .toEqual([{ title: '3 Uploads Finished', body: '2 succeeded, 1 failed. The latest link is copied to the clipboard.' }]);
     await transfer.unrouteAll({ behavior: 'ignoreErrors' });
@@ -186,7 +186,7 @@ test('transfers ending while the window is out of sight are told of in one notif
     await focus(app, true);
     const before = app.eventsOf('notification').length;
     const last = await share('Watched é.bin', 86);
-    await expect.poll(async () => (await transfersIn(window)).length, { message: 'the share, finished', timeout: 30_000 }).toBe(0);
+    await expect.poll(async () => (await goingIn(window)).length, { message: 'the share, finished', timeout: 30_000 }).toBe(0);
     await expect.poll(() => app.eventsOf('upload-finished').length).toBe(7);
     await window.waitForTimeout(500);
     expect(app.eventsOf('notification').slice(before), 'notifications with the window in front').toEqual([]);

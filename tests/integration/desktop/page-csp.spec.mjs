@@ -23,9 +23,10 @@ test('the main window\'s page has its CSP: nothing it does is refused, and an in
     await expect(window.locator('img[src$="dropgate.png"]'), "Credits' logo").toBeVisible();
     await window.getByRole('tab', { name: 'Privacy' }).click();
     await expect(window.locator('#keep-log-on-disk'), 'a switch, drawn with a data: SVG').toBeVisible();
-    await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
+    await window.getByRole('tab', { name: 'Server' }).click();
     await expect(window.locator('#file-lifetime-unit'), 'a select, drawn with a data: SVG').toBeVisible();
-    await expect(window.locator('#browse-more-btn .button-icon')).toHaveCSS('font-size', '16px');
+    await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
+    await expect(window.locator('#add-files-btn .button-icon')).toHaveCSS('font-size', '16px');
     await window.evaluate(() => window.kit.ui.toast('A toast.', { type: 'success' }));
     await expect(window.getByText('A toast.')).toBeVisible();
     await expect.poll(async () => window.evaluate(() => document.fonts.check('24px "Material Icons Round"')), { message: 'the icon font, loaded' }).toBe(true);

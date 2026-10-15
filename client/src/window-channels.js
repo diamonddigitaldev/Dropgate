@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const { IPC } = require('./constants');
-const { failureOf, handleOf, linkOf, newUpload, pathList, serverAddress, uploadOf, uploadsToStart } = require('./core/payloads');
+const { failureOf, filesToAdd, handleOf, linkOf, newUpload, pathList, serverAddress, transfersOf, uploadOf, uploadsToStart } = require('./core/payloads');
 const { view } = require('./core/transfers');
 
 // The window's channels: what its page asks main, through window.electronAPI.
@@ -72,32 +72,62 @@ function answerWindowChannels(main) {
     // Test, and the check before an upload: asked of the server by the transfer window.
     kit.ipc.handle(IPC.SERVER_CHECK, (_event, url) => main.host().check(serverOf(serverAddress(url))));
 
-    // An upload of files handed to this window, waiting to start.
-    kit.ipc.handle(IPC.TRANSFER_ADD_UPLOAD, (event, request) => {
-        const { files, options } = newUpload(request);
-        const held = files.map((handle) => handles.get(event.sender.id, handle));
+    /** The files handed to this window, as the registry keeps them: each one's path, name, size and modification time. */
+    const heldFiles = (sender, list) => {
+        const held = list.map((handle) => handles.get(sender, handle));
         if (held.some((file) => !file)) throw new Error('Expected files handed to this window.');
+        return held.map(({ path: filePath, name, size, mtimeMs }) => ({ path: filePath, name, size, mtimeMs }));
+    };
+
+    // An upload of files handed to this window, waiting to start, with the
+    // server's settings for new uploads (Settings > Server): its lifetime and
+    // download limit. Whether it's encrypted is decided as it starts.
+    kit.ipc.handle(IPC.TRANSFER_ADD_UPLOAD, (event, request) => {
+        const { files } = newUpload(request);
+        const { lifetimeValue, lifetimeUnit, maxDownloads } = kit.settings.get();
         const { id } = transfers.add({
             owner: event.sender.id,
-            files: held.map(({ path: filePath, name, size, mtimeMs }) => ({ path: filePath, name, size, mtimeMs })),
-            options,
+            files: heldFiles(event.sender.id, files),
+            options: { lifetime: { value: lifetimeUnit === 'unlimited' ? 0 : lifetimeValue, unit: lifetimeUnit }, maxDownloads },
         });
         return { id };
     });
 
-    // Start uploads waiting: this window's own, to the server in Settings, or a
-    // share it was asked about (Upload Anyway), to the share's server. Each is
-    // queued, and runs as soon as it has a place.
+    // Files dropped onto an upload of this window's that's waiting: each not
+    // in it already joins it. One that has started takes none (its files are
+    // sealed): the answer says so, and the window makes a new upload of them.
+    kit.ipc.handle(IPC.TRANSFER_ADD_FILES, (event, request) => {
+        const { id, files } = filesToAdd(request, (upload) => transfers.get(upload)?.owner === event.sender.id);
+        return transfers.addFiles(id, heldFiles(event.sender.id, files)) ?? { started: true };
+    });
+
+    // Start uploads waiting: this window's own, to the server in Settings,
+    // end-to-end encrypted or not as the window found the server (encrypt), or
+    // a share it was asked about (Upload Anyway), to the share's server, as
+    // the share decided. Each is queued, and runs as soon as it has a place.
     kit.ipc.handle(IPC.TRANSFER_START, (event, request) => {
         const sender = event.sender.id;
         const startable = (id) => {
             const upload = transfers.get(id);
             return Boolean(upload) && upload.state === 'waiting' && (upload.owner === sender || upload.ask?.owner === sender);
         };
-        const ids = uploadsToStart(request, startable);
+        const { ids, encrypt } = uploadsToStart(request, startable);
+        const own = ids.filter((id) => transfers.get(id).owner === sender);
+        if (own.length > 0 && encrypt === undefined) throw new Error('Expected whether to encrypt.');
         const { serverURL } = kit.settings.get();
         if (!serverURL && ids.some((id) => !transfers.get(id).server)) throw new Error('Server URL is not configured.');
+        for (const id of own) transfers.get(id).options.encrypt = encrypt;
         for (const id of ids) main.start(id, transfers.get(id).server ?? serverOf(serverURL));
+    });
+
+    // Remove uploads waiting or ended (Remove, Clear Finished): one going is cancelled first.
+    kit.ipc.handle(IPC.TRANSFER_REMOVE, (_event, request) => {
+        transfers.remove(transfersOf(request, has));
+    });
+
+    // Try a failed or cancelled upload again: it waits for this window's Upload once more.
+    kit.ipc.handle(IPC.TRANSFER_RETRY, (event, request) => {
+        if (!transfers.retry(uploadOf(request, has), event.sender.id)) throw new Error('Expected an upload that failed or was cancelled.');
     });
 
     // Pause Upload and Resume Upload, from any window. The answer is core's reason

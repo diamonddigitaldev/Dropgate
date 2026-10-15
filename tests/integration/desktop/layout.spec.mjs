@@ -1,8 +1,19 @@
 // The desktop app's page at its smallest: nothing on Upload scrolls sideways
 // (Linux's VM pass, 2026-10-04, saw a horizontal scrollbar under the link: the
-// lifetime and downloads row's negative margins reached past the column). And
-// the Server tab names Share with Dropgate only on Windows, which has it.
-import { expect, test } from '../helpers/desktop.mjs';
+// lifetime and downloads row's negative margins reached past the column), nor
+// on Settings > Server, where that row is now. And the Server tab names Share
+// with Dropgate only on Windows, which has it.
+import { madeUpFile } from '../helpers/files.mjs';
+import { expect, test, uploadLink } from '../helpers/desktop.mjs';
+
+/** How far an element's content reaches sideways past it, and the height of its horizontal scrollbar. */
+const sideways = (window, selector) => window.evaluate((sel) => {
+    const element = document.querySelector(sel);
+    const cs = getComputedStyle(element);
+    const borders = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+    // A horizontal scrollbar takes its height from the element: offsetHeight counts it, clientHeight doesn't.
+    return { overflowX: cs.overflowX, scrollbar: element.offsetHeight - element.clientHeight - borders };
+}, selector);
 
 test('at the window\'s smallest, with a link shown, nothing on Upload scrolls sideways', async ({ desktop }) => {
     const app = await desktop.launch();
@@ -14,19 +25,20 @@ test('at the window\'s smallest, with a link shown, nothing on Upload scrolls si
         return { width, height };
     });
     expect(min.width, "the window's minimum width").toBeGreaterThan(0);
-    // The link row as it is after an upload, with a long link.
-    await window.evaluate(() => {
-        document.getElementById('link-section').classList.remove('d-none');
-        document.getElementById('download-link').value = `https://dropgate.example.test/40418c60-e655-4d32-ba0c-c225a94e8c3b#${'k'.repeat(43)}`;
+    await desktop.setUp(window);
+    // The Server tab, with the settings for new uploads in it.
+    await window.getByRole('button', { name: 'Settings', exact: true }).click();
+    await window.getByRole('tab', { name: 'Server' }).click();
+    expect(await window.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), 'how far Settings > Server scrolls sideways').toBeLessThanOrEqual(0);
+    await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
+
+    // An upload's card as it is when it's done, with a long link.
+    await desktop.upload(window, [madeUpFile('Narrow window.bin', 1_000, 90)], { encrypted: false });
+    await uploadLink(window).evaluate((input) => {
+        input.value = `https://dropgate.example.test/40418c60-e655-4d32-ba0c-c225a94e8c3b#${'k'.repeat(43)}`;
     });
-    // A horizontal scrollbar takes its height from the view: offsetHeight counts it, clientHeight doesn't.
-    // (The row still reaches past the column, so scrollWidth stays wider: it's clipped, not scrollable.)
-    await expect.poll(() => window.evaluate(() => {
-        const view = document.getElementById('upload-view');
-        const cs = getComputedStyle(view);
-        const borders = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
-        return { overflowX: cs.overflowX, scrollbar: view.offsetHeight - view.clientHeight - borders };
-    }), { message: "Upload's sideways overflow, and its horizontal scrollbar's height" }).toEqual({ overflowX: 'hidden', scrollbar: 0 });
+    await expect.poll(() => sideways(window, '#upload-area'), { message: "Upload's sideways overflow, and its horizontal scrollbar's height" })
+        .toEqual({ overflowX: 'hidden', scrollbar: 0 });
     expect(await window.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), 'how far the page scrolls sideways').toBeLessThanOrEqual(0);
 });
 

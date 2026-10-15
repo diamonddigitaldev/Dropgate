@@ -14,6 +14,7 @@ const SERVER = { url: 'https://dropgate.test', allowInsecure: false };
 const OPTIONS = { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true };
 const RUNNING = { status: 'uploading', text: 'Uploading chunk 1 of 3...', percent: 10, canPause: true };
 const PAUSED = { status: 'paused', text: 'Paused.', percent: 10, canPause: true, deadline: 1_800_000_000_000 };
+const DONE = { status: 'success', link: 'https://dropgate.test/0b7e3c51-9d2a-4f6e-8a1c-000000000001#key' };
 
 /** A registry of 3 at once, recording what it starts and resumes in the transfer window. */
 function registry() {
@@ -42,10 +43,10 @@ test('three run at once; the rest wait as queued, and start in the order added a
     assert.deepEqual(started, ids.slice(0, 3));
     assert.deepEqual(transfers.counts(), { running: 3, paused: 0, queued: 2 });
 
-    transfers.ended(ids[1]);
-    assert.deepEqual(states(ids), ['running', 'gone', 'running', 'running', 'queued']);
+    transfers.ended(ids[1], DONE);
+    assert.deepEqual(states(ids), ['running', 'done', 'running', 'running', 'queued']);
     assert.deepEqual(started, [...ids.slice(0, 3), ids[3]], 'the fourth, first in line, took the place');
-    transfers.ended(ids[0]);
+    transfers.ended(ids[0], DONE);
     assert.deepEqual(started, [...ids.slice(0, 3), ids[3], ids[4]]);
 });
 
@@ -66,10 +67,10 @@ test('a paused one takes no place: the next queued starts, and resumed with ever
     assert.equal(transfers.get(ids[0]).state, 'queued');
 
     // A place frees: it was queued first, so it's resumed before the fifth starts.
-    transfers.ended(ids[1]);
+    transfers.ended(ids[1], DONE);
     assert.deepEqual(resumed, [ids[0]]);
-    assert.deepEqual(states(ids), ['running', 'gone', 'running', 'running', 'queued']);
-    transfers.ended(ids[2]);
+    assert.deepEqual(states(ids), ['running', 'done', 'running', 'running', 'queued']);
+    transfers.ended(ids[2], DONE);
     assert.deepEqual(started.at(-1), ids[4]);
 });
 
@@ -82,7 +83,7 @@ test('resumed with a place free, it keeps that place at once; paused again while
     assert.equal(transfers.pause(ids[0]), false, 'nothing to ask the transfer window: it never resumed');
     assert.deepEqual(states(ids), ['paused', 'running', 'running', 'running']);
 
-    transfers.ended(ids[3]);
+    transfers.ended(ids[3], DONE);
     assert.equal(transfers.resume(ids[0]), true, 'a place is free: resumed now');
     assert.equal(transfers.get(ids[0]).state, 'running');
     // While the server is asked, core still says paused ("Resuming..."): the place is kept.
@@ -108,7 +109,7 @@ test('busy (Restart Now asks) while any runs, is paused or is queued; a waiting 
     assert.equal(transfers.busy(), true);
     transfers.updated(id, PAUSED);
     assert.equal(transfers.busy(), true, 'paused');
-    transfers.ended(id);
+    transfers.ended(id, DONE);
     assert.equal(transfers.busy(), false);
     assert.equal(transfers.get(waiting.id).state, 'waiting');
 });
@@ -128,9 +129,61 @@ test('quitting starts nothing more, and takes back every transfer the transfer w
     const waiting = transfers.add({ owner: 1, files: [], options: OPTIONS });
     const dropped = transfers.close();
     assert.deepEqual(dropped.map((card) => card.id).sort(), [ids[3], ids[4], waiting.id].sort());
-    transfers.ended(ids[0]);
+    transfers.ended(ids[0], DONE);
     assert.deepEqual(started, ids.slice(0, 3), 'no place given to anything after quitting');
-    assert.deepEqual(transfers.list().map((card) => card.id), [ids[1], ids[2]]);
+    assert.deepEqual(transfers.list().map((card) => [card.id, card.state]), [[ids[0], 'done'], [ids[1], 'running'], [ids[2], 'running']]);
+});
+
+test('an ended one stays, with its link or its reason, until it\'s removed; a failed or cancelled one can wait again', () => {
+    const { transfers, startMany, states } = registry();
+    const ids = startMany(4);
+    transfers.ended(ids[0], DONE);
+    transfers.ended(ids[1], { status: 'error', error: 'The server closed the connection.' });
+    // Cancelled while queued: it never started, and stays as cancelled.
+    transfers.ended(ids[3], { status: 'cancelled' });
+    assert.deepEqual(states(ids), ['done', 'failed', 'running', 'cancelled']);
+    assert.equal(transfers.get(ids[0]).link, DONE.link);
+    assert.equal(transfers.get(ids[1]).message, 'The server closed the connection.');
+    assert.equal(transfers.ended(ids[0], { status: 'cancelled' }), null, 'it ends once');
+    assert.equal(transfers.busy(), true, 'one still runs');
+    assert.deepEqual(transfers.counts(), { running: 1, paused: 0, queued: 0 }, 'ended ones are counted nowhere');
+    assert.equal(transfers.withdraw(ids[3]), null, 'an ended one isn\'t taken back, it\'s removed');
+
+    // Remove takes waiting and ended ones; one going stays.
+    const removed = [];
+    transfers.removed = (card) => removed.push(card.id);
+    assert.deepEqual(transfers.remove([ids[0], ids[2]]).map((card) => card.id), [ids[0]]);
+    assert.deepEqual(removed, [ids[0]]);
+    assert.deepEqual(states(ids), ['gone', 'failed', 'running', 'cancelled']);
+
+    // Tried again, it waits for the window that asked, as it was, with no link or reason left.
+    assert.equal(transfers.retry(ids[2], 7), null, 'one running isn\'t tried again');
+    const again = transfers.retry(ids[1], 7);
+    assert.equal(again.state, 'waiting');
+    assert.equal(again.owner, 7);
+    assert.equal(again.started, false);
+    assert.equal(again.message, null);
+    assert.deepEqual(again.files.map((file) => file.name), ['plans.bin']);
+    transfers.start(ids[1], SERVER);
+    assert.equal(transfers.get(ids[1]).state, 'running', 'started again, it takes a place');
+});
+
+test('files dropped onto a waiting one join it, each once; one that has started takes none', () => {
+    const { transfers } = registry();
+    const changed = [];
+    transfers.changed = (card) => changed.push(card.id);
+    const waiting = transfers.add({ owner: 1, files: [{ path: '/secret/a.bin', name: 'a.bin', size: 1 }], options: OPTIONS });
+    assert.deepEqual(changed, [waiting.id], 'the window hears of a new one');
+    const more = [{ path: '/secret/a.bin', name: 'a.bin', size: 1 }, { path: '/secret/b.bin', name: 'b.bin', size: 2 }, { path: '/secret/b.bin', name: 'b.bin', size: 2 }];
+    assert.deepEqual(transfers.addFiles(waiting.id, more), { added: 1, skipped: 2 });
+    assert.deepEqual(transfers.get(waiting.id).files.map((file) => file.name), ['a.bin', 'b.bin']);
+    assert.equal(changed.length, 2);
+    assert.deepEqual(transfers.addFiles(waiting.id, more.slice(0, 1)), { added: 0, skipped: 1 });
+    assert.equal(changed.length, 2, 'nothing changed: nothing to send');
+
+    transfers.start(waiting.id, SERVER);
+    assert.equal(transfers.addFiles(waiting.id, more), null, 'started: its files are sealed');
+    assert.equal(transfers.get(waiting.id).files.length, 2);
 });
 
 test('the window is sent a transfer\'s names and sizes and how it\'s going, never a path', () => {
@@ -141,6 +194,7 @@ test('the window is sent a transfer\'s names and sizes and how it\'s going, neve
     assert.deepEqual(drawn, {
         id, kind: 'upload', state: 'running', files: [{ name: 'plans.bin', size: 1 }], status: 'uploading',
         step: RUNNING.text, phase: 'chunk', percent: 10, fileIndex: 0, canPause: true, deadline: null,
+        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true }, link: null, message: null,
     });
     assert.doesNotMatch(JSON.stringify(drawn), /secret/);
 });

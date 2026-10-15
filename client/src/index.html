@@ -20,69 +20,34 @@
 <body>
 
     <!-- kit.ui.mountShell() (renderer.js) builds the frame around what's here:
-         the nav rail (Upload, then Settings and Collapse), the header, and the
-         Settings view, with Dropgate's Server tab, then Update, then Credits. -->
+         the nav rail (Upload, then Settings and Collapse), the header with Add
+         Files, and the Settings view, with Dropgate's Server and Privacy tabs,
+         then Update, then Credits. -->
 
-    <!-- Upload: the files, their lifetime and download limit, how they'll be
-         sent, and the action bar. -->
-    <div id="upload-view" class="upload-view">
-        <div class="upload-column">
-            <!-- The kit's drop zone (renderer.js, kit.ui.dropZone()), while there are no files. -->
-            <div id="empty-state" class="empty-state"></div>
-
-            <div id="file-list-section" class="d-none">
-                <div class="d-flex align-items-center gap-2 mb-2">
-                    <span id="file-count" class="fw-semibold"></span>
-                    <span id="file-chosen-total" class="small text-body-secondary"></span>
-                    <button id="browse-more-btn" class="btn btn-sm btn-secondary d-inline-flex align-items-center gap-1 ms-auto" type="button">
-                        <span class="material-icons-round button-icon" aria-hidden="true">add</span>Add More
-                    </button>
-                </div>
-                <div id="file-list" class="file-list"></div>
-            </div>
-            <div class="form-text mt-2 mb-3" id="max-upload-hint">Loading server limits…</div>
-
-            <div class="row g-3 mb-3">
-                <div class="col-sm-7">
-                    <label for="file-lifetime-value" class="form-label">File lifetime</label>
-                    <div class="input-group input-group-sm">
-                        <input type="number" class="form-control" id="file-lifetime-value" value="24" min="0.5" step="0.5">
-                        <select class="form-select" id="file-lifetime-unit" aria-label="Unit">
-                            <option value="minutes">Minutes</option>
-                            <option value="hours" selected>Hours</option>
-                            <option value="days">Days</option>
-                            <option value="unlimited">Unlimited</option>
-                        </select>
-                    </div>
-                    <div id="file-lifetime-help" class="form-text reserved">Loading…</div>
-                </div>
-                <div class="col-sm-5" id="max-downloads-section">
-                    <label for="max-downloads-value" class="form-label">Max downloads</label>
-                    <input type="number" class="form-control form-control-sm" id="max-downloads-value" value="1" min="0" step="1">
-                    <div id="max-downloads-help" class="form-text reserved">Loading…</div>
-                </div>
-            </div>
-
-            <!-- How the upload will be sent, from the server's capabilities. -->
-            <div id="security-status" class="security-status-card mb-3">
-                <span id="security-icon" class="material-icons-round" aria-hidden="true">https</span>
-                <span id="security-text">Checking security…</span>
-            </div>
-
-            <!-- The kit's action bar (renderer.js, kit.ui.actionBar()): the status line, the bar, Upload and Cancel. -->
-            <div id="action-bar"></div>
-
-            <div id="link-section" class="mt-3 d-none">
-                <label for="download-link" class="form-label">Your link</label>
-                <div class="input-group">
-                    <input type="text" id="download-link" class="form-control selectable" readonly>
-                    <button id="copy-btn" class="btn btn-outline-secondary" type="button">Copy</button>
-                </div>
-            </div>
-        </div>
+    <!-- Add Files, in the header while Upload shows. -->
+    <div id="toolbar" class="d-flex gap-2">
+        <button id="add-files-btn" class="btn btn-sm btn-secondary d-inline-flex align-items-center gap-1" type="button">
+            <span class="material-icons-round button-icon" aria-hidden="true">add</span>Add Files
+        </button>
     </div>
 
-    <!-- Settings > Server, moved into its tab by renderer.js: the server uploads go to, saved as it's tested. -->
+    <!-- Upload: a card for each upload, waiting, going or ended (renderer.js,
+         the kit's cards in its card grid), the bulk bar over them, and the
+         action bar under them. -->
+    <div id="upload-view" class="upload-view">
+        <div id="upload-bulk"></div>
+        <!-- Files dropped anywhere here make an upload, or join the waiting one they're dropped on. -->
+        <div id="upload-area" class="upload-area">
+            <!-- The kit's drop zone (kit.ui.dropZone()), while there are no uploads. -->
+            <div id="empty-state" class="empty-state"></div>
+            <div id="upload-grid"></div>
+        </div>
+        <!-- The kit's action bar (kit.ui.actionBar()): the counts, the running ones' progress, Clear Finished and Upload All. -->
+        <div id="action-bar"></div>
+    </div>
+
+    <!-- Settings > Server, moved into its tab by renderer.js: the server uploads
+         go to, saved as it's tested, and its settings for new uploads. -->
     <div id="server-settings" class="settings-column">
         <label for="server-url" class="form-label">Server URL</label>
         <div class="input-group">
@@ -92,6 +57,36 @@
         <div id="connection-status" class="form-text reserved"></div>
         <!-- renderer.js leaves out Share with Dropgate where there's none (Linux). -->
         <p class="form-text" id="server-help">Uploads go to this server, and so does Share with Dropgate.</p>
+
+        <div class="small fw-semibold mt-3 mb-2">New uploads to this server</div>
+        <div class="row g-3">
+            <div class="col-sm-7">
+                <label for="file-lifetime-value" class="form-label">File lifetime</label>
+                <div class="input-group input-group-sm">
+                    <input type="number" class="form-control" id="file-lifetime-value" value="24" min="0.5" step="0.5">
+                    <select class="form-select" id="file-lifetime-unit" aria-label="Unit">
+                        <option value="minutes">Minutes</option>
+                        <option value="hours" selected>Hours</option>
+                        <option value="days">Days</option>
+                        <option value="unlimited">Unlimited</option>
+                    </select>
+                </div>
+                <div id="file-lifetime-help" class="form-text reserved">Loading…</div>
+            </div>
+            <div class="col-sm-5" id="max-downloads-section">
+                <label for="max-downloads-value" class="form-label">Max downloads</label>
+                <input type="number" class="form-control form-control-sm" id="max-downloads-value" value="1" min="0" step="1">
+                <div id="max-downloads-help" class="form-text reserved">Loading…</div>
+            </div>
+        </div>
+        <div class="form-text mb-2" id="max-upload-hint">Loading server limits…</div>
+
+        <!-- How uploads will be sent, from the server's capabilities. -->
+        <div id="security-status" class="security-status-card">
+            <span id="security-icon" class="material-icons-round" aria-hidden="true">https</span>
+            <span id="security-text">Checking security…</span>
+        </div>
+        <p class="form-text mt-2">Each new upload starts with these. An upload waiting keeps what it started with.</p>
     </div>
 
     <!-- Settings > Privacy, moved into its tab by renderer.js: the kit's keepLogOnDisk, off by default. -->
@@ -103,7 +98,7 @@
         <p class="form-text">The app's log is kept in memory, and goes when the app closes. Turned on, it's also kept in a file on this computer, with none of your file names, folders or links in it, so you can send it with a bug report. Turned off, the file is deleted.</p>
     </div>
 
-    <!-- The browse button's picker. Files picked here are uploaded as they are. -->
+    <!-- Add Files' and the drop zone's picker: the files picked together make one upload. -->
     <input type="file" id="file-input" hidden multiple>
 
     <script src="../node_modules/@diamonddigitaldev/electron-kit/page/kit.js"></script>

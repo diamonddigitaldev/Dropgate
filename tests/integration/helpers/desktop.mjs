@@ -305,7 +305,8 @@ class Desktop {
 
     /**
      * Point the app at the test's server, in Settings > Server, and set its
-     * options on Upload, as a person would.
+     * settings for new uploads there ("New uploads to this server"), as a
+     * person would, then go back to Upload.
      * @param {import('@playwright/test').Page} window
      * @param {object} [opts]
      * @param {{ value: number, unit: 'minutes' | 'hours' | 'days' }} [opts.lifetime]
@@ -317,7 +318,6 @@ class Desktop {
         await window.locator('#server-url').fill(this.serverUrl);
         await window.locator('#test-connection-btn').click();
         await expect(window.locator('#connection-status')).toHaveText(/connection successful/i);
-        await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
         await expect(window.locator('#security-status')).toBeVisible();
         if (lifetime) {
             await window.locator('#file-lifetime-unit').selectOption(lifetime.unit);
@@ -327,13 +327,15 @@ class Desktop {
             await window.locator('#max-downloads-value').fill(String(maxDownloads));
         }
         await saved(window);
+        await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
     }
 
     /**
-     * Upload files from Upload with the action bar's Upload button, and return
-     * the link the window shows. Each file is written to the test's folder and
+     * Upload files from Upload, with their card's Upload button, and return
+     * the link the card shows. Each file is written to the test's folder and
      * picked from there, as a person picks one: the window hands main each
-     * file's path, and never reads a file itself.
+     * file's path, and never reads a file itself. The files picked together
+     * are one upload, the newest card.
      * @param {import('@playwright/test').Page} window
      * @param {{ name: string, mimeType: string, buffer: Buffer }[]} files
      * @param {{ encrypted: boolean }} opts - Whether the window should say the upload will be
@@ -343,11 +345,13 @@ class Desktop {
     async upload(window, files, { encrypted }) {
         this.secrets.addFiles(files, { storedByServer: !encrypted });
         await expect(window.locator('#security-text')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
+        const before = await uploadCards(window).count();
         await window.locator('#file-input').setInputFiles(files.map((file) => this.addFile(file)));
+        await expect(uploadCards(window), 'the upload of the files picked').toHaveCount(before + 1);
         await uploadButton(window).click();
         if (!encrypted) await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();
-        await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });
-        const link = await window.locator('#download-link').inputValue();
+        await expect(uploadStatus(window)).toHaveText(/^Uploaded · /, { timeout: 30_000 });
+        const link = await uploadLink(window).inputValue();
         this.secrets.addLink(link);
         return link;
     }
@@ -507,11 +511,54 @@ function expectNoLookups(desktop) {
  */
 export const saved = (window) => window.evaluate(() => window.kitAPI.getSettings());
 
-/** Upload's status line: the action bar's. */
-export const uploadStatus = (window) => window.locator('#action-bar .kit-action-line');
+/** Upload's cards, one for each upload, in the order they were made. */
+export const uploadCards = (window) => window.locator('#upload-grid .kit-card');
 
-/** The action bar's Upload button (the rail's Upload is a section, not this). */
-export const uploadButton = (window) => window.locator('#action-bar').getByRole('button', { name: 'Upload', exact: true });
+/** The newest upload's card: the one a test's files made last. */
+export const uploadCard = (window) => uploadCards(window).last();
+
+/** An upload card's button, by its label ("Upload", "Pause", "Resume", "Cancel", "Copy Link", "Retry"). */
+export const cardButton = (card, name) => card.locator('.kit-card-actions').getByRole('button', { name, exact: true });
+
+/** The newest upload's status line, as its card says it. */
+export const uploadStatus = (window) => uploadCard(window).locator('.kit-card-status');
+
+/** The newest upload's Upload button (the rail's Upload is a section, and the bar's is Upload All). */
+export const uploadButton = (window) => cardButton(uploadCard(window), 'Upload');
+
+/** The newest upload's link, once it's done. */
+export const uploadLink = (window) => uploadCard(window).getByRole('textbox', { name: 'Link' });
+
+/**
+ * Drop files from disk onto a part of the window (a card, or Upload's empty
+ * space), as a person drags them from a folder: real files, so the window
+ * gets their paths from the kit as it does for a real drop. They're picked
+ * with a file input of the test's own, which goes once they're dropped.
+ * @param {import('@playwright/test').Page} window
+ * @param {import('@playwright/test').Locator} target
+ * @param {string[]} paths
+ */
+export async function dropFiles(window, target, paths) {
+    const input = await window.evaluateHandle(() => {
+        const picker = document.createElement('input');
+        picker.type = 'file';
+        picker.multiple = true;
+        picker.hidden = true;
+        document.body.append(picker);
+        return picker;
+    });
+    await input.asElement().setInputFiles(paths);
+    const dataTransfer = await window.evaluateHandle((picker) => {
+        const dt = new DataTransfer();
+        for (const file of picker.files) dt.items.add(file);
+        picker.remove();
+        return dt;
+    }, input);
+    for (const type of ['dragenter', 'dragover', 'drop']) await target.dispatchEvent(type, { dataTransfer });
+}
+
+/** The action bar's status line, under the cards: how many uploads, or why none can start. */
+export const actionLine = (window) => window.locator('#action-bar .kit-action-line');
 
 /** The Upload Security Warning: the kit's prompt, asked before an upload that won't be encrypted. */
 export const securityWarning = (window) => window.getByRole('alertdialog', { name: 'Upload Security Warning' });
@@ -522,6 +569,9 @@ export const securityWarning = (window) => window.getByRole('alertdialog', { nam
  * @param {import('@playwright/test').Page} window
  */
 export const transfersIn = (window) => window.evaluate(() => window.electronAPI.listTransfers());
+
+/** The transfers in main's registry still going (running, paused or queued): an ended one stays there until it's removed. */
+export const goingIn = async (window) => (await transfersIn(window)).filter((card) => ['queued', 'running', 'paused'].includes(card.state));
 
 /**
  * Share a file with the app open, as Windows' right-click entry does, and wait

@@ -198,11 +198,13 @@ test('the main window\'s page has a CSP: its own scripts, styles, fonts and imag
 });
 
 test('the shell and the shared parts are the kit\'s: no modal, drop zone, progress bar or theme script of the client\'s own', () => {
-    for (const call of ['kit.ui.mountShell(', 'kit.ui.dropZone(', 'kit.ui.actionBar(', 'kit.ui.confirm(', 'kit.ui.toast(', 'kit.format.countOf(', 'kit.format.formatBytes(']) {
+    for (const call of ['kit.ui.mountShell(', 'kit.ui.dropZone(', 'kit.ui.actionBar(', 'kit.ui.card(', 'kit.ui.cardGrid(', 'kit.ui.bulkBar(', 'kit.ui.busy(',
+        'kit.ui.confirm(', 'kit.ui.toast(', 'kit.format']) {
         assert.ok(renderer.includes(call), `renderer.js uses ${call}`);
     }
     assert.match(renderer, /busy: async \(\) =>/, 'Restart Now asks first while an upload runs');
-    for (const own of ['bootstrap.Modal', 'bootstrap.Tooltip', 'innerHTML', 'alert(', 'dragover']) {
+    // Drops are the kit's: the page lights the card files are over, and never reads what's dropped itself.
+    for (const own of ['bootstrap.Modal', 'bootstrap.Tooltip', 'innerHTML', 'alert(', 'dataTransfer', 'xfer-card', 'card-status']) {
         assert.ok(!renderer.includes(own), `renderer.js has ${own}`);
     }
     for (const markup of ['insecure-upload-modal', 'progress-bar', 'drop-zone', 'prefers-color-scheme', 'data-bs-theme']) {
@@ -219,12 +221,14 @@ test('every icon is hidden from screen readers, and every icon-only button has a
     for (const span of spans) assert.match(span, /aria-hidden="true"/, span);
     // The icons the page makes; the ones in index.html (whose glyph it changes) are checked above.
     const created = new Set([...renderer.matchAll(/const (\w+) = document\.createElement\('span'\)/g)].map((m) => m[1]));
+    // The cards' glyphs are the kit's, which hides them; any the page makes itself is hidden here.
     const made = [...renderer.matchAll(/(\w+)\.className = 'material-icons-round[^']*';/g)].map((m) => m[1]).filter((name) => created.has(name));
-    assert.ok(made.length > 0);
     for (const name of made) {
         assert.ok(renderer.includes(`${name}.setAttribute('aria-hidden', 'true');`), `${name} isn't aria-hidden`);
     }
-    assert.match(renderer, /removeBtn\.setAttribute\('aria-label', `Remove \$\{f\.name\}`\)/);
+    // The cards' Remove and Advanced Options are the kit's, named by it; the page's own controls on a card are named here.
+    assert.match(renderer, /select\.setAttribute\('aria-label', 'Upload to'\)/);
+    assert.match(renderer, /linkRow\.setAttribute\('aria-label', 'Link'\)/);
 });
 
 test('the copy is the house\'s: Title Case buttons and titles, sentence case labels and status, one-character ellipses', () => {
@@ -232,7 +236,7 @@ test('the copy is the house\'s: Title Case buttons and titles, sentence case lab
     for (const slip of ['File Lifetime</label>', 'Max Downloads</label>', 'Your Link:', '...\'', '...`', '..."', 'file(s)', 'Upload successful!']) {
         assert.ok(!text.includes(slip), `"${slip}"`);
     }
-    for (const title of ['Upload Security Warning', 'Upload Anyway', 'Drag & Drop Files Here', 'Add More', 'Pause Upload', 'Resume Upload']) {
+    for (const title of ['Upload Security Warning', 'Upload Anyway', 'Drag & Drop Files Here', 'Add Files', 'Upload All', 'Clear Finished', 'Copy Link', "label: 'Pause'", "label: 'Resume'", "label: 'Retry'"]) {
         assert.ok(text.includes(title), `"${title}"`);
     }
 });

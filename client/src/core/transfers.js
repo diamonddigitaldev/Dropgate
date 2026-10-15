@@ -8,11 +8,13 @@ const { randomUUID } = require('crypto');
 // and start in the order added as places free. A paused one takes no place:
 // resumed with none free, it waits as queued, and is resumed when one frees.
 //
-// A transfer's states here: waiting (made, not started), queued, running
-// (in the transfer window, from its first step to its last) and paused. One
-// that ends (done, failed, cancelled) leaves the registry as it ends: today's
-// window keeps its link itself, and has no card to keep (phase 7, piece 4
-// keeps them until they're removed).
+// A transfer's states here: waiting (made, not started: it waits for Upload,
+// and can still take more files), queued, running (in the transfer window,
+// from its first step to its last), paused, and once it has ended, done,
+// failed or cancelled. An ended one stays, with its link or its reason, until
+// it's removed (Remove, Clear Finished) or the app quits; its place goes to
+// the next queued as it ends. A failed or cancelled one can be tried again,
+// and waits once more.
 //
 // It runs nothing itself: `start` and `resume` hand a transfer to the
 // transfer window, and `changed` hears each change, for the window, the tray,
@@ -21,6 +23,12 @@ const { randomUUID } = require('crypto');
 
 /** The states a transfer is going in: these keep the app running, and Restart Now asks. */
 const GOING = Object.freeze(['queued', 'running', 'paused']);
+
+/** The states a transfer has once it has ended: it stays until it's removed. */
+const ENDED = Object.freeze(['done', 'failed', 'cancelled']);
+
+/** The state an outcome ends a transfer in. */
+const ENDED_AS = Object.freeze({ success: 'done', error: 'failed', cancelled: 'cancelled' });
 
 class Transfers {
     /** @type {Map<string, any>} */
@@ -33,7 +41,7 @@ class Transfers {
      * @param {(card: any) => void} options.start - Start one in the transfer window.
      * @param {(card: any) => void} options.resume - Resume a paused one there, now that it has a place.
      * @param {(card: any) => void} [options.changed] - One changed: its state, or its snapshot.
-     * @param {(card: any) => void} [options.removed] - One left: it ended, or was taken back.
+     * @param {(card: any) => void} [options.removed] - One left: removed, or taken back.
      */
     constructor({ atOnce, start, resume, changed = () => {}, removed = () => {} }) {
         this.atOnce = atOnce;
@@ -49,8 +57,9 @@ class Transfers {
      * @returns {any} the transfer, with its new ID
      */
     add(fields) {
-        const card = { id: randomUUID(), kind: 'upload', ...fields, state: 'waiting', started: false, snapshot: null, resumeWhenFree: false, resuming: false };
+        const card = { id: randomUUID(), kind: 'upload', ...fields, state: 'waiting', started: false, snapshot: null, resumeWhenFree: false, resuming: false, link: null, message: null };
         this.#cards.set(card.id, card);
+        this.changed(card);
         return card;
     }
 
@@ -156,26 +165,90 @@ class Transfers {
     }
 
     /**
-     * Take back a transfer the transfer window never had: waiting, or queued
-     * and never started. Returns it, or null when it's running there (cancel
-     * it there instead).
+     * Take back a transfer the transfer window never had, as if it had never
+     * been made: a share declined, or a window's waiting one as the window
+     * goes. Returns it, or null when it has started or ended.
      */
     withdraw(id) {
         const card = this.#cards.get(id);
-        if (!card || card.started) return null;
+        if (!card || card.started || ENDED.includes(card.state)) return null;
         this.#cards.delete(id);
         this.#pump();
         this.removed(card);
         return card;
     }
 
-    /** A transfer has ended in the transfer window: it leaves, and its place goes to the next queued. */
-    ended(id) {
+    /**
+     * A transfer has ended: in the transfer window, or cancelled while queued.
+     * It stays, done (with its link), failed (with its reason) or cancelled,
+     * and its place goes to the next queued.
+     * @param {string} id
+     * @param {{ status: 'success', link: string } | { status: 'cancelled' } | { status: 'error', error: string }} outcome
+     */
+    ended(id, outcome) {
         const card = this.#cards.get(id);
-        if (!card) return null;
-        this.#cards.delete(id);
+        if (!card || ENDED.includes(card.state)) return null;
+        card.link = outcome.status === 'success' ? outcome.link : null;
+        card.message = outcome.status === 'error' ? outcome.error : null;
+        card.resumeWhenFree = false;
+        card.resuming = false;
+        this.#set(card, ENDED_AS[outcome.status], { always: true });
         this.#pump();
-        this.removed(card);
+        return card;
+    }
+
+    /**
+     * Files added to a waiting transfer (dropped onto its card): each one not
+     * in it already, by its path. Returns how many were added and skipped, or
+     * null when it isn't waiting any more (it has started: they make a new one).
+     * @param {string} id
+     * @param {{ path: string }[]} files
+     */
+    addFiles(id, files) {
+        const card = this.#cards.get(id);
+        if (!card || card.state !== 'waiting') return null;
+        const known = new Set(card.files.map((file) => file.path));
+        const fresh = files.filter((file) => {
+            if (known.has(file.path)) return false;
+            known.add(file.path);
+            return true;
+        });
+        card.files.push(...fresh);
+        if (fresh.length > 0) this.changed(card);
+        return { added: fresh.length, skipped: files.length - fresh.length };
+    }
+
+    /**
+     * Remove transfers that are waiting or have ended (Remove, Clear
+     * Finished). One queued, running or paused stays: it's cancelled instead.
+     * Returns those removed.
+     * @param {string[]} ids
+     */
+    remove(ids) {
+        const removed = [];
+        for (const id of ids) {
+            const card = this.#cards.get(id);
+            if (!card || !(card.state === 'waiting' || ENDED.includes(card.state))) continue;
+            this.#cards.delete(id);
+            removed.push(card);
+            this.removed(card);
+        }
+        return removed;
+    }
+
+    /**
+     * Try a failed or cancelled transfer again: it waits once more, for the
+     * window that asked to start it, with its files, server and options as
+     * they were. Returns it, or null when it can't be.
+     * @param {string} id
+     * @param {number} owner - The window that asked.
+     */
+    retry(id, owner) {
+        const card = this.#cards.get(id);
+        if (!card || !['failed', 'cancelled'].includes(card.state)) return null;
+        Object.assign(card, { owner, started: false, snapshot: null, link: null, message: null, resumeWhenFree: false, resuming: false });
+        delete card.ask;
+        this.#set(card, 'waiting');
         return card;
     }
 
@@ -185,7 +258,7 @@ class Transfers {
      */
     close() {
         this.#closed = true;
-        const unstarted = this.list().filter((card) => !card.started);
+        const unstarted = this.list().filter((card) => !card.started && !ENDED.includes(card.state));
         for (const card of unstarted) this.#cards.delete(card.id);
         return unstarted;
     }
@@ -216,8 +289,9 @@ class Transfers {
 
 /**
  * A transfer as the window draws it: its files' names and sizes (never a
- * path), its state, and how it's going, from core's snapshot (which names no
- * file and holds no key).
+ * path), its state and options, how it's going, from core's snapshot (which
+ * names no file and holds no key), and once it has ended, its link or its
+ * reason.
  */
 function view(card) {
     const { snapshot } = card;
@@ -233,6 +307,11 @@ function view(card) {
         fileIndex: snapshot?.fileIndex ?? null,
         canPause: snapshot?.canPause === true,
         deadline: snapshot?.deadline ?? null,
+        options: card.options
+            ? { lifetime: { ...card.options.lifetime }, maxDownloads: card.options.maxDownloads, encrypt: card.options.encrypt ?? null }
+            : null,
+        link: card.link,
+        message: card.message,
     };
 }
 
@@ -291,4 +370,4 @@ class Pacer {
     }
 }
 
-module.exports = { Transfers, Pacer, view, GOING };
+module.exports = { Transfers, Pacer, view, GOING, ENDED };

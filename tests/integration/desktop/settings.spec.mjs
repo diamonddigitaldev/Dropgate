@@ -1,7 +1,7 @@
 // Parity: the desktop app's settings. It starts with no server and the default
 // options, remembers what it's given across a restart, and uploads with it.
 import { madeUpFile, summary } from '../helpers/files.mjs';
-import { expect, test, uploadsStarted, uploadStatus } from '../helpers/desktop.mjs';
+import { actionLine, expect, test, uploadsStarted } from '../helpers/desktop.mjs';
 import { download } from '../helpers/webui.mjs';
 
 // Above v3's default of 1, which makes the app lock Max Downloads at 1.
@@ -14,7 +14,7 @@ test('starts with no server and the default options, then remembers the server a
     let window = await app.window();
 
     // A new profile has no server, so it asks nothing of any.
-    await expect(uploadStatus(window)).toHaveText(/no server url/i);
+    await expect(actionLine(window)).toHaveText(/no server url/i);
     await expect(window.locator('#server-url')).toHaveValue('');
     await expect(window.locator('#file-lifetime-value')).toHaveValue('24');
     await expect(window.locator('#file-lifetime-unit')).toHaveValue('hours');
@@ -39,7 +39,7 @@ test('starts with no server and the default options, then remembers the server a
     window = await app.window();
 
     await expect(window.locator('#server-url'), 'the server after a restart').toHaveValue(desktop.serverUrl);
-    await expect(uploadStatus(window)).not.toHaveText(/no server url|could not connect/i);
+    await expect(actionLine(window)).not.toHaveText(/no server url|could not connect/i);
     await expect(window.locator('#file-lifetime-value'), 'File Lifetime after a restart').toHaveValue('30');
     await expect(window.locator('#file-lifetime-unit'), 'File Lifetime after a restart').toHaveValue('minutes');
 

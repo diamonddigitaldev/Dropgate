@@ -8,7 +8,7 @@ const { menuItems } = require('./menu');
 const { Handles, describeFile } = require('./core/handles');
 const { endNotice, countsLine } = require('./core/notices');
 const { shareUpload } = require('./core/share');
-const { Pacer, Transfers, view } = require('./core/transfers');
+const { GOING, Pacer, Transfers, view } = require('./core/transfers');
 const { createTransferHost } = require('./transfer-host');
 const { createTray } = require('./tray');
 const { answerWindowChannels, serverOf } = require('./window-channels');
@@ -122,9 +122,13 @@ const transfers = new Transfers({
     changed: transferChanged,
     removed: (card) => {
         pacer.drop(card.id);
+        mainWindow()?.webContents.send(IPC.TRANSFER_REMOVED, [card.id]);
         followGoing();
     },
 });
+
+/** The transfers going: running, paused or queued. Waiting and ended ones aren't. */
+const goingTransfers = () => transfers.list().filter((card) => GOING.includes(card.state));
 
 // Each transfer as the window draws it, at most TRANSFERS.UPDATES_PER_SECOND times a second.
 const pacer = new Pacer(TRANSFERS.UPDATES_PER_SECOND, (_id, card) => mainWindow()?.webContents.send(IPC.TRANSFER_CHANGED, card));
@@ -214,7 +218,7 @@ function watchWindow(win) {
         if (!toldOfTray) {
             toldOfTray = true;
             // A share still being checked is going too, though it isn't a transfer yet.
-            const count = Math.max(1, transfers.list().filter((card) => card.state !== 'waiting').length);
+            const count = Math.max(1, goingTransfers().length);
             showNotification('Still Running in the Tray', `${countOf(count, 'upload')} ${count === 1 ? 'goes' : 'go'} on in the background. Open or quit ${APP_NAME} from its tray icon.`);
         }
     });
@@ -286,8 +290,8 @@ if (kit.primary) {
             onUpdate: (id, snapshot) => transfers.updated(id, snapshot),
             onPauseEnding: pauseEnding,
             onFinished: (id, { status, link, message }) => {
-                const card = transfers.ended(id);
-                finishUpload(status === 'error' ? { status, error: message } : { status, ...(link ? { link } : {}) }, card);
+                const result = status === 'error' ? { status, error: message } : { status, ...(link ? { link } : {}) };
+                finishUpload(result, transfers.ended(id, result));
             },
         });
         app.on('before-quit', beforeQuit);
@@ -515,11 +519,9 @@ function cancelUpload(id) {
         host.cancel(id);
     } else if (upload.state === 'waiting' && upload.share) {
         declineShare(id);
-    } else {
-        // Never started: queued, it's told of as cancelled; waiting, only its window knew of it.
-        const { state } = upload;
-        transfers.withdraw(id);
-        if (state === 'queued') finishUpload({ status: 'cancelled' }, upload);
+    } else if (upload.state === 'queued') {
+        // Never started: it's told of as cancelled, and its card stays, as one cancelled while running does.
+        finishUpload({ status: 'cancelled' }, transfers.ended(id, { status: 'cancelled' }));
     }
 }
 
@@ -581,7 +583,7 @@ function keepAwake() {
 function showProgress() {
     const main = mainWindow();
     if (!main) return;
-    const active = transfers.list().filter((card) => card.state !== 'waiting');
+    const active = goingTransfers();
     if (active.length === 0) return;
     if (active.length > 1) {
         const sized = active.filter((card) => card.snapshot?.totalBytes);
@@ -622,7 +624,7 @@ function finishUpload(result, upload) {
     const main = mainWindow();
 
     // Reset window title and taskbar progress, once nothing else is going.
-    if (main && transfers.list().some((card) => card.state !== 'waiting')) {
+    if (main && goingTransfers().length > 0) {
         showProgress();
     } else if (main) {
         main.setTitle(APP_NAME);
@@ -632,7 +634,7 @@ function finishUpload(result, upload) {
             main.setProgressBar(result.status === 'success' ? 1 : 0,
                 { mode: result.status === 'success' ? 'none' : 'error' });
             setTimeout(() => {
-                if (mainWindow() && !transfers.list().some((card) => card.state !== 'waiting')) mainWindow().setProgressBar(-1);
+                if (mainWindow() && goingTransfers().length === 0) mainWindow().setProgressBar(-1);
             }, 3000);
         }
     }

@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { holdsPlaintext, madeUpFile, readZip, summary } from '../helpers/files.mjs';
-import { expect, securityWarning, test, uploadsStarted, uploadStatus } from '../helpers/desktop.mjs';
+import { expect, securityWarning, test, uploadLink, uploadsStarted, uploadStatus } from '../helpers/desktop.mjs';
 import { download } from '../helpers/webui.mjs';
 
 // Big enough for two 5 MiB chunks.
@@ -122,9 +122,9 @@ test.describe('on a server with HTTPS', () => {
         const shared = desktop.addFile(file);
         expect(await desktop.launchAgain(shared, '--upload'), "the second launch's exit code").toBe(0);
 
-        await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });
+        await expect(uploadStatus(window)).toHaveText(/^Uploaded · /, { timeout: 30_000 });
         const { link } = expectLinkCopied(app, shared);
-        await expect(window.locator('#download-link'), 'the link the open app shows').toHaveValue(link);
+        await expect(uploadLink(window), 'the link the open app shows').toHaveValue(link);
         if (desktop.real) {
             // In CI the clipboard is real, and read back once the copy has finished, which can be just
             // after the window says it's done. It's checked here, where the app stays open: an app that
@@ -175,9 +175,9 @@ test.describe('on a server with HTTPS', () => {
         const shared = files.map((file) => desktop.addFile(file));
         expect(await desktop.launchAgain(...shared, '--upload'), "the second launch's exit code").toBe(0);
 
-        await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });
+        await expect(uploadStatus(window)).toHaveText(/^Uploaded · /, { timeout: 30_000 });
         const { link } = expectLinkCopied(app, shared);
-        await expect(window.locator('#download-link'), 'the link the open app shows').toHaveValue(link);
+        await expect(uploadLink(window), 'the link the open app shows').toHaveValue(link);
         secrets.addLink(link);
         expect(app.eventsOf('window').filter((w) => w.session === 'ui'), 'windows the app opened, beside its transfer window: the main one').toHaveLength(1);
         // One encrypted upload of them all, which tells the server nothing of how many files it holds.

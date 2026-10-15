@@ -57,16 +57,41 @@ function handleOf(handle) {
     return handle;
 }
 
+/** A list of handles: at least one, none twice. */
+const handleList = (files) => Array.isArray(files) && files.length > 0 && files.length <= MAX_FILES && files.every(isId) && new Set(files).size === files.length;
+
 /**
- * transfer:add-upload: the handles of the files to upload and the upload's
- * options, as the page set them.
- * @returns {{ files: string[], options: { lifetime: { value: number, unit: string }, maxDownloads: number, encrypt: boolean } }}
+ * transfer:add-upload: the handles of the files to upload. Its options are
+ * the server's settings for new uploads, which main gives it.
+ * @returns {{ files: string[] }}
  */
 function newUpload(request) {
-    if (!isRecord(request, ['files', 'options'], ['files'])) throw new Error('Expected files to upload.');
-    const { files } = request;
-    if (!Array.isArray(files) || files.length === 0 || files.length > MAX_FILES || !files.every(isId)) throw new Error('Expected files to upload.');
-    return { files: [...files], options: uploadOptions(request.options) };
+    if (!isRecord(request, ['files']) || !handleList(request.files)) throw new Error('Expected files to upload.');
+    return { files: [...request.files] };
+}
+
+/**
+ * transfer:add-files: files to add to one of this window's uploads.
+ * @param {(id: string) => boolean} own - Whether it's an upload of this window's.
+ * @returns {{ id: string, files: string[] }}
+ */
+function filesToAdd(request, own) {
+    if (!isRecord(request, ['id', 'files']) || !isId(request.id) || !own(request.id) || !handleList(request.files)) {
+        throw new Error('Expected files to add to an upload of this window\'s.');
+    }
+    return { id: request.id, files: [...request.files] };
+}
+
+/**
+ * transfer:remove: uploads main made, none twice.
+ * @param {(id: string) => boolean} known
+ */
+function transfersOf(request, known) {
+    const ids = isRecord(request, ['ids']) ? request.ids : null;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_FILES || !ids.every((id) => isId(id) && known(id)) || new Set(ids).size !== ids.length) {
+        throw new Error('Expected uploads.');
+    }
+    return [...ids];
 }
 
 /** An upload's options: its lifetime, download limit and whether it's encrypted. */
@@ -93,16 +118,18 @@ function uploadOf(request, known) {
 }
 
 /**
- * transfer:start: uploads main made, each one this window may start.
+ * transfer:start: uploads main made, each one this window may start, and for
+ * the window's own, whether they're end-to-end encrypted.
  * @param {(id: string) => boolean} startable
+ * @returns {{ ids: string[], encrypt?: boolean }}
  */
 function uploadsToStart(request, startable) {
-    const ids = isRecord(request, ['ids']) ? request.ids : null;
+    const ids = isRecord(request, ['ids', 'encrypt'], ['ids']) ? request.ids : null;
     if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_FILES || !ids.every((id) => isId(id) && startable(id))
-        || new Set(ids).size !== ids.length) {
+        || new Set(ids).size !== ids.length || !(request.encrypt === undefined || typeof request.encrypt === 'boolean')) {
         throw new Error('Expected uploads waiting to start.');
     }
-    return [...ids];
+    return { ids: [...ids], ...(request.encrypt === undefined ? {} : { encrypt: request.encrypt }) };
 }
 
 /**
@@ -187,6 +214,8 @@ module.exports = {
     pathList,
     handleOf,
     newUpload,
+    filesToAdd,
+    transfersOf,
     uploadOptions,
     uploadOf,
     uploadsToStart,

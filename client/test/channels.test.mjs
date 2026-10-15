@@ -33,6 +33,7 @@ const WINDOW_CHANNELS = Object.values(IPC).filter((channel) => !PUSHES.includes(
 const ENGINE_CHANNELS = Object.values(ENGINE).filter((channel) => !ENGINE_PUSHES.includes(channel));
 const OPTIONS = { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true };
 const SERVER = { url: 'https://dropgate.test', allowInsecure: false };
+const SETTINGS = { serverURL: 'https://dropgate.test', lifetimeValue: 24, lifetimeUnit: 'hours', maxDownloads: 1 };
 const SNAPSHOT = {
     status: 'uploading', phase: 'chunk', text: 'Uploading chunk 1 of 3...', percent: 33.3,
     processedBytes: 5_242_880, totalBytes: 12_000_000, fileIndex: 0, totalFiles: 1, canPause: true, deadline: null,
@@ -42,7 +43,7 @@ const SNAPSHOT = {
  * Both sets of channels, answered as main answers them, with everything they
  * act on recording what it's asked to do in `work`.
  */
-function setUp({ settings = { serverURL: 'https://dropgate.test' } } = {}) {
+function setUp({ settings = SETTINGS } = {}) {
     const main = fakeMain({ settings });
     const work = [];
     const record = (name, answer) => (...args) => {
@@ -183,47 +184,91 @@ test('server:check takes a server\'s address, never a path or another scheme', a
     }
 });
 
-test('transfer:add-upload takes handles this window holds and options in range, and nothing else', async () => {
-    const setup = setUp();
+test('transfer:add-upload takes handles this window holds, and nothing else: its options are the server\'s settings for new uploads', async () => {
+    const setup = setUp({ settings: { ...SETTINGS, lifetimeValue: 0.5, lifetimeUnit: 'hours', maxDownloads: 3 } });
     const page = setup.main.windowPage();
     const { files: [mine] } = await setup.main.invoke(IPC.FILES_ADD, page, [FILE]);
     const { files: [theirs] } = await setup.main.invoke(IPC.FILES_ADD, setup.main.windowPage(), [FILE]);
-    const upload = (change) => ({ files: [mine.handle], options: OPTIONS, ...change });
-    const options = (change) => upload({ options: { ...OPTIONS, ...change } });
-    const lifetime = (value, unit) => options({ lifetime: { value, unit } });
+    const upload = (change) => ({ files: [mine.handle], ...change });
 
     await refusesAll(setup, IPC.TRANSFER_ADD_UPLOAD, page, [
         [], [[mine.handle]], [upload({ files: [] })], [upload({ files: mine.handle })], [upload({ files: [FILE] })],
-        [upload({ files: ['not a handle'] })], [upload({ files: [42] })], [upload({ server: 'https://elsewhere.test' })],
+        [upload({ files: ['not a handle'] })], [upload({ files: [42] })], [upload({ files: [mine.handle, mine.handle] })],
+        [upload({ server: 'https://elsewhere.test' })], [upload({ options: OPTIONS })],
     ], /Expected files to upload\./);
     await refusesAll(setup, IPC.TRANSFER_ADD_UPLOAD, page, [[upload({ files: [randomUUID()] })], [upload({ files: [mine.handle, theirs.handle] })]],
         /Expected files handed to this window\./);
-    await refusesAll(setup, IPC.TRANSFER_ADD_UPLOAD, page, [
-        [{ files: [mine.handle] }], [upload({ options: null })], [options({ path: FILE })],
-    ], /Expected an upload's options\./);
-    await refusesAll(setup, IPC.TRANSFER_ADD_UPLOAD, page, [
-        [lifetime(24, 'weeks')], [lifetime(-1, 'hours')], [lifetime(NaN, 'hours')], [lifetime(Infinity, 'hours')], [lifetime('24', 'hours')],
-        [lifetime(1e300, 'days')], [lifetime(5, 'unlimited')], [options({ lifetime: { value: 24 } })], [options({ lifetime: { value: 24, unit: 'hours', ms: 1 } })],
-    ], /Expected a file lifetime\./);
-    await refusesAll(setup, IPC.TRANSFER_ADD_UPLOAD, page, [
-        [options({ maxDownloads: 1.5 })], [options({ maxDownloads: -1 })], [options({ maxDownloads: 2 ** 53 })], [options({ maxDownloads: '1' })],
-    ], /Expected a download limit\./);
-    await refusesAll(setup, IPC.TRANSFER_ADD_UPLOAD, page, [[options({ encrypt: 'yes' })], [options({ encrypt: undefined })]],
-        /Expected whether to encrypt\./);
 
-    const { id } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, lifetime(0.5, 'hours'));
+    const { id } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, upload());
     assert.deepEqual(setup.transfers.get(id), {
         id,
         kind: 'upload',
         owner: page.sender.id,
         files: [{ path: FILE, name: 'Secret plans é.bin', size: 1000, mtimeMs: fs.statSync(FILE).mtimeMs }],
-        options: { ...OPTIONS, lifetime: { value: 0.5, unit: 'hours' } },
+        options: { lifetime: { value: 0.5, unit: 'hours' }, maxDownloads: 3 },
         state: 'waiting',
         started: false,
         snapshot: null,
         resumeWhenFree: false,
         resuming: false,
+        link: null,
+        message: null,
     });
+
+    // Unlimited is a lifetime of 0, whatever value Settings kept beside it.
+    const unlimited = setUp({ settings: { ...SETTINGS, lifetimeValue: 24, lifetimeUnit: 'unlimited' } });
+    const unlimitedPage = unlimited.main.windowPage();
+    const { files: [file] } = await unlimited.main.invoke(IPC.FILES_ADD, unlimitedPage, [FILE]);
+    const made = await unlimited.main.invoke(IPC.TRANSFER_ADD_UPLOAD, unlimitedPage, { files: [file.handle] });
+    assert.deepEqual(unlimited.transfers.get(made.id).options.lifetime, { value: 0, unit: 'unlimited' });
+});
+
+test('transfer:add-files adds files this window holds to its own upload waiting, each once; one started takes none', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const other = setup.main.windowPage();
+    const SECOND = path.join(folder, 'Second.bin');
+    fs.writeFileSync(SECOND, Buffer.alloc(10, 2));
+    const { files: [first, second] } = await setup.main.invoke(IPC.FILES_ADD, page, [FILE, SECOND]);
+    const { files: [theirs] } = await setup.main.invoke(IPC.FILES_ADD, other, [SECOND]);
+    const { id } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, { files: [first.handle] });
+    const { id: theirUpload } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, other, { files: [theirs.handle] });
+
+    await refusesAll(setup, IPC.TRANSFER_ADD_FILES, page, [
+        [], [{ id }], [{ id, files: [] }], [{ id, files: [FILE] }], [{ id, files: [second.handle, second.handle] }], [{ id: FILE, files: [second.handle] }],
+        [{ id: randomUUID(), files: [second.handle] }], [{ id: theirUpload, files: [second.handle] }], [{ id, files: [second.handle], extra: 1 }],
+    ], /Expected files to add to an upload of this window's\./);
+    await refusesAll(setup, IPC.TRANSFER_ADD_FILES, page, [[{ id, files: [theirs.handle] }]], /Expected files handed to this window\./);
+
+    assert.deepEqual(await setup.main.invoke(IPC.TRANSFER_ADD_FILES, page, { id, files: [first.handle, second.handle] }), { added: 1, skipped: 1 });
+    assert.deepEqual(setup.transfers.get(id).files.map((file) => file.name), ['Secret plans é.bin', 'Second.bin']);
+    setup.transfers.start(id, SERVER);
+    assert.deepEqual(await setup.main.invoke(IPC.TRANSFER_ADD_FILES, page, { id, files: [second.handle] }), { started: true });
+    assert.equal(setup.transfers.get(id).files.length, 2);
+});
+
+test('transfer:remove takes uploads main made, removing those waiting or ended; transfer:retry one failed or cancelled', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const { files: [file] } = await setup.main.invoke(IPC.FILES_ADD, page, [FILE]);
+    const add = async () => (await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, { files: [file.handle] })).id;
+    const [waiting, running, failed] = [await add(), await add(), await add()];
+    setup.transfers.start(running, SERVER);
+    setup.transfers.start(failed, SERVER);
+    setup.transfers.ended(failed, { status: 'error', error: 'The server closed the connection.' });
+
+    await refusesAll(setup, IPC.TRANSFER_REMOVE, page, [
+        [], [waiting], [{ ids: waiting }], [{ ids: [] }], [{ ids: [waiting, waiting] }], [{ ids: [FILE] }], [{ ids: [randomUUID()] }], [{ ids: [waiting], extra: 1 }],
+    ], /Expected uploads\./);
+    await refusesAll(setup, IPC.TRANSFER_RETRY, page, [[], [{ id: randomUUID() }], [{ id: FILE }]], /Expected an upload\./);
+    await refusesAll(setup, IPC.TRANSFER_RETRY, page, [[{ id: waiting }], [{ id: running }]], /Expected an upload that failed or was cancelled\./);
+
+    await setup.main.invoke(IPC.TRANSFER_RETRY, page, { id: failed });
+    assert.equal(setup.transfers.get(failed).state, 'waiting');
+    setup.transfers.ended(running, { status: 'cancelled' });
+    // One that isn't waiting or ended stays; here, all three can go.
+    await setup.main.invoke(IPC.TRANSFER_REMOVE, page, { ids: [waiting, running, failed] });
+    assert.deepEqual(setup.transfers.list(), []);
 });
 
 test('transfer:start takes uploads waiting that this window made, or a share it was asked about, and checks them all first', async () => {
@@ -232,7 +277,7 @@ test('transfer:start takes uploads waiting that this window made, or a share it 
     const other = setup.main.windowPage();
     const add = async (from) => {
         const { files: [file] } = await setup.main.invoke(IPC.FILES_ADD, from, [FILE]);
-        return (await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, from, { files: [file.handle], options: OPTIONS })).id;
+        return (await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, from, { files: [file.handle] })).id;
     };
     const mine = await add(page);
     const theirs = await add(other);
@@ -250,17 +295,28 @@ test('transfer:start takes uploads waiting that this window made, or a share it 
     await refusesAll(setup, IPC.TRANSFER_START, page, [
         [], [[mine]], [{ ids: mine }], [{ ids: [] }], [{ ids: [mine, mine] }], [{ ids: [FILE] }], [{ ids: [randomUUID()] }],
         [{ ids: [mine, theirs] }], [{ ids: [started] }], [{ ids: [askedOfOther] }], [{ ids: [mine], server: 'https://elsewhere.test' }],
+        [{ ids: [mine], encrypt: 'yes' }], [{ ids: [mine], encrypt: null }],
     ], /Expected uploads waiting to start\./);
+    // The window's own: it says whether they're end-to-end encrypted, as it found the server.
+    await refusesAll(setup, IPC.TRANSFER_START, page, [[{ ids: [mine] }], [{ ids: [mine, asked] }]], /Expected whether to encrypt\./);
 
-    await setup.main.invoke(IPC.TRANSFER_START, page, { ids: [mine, asked] });
+    await setup.main.invoke(IPC.TRANSFER_START, page, { ids: [mine, asked], encrypt: true });
     assert.deepEqual(setup.work.slice(-2), [['start', mine, SERVER], ['start', asked, SERVER]]);
+    assert.equal(setup.transfers.get(mine).options.encrypt, true);
+    assert.equal(setup.transfers.get(asked).options.encrypt, OPTIONS.encrypt, "a share's is the share's");
+
+    // A share asked about alone needs no word on encryption: it decided its own.
+    const alone = share(page.sender.id);
+    setup.transfers.get(alone).options = { ...OPTIONS, encrypt: false };
+    await setup.main.invoke(IPC.TRANSFER_START, page, { ids: [alone] });
+    assert.equal(setup.transfers.get(alone).options.encrypt, false);
 
     // With no server in Settings, a window's own upload has nowhere to go: refused before any starts.
-    const unset = setUp({ settings: { serverURL: '' } });
+    const unset = setUp({ settings: { ...SETTINGS, serverURL: '' } });
     const unsetPage = unset.main.windowPage();
     const { files: [file] } = await unset.main.invoke(IPC.FILES_ADD, unsetPage, [FILE]);
-    const { id } = await unset.main.invoke(IPC.TRANSFER_ADD_UPLOAD, unsetPage, { files: [file.handle], options: OPTIONS });
-    await refusesAll(unset, IPC.TRANSFER_START, unsetPage, [[{ ids: [id] }]], /Server URL is not configured\./);
+    const { id } = await unset.main.invoke(IPC.TRANSFER_ADD_UPLOAD, unsetPage, { files: [file.handle] });
+    await refusesAll(unset, IPC.TRANSFER_START, unsetPage, [[{ ids: [id], encrypt: false }]], /Server URL is not configured\./);
 });
 
 test('transfer:pause, transfer:resume and transfer:cancel take one upload main made, by its ID', async () => {
@@ -282,13 +338,15 @@ test('transfers:list gives every transfer as the window draws it: names and size
     const setup = setUp();
     const page = setup.main.windowPage();
     const { files: [file] } = await setup.main.invoke(IPC.FILES_ADD, page, [FILE]);
-    const { id } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, { files: [file.handle], options: OPTIONS });
+    const { id } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, { files: [file.handle] });
+    await setup.main.invoke(IPC.TRANSFER_START, page, { ids: [id], encrypt: true });
     setup.transfers.start(id, SERVER);
     setup.transfers.updated(id, SNAPSHOT);
     const list = await setup.main.invoke(IPC.TRANSFERS_LIST, page);
     assert.deepEqual(list, [{
         id, kind: 'upload', state: 'running', files: [{ name: 'Secret plans é.bin', size: 1000 }], status: 'uploading',
         step: SNAPSHOT.text, phase: 'chunk', percent: 33.3, fileIndex: 0, canPause: true, deadline: null,
+        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true }, link: null, message: null,
     }]);
     assert.doesNotMatch(JSON.stringify(list), new RegExp(path.basename(folder)), 'no folder in what the window gets');
 });

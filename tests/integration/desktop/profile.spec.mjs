@@ -11,7 +11,7 @@
 // that's where its chunks are held.
 import path from 'node:path';
 import { madeUpFile } from '../helpers/files.mjs';
-import { expect, test, uploadButton, uploadStatus } from '../helpers/desktop.mjs';
+import { cardButton, expect, test, uploadButton, uploadCard, uploadLink, uploadStatus } from '../helpers/desktop.mjs';
 import { heldIn } from '../helpers/profile.mjs';
 
 // End-to-end encrypted, so the link carries a key.
@@ -24,7 +24,7 @@ async function launchWith(desktop, file) {
     const app = await desktop.launch(filePath);
     const window = await app.window();
     await desktop.setUp(window);
-    await expect(window.locator('#file-list .file-row-name')).toHaveText([file.name]);
+    await expect(uploadCard(window).locator('.kit-card-name')).toHaveText([file.name]);
     await expect(window.locator('#security-text')).toHaveText(/will be end-to-end encrypted/i);
     return { app, window, filePath };
 }
@@ -33,8 +33,8 @@ test('after an upload and a restart, nothing in the profile holds the file\'s na
     const file = madeUpFile('Quarterly accounts (draft).bin', 300_000, 51);
     const { app, window, filePath } = await launchWith(desktop, file);
     await uploadButton(window).click();
-    await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });
-    const link = await window.locator('#download-link').inputValue();
+    await expect(uploadStatus(window)).toHaveText(/^Uploaded · /, { timeout: 30_000 });
+    const link = await uploadLink(window).inputValue();
     desktop.secrets.addLink(link);
     await app.quit();
     const again = await desktop.launch();
@@ -58,7 +58,7 @@ test('quit with an upload paused part-way, nothing in the profile holds the file
         return index === 0 ? route.continue() : undefined;
     });
     await uploadButton(window).click();
-    const pause = window.locator('#action-bar').getByRole('button', { name: 'Pause Upload', exact: true });
+    const pause = cardButton(uploadCard(window), 'Pause');
     await expect.poll(() => uploadIds.size, { message: 'the upload should be sending its chunks' }).toBe(1);
     await expect(pause).toBeEnabled();
     await pause.click();

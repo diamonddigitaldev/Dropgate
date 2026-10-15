@@ -10,7 +10,7 @@
 // (the test preload's): Chromium's net log names no session. The net log
 // still checks that nothing went to the server that the sessions didn't see.
 import { madeUpFile, summary } from '../helpers/files.mjs';
-import { expect, securityWarning, test, uploadButton, uploadStatus } from '../helpers/desktop.mjs';
+import { cardButton, expect, securityWarning, test, uploadButton, uploadCard, uploadLink, uploadStatus } from '../helpers/desktop.mjs';
 import { requestsTo } from '../helpers/netlog.mjs';
 import { download } from '../helpers/webui.mjs';
 
@@ -88,7 +88,7 @@ test('through an upload, a pause and a resume, every request to the server comes
     const app = await desktop.launch(desktop.addFile(file));
     const window = await app.window();
     await desktop.setUp(window);
-    await expect(window.locator('#file-list .file-row-name')).toHaveText([file.name]);
+    await expect(uploadCard(window).locator('.kit-card-name')).toHaveText([file.name]);
 
     // The second chunk waits until the upload is paused.
     const transfer = await app.transferWindow();
@@ -101,12 +101,12 @@ test('through an upload, a pause and a resume, every request to the server comes
     await uploadButton(window).click();
     await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();
     await expect.poll(() => chunks, { message: 'the second chunk should be on its way' }).toBe(2);
-    await window.locator('#action-bar').getByRole('button', { name: 'Pause Upload', exact: true }).click();
+    await cardButton(uploadCard(window), 'Pause').click();
     await expect(uploadStatus(window)).toHaveText(/^Paused\. Kept until /);
     holding = false;
-    await window.locator('#action-bar').getByRole('button', { name: 'Resume Upload', exact: true }).click();
-    await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });
-    const link = await window.locator('#download-link').inputValue();
+    await cardButton(uploadCard(window), 'Resume').click();
+    await expect(uploadStatus(window)).toHaveText(/^Uploaded · /, { timeout: 30_000 });
+    const link = await uploadLink(window).inputValue();
     desktop.secrets.addLink(link);
     await transfer.unrouteAll({ behavior: 'ignoreErrors' });
     await app.quit();

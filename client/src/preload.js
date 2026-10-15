@@ -18,7 +18,10 @@ const CH = {
     FILE_REVOKE: 'file:revoke',
     SERVER_CHECK: 'server:check',
     TRANSFER_ADD_UPLOAD: 'transfer:add-upload',
+    TRANSFER_ADD_FILES: 'transfer:add-files',
     TRANSFER_START: 'transfer:start',
+    TRANSFER_REMOVE: 'transfer:remove',
+    TRANSFER_RETRY: 'transfer:retry',
     TRANSFER_PAUSE: 'transfer:pause',
     TRANSFER_RESUME: 'transfer:resume',
     TRANSFER_CANCEL: 'transfer:cancel',
@@ -30,6 +33,7 @@ const CH = {
     FILE_OPEN_ERROR: 'file:open-error',
     TRANSFER_ASK_INSECURE: 'transfer:ask-insecure',
     TRANSFER_CHANGED: 'transfer:changed',
+    TRANSFER_REMOVED: 'transfer:removed',
     UPLOAD_STATUS: 'upload:status',
 };
 
@@ -42,7 +46,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     revokeFileAccess: (handle) => ipcRenderer.invoke(CH.FILE_REVOKE, handle),
     checkServer: (url) => ipcRenderer.invoke(CH.SERVER_CHECK, url),
     addUpload: (upload) => ipcRenderer.invoke(CH.TRANSFER_ADD_UPLOAD, upload),
-    startTransfers: (ids) => ipcRenderer.invoke(CH.TRANSFER_START, { ids }),
+    addToUpload: (id, files) => ipcRenderer.invoke(CH.TRANSFER_ADD_FILES, { id, files }),
+    // encrypt is given for the page's own uploads only: a share it was asked about decided its own.
+    startTransfers: (ids, encrypt) => ipcRenderer.invoke(CH.TRANSFER_START, encrypt === undefined ? { ids } : { ids, encrypt }),
+    removeTransfers: (ids) => ipcRenderer.invoke(CH.TRANSFER_REMOVE, { ids }),
+    retryTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_RETRY, { id }),
     pauseTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_PAUSE, { id }),
     resumeTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_RESUME, { id }),
     cancelTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_CANCEL, { id }),
@@ -54,5 +62,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onFileOpenError: (callback) => on(CH.FILE_OPEN_ERROR, callback),
     onAskInsecure: (callback) => on(CH.TRANSFER_ASK_INSECURE, callback),
     onTransferChanged: (callback) => on(CH.TRANSFER_CHANGED, callback),
+    onTransfersRemoved: (callback) => on(CH.TRANSFER_REMOVED, callback),
     onUploadStatus: (callback) => on(CH.UPLOAD_STATUS, callback),
 });

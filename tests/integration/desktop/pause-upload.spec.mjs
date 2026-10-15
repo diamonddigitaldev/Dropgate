@@ -13,7 +13,7 @@
 // that's where its chunks are held, and its clock moved.
 import fs from 'node:fs';
 import { madeUpFile, summary } from '../helpers/files.mjs';
-import { expect, securityWarning, test, uploadButton, uploadStatus } from '../helpers/desktop.mjs';
+import { cardButton, expect, securityWarning, test, uploadButton, uploadCard, uploadLink, uploadStatus } from '../helpers/desktop.mjs';
 import { download } from '../helpers/webui.mjs';
 
 // Three 5 MiB chunks.
@@ -57,7 +57,7 @@ async function startUpload(desktop, name, seed, { encrypted, clock = false }) {
     // The upload's clock, where core and the paused upload's notification run, is moved forward rather than waited on.
     const uploader = await app.transferWindow();
     if (clock) await uploader.clock.install();
-    await expect(window.locator('#file-list .file-row-name')).toHaveText([name]);
+    await expect(uploadCard(window).locator('.kit-card-name')).toHaveText([name]);
     await expect(window.locator('#security-text')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
     const chunks = await holdChunks(uploader);
     await uploadButton(window).click();
@@ -66,9 +66,9 @@ async function startUpload(desktop, name, seed, { encrypted, clock = false }) {
     return { app, window, uploader, file, filePath, chunks };
 }
 
-const pauseButton = (window) => window.locator('#action-bar').getByRole('button', { name: 'Pause Upload', exact: true });
-const resumeButton = (window) => window.locator('#action-bar').getByRole('button', { name: 'Resume Upload', exact: true });
-const cancelButton = (window) => window.locator('#action-bar').getByRole('button', { name: 'Cancel', exact: true });
+const pauseButton = (window) => cardButton(uploadCard(window), 'Pause');
+const resumeButton = (window) => cardButton(uploadCard(window), 'Resume');
+const cancelButton = (window) => cardButton(uploadCard(window), 'Cancel');
 
 /** The local time a deadline `minutes` from now is, and a minute after it, as the window writes it. */
 const shownTimes = (window, minutes) => window.evaluate(({ ms, minute }) => [ms, ms + minute].map((after) => new Date(Date.now() + after)
@@ -105,10 +105,10 @@ test.describe('on a server with HTTPS, keeping a paused upload 30 minutes', () =
 
         chunks.release();
         await resumeButton(window).click();
-        await expect(uploadStatus(window)).toHaveText(/upload successful/i, { timeout: 30_000 });
+        await expect(uploadStatus(window)).toHaveText(/^Uploaded · /, { timeout: 30_000 });
         await expect(resumeButton(window)).toBeHidden();
         await expect(pauseButton(window)).toBeHidden();
-        const link = await window.locator('#download-link').inputValue();
+        const link = await uploadLink(window).inputValue();
         desktop.secrets.addLink(link);
 
         // One pause and one resume; the stopped chunk went again exactly as it was sealed, and each chunk reached the server once.
@@ -155,7 +155,7 @@ test.describe('on a server keeping a paused upload 6 minutes', () => {
         expect(requests(server).filter((r) => r.route === 'POST /api/v4/upload/resume'), 'resume requests').toEqual([]);
 
         await cancelButton(window).click();
-        await expect(uploadStatus(window)).toHaveText(/upload cancelled/i);
+        await expect(uploadStatus(window)).toHaveText(/^Cancelled$/);
         expect(pauseNotifications(app), 'notifications, in the end').toHaveLength(1);
         await uploader.unrouteAll({ behavior: 'ignoreErrors' });
     });
@@ -180,7 +180,7 @@ test.describe('on a server keeping a paused upload 6 minutes', () => {
         expect(pauseNotifications(app), 'notifications after resuming').toEqual([]);
 
         await cancelButton(window).click();
-        await expect(uploadStatus(window)).toHaveText(/upload cancelled/i);
+        await expect(uploadStatus(window)).toHaveText(/^Cancelled$/);
         await uploader.unrouteAll({ behavior: 'ignoreErrors' });
     });
 });
@@ -197,9 +197,9 @@ test.describe('on a server keeping a paused upload 1 minute', () => {
 
         await uploader.clock.fastForward(MINUTE + 5_000);
         await server.advanceClock(MINUTE + 5_000);
-        await expect(uploadStatus(window)).toHaveText('Upload failed: The server dropped this paused upload.');
-        await expect(window.locator('#action-bar').getByRole('button', { name: /pause|resume|cancel/i })).toHaveCount(0);
-        await expect(uploadButton(window), 'ready to upload again').toBeVisible();
+        await expect(uploadStatus(window)).toHaveText('Failed: The server dropped this paused upload.');
+        await expect(uploadCard(window).locator('.kit-card-actions').getByRole('button', { name: /pause|resume|cancel/i })).toHaveCount(0);
+        await expect(cardButton(uploadCard(window), 'Retry'), 'ready to upload again').toBeVisible();
         await expect.poll(() => app.eventsOf('upload-finished').map(({ status, error }) => ({ status, error })), { message: 'how the upload finished' })
             .toEqual([{ status: 'error', error: 'The server dropped this paused upload.' }]);
         expect(chunks.sent, 'chunks sent after the pause').toHaveLength(2);
@@ -228,7 +228,7 @@ test.describe('on a server keeping a paused upload 30 minutes', () => {
         await resumeButton(window).click();
 
         const message = "A file changed after the upload started, so the rest of it can't be read as it was.";
-        await expect(uploadStatus(window)).toHaveText(`Upload failed: ${message}`);
+        await expect(uploadStatus(window)).toHaveText(`Failed: ${message}`);
         await expect.poll(() => app.eventsOf('upload-finished').map(({ status, error }) => ({ status, error })), { message: 'how the upload finished' })
             .toEqual([{ status: 'error', error: message }]);
         // The stopped chunk went again as it was read before the edit; the chunk after it was never read, so never sent.
@@ -245,10 +245,10 @@ test.describe('with pausing turned off on the server', () => {
     test('an upload has no Pause', async ({ desktop, server }) => {
         const { window, uploader } = await startUpload(desktop, 'Not paused é.bin', 45, { encrypted: false });
         await expect(cancelButton(window)).toBeVisible();
-        await expect(window.locator('#action-bar').getByRole('button', { name: /pause|resume/i })).toHaveCount(0);
+        await expect(uploadCard(window).locator('.kit-card-actions').getByRole('button', { name: /pause|resume/i })).toHaveCount(0);
 
         await cancelButton(window).click();
-        await expect(uploadStatus(window)).toHaveText(/upload cancelled/i);
+        await expect(uploadStatus(window)).toHaveText(/^Cancelled$/);
         expect(requests(server).filter((r) => r.route.startsWith('POST /api/v4/upload/pause'))).toEqual([]);
         await uploader.unrouteAll({ behavior: 'ignoreErrors' });
     });

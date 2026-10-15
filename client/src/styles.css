@@ -1,7 +1,8 @@
 /* Dropgate's own parts. The frame, the rail, the header, the Settings view,
-   toasts, prompts, the drop zone, the progress bar and the action bar are the
-   kit's (kit.css), drawn in the accent from styles/accent.css: nothing here
-   restyles them, and no colour here is a hex. */
+   toasts, prompts, the drop zone, the cards, their grid and bulk bar, the
+   progress bar and the action bar are the kit's (kit.css), drawn in the accent
+   from styles/accent.css: nothing here restyles them, and no colour here is a
+   hex. */
 
 /* Nothing is selectable but fields and the things worth copying. */
 body {
@@ -19,117 +20,72 @@ textarea,
     min-height: 1.5em;
 }
 
-/* ── Upload ──────────────────────────────────────────────────────────────── */
-
-/* Sideways, nothing scrolls: the lifetime and downloads row is a Bootstrap .row,
-   whose negative margins reach past the column once the window is narrow, as
-   Bootstrap's gutters say to clip on the parent. */
-.upload-view {
-    overflow-y: auto;
-    overflow-x: hidden;
-}
-
-.upload-column,
 .settings-column {
     max-width: 40rem;
 }
 
-.empty-state.d-none {
-    display: none;
-}
-
-/* An icon beside a small button's label (Add More), at the label's size: the page's CSP allows no inline style. */
+/* An icon beside a small button's label (Add Files), at the label's size: the page's CSP allows no inline style. */
 .button-icon {
     font-size: 16px;
 }
 
-.upload-view.drag-over .file-list {
+/* ── Upload ──────────────────────────────────────────────────────────────── */
+
+/* The bulk bar, then the cards, which scroll, then the action bar, filling the view. */
+.upload-view {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    min-height: 0;
+    flex: 1 1 auto;
+}
+
+.upload-view > #upload-bulk,
+.upload-view > #action-bar {
+    flex-shrink: 0;
+}
+
+/* Where files are dropped: the cards, or the drop zone while there are none. Sideways, nothing scrolls. */
+.upload-area {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border: 1px solid var(--bs-border-color);
+    border-radius: var(--radius-card);
+    padding: 0.75rem;
+    transition: background-color var(--dur-state) var(--ease-standard), border-color var(--dur-state) var(--ease-standard);
+}
+
+.upload-area.drag-over {
     border-color: rgba(var(--accent-rgb), var(--wash-active-border));
     background-color: rgba(var(--accent-rgb), var(--wash-active-fill));
 }
 
-/* ── File list ───────────────────────────────────────────────────────────── */
+.upload-area::-webkit-scrollbar { width: var(--scrollbar-width); }
+.upload-area::-webkit-scrollbar-track { background: transparent; }
+.upload-area::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+.upload-area::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
-.file-list {
-    max-height: 280px;
-    overflow-y: auto;
-    border: 1px solid var(--bs-border-color);
-    border-radius: var(--radius-card);
-    padding: 0.25rem 0.6rem;
-    transition: background-color var(--dur-state) var(--ease-standard), border-color var(--dur-state) var(--ease-standard);
+.empty-state[hidden],
+#upload-grid[hidden] {
+    display: none;
 }
 
-.file-list::-webkit-scrollbar { width: var(--scrollbar-width); }
-.file-list::-webkit-scrollbar-track { background: transparent; }
-.file-list::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
-.file-list::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
-
-.file-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.35rem 0;
-    border-bottom: 1px solid var(--bs-border-color);
+/* A waiting upload with files over it: they join it when they're dropped. The kit has no such state, so it's on the app's own class. */
+.upload-card.drop-target {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.35);
 }
 
-.file-row:last-child {
-    border-bottom: none;
+/* A finished upload's link, on its card: selectable, in the mono face. */
+.card-link {
+    font-size: 0.75rem;
+    padding: 0.15rem 0.45rem;
+    font-family: var(--bs-font-monospace);
 }
 
-.file-row > .material-icons-round {
-    font-size: 18px;
-    flex-shrink: 0;
-}
-
-.file-row-name {
-    flex: 1 1 0;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.875rem;
-}
-
-.file-row-size {
-    flex-shrink: 0;
-    color: var(--bs-secondary-color);
-    font-size: 0.875rem;
-}
-
-.file-remove-btn {
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    border: 1px solid var(--bs-border-color);
-    background: var(--bs-body-bg);
-    color: var(--bs-secondary-color);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background-color var(--dur-micro) var(--ease-micro), color var(--dur-micro) var(--ease-micro), border-color var(--dur-micro) var(--ease-micro);
-}
-
-.file-remove-btn:hover:not(:disabled) {
-    background-color: var(--bs-danger);
-    border-color: var(--bs-danger);
-    color: var(--bs-white);
-}
-
-.file-remove-btn:disabled {
-    opacity: var(--opacity-disabled);
-    cursor: default;
-}
-
-.file-remove-btn .material-icons-round {
-    font-size: 14px;
-    line-height: 1;
-    display: block;
-}
-
-/* ── How the upload will be sent ─────────────────────────────────────────── */
+/* ── How uploads will be sent (Settings > Server) ────────────────────────── */
 
 .security-status-card {
     padding: 0.75rem 1rem;
@@ -157,10 +113,4 @@ textarea,
 .security-status-card.security-red {
     background: var(--bs-danger-bg-subtle);
     border-color: var(--bs-danger-border-subtle);
-}
-
-/* No files can be added while there's no server to send them to, or while an upload runs. */
-.empty-state.disabled {
-    opacity: var(--opacity-disabled);
-    pointer-events: none;
 }

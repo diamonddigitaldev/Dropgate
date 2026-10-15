@@ -25,8 +25,11 @@ const IPC = Object.freeze({
     FILES_ADD: 'files:add',                     // (paths) dropped, picked or opened files' paths -> { files: [{ handle, name, size }], folders }
     FILE_REVOKE: 'file:revoke',                 // (handle) the page is done with it
     SERVER_CHECK: 'server:check',               // (url) -> { ok: true, baseUrl, serverVersion, serverInfo, dgup } | { ok: false, code, message }, asked of the server by the transfer window
-    TRANSFER_ADD_UPLOAD: 'transfer:add-upload', // ({ files: [handle], options: { lifetime: { value, unit }, maxDownloads, encrypt } }) -> { id }, an upload waiting to start
-    TRANSFER_START: 'transfer:start',           // ({ ids }) start them, in the transfer window: the page's own, or a share's it was asked about (Upload Anyway)
+    TRANSFER_ADD_UPLOAD: 'transfer:add-upload', // ({ files: [handle] }) -> { id }, an upload waiting to start, with the server's settings for new uploads
+    TRANSFER_ADD_FILES: 'transfer:add-files',   // ({ id, files: [handle] }) -> { added, skipped } onto the page's own upload waiting, or { started: true } once it has started
+    TRANSFER_START: 'transfer:start',           // ({ ids, encrypt? }) start them, in the transfer window: the page's own (encrypt, as it found the server), or a share's it was asked about (Upload Anyway)
+    TRANSFER_REMOVE: 'transfer:remove',         // ({ ids }) remove uploads waiting or ended: Remove, Clear Finished
+    TRANSFER_RETRY: 'transfer:retry',           // ({ id }) a failed or cancelled upload waits for the page's Upload once more
     TRANSFER_PAUSE: 'transfer:pause',           // ({ id }) -> { message? }, core's reason when it couldn't
     TRANSFER_RESUME: 'transfer:resume',         // ({ id }) -> { message? }
     TRANSFER_CANCEL: 'transfer:cancel',         // ({ id }) a running upload, or one waiting: a share's question declined
@@ -39,11 +42,12 @@ const IPC = Object.freeze({
     FILE_OPEN_ERROR: 'file:open-error',         // push: the message, when the file picked can't be read
     TRANSFER_ASK_INSECURE: 'transfer:ask-insecure', // push: { id }, a share to a server with no end-to-end encryption: the Upload Security Warning, answered with transfer:start or transfer:cancel
     TRANSFER_CHANGED: 'transfer:changed',       // push: a transfer as it is now, for drawing (core/transfers.js' view()), at most TRANSFERS.UPDATES_PER_SECOND times a second each
+    TRANSFER_REMOVED: 'transfer:removed',       // push: [id], transfers gone from main's registry
     UPLOAD_STATUS: 'upload:status',             // push: { type: 'success' | 'cancelled' | 'error', data: { id?, link? | error? } }, an upload's outcome, to the main window
 });
 
 /** The pushes, which main sends and the page only listens for. */
-const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.TRANSFER_CHANGED, IPC.UPLOAD_STATUS]);
+const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.TRANSFER_CHANGED, IPC.TRANSFER_REMOVED, IPC.UPLOAD_STATUS]);
 
 /**
  * The channels between main and the transfer window: a hidden, sandboxed
@@ -102,8 +106,9 @@ const READ_PIECE_BYTES = 1024 * 1024;
 const SETTINGS_DEFAULTS = Object.freeze({
     // The server uploads go to; empty until the person gives one.
     serverURL: '',
-    // An upload's lifetime and download limit, as last set on Upload: what
-    // Share with Dropgate uses too.
+    // The server's settings for new uploads (Settings > Server, "New uploads
+    // to this server"): each new upload's lifetime and download limit, Share
+    // with Dropgate's too.
     lifetimeValue: 24,
     lifetimeUnit: 'hours',
     maxDownloads: 1,

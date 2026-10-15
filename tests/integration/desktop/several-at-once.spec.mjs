@@ -56,26 +56,26 @@ test('five shares at once: three run and two wait as queued, starting in order a
 
     // Cancelled, the second's place goes to the fifth.
     await window.evaluate((id) => window.electronAPI.cancelTransfer(id), ids[1]);
-    await expect.poll(() => states(ids), { message: 'the second cancelled, the fifth started' }).toEqual(['paused', 'gone', 'running', 'running', 'running']);
+    await expect.poll(() => states(ids), { message: 'the second cancelled, the fifth started' }).toEqual(['paused', 'cancelled', 'running', 'running', 'running']);
     await expect.poll(() => uploadsStarted(server).length).toBe(5);
 
     // Resumed with every place taken, the first waits as queued; paused again, it's paused.
     expect(await window.evaluate((id) => window.electronAPI.resumeTransfer(id), ids[0])).toEqual({});
-    await expect.poll(() => states(ids)).toEqual(['queued', 'gone', 'running', 'running', 'running']);
+    await expect.poll(() => states(ids)).toEqual(['queued', 'cancelled', 'running', 'running', 'running']);
     expect(await isBusy(), 'Restart Now asks, with one queued').toBe(true);
     await window.evaluate((id) => window.electronAPI.pauseTransfer(id), ids[0]);
-    await expect.poll(() => states(ids)).toEqual(['paused', 'gone', 'running', 'running', 'running']);
+    await expect.poll(() => states(ids)).toEqual(['paused', 'cancelled', 'running', 'running', 'running']);
 
     // Let go, the three running finish; only the paused one is left, and nothing runs.
     chunks.release();
-    await expect.poll(() => states(ids), { message: 'the three running, finished', timeout: 30_000 }).toEqual(['paused', 'gone', 'gone', 'gone', 'gone']);
+    await expect.poll(() => states(ids), { message: 'the three running, finished', timeout: 30_000 }).toEqual(['paused', 'cancelled', 'done', 'done', 'done']);
     expect(await isBusy(), 'Restart Now asks, with one paused').toBe(true);
     await expect.poll(() => powerSaves(app), { message: 'the power-save blocker, with nothing running' })
         .toEqual(['start prevent-app-suspension', 'stop']);
 
     // Resumed, it has a place, runs and finishes.
     await window.evaluate((id) => window.electronAPI.resumeTransfer(id), ids[0]);
-    await expect.poll(() => states(ids), { message: 'the first, resumed and finished', timeout: 30_000 }).toEqual(['gone', 'gone', 'gone', 'gone', 'gone']);
+    await expect.poll(() => states(ids), { message: 'the first, resumed and finished', timeout: 30_000 }).toEqual(['done', 'cancelled', 'done', 'done', 'done']);
     expect(await isBusy(), 'Restart Now asks, with nothing left').toBe(false);
     await expect.poll(() => powerSaves(app)).toEqual(['start prevent-app-suspension', 'stop', 'start prevent-app-suspension', 'stop']);
 
