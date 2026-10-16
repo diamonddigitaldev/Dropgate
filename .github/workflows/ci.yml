@@ -336,21 +336,11 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps --only-shell chromium
 
-      # TEMPORARY (diagnostic, the crash after piece 4a): the test preload writes crash dumps here.
-      - name: Crash dumps folder
-        shell: bash
-        run: |
-          dir="$RUNNER_TEMP/crash-dumps"
-          mkdir -p "$dir"
-          echo "CRASH_DUMPS=$dir" >> "$GITHUB_ENV"
-          echo "DROPGATE_TEST_CRASH_DUMPS=$dir" >> "$GITHUB_ENV"
-
       # One test at a time: in CI the app copies its links to the real clipboard,
       # which every test shares, and the update tests share their server's port.
       # On Linux, inside a D-Bus session of their own, as a desktop gives an app:
       # the runner's own session bus address can't be parsed, and the app's
       # power-save blocker, taskbar progress and notifications talk to the bus.
-      # Without one, Electron crashed (SIGSEGV) early in an upload, now and then.
       - name: Run tests
         if: runner.os == 'Linux'
         run: |
@@ -360,25 +350,6 @@ jobs:
       - name: Run tests
         if: runner.os == 'Windows'
         run: npx playwright test --project=desktop --workers=1
-
-      # TEMPORARY (diagnostic, the crash after piece 4a): each crash's native stack.
-      - name: Symbolize crash dumps
-        if: always() && runner.os == 'Linux'
-        shell: bash
-        run: |
-          find "$CRASH_DUMPS" -type f -printf '%TT %s %p\n' 2>/dev/null || true
-          dumps=$(find "$CRASH_DUMPS" -name '*.dmp' 2>/dev/null)
-          [ -n "$dumps" ] || exit 0
-          npm install -g electron-minidump@3.2.2
-          for f in $dumps; do echo "=== $f"; electron-minidump -f "$f" 2>&1 | head -150 || true; done
-      - name: Keep the crash dumps
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: crash-dumps-${{ matrix.os }}
-          path: ${{ env.CRASH_DUMPS }}
-          if-no-files-found: ignore
-          retention-days: 3
 
   server-image:
     name: Server image

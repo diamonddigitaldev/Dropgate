@@ -66,12 +66,6 @@ const { app, BrowserWindow, clipboard, ipcMain, Notification, session, utilityPr
 const at = process.argv.findIndex((arg) => path.resolve(arg) === __filename);
 if (at > 0 && ['-r', '--require'].includes(process.argv[at - 1])) process.argv.splice(at - 1, 2);
 
-// TEMPORARY (diagnostic, the crash after piece 4a): native crash dumps, to a folder CI symbolizes.
-if (process.env.DROPGATE_TEST_CRASH_DUMPS) {
-    app.setPath('crashDumps', process.env.DROPGATE_TEST_CRASH_DUMPS);
-    electron.crashReporter.start({ uploadToServer: false, compress: false });
-}
-
 const EVENTS = process.env.DROPGATE_TEST_EVENTS;
 if (!EVENTS) throw new Error('DROPGATE_TEST_EVENTS must name the file to write events to.');
 const real = process.env.DROPGATE_TEST_REAL_CLIPBOARD === '1';
@@ -186,10 +180,18 @@ app.whenReady().then(() => {
 
 // Each request to a server, as the session that sends it sees it. The app
 // hooks no request itself, so these listeners are the sessions' only ones.
-const watchRequests = (ses) => ses.webRequest.onSendHeaders(({ url, webContents }) => {
-    if (!/^(https?|wss?):/.test(url)) return;
-    const page = webContents && !webContents.isDestroyed() ? path.basename(new URL(webContents.getURL()).pathname) || null : null;
-    record({ event: 'request', url, session: ses === session.defaultSession ? 'ui' : 'isolated', persistent: ses.isPersistent(), page });
+// It's onBeforeSendHeaders, answered at once with nothing changed, not
+// onSendHeaders: Electron 44 hands a request with only observing listeners
+// (onSendHeaders, onCompleted, …) to them on another thread, and copying an
+// upload's Blob body there crashed the app now and then (SIGSEGV on Linux,
+// an access violation on Windows) as core sent a chunk. A listener that can
+// change the request sees it on the thread that sends it.
+const watchRequests = (ses) => ses.webRequest.onBeforeSendHeaders(({ url, webContents }, callback) => {
+    if (/^(https?|wss?):/.test(url)) {
+        const page = webContents && !webContents.isDestroyed() ? path.basename(new URL(webContents.getURL()).pathname) || null : null;
+        record({ event: 'request', url, session: ses === session.defaultSession ? 'ui' : 'isolated', persistent: ses.isPersistent(), page });
+    }
+    callback({});
 });
 app.on('session-created', watchRequests);
 app.whenReady().then(() => watchRequests(session.defaultSession));
