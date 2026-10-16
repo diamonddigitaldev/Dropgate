@@ -66,6 +66,12 @@ const { app, BrowserWindow, clipboard, ipcMain, Notification, session, utilityPr
 const at = process.argv.findIndex((arg) => path.resolve(arg) === __filename);
 if (at > 0 && ['-r', '--require'].includes(process.argv[at - 1])) process.argv.splice(at - 1, 2);
 
+// TEMPORARY (diagnostic, the crash after piece 4a): native crash dumps, to a folder CI symbolizes.
+if (process.env.DROPGATE_TEST_CRASH_DUMPS) {
+    app.setPath('crashDumps', process.env.DROPGATE_TEST_CRASH_DUMPS);
+    electron.crashReporter.start({ uploadToServer: false, compress: false });
+}
+
 const EVENTS = process.env.DROPGATE_TEST_EVENTS;
 if (!EVENTS) throw new Error('DROPGATE_TEST_EVENTS must name the file to write events to.');
 const real = process.env.DROPGATE_TEST_REAL_CLIPBOARD === '1';
