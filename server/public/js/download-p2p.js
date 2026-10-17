@@ -1,4 +1,5 @@
-import { DropgateClient, isSecureContextForP2P, StreamingZipWriter } from './dropgate-core.js';
+import { hosts, zip, filenames } from './dropgate-core.js';
+import { formatBytes, pageClient, saveStream } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard, clearStatusBorder } from './status-card.js';
 
 const elTitle = document.getElementById('title');
@@ -46,8 +47,8 @@ function buildP2PFileList(files) {
     li.className = 'list-group-item d-flex justify-content-between align-items-center py-2';
     const nameSpan = document.createElement('span');
     nameSpan.className = 'text-truncate me-2';
-    nameSpan.textContent = f.name;
-    nameSpan.title = f.name;
+    nameSpan.textContent = filenames.sanitize(f.name);
+    nameSpan.title = nameSpan.textContent;
     const sizeSpan = document.createElement('span');
     sizeSpan.className = 'text-body-secondary small flex-shrink-0';
     sizeSpan.textContent = formatBytes(f.size);
@@ -61,8 +62,8 @@ function buildP2PFileList(files) {
     p2pFileListVisible = !p2pFileListVisible;
     elP2PFileList.style.display = p2pFileListVisible ? 'block' : 'none';
     elP2PToggleFileList.innerHTML = p2pFileListVisible
-      ? '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_less</span> Hide files'
-      : '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span> Show files';
+      ? '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_less</span> Hide Files'
+      : '<span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span> Show Files';
   });
 }
 
@@ -91,16 +92,6 @@ document.addEventListener('visibilitychange', () => {
     setProgress();
   }
 });
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return '0 bytes';
-  if (bytes === 0) return '0 bytes';
-  const k = 1000;
-  const sizes = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const v = bytes / Math.pow(k, i);
-  return `${v.toFixed(v < 10 && i > 0 ? 2 : 1)} ${sizes[i]}`;
-}
 
 const setProgress = () => {
   const pct = total > 0 ? Math.min(100, (received / total) * 100) : 0;
@@ -131,7 +122,7 @@ const showError = (title, message) => {
   elBar.parentElement.hidden = true;
 };
 
-const client = new DropgateClient({ clientVersion: '3.0.13', server: location.origin });
+const client = pageClient();
 
 async function loadPeerJS() {
   if (globalThis.Peer) return globalThis.Peer;
@@ -169,12 +160,12 @@ function startDownload() {
 
   // Create streamSaver write stream
   if (window.streamSaver?.createWriteStream) {
-    const stream = window.streamSaver.createWriteStream(fileName, isMultiFile ? undefined : (total ? { size: total } : undefined));
+    const stream = saveStream(fileName, isMultiFile ? undefined : (total ? { size: total } : undefined));
     writer = stream.getWriter();
 
-    // For multi-file transfers, set up a StreamingZipWriter that pipes ZIP data into the StreamSaver writer
+    // For multi-file transfers, set up a ZIP writer that pipes ZIP data into the StreamSaver writer
     if (isMultiFile) {
-      zipWriter = new StreamingZipWriter(async (chunk) => {
+      zipWriter = zip.writer(async (chunk) => {
         await writer.write(chunk);
       });
     }
@@ -200,7 +191,7 @@ async function start() {
     return;
   }
 
-  if (!isSecureContextForP2P(location.hostname, window.isSecureContext)) {
+  if (!hosts.isSecureForDirect(location.hostname, window.isSecureContext)) {
     showError('Secure connection required', 'P2P transfers require HTTPS in most browsers.');
     return;
   }
@@ -219,7 +210,7 @@ async function start() {
   }
 
   try {
-    p2pSession = await client.p2pReceive({
+    p2pSession = await client.direct.receive({
       code,
       Peer,
       autoReady: false, // We want to show preview before starting transfer
@@ -232,7 +223,8 @@ async function start() {
         received = 0;
         fileCount = metaFileCount || 1;
         isMultiFile = fileCount > 1;
-        fileName = isMultiFile ? `dropgate-bundle-${code}.zip` : name;
+        // Shown and saved under its safe name: the one file name rule.
+        fileName = isMultiFile ? `dropgate-bundle-${code}.zip` : filenames.sanitize(name);
 
         // Store the sendReady function to call when user clicks download
         pendingSendReady = sendReady;
@@ -241,7 +233,7 @@ async function start() {
         elTitle.textContent = 'Ready to Transfer';
         elMsg.textContent = 'Review the file details below, then click Start Transfer.';
 
-        elFileName.textContent = isMultiFile ? fileCount : name;
+        elFileName.textContent = isMultiFile ? fileCount : fileName;
         elFileNameLabel.textContent = isMultiFile ? 'Files' : 'File name';
         elFileSize.textContent = formatBytes(total);
         elFileDetails.style.display = 'block';
@@ -258,10 +250,12 @@ async function start() {
         // Add click handler for download button
         elDownloadBtn.addEventListener('click', startDownload, { once: true });
       },
-      onFileStart: ({ name }) => {
-        // Start a new file entry in the ZIP writer (multi-file only)
+      onFileStart: ({ name, size }) => {
+        // Start a new file entry in the ZIP writer (multi-file only). The writer
+        // saves it under its safe name, told apart from any other the same, and
+        // refuses more or fewer bytes than the size the sender gave.
         if (zipWriter) {
-          zipWriter.startFile(name);
+          zipWriter.startFile(name, size);
         }
       },
       onFileEnd: () => {
@@ -272,8 +266,10 @@ async function start() {
       },
       onData: async (chunk) => {
         if (zipWriter) {
-          // Multi-file: write chunk through the ZIP writer (which pipes to StreamSaver)
+          // Multi-file: write chunk through the ZIP writer (which pipes to StreamSaver),
+          // and wait for it, so the sender is slowed to what the download can take
           zipWriter.writeChunk(chunk);
+          await zipWriter.drained();
         } else if (writer) {
           // Single file: write directly to StreamSaver
           await writer.write(chunk);

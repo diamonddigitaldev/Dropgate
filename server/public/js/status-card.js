@@ -1,7 +1,7 @@
 /**
  * Status Card Module
  * Provides centralized handling for status card state, icons, colors, and borders.
- * Used across download-standard.js, download-p2p.js, and webui-main.js for consistency.
+ * Used across download.js, download-bundle.js, download-p2p.js, and webui-main.js for consistency.
  */
 
 /**

@@ -34,7 +34,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/copy-build.mjs",
     "dev": "tsup --watch",
     "test": "vitest",
     "test:coverage": "vitest --coverage",
@@ -51,19 +51,17 @@
     }
   },
   "devDependencies": {
-    "@types/node": "^25.2.0",
-    "@typescript-eslint/eslint-plugin": "^8.54.0",
-    "@typescript-eslint/parser": "^8.54.0",
-    "@vitest/coverage-v8": "^4.0.18",
-    "eslint": "^10.0.2",
-    "happy-dom": "^20.4.0",
-    "msw": "^2.12.7",
+    "@types/node": "^26.6.2",
+    "@typescript-eslint/eslint-plugin": "^8.70.1",
+    "@typescript-eslint/parser": "^8.70.1",
+    "@vitest/coverage-v8": "^5.0.1",
+    "eslint": "^10.11.0",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.1"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=24.0.0"
   },
   "sideEffects": false,
   "author": "Diamond Digital Development <https://diamonddigital.dev>",
@@ -74,7 +72,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/diamonddigitaldev/Dropgate.git",
+    "url": "git+https://github.com/diamonddigitaldev/Dropgate.git",
     "directory": "packages/dropgate-core"
   },
   "keywords": [
@@ -85,7 +83,7 @@
     "encryption",
     "e2ee"
   ],
-  "dependencies": {
-    "fflate": "^0.8.2"
+  "allowScripts": {
+    "esbuild@0.27.7": true
   }
 }

@@ -1,30 +1,31 @@
 import { defineConfig } from 'tsup';
+import { versionDefine } from './scripts/version-define.mjs';
 
 export default defineConfig([
   // Main entry - ESM and CJS
   {
     entry: ['src/index.ts'],
     format: ['esm', 'cjs'],
-    dts: true,
+    dts: { compilerOptions: { ignoreDeprecations: '6.0' } },
     sourcemap: true,
     clean: true,
     target: 'es2020',
     splitting: false,
     external: ['peerjs'],
-    noExternal: ['fflate'],
     platform: 'browser',
+    define: versionDefine,
   },
   // P2P submodule - ESM and CJS
   {
     entry: { 'p2p/index': 'src/p2p/index.ts' },
     format: ['esm', 'cjs'],
-    dts: true,
+    dts: { compilerOptions: { ignoreDeprecations: '6.0' } },
     sourcemap: true,
     target: 'es2020',
     splitting: false,
     external: ['peerjs'],
-    noExternal: ['fflate'],
     platform: 'browser',
+    define: versionDefine,
   },
   // Browser bundle (IIFE)
   {
@@ -34,6 +35,7 @@ export default defineConfig([
     outDir: 'dist',
     outExtension: () => ({ js: '.browser.js' }),
     minify: true,
+    define: versionDefine,
     sourcemap: true,
     target: 'es2020',
     external: ['peerjs'],

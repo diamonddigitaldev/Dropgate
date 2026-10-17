@@ -1,168 +1,202 @@
-html {
+/* Dropgate's own parts. The frame, the rail, the header, the Settings view,
+   toasts, prompts, the drop zone, the cards, their grid and bulk bar, the
+   progress bar and the action bar are the kit's (kit.css), drawn in the accent
+   from styles/accent.css: nothing here restyles them, and no colour here is a
+   hex. */
+
+/* Nothing is selectable but fields and the things worth copying. */
+body {
     user-select: none;
 }
 
-body {
-    background-color: var(--bs-body-bg);
-    color: var(--bs-body-color);
+input,
+textarea,
+.selectable {
+    user-select: text;
 }
 
-#drop-zone {
-    border: 2px dashed var(--bs-border-color);
-    border-radius: 0.375rem;
-    cursor: pointer;
-    padding: 2.25rem 1.5rem;
-    transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out;
+/* A help line keeps its height, so nothing under it jumps as its text comes and goes. */
+.form-text.reserved {
+    min-height: 1.5em;
 }
 
-#drop-zone:hover:not(:has(button:hover)) {
-    border-color: rgba(var(--bs-primary-rgb), 0.5);
-    background-color: rgba(var(--bs-primary-rgb), .04);
+.settings-column {
+    max-width: 40rem;
 }
 
-#drop-zone.drag-over {
-    border-color: rgba(var(--bs-primary-rgb), 1);
-    background-color: rgba(var(--bs-primary-rgb), .06);
-}
-
-#upload-btn {
-    transition: background-color 0.3s;
-}
-
-.container {
-    max-width: 100%;
-    width: 100%;
-    padding-left: 1rem;
-    padding-right: 1rem;
-}
-
-[data-bs-toggle="tooltip"] {
-    cursor: help;
-}
-
-.help-icon {
-    vertical-align: sub;
-    font-size: 1.25rem !important;
-    color: var(--bs-secondary-color);
-}
-
-/* Preferences/Credits Page Styles */
-body.popup-window {
-    background-color: var(--bs-body-bg);
-    color: var(--bs-body-color);
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    padding: 20px;
-}
-
-.popup-window h1 {
-    font-size: 24px;
-    margin-bottom: 20px;
-    text-align: center;
-}
-
-.popup-window label {
-    display: block;
+/* An icon beside a small button's label (Add Files), at the label's size: the page's CSP allows no inline style. */
+.button-icon {
     font-size: 16px;
-    margin-bottom: 10px;
 }
 
-.popup-window select {
-    width: 100%;
-    padding: 10px;
-    font-size: 16px;
-    background-color: var(--bs-secondary-bg);
-    color: var(--bs-body-color);
+/* ── Upload ──────────────────────────────────────────────────────────────── */
+
+/* The bulk bar, then the cards, which scroll, then the action bar, filling the view. */
+.upload-view {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    min-height: 0;
+    flex: 1 1 auto;
+}
+
+.upload-view > #upload-bulk,
+.upload-view > #action-bar,
+.upload-view > #download-bulk,
+.upload-view > #download-action-bar,
+.upload-view > .link-entry {
+    flex-shrink: 0;
+}
+
+/* Where files are dropped: the cards, or the drop zone while there are none. Sideways, nothing scrolls. */
+.upload-area {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
     border: 1px solid var(--bs-border-color);
-    border-radius: 5px;
-    margin-bottom: 20px;
-    transition: background-color 0.3s;
+    border-radius: var(--radius-card);
+    padding: 0.75rem;
+    transition: background-color var(--dur-state) var(--ease-standard), border-color var(--dur-state) var(--ease-standard);
 }
 
-.popup-window select:hover {
-    background-color: var(--bs-tertiary-bg);
+.upload-area.drag-over {
+    border-color: rgba(var(--accent-rgb), var(--wash-active-border));
+    background-color: rgba(var(--accent-rgb), var(--wash-active-fill));
 }
 
-.popup-window select:focus {
-    outline: none;
-    background-color: var(--bs-tertiary-bg);
-    border-color: var(--bs-primary);
+.upload-area::-webkit-scrollbar { width: var(--scrollbar-width); }
+.upload-area::-webkit-scrollbar-track { background: transparent; }
+.upload-area::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+.upload-area::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+
+.empty-state[hidden],
+#upload-grid[hidden],
+#download-empty[hidden],
+#download-grid[hidden] {
+    display: none;
 }
 
-.popup-window .btn {
-    display: block;
-    width: 100%;
-    padding: 10px;
-    margin-top: 20px;
-    font-size: 16px;
-    background-color: var(--bs-secondary-bg);
-    color: var(--bs-body-color);
+/* Download's link box: the link, Add, and its help line, over the cards. */
+.link-entry .form-label {
+    margin-bottom: 0.25rem;
+}
+
+/* A waiting upload with files over it: they join it when they're dropped. The kit has no such state, so it's on the app's own class. */
+.upload-card.drop-target {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.35);
+}
+
+/* A finished upload's link, on its card: selectable, in the mono face. */
+.card-link {
+    font-size: 0.75rem;
+    padding: 0.15rem 0.45rem;
+    font-family: var(--bs-font-monospace);
+}
+
+/* ── Advanced Options ────────────────────────────────────────────────────── */
+
+/* The page's own form dialog, drawn as the kit's prompts are (its dialog
+   classes): the kit has no form dialog. A little narrower, its rows apart.
+   kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65 */
+.options-dialog {
+    width: min(30rem, calc(100vw - 32px));
+}
+
+.options-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+/* The files of an upload of several, each with its Remove. */
+.options-files {
+    max-height: 180px;
+    overflow-y: auto;
     border: 1px solid var(--bs-border-color);
-    border-radius: 5px;
-    transition: background-color 0.3s;
-    text-align: center;
-    cursor: pointer;
+    border-radius: var(--radius-card);
+    padding: 0.25rem 0.6rem;
 }
 
-.popup-window .btn:hover {
-    background-color: var(--bs-tertiary-bg);
-}
-
-.popup-window .btn:focus {
-    outline: none;
-    background-color: #5a5a5a;
-}
-
-.popup-window hr {
-    margin: 20px 0;
-    border: none;
-    border-top: 1px solid #535353;
-}
-
-.popup-window span {
-    color: var(--bs-primary);
-    text-decoration: none;
-    cursor: pointer;
-    transition: all 0.3s;
-}
-
-.popup-window span:hover {
-    color: var(--bs-primary);
-    text-decoration: underline;
-    opacity: 0.8;
-}
-
-#credits-logo {
-    margin: 0;
-    width: 24px;
-    height: 24px;
-    pointer-events: none;
-    vertical-align: middle;
-    margin-top: 5px;
-    margin-right: 10px;
-}
-
-@keyframes security-pulse {
-    0% {
-        opacity: 0.75;
-    }
-
-    50% {
-        opacity: 0.5;
-    }
-
-    100% {
-        opacity: 0.75;
-    }
-}
-
-/* Security status card */
-.security-status-card {
-    padding: 0.75rem 1rem;
-    border-radius: 0.5rem;
+.options-file {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    animation: security-pulse 2s infinite ease-in-out;
+    padding: 0.25rem 0;
+    font-size: 0.82rem;
+    border-bottom: 1px solid var(--bs-border-color);
+}
+
+.options-file:last-child {
+    border-bottom: 0;
+}
+
+.options-file .material-icons-round {
+    font-size: 18px;
+}
+
+.options-file-name {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.options-file-size {
+    color: var(--bs-secondary-color);
+    font-variant-numeric: tabular-nums;
+}
+
+/* A 20px round Remove, as a card's. */
+.options-file-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--bs-secondary-color);
+    transition: background-color var(--dur-state) var(--ease-standard);
+}
+
+.options-file-remove .material-icons-round {
+    font-size: 16px;
+}
+
+.options-file-remove:hover:not(:disabled) {
+    background-color: rgba(var(--accent-rgb), var(--wash-hover-fill));
+    color: var(--bs-body-color);
+}
+
+.options-file-remove:disabled {
+    opacity: var(--opacity-disabled);
+}
+
+/* How it will be sent: shown, never a control. */
+.options-encryption {
+    display: flex;
+    gap: 0.45rem;
+    align-items: flex-start;
+    font-size: 0.85rem;
+}
+
+.options-encryption .material-icons-round {
+    font-size: 18px;
+}
+
+/* ── How uploads will be sent (Settings > Server) ────────────────────────── */
+
+.security-status-card {
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-card);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     border: 1px solid var(--bs-border-color);
 }
 
@@ -170,154 +204,17 @@ body.popup-window {
     font-size: 24px;
 }
 
-.security-status-card.security-green,
-.security-status-card.security-yellow,
-.security-status-card.security-red {
-    animation: none;
-}
-
 .security-status-card.security-green {
-    background: rgba(25, 135, 84, 0.1);
-    border: 1px solid rgba(25, 135, 84, 0.3);
+    background: var(--bs-success-bg-subtle);
+    border-color: var(--bs-success-border-subtle);
 }
 
 .security-status-card.security-yellow {
-    background: rgba(255, 193, 7, 0.1);
-    border: 1px solid rgba(255, 193, 7, 0.3);
+    background: var(--bs-warning-bg-subtle);
+    border-color: var(--bs-warning-border-subtle);
 }
 
 .security-status-card.security-red {
-    background: rgba(220, 53, 69, 0.1);
-    border: 1px solid rgba(220, 53, 69, 0.3);
-}
-
-/* Drop zone icon */
-.drop-icon {
-    font-size: 48px;
-    color: var(--bs-secondary-color);
-    margin-bottom: 0.25rem;
-}
-
-.drop-label {
-    font-size: 1rem;
-    font-weight: 500;
-}
-
-.accent {
-    color: var(--bs-primary);
-}
-
-/* ── File list ───────────────────────────────────────────────────────────── */
-
-#file-list {
-    max-height: 280px;
-    overflow-y: auto;
-    border: 1px solid var(--bs-border-color);
-    border-radius: 8px;
-    padding: 0.25rem 0.6rem;
-}
-
-#file-list::-webkit-scrollbar { width: 6px; }
-#file-list::-webkit-scrollbar-track { background: transparent; }
-#file-list::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.3); border-radius: 3px; }
-#file-list::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,0.5); }
-
-.file-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.35rem 0;
-    border-bottom: 1px solid var(--bs-border-color);
-}
-
-.file-row:last-child {
-    border-bottom: none;
-}
-
-.file-row .material-icons-round {
-    font-size: 18px;
-    flex-shrink: 0;
-}
-
-.file-row-name {
-    flex: 1 1 0;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.875rem;
-}
-
-.file-row-size {
-    flex-shrink: 0;
-    color: var(--bs-secondary-color);
-    font-size: 0.875rem;
-}
-
-.file-remove-btn {
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    border: 1px solid var(--bs-border-color);
-    background: var(--bs-body-bg);
-    color: var(--bs-secondary-color);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
-}
-
-.file-remove-btn:hover {
-    background-color: var(--bs-danger);
-    border-color: var(--bs-danger);
-    color: #fff;
-}
-
-.file-remove-btn .material-icons-round {
-    font-size: 14px;
-    line-height: 1;
-    display: block;
-}
-
-/* Responsive Design */
-@media (max-width: 500px) {
-    body {
-        padding: 0.75rem !important;
-    }
-
-    .container {
-        padding-left: 0.5rem;
-        padding-right: 0.5rem;
-    }
-
-    h3 {
-        font-size: 1.25rem !important;
-    }
-
-    #drop-zone {
-        padding: 2rem !important;
-    }
-
-    #drop-zone p {
-        font-size: 0.9rem;
-    }
-
-    .security-status-card {
-        padding: 0.5rem 0.75rem;
-        font-size: 0.875rem;
-    }
-
-    .security-status-card .material-icons-round {
-        font-size: 20px;
-    }
-}
-
-@media (min-width: 700px) {
-    .container {
-        max-width: 650px;
-        margin: 0 auto;
-    }
+    background: var(--bs-danger-bg-subtle);
+    border-color: var(--bs-danger-border-subtle);
 }

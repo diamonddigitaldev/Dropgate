@@ -1,4 +1,4 @@
-import type { Base64Adapter, CryptoAdapter, FetchFn } from '../types.js';
+import type { Base64Adapter, FetchFn } from '../types.js';
 
 /**
  * Get the default Base64 adapter for the current environment.
@@ -41,14 +41,6 @@ export function getDefaultBase64(): Base64Adapter {
   throw new Error(
     'No Base64 implementation available. Provide a Base64Adapter via options.'
   );
-}
-
-/**
- * Get the default crypto object for the current environment.
- * Returns globalThis.crypto if available.
- */
-export function getDefaultCrypto(): CryptoAdapter | undefined {
-  return globalThis.crypto as CryptoAdapter | undefined;
 }
 
 /**
