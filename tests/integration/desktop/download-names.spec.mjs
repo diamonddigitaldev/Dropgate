@@ -38,7 +38,9 @@ test('every awkward name, received through a real download, lands inside the fol
     const window = await app.window();
     for (const [i, name] of NAMES.entries()) {
         const file = madeUpFile(name, 1_000 + i, 70 + i);
-        desktop.secrets.addFiles([file]);
+        // A name of a few bytes (a., a:b) turns up by chance in an encrypted chunk's random bytes, so only
+        // the longer ones are looked for in what the server got; every one is still checked on disk below.
+        if (Buffer.byteLength(name) >= 6) desktop.secrets.addFiles([file]);
         const { link } = await uploadWithCore(server, [file]);
         desktop.secrets.addLink(link);
         await addLink(window, link);
