@@ -224,6 +224,9 @@ class Desktop {
         this.profile = path.join(root, 'profile');
         this.folder = path.join(root, 'Secret Folder');
         fs.mkdirSync(this.folder);
+        // The system's Downloads folder, as the app sees it (desktop-preload.cjs): the test's own.
+        this.downloads = path.join(root, 'Downloads');
+        fs.mkdirSync(this.downloads);
     }
 
     /** The address the app is given for the server: the TLS proxy's when there is one. */
@@ -256,6 +259,7 @@ class Desktop {
                 DROPGATE_TEST_EVENTS: eventsFile,
                 DROPGATE_TEST_REAL_CLIPBOARD: this.real ? '1' : '0',
                 DROPGATE_TEST_DICTIONARY_URL: this.dictionaryUrl,
+                DROPGATE_TEST_DOWNLOADS: this.downloads,
             }),
             // The TLS proxy's certificate is made up for the test, so the app is told to accept it.
             ignoreHTTPSErrors: Boolean(this.proxy),
@@ -556,6 +560,37 @@ export async function dropFiles(window, target, paths) {
     }, input);
     for (const type of ['dragenter', 'dragover', 'drop']) await target.dispatchEvent(type, { dataTransfer });
 }
+
+/** Download's cards, one for each download, in the order they were made. */
+export const downloadCards = (window) => window.locator('#download-grid .kit-card');
+
+/** The newest download's card. */
+export const downloadCard = (window) => downloadCards(window).last();
+
+/** The newest download's status line. */
+export const downloadStatus = (window) => downloadCard(window).locator('.kit-card-status');
+
+/**
+ * Paste a link into Download's box and add it, as a person does: Download
+ * shows first, and the box is left as the app leaves it.
+ * @param {import('@playwright/test').Page} window
+ * @param {string} link
+ */
+export async function addLink(window, link) {
+    await window.locator('#nav-rail').getByRole('button', { name: 'Download' }).click();
+    await window.locator('#link-input').fill(link);
+    await window.locator('#add-link-btn').click();
+}
+
+/**
+ * What the system's folder picker answers from now on, in this run of the
+ * app: this folder, or (null) cancelled (desktop-preload.cjs).
+ * @param {DesktopApp} app
+ * @param {string | null} folder
+ */
+export const pickFolder = (app, folder) => app.app.evaluate((_electron, pick) => {
+    globalThis.__dropgateFolderPick = pick ?? undefined;
+}, folder);
 
 /** The action bar's status line, under the cards: how many uploads, or why none can start. */
 export const actionLine = (window) => window.locator('#action-bar .kit-action-line');

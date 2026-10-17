@@ -41,7 +41,7 @@ test('three run at once; the rest wait as queued, and start in the order added a
     const ids = startMany(5);
     assert.deepEqual(states(ids), ['running', 'running', 'running', 'queued', 'queued']);
     assert.deepEqual(started, ids.slice(0, 3));
-    assert.deepEqual(transfers.counts(), { running: 3, paused: 0, queued: 2 });
+    assert.deepEqual(transfers.counts(), { running: 3, paused: 0, queued: 2, downloading: 0 });
 
     transfers.ended(ids[1], DONE);
     assert.deepEqual(states(ids), ['running', 'done', 'running', 'running', 'queued']);
@@ -146,7 +146,7 @@ test('an ended one stays, with its link or its reason, until it\'s removed; a fa
     assert.equal(transfers.get(ids[1]).message, 'The server closed the connection.');
     assert.equal(transfers.ended(ids[0], { status: 'cancelled' }), null, 'it ends once');
     assert.equal(transfers.busy(), true, 'one still runs');
-    assert.deepEqual(transfers.counts(), { running: 1, paused: 0, queued: 0 }, 'ended ones are counted nowhere');
+    assert.deepEqual(transfers.counts(), { running: 1, paused: 0, queued: 0, downloading: 0 }, 'ended ones are counted nowhere');
     assert.equal(transfers.withdraw(ids[3]), null, 'an ended one isn\'t taken back, it\'s removed');
 
     // Remove takes waiting and ended ones; one going stays.
@@ -294,4 +294,67 @@ test('a done upload can be deleted while the transfer window holds its token: th
     assert.equal(view(transfers.get(other)).link, DONE.link, 'its link still works');
 
     assert.deepEqual(transfers.remove([done, other]).map((card) => card.id), [done, other]);
+});
+
+/** A download as main makes one from a link: no files until its list is read, saved to the default folder. */
+const addDownload = (transfers) => transfers.add({
+    kind: 'download', owner: 1, server: SERVER, host: 'dropgate.test', files: [], options: null, saveTo: { folder: 'default', label: 'Downloads' },
+});
+
+test('a download reads its list of files, then waits; Save to changes until it starts; it runs with uploads, counted apart; done, it can be shown', () => {
+    const { transfers, started, startMany } = registry();
+    const card = addDownload(transfers);
+    assert.equal(card.state, 'reading');
+    assert.equal(transfers.read(card.id, { files: [{ name: 'Secret plans é.bin', size: 1000 }], encrypted: true }), card);
+    assert.equal(transfers.read(card.id, { files: [], encrypted: false }), null, 'read once');
+    assert.equal(card.state, 'waiting');
+    // Not an upload's: no files dropped on, no upload options.
+    assert.equal(transfers.addFiles(card.id, [{ path: '/secret/more.bin' }]), null);
+    assert.equal(transfers.setOptions(card.id, { maxDownloads: 5 }), null);
+
+    transfers.saveTo([card.id], { folder: 'a-folder-id', label: 'Projects' });
+    assert.deepEqual(view(card).saveTo, { folder: 'a-folder-id', label: 'Projects' });
+
+    // Two uploads run; the download takes the third place, and counts as one downloading.
+    startMany(2);
+    transfers.start(card.id, SERVER);
+    assert.deepEqual(transfers.counts(), { running: 3, paused: 0, queued: 0, downloading: 1 });
+    assert.equal(started.at(-1), card.id);
+    transfers.saveTo([card.id], { folder: 'default', label: 'Downloads' });
+    assert.deepEqual(view(card).saveTo, { folder: 'a-folder-id', label: 'Projects' }, 'started: its folder stays');
+
+    transfers.saved(card.id, '/home/will/Projects/Secret plans é.bin');
+    transfers.ended(card.id, { status: 'success' });
+    const shown = view(card);
+    assert.deepEqual([shown.kind, shown.state, shown.host, shown.encrypted, shown.canShow, shown.canDelete, shown.link], ['download', 'done', 'dropgate.test', true, true, false, null]);
+    assert.doesNotMatch(JSON.stringify(shown), /home|will\//, 'never where it was saved');
+    assert.deepEqual(transfers.remove([card.id]).map(({ id }) => id), [card.id]);
+});
+
+test('a download whose list couldn\'t be read fails, with no Retry; one that failed with its list read can wait again; at once follows Settings', () => {
+    const { transfers, started } = registry();
+    const unread = addDownload(transfers);
+    transfers.ended(unread.id, { status: 'error', error: 'The upload wasn\'t found. It may have expired.' });
+    assert.equal(unread.state, 'failed');
+    assert.equal(transfers.retry(unread.id, 1), null, 'nothing to download again');
+
+    const read = addDownload(transfers);
+    transfers.read(read.id, { files: [{ name: 'a.bin', size: 1 }], encrypted: false });
+    transfers.start(read.id, SERVER);
+    transfers.ended(read.id, { status: 'error', error: 'The connection was lost.' });
+    assert.equal(transfers.retry(read.id, 1)?.state, 'waiting');
+
+    // One at once: a second waits, and runs as soon as more are allowed.
+    transfers.setAtOnce(1);
+    const [first, second] = [addDownload(transfers), addDownload(transfers)];
+    for (const { id } of [first, second]) {
+        transfers.read(id, { files: [{ name: 'b.bin', size: 1 }], encrypted: false });
+        transfers.start(id, SERVER);
+    }
+    assert.deepEqual([first.state, second.state], ['running', 'queued']);
+    transfers.setAtOnce(2);
+    assert.deepEqual([second.state, started.at(-1)], ['running', second.id]);
+    // Removed while it reads: it goes, and nothing of it is left.
+    const reading = addDownload(transfers);
+    assert.deepEqual(transfers.remove([reading.id]).map(({ id }) => id), [reading.id]);
 });

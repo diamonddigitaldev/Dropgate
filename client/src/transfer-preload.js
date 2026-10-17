@@ -12,6 +12,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 const CH = {
     PORT: 'engine:port',
     UPLOAD: 'engine:upload',
+    METADATA: 'engine:metadata',
+    DOWNLOAD: 'engine:download',
     PAUSE: 'engine:pause',
     RESUME: 'engine:resume',
     CANCEL: 'engine:cancel',
@@ -40,6 +42,8 @@ contextBridge.exposeInMainWorld('engine', {
     finished: (id, result) => ipcRenderer.invoke(CH.FINISHED, id, result),
     answer: (call, value) => ipcRenderer.invoke(CH.ANSWER, call, value),
     onUpload: (callback) => on(CH.UPLOAD, callback),
+    onMetadata: (callback) => on(CH.METADATA, callback),
+    onDownload: (callback) => on(CH.DOWNLOAD, callback),
     onPause: (callback) => on(CH.PAUSE, callback),
     onResume: (callback) => on(CH.RESUME, callback),
     onCancel: (callback) => on(CH.CANCEL, callback),

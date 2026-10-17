@@ -20,11 +20,11 @@
 <body>
 
     <!-- kit.ui.mountShell() (renderer.js) builds the frame around what's here:
-         the nav rail (Upload, then Settings and Collapse), the header with Add
-         Files, and the Settings view, with Dropgate's Server and Privacy tabs,
-         then Update, then Credits. -->
+         the nav rail (Upload and Download, then Settings and Collapse), the
+         header with Add Files, and the Settings view, with Dropgate's Server,
+         Transfers and Privacy tabs, then Update, then Credits. -->
 
-    <!-- Add Files, in the header while Upload shows. -->
+    <!-- Add Files, in the header while a section shows: the files picked are an upload, on Upload. -->
     <div id="toolbar" class="d-flex gap-2">
         <button id="add-files-btn" class="btn btn-sm btn-secondary d-inline-flex align-items-center gap-1" type="button">
             <span class="material-icons-round button-icon" aria-hidden="true">add</span>Add Files
@@ -44,6 +44,28 @@
         </div>
         <!-- The kit's action bar (kit.ui.actionBar()): the counts, the running ones' progress, Clear Finished and Upload All. -->
         <div id="action-bar"></div>
+    </div>
+
+    <!-- Download: a link pasted makes a download, which reads its list of files
+         (no download is counted), then waits; a card for each (renderer.js, the
+         kit's cards in its card grid), the bulk bar over them, and the action
+         bar under them. -->
+    <div id="download-view" class="upload-view">
+        <div class="link-entry">
+            <label for="link-input" class="form-label">Link</label>
+            <div class="input-group input-group-sm">
+                <input type="text" class="form-control selectable" id="link-input" placeholder="https://drop.example.com/…#…" spellcheck="false" autocomplete="off">
+                <button class="btn btn-outline-secondary" type="button" id="add-link-btn">Add</button>
+            </div>
+            <div class="form-text" id="link-help">A Dropgate link. Adding it reads its list of files; nothing is downloaded or counted until you press Download.</div>
+        </div>
+        <div id="download-bulk"></div>
+        <div id="download-area" class="upload-area">
+            <div id="download-empty" class="text-body-secondary small p-3">Paste a link above to add a download.</div>
+            <div id="download-grid"></div>
+        </div>
+        <!-- The kit's action bar: the counts, the running ones' progress, Clear Finished and Download All. -->
+        <div id="download-action-bar"></div>
     </div>
 
     <!-- Settings > Server, moved into its tab by renderer.js: the server uploads
@@ -87,6 +109,23 @@
             <span id="security-text">Checking security…</span>
         </div>
         <p class="form-text mt-2">Each new upload starts with these. An upload waiting keeps what it started with.</p>
+    </div>
+
+    <!-- Settings > Transfers, moved into its tab by renderer.js: where new downloads
+         are saved (shown; Browse is the system's folder picker, in main), and how
+         many transfers run at once (the kit's stepped slider, added by renderer.js). -->
+    <div id="transfers-settings" class="settings-column d-flex flex-column gap-3">
+        <div>
+            <label for="downloads-folder" class="form-label">Save downloads to</label>
+            <div class="input-group input-group-sm">
+                <input type="text" class="form-control selectable" id="downloads-folder" readonly aria-describedby="downloads-folder-help">
+                <button class="btn btn-outline-secondary" type="button" id="downloads-browse-btn">Browse</button>
+                <button class="btn btn-outline-secondary" type="button" id="downloads-reset-btn">Reset</button>
+            </div>
+            <div class="form-text reserved" id="downloads-folder-help">New downloads will be saved here: The system's Downloads folder unless you choose another. Each download can choose its own.</div>
+        </div>
+        <div id="at-once-field"></div>
+        <p class="form-text">File lifetime and max downloads for new uploads are the server's own, in Server.</p>
     </div>
 
     <!-- Settings > Privacy, moved into its tab by renderer.js: the kit's keepLogOnDisk, off by default,

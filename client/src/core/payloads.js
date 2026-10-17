@@ -27,8 +27,20 @@ const MAX_TEXT = 1_000;
 /** A file lifetime's units, as the page offers them, in ms (unlimited is 0). */
 const LIFETIME_UNIT_MS = Object.freeze({ minutes: 60_000, hours: 3_600_000, days: 86_400_000, unlimited: 0 });
 
-/** An upload's statuses, as core gives them: the steps while it runs, then its outcome's. */
-const UPLOAD_STATUSES = Object.freeze(['initializing', 'uploading', 'paused', 'completing', 'completed', 'cancelled', 'failed']);
+/** An upload's or a download's statuses, as core gives them: the steps while it runs, then its outcome's. */
+const TRANSFER_STATUSES = Object.freeze(['initializing', 'uploading', 'downloading', 'paused', 'completing', 'completed', 'cancelled', 'failed']);
+
+/** The most bytes a received file's name takes in UTF-16 code units: core refuses one over 255 bytes of UTF-8. */
+const MAX_NAME = 255;
+
+/**
+ * A hosted upload's link, as Dropgate makes it: http(s), a host, the upload's
+ * ID as the whole path, and for an encrypted one its secret after the #, 32
+ * bytes in URL-safe base64 (43 characters). Nothing else: no user name or
+ * password, no query.
+ */
+const HOSTED_PATH = /^\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SECRET = /^#[A-Za-z0-9_-]{43}$/;
 
 const isId = (value) => typeof value === 'string' && UUID.test(value);
 
@@ -189,6 +201,74 @@ function linkOf(link) {
     return link;
 }
 
+/**
+ * transfer:add-download: a link to a hosted upload, as Dropgate makes it
+ * (HOSTED_PATH, SECRET), from a page that holds it until it's sent. Main
+ * passes the link on to the transfer window, and keeps only where it points:
+ * the server's address (its origin) and host, never the ID or the secret.
+ * @returns {{ link: string, server: { url: string, allowInsecure: boolean }, host: string }}
+ */
+function downloadLink(request) {
+    const link = isRecord(request, ['link']) ? request.link : null;
+    let url = null;
+    if (isText(link, MAX_LINK) && /^https?:\/\/[^\s]+$/i.test(link)) {
+        try {
+            url = new URL(link);
+        } catch {
+            url = null;
+        }
+    }
+    const ok = url && !url.username && !url.password && url.search === '' && HOSTED_PATH.test(url.pathname) && (url.hash === '' || SECRET.test(url.hash));
+    if (!ok) throw new Error('Expected a link to an upload.');
+    return { link, server: { url: url.origin, allowInsecure: url.protocol === 'http:' }, host: url.host };
+}
+
+/**
+ * transfer:save-to: downloads of this window's waiting, and where they're
+ * saved: 'default' (Settings > Transfers' folder) or a folder this window
+ * chose (folder:choose), by the ID main made for it.
+ * @param {(id: string) => boolean} own - Whether it's a download of this window's, waiting.
+ * @param {(folder: string) => boolean} chosen - Whether main made this folder's ID for this window.
+ * @returns {{ ids: string[], folder: string }}
+ */
+function saveToOf(request, own, chosen) {
+    const ids = isRecord(request, ['ids', 'folder']) ? request.ids : null;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_FILES || !ids.every((id) => isId(id) && own(id)) || new Set(ids).size !== ids.length) {
+        throw new Error('Expected downloads of this window\'s waiting to start.');
+    }
+    if (!(request.folder === 'default' || (isId(request.folder) && chosen(request.folder)))) throw new Error('Expected a folder this window chose.');
+    return { ids: [...ids], folder: request.folder };
+}
+
+/**
+ * folder:set-default: a folder this window chose (folder:choose), or null for
+ * the system's Downloads folder.
+ * @param {(folder: string) => boolean} chosen
+ */
+function defaultFolderOf(request, chosen) {
+    const folder = isRecord(request, ['folder']) ? request.folder : undefined;
+    if (!(folder === null || (isId(folder) && chosen(folder)))) throw new Error('Expected a folder this window chose.');
+    return folder;
+}
+
+/**
+ * The kit's settings:set, as main answers it: a plain object of changes,
+ * none to a setting only main changes, and transfers at once a whole number
+ * in its range. The kit checks the rest (each a known setting, of its kind).
+ * @param {readonly string[]} mainOnly
+ * @param {{ MIN: number, MAX: number }} atOnce
+ */
+function settingsChangesOf(changes, mainOnly, atOnce) {
+    if (typeof changes !== 'object' || changes === null || Array.isArray(changes)) throw new Error('Expected settings to change.');
+    const named = mainOnly.filter((key) => Object.hasOwn(changes, key));
+    if (named.length > 0) throw new Error(`${named.join(', ')} can't be changed from the page.`);
+    if (Object.hasOwn(changes, 'transfersAtOnce')) {
+        const n = changes.transfersAtOnce;
+        if (!Number.isSafeInteger(n) || n < atOnce.MIN || n > atOnce.MAX) throw new Error(`Expected transfers at once from ${atOnce.MIN} to ${atOnce.MAX}.`);
+    }
+    return { ...changes };
+}
+
 /** upload:finished: why an upload the page made never started. */
 function failureOf(result) {
     if (!isRecord(result, ['status', 'error']) || result.status !== 'error' || !isText(result.error, MAX_TEXT)) {
@@ -204,7 +284,7 @@ function snapshotOf(snapshot) {
     const fields = ['status', 'phase', 'text', 'percent', 'processedBytes', 'totalBytes', 'fileIndex', 'totalFiles', 'canPause', 'deadline'];
     const optional = (value, ok) => value === undefined || ok(value);
     const ok = isRecord(snapshot, fields, ['status'])
-        && UPLOAD_STATUSES.includes(snapshot.status)
+        && TRANSFER_STATUSES.includes(snapshot.status)
         && optional(snapshot.phase, (v) => isText(v, 64))
         && optional(snapshot.text, (v) => isText(v, MAX_TEXT))
         && optional(snapshot.percent, (v) => typeof v === 'number' && v >= 0 && v <= 100)
@@ -221,11 +301,16 @@ function deadlineOf(deadline) {
     return deadline;
 }
 
-/** engine:finished: an upload's one outcome: its link, cancelled, or core's reason. */
+/**
+ * engine:finished: a transfer's one outcome: an upload's link, a download's
+ * completion (no link: its file is in its folder), cancelled, or core's
+ * reason. Which kind may end how is main's to check (transfer-host.js).
+ */
 function outcomeOf(result) {
     if (isRecord(result, ['status', 'link']) && result.status === 'success' && isWebLink(result.link, MAX_LINK)) {
         return { status: 'success', link: result.link };
     }
+    if (isRecord(result, ['status']) && result.status === 'success') return { status: 'success' };
     if (isRecord(result, ['status']) && result.status === 'cancelled') return { status: 'cancelled' };
     if (isRecord(result, ['status', 'message']) && result.status === 'error' && isText(result.message, MAX_TEXT)) {
         return { status: 'error', message: result.message };
@@ -233,13 +318,45 @@ function outcomeOf(result) {
     throw new Error('Expected how an upload running finished.');
 }
 
-/** engine:answer: a server check's answer, or a pause's, a resume's, a delete's or a quit's (core's reason when it couldn't, or nothing). */
+/**
+ * A download's list of files, as core read it from the server (decrypted):
+ * each name (core's file name rule: at most 255 bytes, so as many UTF-16
+ * units) and size, at least one file, and whether it's encrypted.
+ */
+const isFileList = (value) => isRecord(value, ['files', 'encrypted']) && typeof value.encrypted === 'boolean'
+    && Array.isArray(value.files) && value.files.length > 0 && value.files.length <= MAX_FILES
+    && value.files.every((file) => isRecord(file, ['name', 'size']) && isText(file.name, MAX_NAME) && file.name.length > 0 && isCount(file.size));
+
+/**
+ * engine:answer: a server check's answer; a metadata read's (the list of
+ * files, or why it couldn't be read); or a pause's, a resume's, a delete's or
+ * a quit's (core's reason when it couldn't, or nothing).
+ */
 function answerOf(kind, value) {
-    const ok = kind === 'check'
-        ? isRecord(value, ['ok', 'baseUrl', 'serverVersion', 'serverInfo', 'dgup', 'code', 'message'], ['ok']) && typeof value.ok === 'boolean'
-        : isRecord(value, ['message'], []) && (value.message === undefined || isText(value.message, MAX_TEXT));
+    const reason = isRecord(value, ['message'], []) && (value.message === undefined || isText(value.message, MAX_TEXT));
+    let ok;
+    if (kind === 'check') ok = isRecord(value, ['ok', 'baseUrl', 'serverVersion', 'serverInfo', 'dgup', 'code', 'message'], ['ok']) && typeof value.ok === 'boolean';
+    else if (kind === 'metadata') ok = isFileList(value) || (reason && typeof value.message === 'string');
+    else ok = reason;
     if (!ok) throw new Error('Expected the answer to a call.');
+    if (kind === 'metadata' && value.files) {
+        return { files: value.files.map(({ name, size }) => ({ name, size })), encrypted: value.encrypted };
+    }
     return value;
+}
+
+// --- The file service's ---
+
+/**
+ * saved: where a download landed, for Show in Folder: its output, as main
+ * granted it, and an absolute path.
+ * @param {(output: string) => boolean} granted
+ */
+function savedOf(message, granted) {
+    const ok = isRecord(message, ['type', 'output', 'path']) && message.type === 'saved' && isId(message.output) && granted(message.output)
+        && isText(message.path, MAX_PATH) && !message.path.includes('\0') && path.isAbsolute(message.path);
+    if (!ok) throw new Error('Expected where a download was saved.');
+    return { output: message.output, path: message.path };
 }
 
 module.exports = {
@@ -257,9 +374,14 @@ module.exports = {
     uploadsToStart,
     serverAddress,
     linkOf,
+    downloadLink,
+    saveToOf,
+    defaultFolderOf,
+    settingsChangesOf,
     failureOf,
     snapshotOf,
     deadlineOf,
     outcomeOf,
     answerOf,
+    savedOf,
 };

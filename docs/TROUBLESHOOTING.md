@@ -116,6 +116,12 @@ If clients see “Too many requests”:
 **To send its log with a bug report**
 - Turn on **Keep log on disk for troubleshooting** in **Settings**, under **Privacy**, and do what went wrong again. The log is `debug.log` in the app's user data folder (`%APPDATA%\dropgate-client` on Windows, `~/.config/dropgate-client` on Linux). It holds none of your file names, folders or links. Turn the setting off afterwards, and the file is deleted.
 
+**A download says "The folder to save to isn't there any more."**
+- The folder it was to be saved in was moved or deleted after it was chosen. Choose another in its **Save to** (or, for every new download, in **Settings**, under **Transfers**), and choose **Retry**. Nothing of the download is left behind: until it's whole, a download is written in `Partial Downloads` in the app's user data folder, which is emptied whenever the app starts and quits.
+
+**A pasted link isn't taken**
+- **Download** takes a link to an upload, `https://<server>/<id>`, with `#` and its key after it when it's encrypted. A direct transfer's code or link isn't taken yet: open it in your browser. A link made by Dropgate 3 can't be downloaded by this version. A link to several files can't be downloaded in the app yet either: open it in your browser.
+
 **A `.*` key left in the registry after upgrading from version 3 (Windows)**
 - Version 3, installed for all users, registered an association for a literal `.*` extension, which never did anything, and its uninstaller leaves that key behind. Nothing reads it. To remove it, from a Command Prompt run as administrator:
 

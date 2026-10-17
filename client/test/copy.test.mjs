@@ -25,7 +25,7 @@ const slipsOf = (rule) => everything.flatMap(({ where, text }) => copySlips(text
 
 test('the checks read every script and page of the client\'s own, with their words and none of their comments', () => {
     assert.deepEqual(scripts.map(({ name }) => name).sort(), ['constants.js', 'core/file-service.js', 'core/handles.js', 'core/notices.js', 'core/payloads.js', 'core/share.js',
-        'core/transfers.js', 'file-service.js', 'main.js', 'menu.js', 'preload.js', 'renderer.js', 'transfer-host.js', 'transfer-preload.js', 'transfer.js', 'tray.js', 'window-channels.js']);
+        'core/transfers.js', 'file-service.js', 'main.js', 'menu.js', 'preload.js', 'renderer.js', 'settings-guard.js', 'transfer-host.js', 'transfer-preload.js', 'transfer.js', 'tray.js', 'window-channels.js']);
     assert.deepEqual(pages.map(({ name }) => name).sort(), ['index.html', 'transfer.html']);
     const texts = new Set(everything.map(({ text }) => text));
     for (const known of ['Delete This Upload?', 'Deleted from the server. Its link no longer works.', "Outside This Server's Limits", 'Uploaded · End-to-End Encrypted', 'Add Files',

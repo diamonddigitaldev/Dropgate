@@ -3,7 +3,8 @@
 // path), is the kit's, which it registers on the app's session.
 //
 // The window holds no path but the ones it hands main once (addFiles), and
-// asks no server anything itself: main runs checks and uploads in the
+// where new downloads are saved, to show it (Settings > Transfers); it asks
+// no server anything itself: main runs checks and uploads in the
 // transfer window, which has a bridge of its own (transfer-preload.js).
 //
 // This runs in a sandboxed preload, where require() can only load "electron"
@@ -24,6 +25,12 @@ const CH = {
     TRANSFER_RETRY: 'transfer:retry',
     TRANSFER_SET_OPTIONS: 'transfer:set-options',
     TRANSFER_DELETE: 'transfer:delete',
+    TRANSFER_ADD_DOWNLOAD: 'transfer:add-download',
+    TRANSFER_SAVE_TO: 'transfer:save-to',
+    TRANSFER_SHOW: 'transfer:show',
+    FOLDER_CHOOSE: 'folder:choose',
+    FOLDER_DEFAULT: 'folder:default',
+    FOLDER_SET_DEFAULT: 'folder:set-default',
     TRANSFER_PAUSE: 'transfer:pause',
     TRANSFER_RESUME: 'transfer:resume',
     TRANSFER_CANCEL: 'transfer:cancel',
@@ -55,6 +62,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     retryTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_RETRY, { id }),
     setTransferOptions: (id, options) => ipcRenderer.invoke(CH.TRANSFER_SET_OPTIONS, { id, options }),
     deleteTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_DELETE, { id }),
+    // A link pasted into Download: main passes it on to be read, and keeps none of it.
+    addDownload: (link) => ipcRenderer.invoke(CH.TRANSFER_ADD_DOWNLOAD, { link }),
+    saveDownloadsTo: (ids, folder) => ipcRenderer.invoke(CH.TRANSFER_SAVE_TO, { ids, folder }),
+    showInFolder: (id) => ipcRenderer.invoke(CH.TRANSFER_SHOW, { id }),
+    // A folder is an ID main made and its own name, never its path.
+    chooseFolder: () => ipcRenderer.invoke(CH.FOLDER_CHOOSE),
+    getDownloadFolder: () => ipcRenderer.invoke(CH.FOLDER_DEFAULT),
+    setDownloadFolder: (folder) => ipcRenderer.invoke(CH.FOLDER_SET_DEFAULT, { folder }),
     pauseTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_PAUSE, { id }),
     resumeTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_RESUME, { id }),
     cancelTransfer: (id) => ipcRenderer.invoke(CH.TRANSFER_CANCEL, { id }),

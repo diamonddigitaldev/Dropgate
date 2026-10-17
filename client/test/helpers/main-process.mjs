@@ -103,6 +103,9 @@ export function fakeMain({ settings = {} } = {}) {
                 if (handlers.has(channel)) throw new Error(`"${channel}" is handled twice.`);
                 handlers.set(channel, handler);
             },
+            removeHandler(channel) {
+                handlers.delete(channel);
+            },
         },
         BrowserWindow,
         MessageChannelMain: class {

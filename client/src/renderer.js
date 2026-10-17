@@ -1,9 +1,13 @@
-// The page: Dropgate's Upload section and its Server and Privacy tabs, in the
+// The page: Dropgate's Upload and Download sections and its Server, Transfers and Privacy tabs, in the
 // kit's frame (kit.ui.mountShell()): the nav rail, the header (with Add
 // Files), and the Settings view, with Update and Credits after Dropgate's own
 // tabs. The drop zone, the cards, their grid and bulk bar, the action bar, the
 // prompts and the toasts are the kit's too. The settings are the kit's
 // (window.kitAPI), saved as they change.
+//
+// Download (below, "--- Download ---") is a card for each download, made from
+// a link pasted into its box; Settings > Transfers says where downloads are
+// saved and how many transfers run at once.
 //
 // Upload is a card for each upload in main's registry: waiting for Upload,
 // queued, running, paused, and once ended, done (with its link), failed or
@@ -36,15 +40,13 @@ const kitApi = window.kitAPI;
 /** What Restart Now says while an upload runs, from this window or Share with Dropgate. */
 const BUSY_REASON = 'An upload is in progress.';
 
-/** How many uploads run at once: main's TRANSFERS.AT_ONCE (Settings > Transfers sets it from phase 7's piece 5). */
-const AT_ONCE = 3;
 
 /** A file lifetime in ms, to hold it to the server's limit here: core's lifetime.toMs(), which the upload itself uses. */
 const LIFETIME_UNIT_MS = { minutes: 60_000, hours: 3_600_000, days: 86_400_000 };
 const lifetimeToMs = (value, unit) => (Number.isFinite(value) && value > 0 && LIFETIME_UNIT_MS[unit] ? Math.round(value * LIFETIME_UNIT_MS[unit]) : 0);
 
-/** The states an upload has once it has ended, and those going. */
-const ENDED = ['done', 'failed', 'cancelled'];
+/** The states a transfer has once it has ended, and those going. */
+const ENDED = ['done', 'failed', 'cancelled', 'deleted'];
 const GOING = ['queued', 'running', 'paused'];
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -81,6 +83,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Share with Dropgate is Windows' right-click entry: elsewhere, the Server tab doesn't mention it.
         if (!navigator.userAgent.includes('Windows')) $('server-help').textContent = 'Uploads go to this server.';
 
+        /** How many transfers run at once: Settings > Transfers' transfersAtOnce, read with the settings. */
+        let atOnce = 3;
+
         let serverCapabilities = null;
         /** @type {{compatible:boolean, message?:string}} */
         let lastServerCheck = { compatible: false, message: '' };
@@ -88,10 +93,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         // --- The frame ---
         const shell = kit.ui.mountShell({
             title: 'Dropgate Client',
-            sections: [{ view: 'upload', label: 'Upload', icon: 'upload_file', element: uploadView }],
+            sections: [
+                { view: 'upload', label: 'Upload', icon: 'upload_file', element: uploadView },
+                { view: 'download', label: 'Download', icon: 'download', element: $('download-view') },
+            ],
             toolbar: $('toolbar'),
             settingsTabs: [
                 { id: 'server', label: 'Server', render: (pane) => pane.append($('server-settings')) },
+                { id: 'transfers', label: 'Transfers', render: (pane) => pane.append($('transfers-settings')) },
                 { id: 'privacy', label: 'Privacy', render: (pane) => pane.append($('privacy-settings')) },
             ],
             credits: { logo: 'img/dropgate.png' },
@@ -235,7 +244,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         function statusOf(view) {
             switch (view.state) {
                 case 'waiting': return { text: 'Ready', tone: 'ready' };
-                case 'queued': return { text: `Queued: Starts when one of the ${AT_ONCE} running finishes.`, tone: 'muted' };
+                case 'queued': return { text: `Queued: Starts when one of the ${atOnce} running finishes.`, tone: 'muted' };
                 case 'paused':
                     return { text: view.deadline ? `Paused. Kept until ${formatDeadline(view.deadline)}.` : 'Paused.', tone: 'warning' };
                 case 'running': {
@@ -363,8 +372,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 restore();
                 kit.ui.toast(message, { type: 'warning' });
             }
-            // As the upload is now: it may have moved on before this answer came.
-            if (shown.has(id)) draw(shown.get(id).view);
+            // As it is now: it may have moved on before this answer came.
+            const entry = shown.get(id) ?? downloadsShown.get(id);
+            if (entry) draw(entry.view);
         }
 
         /**
@@ -399,9 +409,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         }
 
-        /** Draw an upload as main says it is now: a new card, or the one it has. */
+        /** Draw a transfer as main says it is now, on Upload or on Download. */
         function draw(view) {
-            if (view.kind !== 'upload') return;
+            if (view.kind === 'download') drawDownload(view);
+            else if (view.kind === 'upload') drawUpload(view);
+        }
+
+        /** Draw an upload as main says it is now: a new card, or the one it has. */
+        function drawUpload(view) {
             let entry = shown.get(view.id);
             if (!entry) {
                 const select = document.createElement('select');
@@ -447,17 +462,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             drawBars();
         }
 
-        /** Uploads gone from main's registry. */
+        /** Transfers gone from main's registry. */
         function forget(ids) {
             for (const id of ids) {
+                settling.delete(id);
                 const entry = shown.get(id);
-                if (!entry) continue;
-                shown.delete(id);
-                idOf.delete(entry.card);
-                asking.delete(id);
-                grid.remove(entry.card);
+                if (entry) {
+                    shown.delete(id);
+                    idOf.delete(entry.card);
+                    asking.delete(id);
+                    grid.remove(entry.card);
+                }
+                const download = downloadsShown.get(id);
+                if (download) {
+                    downloadsShown.delete(id);
+                    downloadIdOf.delete(download.card);
+                    downloadGrid.remove(download.card);
+                }
             }
             drawBars();
+            drawDownloadBars();
         }
 
         /** Remove uploads that can go: waiting or ended. */
@@ -486,6 +510,326 @@ document.addEventListener('DOMContentLoaded', async () => {
                 canClear: views.some((view) => ENDED.includes(view.state)),
             });
             bulk.refresh();
+        }
+
+        // --- Download ---
+        // A link pasted (Add, or Enter) makes a download: main passes the link
+        // to the transfer window, which reads its list of files with no lease
+        // (nothing is counted), and the page holds the link no longer than it
+        // takes to hand it over. The download waits, Ready, with its Save to:
+        // the folder new downloads are saved in (Settings > Transfers), or one
+        // chosen with the system's picker (Choose Folder…), which the page knows
+        // by an ID and its name only. Download starts it; once it's saved, Show
+        // in Folder shows it in its folder, and nothing received is ever opened.
+
+        /**
+         * Each download drawn, by the ID main made: what main last said of it, its card and its Save to select.
+         * @type {Map<string, { view: any, card: any, select: HTMLSelectElement }>}
+         */
+        const downloadsShown = new Map();
+        const downloadIdOf = new Map();
+        const linkInput = $('link-input');
+        const downloadGrid = kit.ui.cardGrid($('download-grid'), { view: 'download', onSelect: () => drawDownloadBars() });
+        const downloadScope = () => (downloadGrid.selection.length > 0 ? downloadGrid.selection : downloadGrid.cards)
+            .map((card) => downloadsShown.get(downloadIdOf.get(card))).filter(Boolean);
+
+        /** Where new downloads are saved, as main says (Settings > Transfers): its path, shown there, and its name, shown on each download. */
+        let defaultFolder = { path: '', label: 'Downloads', chosen: false };
+        /** The folders this window chose with the system's picker, by the ID main made: each one's name. */
+        const chosenFolders = [];
+
+        /** Fill a Save to select: the default folder, those chosen, then Choose Folder…. */
+        function fillFolders(select, current = 'default') {
+            const option = (value, label) => {
+                const made = element('option', '', label);
+                made.value = value;
+                return made;
+            };
+            select.replaceChildren(option('default', defaultFolder.label), ...chosenFolders.map(({ folder, label }) => option(folder, label)), option('choose', 'Choose Folder…'));
+            select.value = current;
+        }
+
+        /**
+         * Save to changed, on one download or (the bulk bar's "Save all to")
+         * several: a folder known already, or one chosen now with the
+         * system's picker; picking none leaves them as they were.
+         * @param {HTMLSelectElement} select
+         * @param {() => any[]} views - The downloads it's for.
+         * @param {string} was - What the select said before.
+         */
+        async function changeSaveTo(select, views, was) {
+            let folder = select.value;
+            if (folder === 'choose') {
+                const picked = await api.chooseFolder().catch(() => null);
+                if (!picked) {
+                    select.value = was;
+                    return;
+                }
+                chosenFolders.push(picked);
+                folder = picked.folder;
+                refreshFolders();
+            }
+            const ids = views().filter(saveable).map((view) => view.id);
+            if (ids.length > 0) await api.saveDownloadsTo(ids, folder).catch(() => kit.ui.toast('Those downloads have started, so where they are saved stays as it was.', { type: 'warning' }));
+        }
+
+        /** Every Save to select, and the bulk bar's, with the folders as they are now. */
+        function refreshFolders() {
+            fillFolders(saveAllTo, saveAllTo.value === 'choose' ? 'default' : saveAllTo.value);
+            for (const entry of downloadsShown.values()) fillFolders(entry.select, entry.view.saveTo?.folder ?? 'default');
+        }
+
+        /** Whether a download's Save to can change: it hasn't started. */
+        const saveable = (view) => Boolean(view) && ['reading', 'waiting'].includes(view.state);
+        /** Whether it can go: reading, waiting, or ended. One going is cancelled first. */
+        const downloadRemovable = (view) => Boolean(view) && (saveable(view) || ENDED.includes(view.state));
+
+        const saveAllTo = element('select', 'form-select form-select-sm');
+        let saveAllWas = 'default';
+        saveAllTo.addEventListener('focus', () => { saveAllWas = saveAllTo.value; });
+        saveAllTo.addEventListener('change', () => changeSaveTo(saveAllTo, () => downloadScope().map(({ view }) => view), saveAllWas));
+        fillFolders(saveAllTo);
+        const downloadBulk = kit.ui.bulkBar(downloadGrid, {
+            noun: 'download',
+            target: { verb: 'Save', control: saveAllTo, note: () => '' },
+            actions: [{
+                label: 'Remove',
+                variant: 'outline-danger',
+                selection: true,
+                enabled: (picked) => picked.some((card) => downloadRemovable(downloadsShown.get(downloadIdOf.get(card))?.view)),
+                onClick: (picked) => removeDownloads(picked.map((card) => downloadsShown.get(downloadIdOf.get(card))).filter(Boolean)),
+            }],
+        });
+        $('download-bulk').append(downloadBulk.element);
+
+        const downloadActions = kit.ui.actionBar({
+            run: { label: 'Download All', onClick: () => startDownloads(downloadScope().filter(({ view }) => view.state === 'waiting').map(({ view }) => view)) },
+            // Each download has its own Cancel, so the bar never swaps to its abort.
+            abort: { onClick: () => {} },
+            clear: { label: 'Clear Finished', onClick: () => removeDownloads([...downloadsShown.values()].filter(({ view }) => ENDED.includes(view.state))) },
+            progressLabel: 'Downloads in progress',
+        });
+        $('download-action-bar').append(downloadActions.element);
+
+        // Delete removes the downloads selected that can go.
+        kit.keys.onKey((event) => {
+            if (event.key !== 'Delete' || downloadGrid.selection.length === 0) return;
+            event.preventDefault();
+            removeDownloads(downloadScope());
+        }, { view: 'download' });
+
+        /** A link's shape, as the page can tell it: an upload's, a direct transfer's or a code, one an older Dropgate made, or none. */
+        function linkKind(value) {
+            if (/^[a-z]{4}-?\d{4}$/i.test(value) || /^https?:\/\/[^/\s]+\/p2p(?:[/#?]|$)/i.test(value)) return 'direct';
+            const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+            if (new RegExp(`^https?://[^/\\s?#@]+/${uuid}(?:#[A-Za-z0-9_-]{43})?$`, 'i').test(value)) return 'hosted';
+            // Dropgate 3's: a bundle's page (/b/), or a file's key in standard base64 (44 characters).
+            if (new RegExp(`^https?://[^/\\s?#@]+/(?:b/${uuid}(?:#.*)?|${uuid}#[A-Za-z0-9+/]{43}=)$`, 'i').test(value)) return 'older';
+            return null;
+        }
+
+        /** Add the link in the box: a download, or a toast saying why not. The box is emptied once it's handed over. */
+        async function addLink() {
+            const value = linkInput.value.trim();
+            if (!value) return;
+            const kind = linkKind(value);
+            if (kind === 'direct') {
+                kit.ui.toast('Direct transfers come to the desktop app later. For now, this box takes links to uploads.', { type: 'info' });
+                return;
+            }
+            if (kind === 'older') {
+                kit.ui.toast("That link was made with an older version of Dropgate, which this app can't download.", { type: 'warning' });
+                return;
+            }
+            if (kind !== 'hosted') {
+                kit.ui.toast("That isn't a Dropgate link.", { type: 'danger' });
+                return;
+            }
+            try {
+                await api.addDownload(value);
+                linkInput.value = '';
+            } catch {
+                kit.ui.toast("That isn't a Dropgate link.", { type: 'danger' });
+            }
+        }
+        $('add-link-btn').addEventListener('click', () => addLink());
+        linkInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') addLink();
+        });
+
+        /** A download's name on its card: its file's, or how many files; while its list is read, that. */
+        function downloadName(view) {
+            if (view.state === 'reading') return 'Reading the link…';
+            if (view.files.length === 0) return `Link from ${view.host}`;
+            return view.files.length === 1 ? view.files[0].name : countOf(view.files.length, 'file');
+        }
+
+        /** Its meta line: the size, and with several files the first's name and how many more; its server; whether it's encrypted. */
+        function downloadMeta(view) {
+            if (view.files.length === 0) return view.host;
+            const total = view.files.reduce((sum, file) => sum + file.size, 0);
+            const more = view.files.length > 1 ? ` · ${view.files[0].name} and ${view.files.length - 1} More` : '';
+            return `${formatBytes(total)}${more} · ${view.host}${view.encrypted ? ' · Encrypted' : ''}`;
+        }
+
+        /** Its status line. */
+        function downloadStatus(view) {
+            switch (view.state) {
+                case 'reading': return { text: 'Reading the file list…', tone: 'running' };
+                case 'waiting': return { text: 'Ready', tone: 'ready' };
+                case 'queued': return { text: `Queued: Starts when one of the ${atOnce} running finishes.`, tone: 'muted' };
+                case 'paused':
+                    return { text: view.deadline ? `Paused. Kept until ${formatDeadline(view.deadline)}.` : 'Paused.', tone: 'warning' };
+                case 'running':
+                    // Finishing is moving it into its folder, which on another drive is a copy.
+                    if (view.status === 'completing') return { text: 'Saving…', tone: 'running' };
+                    if (view.phase === 'downloading' && typeof view.percent === 'number' && view.status === 'downloading') {
+                        return { text: `Downloading ${Math.floor(view.percent)}%`, tone: 'running' };
+                    }
+                    return { text: tidy(view.step) || 'Starting…', tone: 'running' };
+                case 'done': return { text: `Saved to ${view.saveTo?.label ?? defaultFolder.label}`, tone: 'success' };
+                case 'failed': return { text: `Failed: ${sentence(tidy(view.message) || 'The download stopped.')}`, tone: 'danger' };
+                case 'cancelled': return { text: 'Cancelled', tone: 'muted' };
+                default: return { text: view.state, tone: 'muted' };
+            }
+        }
+
+        /** Its buttons, for its state. */
+        function downloadButtons(view) {
+            const { id } = view;
+            const cancel = { label: 'Cancel', variant: 'outline-danger', onClick: () => api.cancelTransfer(id).catch(() => {}) };
+            switch (view.state) {
+                case 'waiting': return [{ label: 'Download', variant: 'primary', onClick: () => startDownloads([view]) }];
+                case 'running': {
+                    // Saving, it's finishing: nothing to pause, and too late to cancel.
+                    if (view.status === 'completing') return [];
+                    const asked = settling.get(id)?.kind;
+                    const pausable = view.canPause && ['initializing', 'downloading'].includes(view.status);
+                    const toggle = asked === 'resume' ? [{ label: 'Resume', onClick: () => {} }]
+                        : pausable || asked === 'pause' ? [{ label: 'Pause', onClick: (button) => pauseOrResume(button, id, true) }] : [];
+                    return [...toggle, cancel];
+                }
+                case 'paused':
+                    return [...(view.canPause || settling.get(id)?.kind === 'resume' ? [{ label: 'Resume', onClick: (button) => pauseOrResume(button, id, false) }] : []), cancel];
+                case 'queued': return [cancel];
+                case 'done': return view.canShow ? [{ label: 'Show in Folder', onClick: () => api.showInFolder(id).catch(() => kit.ui.toast("Couldn't show the folder.", { type: 'danger' })) }] : [];
+                case 'failed':
+                case 'cancelled':
+                    return view.files.length > 0 ? [{ label: 'Retry', onClick: () => api.retryTransfer(id).catch(() => {}) }] : [];
+                default: return [];
+            }
+        }
+
+        /** Draw a download as main says it is now: a new card, or the one it has. */
+        function drawDownload(view) {
+            let entry = downloadsShown.get(view.id);
+            if (!entry) {
+                const select = element('select', 'form-select form-select-sm');
+                select.setAttribute('aria-label', 'Save to');
+                let was = 'default';
+                select.addEventListener('focus', () => { was = select.value; });
+                select.addEventListener('change', () => changeSaveTo(select, () => [downloadsShown.get(view.id)?.view], was));
+                const card = kit.ui.card({
+                    icon: 'download',
+                    name: downloadName(view),
+                    onConfigure: () => openDownloadOptions(downloadsShown.get(view.id)?.view),
+                    onRemove: () => removeDownloads([downloadsShown.get(view.id)]),
+                    route: { label: 'Save to', control: select },
+                });
+                entry = { view, card, select };
+                downloadsShown.set(view.id, entry);
+                downloadIdOf.set(card, view.id);
+                downloadGrid.add(card);
+            }
+            entry.view = view;
+            if (settling.has(view.id) && settled(view, settling.get(view.id))) settling.delete(view.id);
+            if (document.activeElement !== entry.select) fillFolders(entry.select, view.saveTo?.folder ?? 'default');
+            const bar = ['running', 'paused'].includes(view.state);
+            entry.card.update({
+                name: downloadName(view),
+                meta: downloadMeta(view),
+                status: downloadStatus(view),
+                ...(bar ? { percent: view.status === 'completing' ? null : view.percent ?? null, paused: view.state === 'paused' } : {}),
+                actions: downloadButtons(view),
+                // Save to, while its list is read and it waits; hidden until there's a file to save.
+                ...(view.files.length === 0 ? { route: false } : {}),
+                locked: !saveable(view),
+                canRemove: downloadRemovable(view),
+            });
+            drawDownloadBars();
+        }
+
+        /** Remove downloads that can go: reading, waiting, or ended. Their links go from the transfer window with them. */
+        function removeDownloads(entries) {
+            const ids = entries.filter((entry) => downloadRemovable(entry?.view)).map((entry) => entry.view.id);
+            if (ids.length > 0) api.removeTransfers(ids).catch(() => {});
+        }
+
+        /** Start downloads waiting: each is queued, and runs as soon as it has a place. A link to several files isn't downloaded yet. */
+        async function startDownloads(views) {
+            const single = views.filter((view) => view.files.length === 1);
+            if (single.length < views.length) kit.ui.toast("Links to several files can't be downloaded here yet.", { type: 'warning' });
+            if (single.length === 0) return;
+            try {
+                await api.startTransfers(single.map((view) => view.id));
+            } catch (error) {
+                kit.ui.toast(`Couldn't start the download: ${sentence(error?.message || String(error))}`, { type: 'danger' });
+            }
+        }
+
+        /** The bars under and over the downloads: the counts, progress and buttons; the line while there are none. */
+        function drawDownloadBars() {
+            const views = [...downloadsShown.values()].map(({ view }) => view);
+            $('download-empty').hidden = views.length > 0;
+            $('download-grid').hidden = views.length === 0;
+            const count = (state) => views.filter((view) => view.state === state).length;
+            const running = views.filter((view) => view.state === 'running');
+            const parts = [[running.length, 'Running'], [count('paused'), 'Paused'], [count('queued'), 'Queued'], [count('waiting'), 'Ready']]
+                .filter(([n]) => n > 0).map(([n, word]) => `${n} ${word}`);
+            const percents = running.map((view) => view.percent).filter((percent) => typeof percent === 'number');
+            downloadActions.update({
+                summary: views.length > 0 ? countOf(views.length, 'download') : '',
+                detail: parts.join(' · '),
+                percent: percents.length ? percents.reduce((sum, percent) => sum + percent, 0) / percents.length : 0,
+                running: false,
+                canRun: views.some((view) => view.state === 'waiting'),
+                canClear: views.some((view) => ENDED.includes(view.state)),
+            });
+            downloadBulk.refresh();
+        }
+
+        /**
+         * Advanced Options on a download: a single file has nothing more to
+         * choose (where it's saved is its Save to). A bundle's files and Save
+         * as One ZIP come with links to several files.
+         */
+        function openDownloadOptions(view) {
+            if (!view || !saveable(view)) return;
+            // kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65
+            const dialog = element('dialog', 'kit-dialog options-dialog');
+            dialog.setAttribute('aria-labelledby', 'download-options-title');
+            const header = element('div', 'kit-dialog-header');
+            const title = element('h2', 'kit-dialog-title');
+            const titleText = element('span', '', 'Advanced Options');
+            titleText.id = 'download-options-title';
+            title.append(glyph('tune', 'kit-dialog-icon'), titleText);
+            const close = element('button', 'btn-close');
+            close.type = 'button';
+            close.setAttribute('aria-label', 'Close');
+            close.addEventListener('click', () => dialog.close());
+            header.append(title, close);
+            const body = element('div', 'kit-dialog-body options-body');
+            body.append(element('p', 'kit-dialog-text', downloadName(view)),
+                element('p', 'kit-dialog-detail', "A single file has nothing more to choose: Where it's saved is chosen beside Save to."));
+            const footer = element('div', 'kit-dialog-footer');
+            const done = element('button', 'btn btn-secondary', 'Close');
+            done.type = 'button';
+            done.addEventListener('click', () => dialog.close());
+            footer.append(done);
+            dialog.append(header, body, footer);
+            dialog.addEventListener('close', () => dialog.remove());
+            document.body.append(dialog);
+            dialog.showModal();
         }
 
         // --- The server ---
@@ -535,6 +879,45 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         $('privacy-settings').append(keepLog.element);
 
+        // Settings > Transfers: where new downloads are saved, shown whole
+        // (Browse is the system's folder picker, in main; Reset goes back to
+        // the system's Downloads), and how many transfers run at once.
+        const foldersInput = $('downloads-folder');
+        const resetFolderBtn = $('downloads-reset-btn');
+        /** Show where new downloads are saved, and on every download waiting on it. */
+        function showDefaultFolder(folder) {
+            defaultFolder = folder;
+            foldersInput.value = folder.path;
+            resetFolderBtn.disabled = !folder.chosen;
+            refreshFolders();
+        }
+        showDefaultFolder(await api.getDownloadFolder());
+        $('downloads-browse-btn').addEventListener('click', async () => {
+            const picked = await api.chooseFolder().catch(() => null);
+            if (!picked) return;
+            chosenFolders.push(picked);
+            showDefaultFolder(await api.setDownloadFolder(picked.folder));
+        });
+        resetFolderBtn.addEventListener('click', async () => showDefaultFolder(await api.setDownloadFolder(null)));
+
+        atOnce = settings.transfersAtOnce;
+        const atOnceSlider = kit.ui.stepSlider({
+            id: 'transfers-at-once',
+            label: 'Transfers at once',
+            min: 1,
+            max: 6,
+            value: atOnce,
+            valueText: (n) => countOf(n, 'transfer'),
+            help: (n) => `Up to ${countOf(n, 'transfer')} at once, uploads and downloads together. The rest wait as Queued; a paused one doesn't take a place.`,
+            onChange: (n) => {
+                atOnce = n;
+                kitApi.setSettings({ transfersAtOnce: n });
+                // Each queued one says how many run.
+                for (const entry of [...shown.values(), ...downloadsShown.values()]) if (entry.view.state === 'queued') draw(entry.view);
+            },
+        });
+        $('at-once-field').append(atOnceSlider.element);
+
         await checkServerCompatibility();
 
         // --- Event Listeners ---
@@ -574,7 +957,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             const picked = Array.from(e.target.files ?? []);
             fileInput.value = '';
             const paths = picked.map((file) => kitApi.getPathForFile(file)).filter(Boolean);
-            if (paths.length) addPaths(paths, null);
+            // Picked from Download's header too: they're an upload, shown on Upload.
+            if (paths.length) {
+                shell.showView('upload');
+                addPaths(paths, null);
+            }
         });
 
         // The server is kept as it's changed, and as Test finds it.

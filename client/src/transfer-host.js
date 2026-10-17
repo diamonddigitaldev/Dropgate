@@ -4,13 +4,13 @@ const { randomUUID } = require('crypto');
 const path = require('path');
 const { BrowserWindow, MessageChannelMain, utilityProcess } = require('electron');
 const { ENGINE, FILE_SERVICE, TRANSFERS } = require('./constants');
-const { answerOf, deadlineOf, isId, outcomeOf, snapshotOf } = require('./core/payloads');
+const { answerOf, deadlineOf, isId, outcomeOf, savedOf, snapshotOf } = require('./core/payloads');
 
 // The transfer host: the hidden transfer window, which runs core and makes
 // every request Dropgate makes, and the file service, which reads the files
-// it sends. Main starts both together on demand, and hands each one end of
-// one MessageChannel, so a file's bytes go from the file service to the
-// transfer window and never through main.
+// it sends and writes the files it downloads. Main starts both together on
+// demand, and hands each one end of one MessageChannel, so a file's bytes go
+// between the file service and the transfer window and never through main.
 //
 // - They start with the first server check or upload, and close
 //   TRANSFERS.WINDOW_IDLE_MS after the last of the transfer window's work
@@ -32,11 +32,16 @@ const { answerOf, deadlineOf, isId, outcomeOf, snapshotOf } = require('./core/pa
 //   it (core/payloads.js): the page is never trusted.
 // - The file service is a utility process with no window and no session. It
 //   reads a file only for a grant main made as its upload started, with the
-//   path main holds, and the grant is revoked as the upload ends.
+//   path main holds, and writes one only for an output main granted as its
+//   download started, into the folder main chose; each is revoked as its
+//   transfer ends. It tells main where each download landed (saved), and
+//   nothing else.
 // - A finished upload's manage token stays in the transfer window, which
 //   deletes the upload with it when asked, until its card is removed
-//   (engine:forget) or the app quits (engine:quit). Main knows only which
-//   uploads it holds one for: the token never leaves the transfer window.
+//   (engine:forget) or the app quits (engine:quit); so does a download's
+//   link, from the moment main hands it over to read its list of files.
+//   Main knows only which transfers it holds one for: neither leaves the
+//   transfer window, and main never keeps the link it passed on.
 
 /**
  * Start answering the transfer window's channels. Call once the app is ready
@@ -46,10 +51,12 @@ const { answerOf, deadlineOf, isId, outcomeOf, snapshotOf } = require('./core/pa
  * @param {{ name: string, version: string }} options.appInfo - For core, for display only.
  * @param {(id: string, snapshot: object) => void} options.onUpdate - An upload's snapshot.
  * @param {(id: string, deadline: number) => void} options.onPauseEnding - A paused upload's server drops it at this time.
- * @param {(id: string, result: object) => void} options.onFinished - An upload's one outcome.
- * @param {(ids: string[]) => void} [options.onTokensLost] - The transfer window stopped holding these finished uploads' manage tokens.
+ * @param {(id: string, result: object) => void} options.onFinished - An upload's or a download's one outcome.
+ * @param {(ids: string[]) => void} [options.onTokensLost] - The transfer window stopped holding these finished uploads' manage tokens, or these downloads' links.
+ * @param {(id: string, filePath: string) => void} [options.onSaved] - A download's file is in place, here.
+ * @param {string} [options.partials] - The partial folder, where the file service writes a download until it's whole.
  */
-function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished, onTokensLost = () => {} }) {
+function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished, onTokensLost = () => {}, onSaved = () => {}, partials = '' }) {
     const session = kit.sessions.isolated('transfer');
 
     /** @type {BrowserWindow | null} */
@@ -65,12 +72,16 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
     let closing = false;
     /** The timer that closes the transfer window once it has had nothing to do for a while. */
     let idleTimer = null;
-    /** The uploads running there, with the read grants each was given. */
+    /** The transfers running there: each one's kind, the read grants an upload was given, and a download's output. */
     const running = new Map();
+    /** Each download's output, back to the download. */
+    const outputs = new Map();
     /** The calls waiting for the transfer window's answer. */
     const calls = new Map();
-    /** The finished uploads whose manage tokens the transfer window holds, by ID: never the tokens. */
+    /** The finished uploads whose manage tokens the transfer window holds, and the downloads whose links it holds, by ID: never the tokens or links. */
     const kept = new Set();
+    /** The file service's exit, while it runs. */
+    let fileServiceExit = null;
 
     const known = (id) => isId(id) && running.has(id);
 
@@ -107,7 +118,10 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
         fromTransferWindow(event);
         const outcome = outcomeOf(result);
         runningId(id, 'Expected how an upload running finished.');
-        // A completed upload's manage token stays there, for its Delete.
+        // A completed upload has its link, and a download none: its file is in its folder.
+        const { kind } = running.get(id);
+        if (outcome.status === 'success' && Boolean(outcome.link) !== (kind === 'upload')) throw new Error('Expected how an upload running finished.');
+        // A completed upload's manage token stays there, for its Delete (a download's link is there already).
         if (outcome.status === 'success') kept.add(id);
         end(id);
         onFinished(id, outcome);
@@ -132,9 +146,21 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
 
     /** Start the file service, with one end of a new channel; the transfer window gets the other once it's ready. */
     function startFileService() {
-        fileService = utilityProcess.fork(path.join(__dirname, 'file-service.js'), [], {
+        fileService = utilityProcess.fork(path.join(__dirname, 'file-service.js'), [partials], {
             serviceName: 'Dropgate Client File Service',
             stdio: 'ignore',
+        });
+        const child = fileService;
+        fileServiceExit = new Promise((resolve) => child.on('exit', resolve));
+        // Where a download landed: for its own output only, an absolute path.
+        child.on('message', (message) => {
+            let saved;
+            try {
+                saved = savedOf(message, (output) => outputs.has(output));
+            } catch {
+                return;
+            }
+            onSaved(outputs.get(saved.output), saved.path);
         });
         const { port1, port2 } = new MessageChannelMain();
         fileService.postMessage({ type: FILE_SERVICE.PORT }, [port2]);
@@ -145,7 +171,9 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
     function stopFileService() {
         fileService?.kill();
         fileService = null;
+        fileServiceExit = null;
         windowPort = null;
+        outputs.clear();
     }
 
     /** Whether the transfer window has anything to do or keep: an upload, a call waiting, a manage token. */
@@ -162,13 +190,21 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
         }, TRANSFERS.WINDOW_IDLE_MS);
     }
 
-    /** Stop the transfer window and the file service: whatever runs there ends with them, untold. */
+    /**
+     * Stop the transfer window and the file service: whatever runs there ends
+     * with them, untold. Gives a promise that resolves once the file service
+     * has exited (at most 3 seconds), so nothing holds a partial file open
+     * when the partial folder is emptied.
+     */
     function close() {
         clearTimeout(idleTimer);
         idleTimer = null;
         closing = true;
+        const exited = fileServiceExit;
         if (win && !win.isDestroyed()) win.destroy();
         else stopped('The transfer window stopped.');
+        let timer;
+        return Promise.race([exited ?? Promise.resolve(), new Promise((resolve) => { timer = setTimeout(resolve, 3_000); })]).finally(() => clearTimeout(timer));
     }
 
     /** Start the transfer window, if it isn't running. */
@@ -239,18 +275,23 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
     /** Send work that's answered, and wait for its answer: a check's, or a pause's, a resume's, a delete's or a quit's (each { message? }). */
     function call(channel, payload) {
         const id = randomUUID();
-        const kind = channel === ENGINE.CHECK ? 'check' : 'pause';
+        const kind = channel === ENGINE.CHECK ? 'check' : channel === ENGINE.METADATA ? 'metadata' : 'pause';
         return new Promise((resolve, reject) => {
             calls.set(id, { kind, resolve, reject });
             send(channel, { ...payload, call: id });
         });
     }
 
-    /** An upload has ended: its read grants are revoked. */
+    /** A transfer has ended: an upload's read grants are revoked, and a download's output. */
     function end(id) {
-        const grants = running.get(id) ?? [];
+        const { grants = [], output = null } = running.get(id) ?? {};
         running.delete(id);
         for (const handle of grants) fileService?.postMessage({ type: FILE_SERVICE.REVOKE, handle });
+        if (output) {
+            fileService?.postMessage({ type: FILE_SERVICE.REVOKE, output });
+            // Its saved report, if one is still on its way, comes first: the service answers in order.
+            setImmediate(() => outputs.delete(output));
+        }
         idleSoon();
     }
 
@@ -273,12 +314,50 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
             if (!isId(id) || running.has(id)) throw new Error('Expected a new upload.');
             start();
             const granted = files.map((file) => ({ ...file, handle: randomUUID() }));
-            running.set(id, granted.map((file) => file.handle));
+            running.set(id, { kind: 'upload', grants: granted.map((file) => file.handle) });
             for (const { handle, path: filePath, size, mtimeMs } of granted) {
                 fileService.postMessage({ type: FILE_SERVICE.GRANT_READ, handle, path: filePath, size, mtimeMs });
             }
             send(ENGINE.UPLOAD, { id, server, options, files: granted.map(({ handle, name, size }) => ({ handle, name, size })) });
         },
+
+        /**
+         * Read a download's list of files: the transfer window keeps its link
+         * (main passes it on and keeps none of it), reads the list with no
+         * lease, and answers it, or why it couldn't (then it keeps nothing).
+         * @param {string} id - The download's ID, which main made.
+         * @param {string} link
+         * @returns {Promise<{ files: { name: string, size: number }[], encrypted: boolean } | { message: string }>}
+         */
+        async metadata(id, link) {
+            if (!isId(id) || running.has(id) || kept.has(id)) throw new Error('Expected a new download.');
+            kept.add(id);
+            const answer = await call(ENGINE.METADATA, { id, link }).catch((error) => ({ message: error.message }));
+            if (answer.message) kept.delete(id);
+            idleSoon();
+            return answer;
+        },
+
+        /**
+         * Start a download whose list of files was read: its folder is granted
+         * to the file service as an output, and the transfer window gets the
+         * output, never the folder.
+         * @param {string} id
+         * @param {string} folder - Where it's saved, as main resolved it.
+         */
+        download(id, folder) {
+            if (!isId(id) || running.has(id)) throw new Error('Expected a new download.');
+            if (!kept.has(id)) throw new Error('The link to this download is no longer held: Paste it again.');
+            start();
+            const output = randomUUID();
+            running.set(id, { kind: 'download', grants: [], output });
+            outputs.set(output, id);
+            fileService.postMessage({ type: FILE_SERVICE.GRANT_OUTPUT, output, folder, shape: 'file' });
+            send(ENGINE.DOWNLOAD, { id, output });
+        },
+
+        /** Whether the transfer window holds a download's link: from its list being read until it's removed, unless the transfer window stopped. */
+        holds: (id) => kept.has(id),
 
         /** Pause or resume an upload: the answer is core's reason when it couldn't, or nothing. */
         pause: (id) => (known(id) ? call(ENGINE.PAUSE, { id }) : Promise.resolve({})),

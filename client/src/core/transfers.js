@@ -3,13 +3,20 @@
 const { randomUUID } = require('crypto');
 
 // Main's registry of transfers (17 §4): every upload the app makes, a
-// window's own or Share with Dropgate's, by the ID main made, in the order
-// added, in memory only. Up to `atOnce` run at once; the rest wait as queued,
-// and start in the order added as places free. A paused one takes no place:
-// resumed with none free, it waits as queued, and is resumed when one frees.
+// window's own or Share with Dropgate's, and every download, by the ID main
+// made, in the order added, in memory only. Up to `atOnce` run at once,
+// uploads and downloads together; the rest wait as queued, and start in the
+// order added as places free. A paused one takes no place: resumed with none
+// free, it waits as queued, and is resumed when one frees.
 //
-// A transfer's states here: waiting (made, not started: it waits for Upload,
-// and can still take more files and new options), queued, running (in the
+// A download starts out reading (its link's list of files, read with no
+// lease, so the server counts nothing), then waits like an upload, with the
+// folder it's saved to (Save to), and once done can be shown in its folder.
+// It holds no link: the transfer window keeps that.
+//
+// A transfer's states here: reading (a download's list of files), waiting
+// (made, not started: it waits for Upload or Download, and an upload can
+// still take more files and new options), queued, running (in the
 // transfer window, from its first step to its last), paused, and once it has
 // ended, done, failed or cancelled, and a done upload deleted from its server,
 // deleted. An ended one stays, with its link or its reason, until it's
@@ -55,15 +62,60 @@ class Transfers {
     }
 
     /**
-     * A transfer, waiting to start.
-     * @param {{ kind?: 'upload', owner: number | null, share?: boolean, server?: object, files: object[], options: object }} fields
+     * A transfer, waiting to start: an upload, or a download reading its list of files.
+     * @param {{ kind?: 'upload' | 'download', owner: number | null, share?: boolean, server?: object, files: object[], options: object | null, host?: string, saveTo?: object }} fields
      * @returns {any} the transfer, with its new ID
      */
     add(fields) {
-        const card = { id: randomUUID(), kind: 'upload', ...fields, state: 'waiting', started: false, snapshot: null, resumeWhenFree: false, resuming: false, link: null, message: null, deletable: false };
+        const kind = fields.kind ?? 'upload';
+        const card = {
+            id: randomUUID(), ...fields, kind, state: kind === 'download' ? 'reading' : 'waiting', started: false, snapshot: null,
+            resumeWhenFree: false, resuming: false, link: null, message: null, deletable: false, ...(kind === 'download' ? { encrypted: null, saved: null } : {}),
+        };
         this.#cards.set(card.id, card);
         this.changed(card);
         return card;
+    }
+
+    /**
+     * A download's list of files is read: it waits for Download. Returns it,
+     * or null when it isn't reading (it was removed, or the app is quitting).
+     * @param {string} id
+     * @param {{ files: { name: string, size: number }[], encrypted: boolean }} list
+     */
+    read(id, { files, encrypted }) {
+        const card = this.#cards.get(id);
+        if (!card || card.kind !== 'download' || card.state !== 'reading') return null;
+        card.files = files.map(({ name, size }) => ({ name, size }));
+        card.encrypted = encrypted;
+        this.#set(card, 'waiting');
+        return card;
+    }
+
+    /**
+     * Where downloads waiting are saved: their Save to. Those not waiting keep theirs.
+     * @param {string[]} ids
+     * @param {{ folder: string, label: string }} saveTo
+     */
+    saveTo(ids, saveTo) {
+        for (const id of ids) {
+            const card = this.#cards.get(id);
+            if (card?.kind !== 'download' || !['reading', 'waiting'].includes(card.state)) continue;
+            card.saveTo = { ...saveTo };
+            this.changed(card);
+        }
+    }
+
+    /** A finished download is in its folder, at this path: for Show in Folder. */
+    saved(id, filePath) {
+        const card = this.#cards.get(id);
+        if (card?.kind === 'download') card.saved = filePath;
+    }
+
+    /** How many run at once changed (Settings > Transfers): more may start now. */
+    setAtOnce(atOnce) {
+        this.atOnce = atOnce;
+        this.#pump();
     }
 
     get(id) {
@@ -79,10 +131,13 @@ class Transfers {
         return [...this.#cards.values()];
     }
 
-    /** How many run, are paused, and are queued. */
+    /** How many run (and of them, how many are downloads), are paused, and are queued. */
     counts() {
-        const counts = { running: 0, paused: 0, queued: 0 };
-        for (const { state } of this.#cards.values()) if (Object.hasOwn(counts, state)) counts[state]++;
+        const counts = { running: 0, paused: 0, queued: 0, downloading: 0 };
+        for (const { state, kind } of this.#cards.values()) {
+            if (Object.hasOwn(counts, state)) counts[state]++;
+            if (state === 'running' && kind === 'download') counts.downloading++;
+        }
         return counts;
     }
 
@@ -191,10 +246,10 @@ class Transfers {
     ended(id, outcome) {
         const card = this.#cards.get(id);
         if (!card || ENDED.includes(card.state)) return null;
-        card.link = outcome.status === 'success' ? outcome.link : null;
+        card.link = outcome.status === 'success' ? outcome.link ?? null : null;
         card.message = outcome.status === 'error' ? outcome.error : null;
         // A finished upload's manage token stays in the transfer window, for its Delete.
-        card.deletable = outcome.status === 'success';
+        card.deletable = outcome.status === 'success' && card.kind === 'upload';
         card.resumeWhenFree = false;
         card.resuming = false;
         this.#set(card, ENDED_AS[outcome.status], { always: true });
@@ -211,7 +266,7 @@ class Transfers {
      */
     addFiles(id, files) {
         const card = this.#cards.get(id);
-        if (!card || card.state !== 'waiting') return null;
+        if (!card || card.kind !== 'upload' || card.state !== 'waiting') return null;
         const known = new Set(card.files.map((file) => file.path));
         const fresh = files.filter((file) => {
             if (known.has(file.path)) return false;
@@ -232,7 +287,7 @@ class Transfers {
      */
     setOptions(id, { lifetime, maxDownloads, files }) {
         const card = this.#cards.get(id);
-        if (!card || card.state !== 'waiting') return null;
+        if (!card || card.kind !== 'upload' || card.state !== 'waiting') return null;
         if (files && files.some((index) => index >= card.files.length)) return null;
         if (lifetime) card.options.lifetime = { value: lifetime.value, unit: lifetime.unit };
         if (maxDownloads !== undefined) card.options.maxDownloads = maxDownloads;
@@ -274,7 +329,7 @@ class Transfers {
         const removed = [];
         for (const id of ids) {
             const card = this.#cards.get(id);
-            if (!card || !(card.state === 'waiting' || ENDED.includes(card.state))) continue;
+            if (!card || !(['reading', 'waiting'].includes(card.state) || ENDED.includes(card.state))) continue;
             this.#cards.delete(id);
             removed.push(card);
             this.removed(card);
@@ -291,7 +346,7 @@ class Transfers {
      */
     retry(id, owner) {
         const card = this.#cards.get(id);
-        if (!card || !['failed', 'cancelled'].includes(card.state)) return null;
+        if (!card || !['failed', 'cancelled'].includes(card.state) || (card.kind === 'download' && card.files.length === 0)) return null;
         Object.assign(card, { owner, started: false, snapshot: null, link: null, message: null, resumeWhenFree: false, resuming: false, deletable: false });
         delete card.ask;
         this.#set(card, 'waiting');
@@ -359,6 +414,13 @@ function view(card) {
         link: card.link,
         message: card.message,
         canDelete: card.state === 'done' && card.deletable === true,
+        // A download's: its server's host, whether it's encrypted (once read), where it's saved, and whether it can be shown there.
+        ...(card.kind === 'download' ? {
+            host: card.host,
+            encrypted: card.encrypted,
+            saveTo: card.saveTo ? { folder: card.saveTo.folder, label: card.saveTo.label } : null,
+            canShow: card.state === 'done' && typeof card.saved === 'string',
+        } : {}),
     };
 }
 

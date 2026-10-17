@@ -47,4 +47,20 @@ test('the tray says how many are going, in Title Case between bullets', () => {
     assert.equal(countsLine({ running: 2, paused: 1, queued: 1 }), '2 Uploading • 1 Paused • 1 Queued');
     assert.equal(countsLine({ running: 1, paused: 0, queued: 0 }), '1 Uploading');
     assert.equal(countsLine({ running: 0, paused: 0, queued: 0 }), 'Nothing Running');
+    assert.equal(countsLine({ running: 3, paused: 0, queued: 1, downloading: 2 }), '1 Uploading • 2 Downloading • 1 Queued');
+    assert.equal(countsLine({ running: 1, paused: 1, queued: 0, downloading: 1 }), '1 Downloading • 1 Paused');
+});
+
+test('a download ending is told of as its own, with no link, and never its name or its folder', () => {
+    const saved = { kind: 'download', status: 'success' };
+    const lost = { kind: 'download', status: 'error', error: 'The server dropped this paused download.' };
+    assert.deepEqual(endNotice([saved]), { title: 'Download Successful', body: "It's saved in its folder." });
+    assert.deepEqual(endNotice([lost]), { title: 'Download Failed', body: 'The server dropped this paused download.' });
+    assert.deepEqual(endNotice([saved, saved]), { title: '2 Downloads Finished', body: 'Each is saved in its folder.' });
+    assert.deepEqual(endNotice([lost, lost]), { title: '2 Downloads Failed', body: 'None of them finished.' });
+    // Uploads and downloads together are transfers; only an upload's link is on the clipboard.
+    assert.deepEqual(endNotice([ok, saved]), { title: '2 Transfers Finished', body: 'The latest link is copied to the clipboard.' });
+    assert.deepEqual(endNotice([saved, failed('Reason.')]), { title: '2 Transfers Finished', body: '1 succeeded, 1 failed.' });
+    assert.deepEqual(endNotice([ok, lost, saved]), { title: '3 Transfers Finished', body: '2 succeeded, 1 failed. The latest link is copied to the clipboard.' });
+    for (const ends of [[saved], [lost], [saved, saved], [ok, saved], [saved, lost]]) assert.ok(titleCase(endNotice(ends).title));
 });

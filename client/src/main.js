@@ -1,9 +1,12 @@
-const { app, BrowserWindow, dialog, clipboard, ClipboardItem, Notification, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, dialog, clipboard, ClipboardItem, Notification, powerSaveBlocker, shell } = require('electron');
+const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 
-const { APP_NAME, IPC, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS } = require('./constants');
+const {
+    APP_NAME, AT_ONCE_RANGE, IPC, PARTIAL_FOLDER, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS, migrateSettings,
+} = require('./constants');
 const { menuItems } = require('./menu');
 const { Handles, describeFile } = require('./core/handles');
 const { endNotice, countsLine } = require('./core/notices');
@@ -11,6 +14,7 @@ const { shareUpload } = require('./core/share');
 const { GOING, Pacer, Transfers, view } = require('./core/transfers');
 const { createTransferHost } = require('./transfer-host');
 const { createTray } = require('./tray');
+const { guardSettings } = require('./settings-guard');
 const { answerWindowChannels, serverOf } = require('./window-channels');
 
 // The house frame (electron-kit): one instance, the shared preload
@@ -65,6 +69,22 @@ const { answerWindowChannels, serverOf } = require('./window-channels');
 // - Notifications about transfers ending come only while the main window
 //   isn't in front of the person (not focused, or in the tray): those ending
 //   together are told of in one (core/notices.js).
+// - A download starts from a link pasted into Download: main checks its shape
+//   and hands it to the transfer window, which reads its list of files with
+//   no lease (the server counts nothing) and keeps the link for the download;
+//   main keeps only the server's address and host, and never stores or logs
+//   the link. Downloads run in the registry with uploads. Each is saved in its
+//   Save to folder (Settings > Transfers' downloads folder, the system's
+//   Downloads unless one was chosen, or one chosen with the system's picker
+//   for it, which the window knows by an ID and a name): the file service
+//   writes it in the partial folder in the profile under a random name, and
+//   moves it into place under a name made safe and unique there, replacing
+//   nothing. Main empties the partial folder at every start and at quit, and
+//   shows a saved file in its folder when asked (Show in Folder), never
+//   opening it.
+// - The page changes its settings through main (settings-guard.js), which
+//   refuses the downloads folder from it, and tells the registry when
+//   transfers at once changes.
 // Share with Dropgate (Windows' context menu) launches the app with a file's
 // path and --upload. Main makes the upload itself, with no window: the server
 // in Settings, checked by the transfer window, with Settings' lifetime and
@@ -84,6 +104,7 @@ const kit = require('@diamonddigitaldev/electron-kit/main').start({
     settings: {
         defaults: SETTINGS_DEFAULTS,
         version: SETTINGS_SCHEMA_VERSION,
+        migrate: migrateSettings,
         obsoleteKeys: V3_STORE_KEYS,
     },
     log: 'memory',
@@ -105,6 +126,38 @@ const kit = require('@diamonddigitaldev/electron-kit/main').start({
     openExternal: { allow: ['https://github.com/diamonddigitaldev/Dropgate/'] },
 });
 
+/** Transfers at once, as Settings > Transfers has it, held to its range. */
+function atOnceSetting() {
+    const n = kit.settings.get().transfersAtOnce;
+    return Number.isSafeInteger(n) ? Math.min(AT_ONCE_RANGE.MAX, Math.max(AT_ONCE_RANGE.MIN, n)) : TRANSFERS.AT_ONCE;
+}
+
+// The page's settings changes come through main: never the downloads folder,
+// and transfers at once reaches the registry as it changes.
+guardSettings({
+    kit,
+    onChange: (changes) => {
+        if (Object.hasOwn(changes, 'transfersAtOnce')) transfers.setAtOnce(atOnceSetting());
+    },
+});
+
+// Where downloads are written until they're whole: emptied at every start and at quit.
+const partials = path.join(app.getPath('userData'), PARTIAL_FOLDER);
+
+/** Empty the partial folder: nothing of a download that didn't finish (a crash's, too) is kept. */
+function emptyPartials() {
+    try {
+        fs.rmSync(partials, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
+        kit.log.warn(`Couldn't empty the partial downloads folder (${error?.code ?? 'error'}).`);
+    }
+}
+
+// The folders each window chose with the system's picker (Save to, Settings >
+// Transfers), by an ID made here: the window knows a folder by it and its name
+// only. In memory only, for this run.
+const chosenFolders = new Map();
+
 // Electron 43+ opens file dialogs in Downloads unless told otherwise. Remember the
 // last folder for this session only, so it's never written to disk.
 let lastOpenDialogDir;
@@ -121,8 +174,8 @@ let host = null;
 // answer (ask), and its server. Each keeps its files' paths, names and sizes;
 // the transfer window gets a read grant for each file, never its path.
 const transfers = new Transfers({
-    atOnce: TRANSFERS.AT_ONCE,
-    start: runUpload,
+    atOnce: atOnceSetting(),
+    start: runTransfer,
     resume: resumeQueued,
     changed: transferChanged,
     removed: (card) => {
@@ -226,7 +279,8 @@ function watchWindow(win) {
             toldOfTray = true;
             // A share still being checked is going too, though it isn't a transfer yet.
             const count = Math.max(1, goingTransfers().length);
-            showNotification('Still Running in the Tray', `${countOf(count, 'upload')} ${count === 1 ? 'goes' : 'go'} on in the background. Open or quit ${APP_NAME} from its tray icon.`);
+            const noun = goingTransfers().every((card) => card.kind === 'upload') ? 'upload' : goingTransfers().every((card) => card.kind === 'download') ? 'download' : 'transfer';
+            showNotification('Still Running in the Tray', `${countOf(count, noun)} ${count === 1 ? 'goes' : 'go'} on in the background. Open or quit ${APP_NAME} from its tray icon.`);
         }
     });
     win.on('show', () => tray.hide());
@@ -235,8 +289,9 @@ function watchWindow(win) {
         handles.dropOwner(owner);
         declineQuestionsOf(owner);
         for (const card of transfers.list()) {
-            if (card.owner === owner && card.state === 'waiting') transfers.withdraw(card.id);
+            if (card.owner === owner && ['reading', 'waiting'].includes(card.state)) transfers.withdraw(card.id);
         }
+        for (const [folder, chosen] of chosenFolders) if (chosen.owner === owner) chosenFolders.delete(folder);
     });
     win.on('closed', () => {
         appWindows.delete(win);
@@ -291,15 +346,21 @@ if (kit.primary) {
     });
 
     kit.ready.then(() => {
+        // Anything a run before left part-written (a crash's) goes before anything runs.
+        emptyPartials();
         host = createTransferHost({
             kit,
             appInfo: { name: APP_NAME, version: app.getVersion() },
             onUpdate: (id, snapshot) => transfers.updated(id, snapshot),
             onPauseEnding: pauseEnding,
-            onTokensLost: (ids) => transfers.tokensLost(ids),
+            onTokensLost: tokensLost,
+            onSaved: (id, filePath) => transfers.saved(id, filePath),
+            partials,
             onFinished: (id, { status, link, message }) => {
                 const result = status === 'error' ? { status, error: message } : { status, ...(link ? { link } : {}) };
-                finishUpload(result, transfers.ended(id, result));
+                const card = transfers.ended(id, result);
+                if (card?.kind === 'download') finishDownload(result, card);
+                else finishUpload(result, card);
             },
         });
         app.on('before-quit', beforeQuit);
@@ -325,7 +386,98 @@ answerWindowChannels({
     busy: going,
     failed: (result) => finishUpload(result),
     copyLink: copyPrivately,
+    addDownload,
+    saveTo: (ids, folder, owner) => transfers.saveTo(ids, saveToOf(folder, owner)),
+    show: (id) => shell.showItemInFolder(transfers.get(id).saved),
+    chooseFolder,
+    chose: (owner, folder) => chosenFolders.get(folder)?.owner === owner,
+    defaultFolder,
+    setDefaultFolder,
 });
+
+/** A folder's name for the window: its own, or a drive's root as it's written. */
+const labelOf = (folder) => path.basename(folder) || folder;
+
+/** Where new downloads are saved: Settings > Transfers' folder, or the system's Downloads. */
+function defaultFolder() {
+    const { downloadFolder } = kit.settings.get();
+    const folder = typeof downloadFolder === 'string' && path.isAbsolute(downloadFolder) ? downloadFolder : app.getPath('downloads');
+    return { path: folder, label: labelOf(folder), chosen: folder === downloadFolder };
+}
+
+/** A download's Save to, as the window knows it: the default, or a folder it chose, by ID, with its name. */
+function saveToOf(folder, owner) {
+    if (folder === 'default') return { folder, label: defaultFolder().label };
+    const chosen = chosenFolders.get(folder);
+    if (chosen?.owner !== owner) throw new Error('Expected a folder this window chose.');
+    return { folder, label: chosen.label };
+}
+
+/**
+ * The system's folder picker, over the window that asked: the folder it
+ * picks gets an ID for that window, for this run, and the window is told the
+ * ID and the folder's own name, never its path.
+ * @param {Electron.WebContents} sender
+ */
+async function chooseFolder(sender) {
+    const win = BrowserWindow.fromWebContents(sender) ?? mainWindow();
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+        properties: ['openDirectory', 'createDirectory'],
+        title: 'Choose a Folder',
+        buttonLabel: 'Choose',
+        defaultPath: defaultFolder().path,
+    });
+    if (canceled || filePaths.length === 0) return null;
+    const folder = randomUUID();
+    chosenFolders.set(folder, { owner: sender.id, path: filePaths[0], label: labelOf(filePaths[0]) });
+    return { folder, label: labelOf(filePaths[0]) };
+}
+
+/**
+ * Settings > Transfers' Browse (a folder the window chose) or Reset (null:
+ * the system's Downloads): saved, and every download still waiting on the
+ * default shows its new name.
+ */
+function setDefaultFolder(owner, folder) {
+    kit.settings.set({ downloadFolder: folder === null ? null : chosenFolders.get(folder).path });
+    const waiting = transfers.list().filter((card) => card.kind === 'download' && card.saveTo?.folder === 'default').map((card) => card.id);
+    transfers.saveTo(waiting, saveToOf('default', owner));
+    return defaultFolder();
+}
+
+/**
+ * A link pasted into Download, its shape checked: a download that reads its
+ * list of files in the transfer window (with no lease: nothing is counted),
+ * then waits for Download, saved to the default folder unless it's changed.
+ * The link goes to the transfer window, and main keeps none of it: only the
+ * server's address and host, for the card.
+ * @param {number} owner
+ * @param {{ link: string, server: { url: string, allowInsecure: boolean }, host: string }} download
+ */
+function addDownload(owner, { link, server, host: linkHost }) {
+    const card = transfers.add({ kind: 'download', owner, server, host: linkHost, files: [], options: null, saveTo: saveToOf('default', owner) });
+    const { id } = card;
+    host.metadata(id, link).then((answer) => {
+        if (answer.message) transfers.ended(id, { status: 'error', error: answer.message });
+        else transfers.read(id, answer);
+    }, () => transfers.ended(id, { status: 'error', error: "The link's list of files couldn't be read." }));
+    return { id };
+}
+
+/**
+ * The transfer window stopped by itself: the finished uploads' manage tokens
+ * went with it, and so did the links of downloads that hadn't started, which
+ * can't be downloaded from here any more.
+ */
+function tokensLost(ids) {
+    transfers.tokensLost(ids);
+    for (const id of ids) {
+        const card = transfers.get(id);
+        if (card?.kind === 'download' && ['reading', 'waiting'].includes(card.state)) {
+            transfers.ended(id, { status: 'error', error: 'The link to this download is no longer held: Paste it again.' });
+        }
+    }
+}
 
 /**
  * The app is quitting, by any way: the tray's Quit, the menu's Exit, the
@@ -340,17 +492,21 @@ function beforeQuit(event) {
     flushEnds();
     if (readyToQuit) return;
     transfers.close();
-    // Running uploads are cancelled there, and finished ones' manage tokens forgotten.
+    // Running transfers are cancelled there, finished uploads' manage tokens
+    // and downloads' links forgotten; then, once the file service has exited
+    // (holding no partial file open), the partial folder is emptied.
     if (host?.busy || host?.keeping) {
         event.preventDefault();
-        host.quit().finally(() => {
+        host.quit().finally(async () => {
             readyToQuit = true;
-            host.close();
+            await host.close();
+            emptyPartials();
             app.quit();
         });
     } else {
         readyToQuit = true;
         host?.close();
+        emptyPartials();
     }
 }
 
@@ -500,6 +656,28 @@ function startUpload(id, server) {
     transfers.start(id, server);
 }
 
+/** The registry gave a transfer its place: it runs in the transfer window now. */
+function runTransfer(card) {
+    if (card.kind === 'download') runDownload(card);
+    else runUpload(card);
+}
+
+/**
+ * A download runs, into its Save to folder as main resolves it now: the
+ * file service is granted that folder, and the transfer window the output.
+ */
+function runDownload(card) {
+    const folder = card.saveTo?.folder === 'default' || !card.saveTo ? defaultFolder().path : chosenFolders.get(card.saveTo.folder)?.path;
+    try {
+        if (!folder) throw new Error("The folder to save to isn't there any more.");
+        host.download(card.id, folder);
+    } catch (error) {
+        // Once the registry has finished starting what it's starting.
+        const result = { status: 'error', error: error.message };
+        setImmediate(() => finishDownload(result, transfers.ended(card.id, result)));
+    }
+}
+
 /** The registry gave an upload its place: it runs in the transfer window now. */
 function runUpload(card) {
     if (card.share && !watched()) {
@@ -639,7 +817,7 @@ function showProgress() {
         main.setTitle(`${APP_NAME} — Paused`);
         main.setProgressBar((progressData.percent ?? 0) / 100, { mode: 'paused' });
     } else if (typeof progressData.percent === 'number') {
-        main.setTitle(`${APP_NAME} — Uploading ${progressData.percent.toFixed(0)}%`);
+        main.setTitle(`${APP_NAME} — ${card.kind === 'download' ? 'Downloading' : 'Uploading'} ${progressData.percent.toFixed(0)}%`);
         main.setProgressBar(progressData.percent / 100);
     } else if (progressData.step) {
         main.setTitle(`${APP_NAME} — ${progressData.step}`);
@@ -703,6 +881,27 @@ function finishUpload(result, upload) {
 }
 
 /**
+ * A download's one outcome, from the transfer window: its card says it, the
+ * window title and taskbar follow, and a notification comes unless the person
+ * is looking. Nothing is copied: its file is in its folder. Once nothing is
+ * left going, an app with its window in the tray quits.
+ * @param {{ status: 'success' } | { status: 'cancelled' } | { status: 'error', error: string }} result
+ * @param {object | null} card
+ */
+function finishDownload(result, card) {
+    kit.log.info(`Download finished: ${result.status}`);
+    const main = mainWindow();
+    if (main && goingTransfers().length > 0) {
+        showProgress();
+    } else if (main) {
+        main.setTitle(APP_NAME);
+        main.setProgressBar(-1);
+    }
+    if (card && result.status !== 'cancelled' && !watched(main)) tellOfEnd({ kind: 'download', status: result.status, error: result.error });
+    settle();
+}
+
+/**
  * A transfer ended while the person wasn't looking: told of in one
  * notification with any others ending within TRANSFERS.NOTICE_GROUP_MS of
  * the first, or at once when nothing else is running or queued to end.
@@ -760,9 +959,10 @@ function settle() {
  * itself, so the transfer window says so 5 minutes before (or as it pauses,
  * when the pause is shorter). The notification gives the time, never a file.
  */
-function pauseEnding(_id, deadline) {
+function pauseEnding(id, deadline) {
     const time = new Date(deadline).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    showNotification('Upload Still Paused', `The server drops it at ${time} unless it's resumed.`);
+    const kind = transfers.get(id)?.kind === 'download' ? 'Download' : 'Upload';
+    showNotification(`${kind} Still Paused`, `The server drops it at ${time} unless it's resumed.`);
 }
 
 async function handleOpenDialog() {

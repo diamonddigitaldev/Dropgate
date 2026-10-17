@@ -22,7 +22,7 @@ test('Settings has Dropgate\'s Server tab, then Update, then Credits, last, with
     let window = await app.window();
 
     const update = await openSettings(window, 'Update');
-    expect(await window.getByRole('tab').allTextContents(), 'the Settings tabs').toEqual(['Server', 'Privacy', 'Update', 'Credits']);
+    expect(await window.getByRole('tab').allTextContents(), 'the Settings tabs').toEqual(['Server', 'Transfers', 'Privacy', 'Update', 'Credits']);
     const automatic = update.getByRole('switch', { name: 'Download updates automatically' });
     await expect(automatic, 'automatic downloads, on a new profile').toBeChecked();
     // Run from source, a 3.x build is a stable one.

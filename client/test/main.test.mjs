@@ -10,7 +10,7 @@ import { balancedBlock, constructorOptions, readSource } from './helpers/source.
 
 const require = createRequire(import.meta.url);
 const { assertAccentContrast, assertNoBareAccelerators, assertBuildExtendsKit } = require('@diamonddigitaldev/electron-kit/testing');
-const { SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS } = require('../src/constants.js');
+const { MAIN_ONLY_SETTINGS, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, migrateSettings } = require('../src/constants.js');
 const { menuItems } = require('../src/menu.js');
 const pkg = require('../package.json');
 // The electron-builder config, from the kit's config(), as electron-builder reads it.
@@ -44,6 +44,7 @@ test('the main process is the kit\'s: its name, settings, memory log, files, cre
     assert.match(options, /name: APP_NAME,/);
     assert.match(options, /defaults: SETTINGS_DEFAULTS,/);
     assert.match(options, /version: SETTINGS_SCHEMA_VERSION,/);
+    assert.match(options, /migrate: migrateSettings,/);
     assert.match(options, /obsoleteKeys: V3_STORE_KEYS,/);
     assert.match(options, /log: 'memory',/);
     // #93: the files it's opened with reach the page, bar a Share with Dropgate launch's, which main uploads.
@@ -84,7 +85,7 @@ test('the client keeps no log of its own, and has no updater, update boxes or li
 });
 
 test('v3\'s settings are dropped, once, and the client\'s defaults are ones the kit takes', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 1);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 2);
     assert.deepEqual([...V3_STORE_KEYS].sort(), ['lifetimeUnit', 'lifetimeValue', 'maxDownloads', 'serverURL']);
     assert.ok(!V3_STORE_KEYS.includes('windowBounds'), 'the window\'s bounds are the kit\'s key too, so they carry over');
     // kit.start() throws at launch on either; this says so before then.
@@ -94,6 +95,17 @@ test('v3\'s settings are dropped, once, and the client\'s defaults are ones the 
     assert.deepEqual(JSON.parse(JSON.stringify(SETTINGS_DEFAULTS)), { ...SETTINGS_DEFAULTS }, 'every default is a JSON value');
     assert.equal(typeof SETTINGS_DEFAULTS.lifetimeValue, 'number', 'v3 kept the lifetime as text');
     assert.equal(typeof SETTINGS_DEFAULTS.maxDownloads, 'number', 'v3 kept Max Downloads as text');
+});
+
+test('settings version 2: a version 1 profile keeps its server and its settings for new uploads, and gains the downloads folder (the system\'s) and 3 at once', () => {
+    const v1 = { serverURL: 'https://dropgate.test', lifetimeValue: 3, lifetimeUnit: 'days', maxDownloads: 5, navCollapsed: true, keepLogOnDisk: false };
+    assert.deepEqual(migrateSettings(structuredClone(v1), 1), { ...v1, downloadFolder: null, transfersAtOnce: 3 });
+    // v3's were never under the kit's key: nothing of them is kept.
+    assert.deepEqual(migrateSettings({ serverURL: 'https://old.test' }, 0), {});
+    assert.equal(SETTINGS_DEFAULTS.downloadFolder, null, 'null until a folder is chosen: the system\'s Downloads');
+    assert.equal(SETTINGS_DEFAULTS.transfersAtOnce, 3);
+    // The page can't choose where downloads land: only main's folder picker does.
+    assert.deepEqual([...MAIN_ONLY_SETTINGS], ['downloadFolder']);
 });
 
 test('every window the client makes keeps the house\'s security settings: the main window is the kit\'s, and the only other is the transfer window', () => {

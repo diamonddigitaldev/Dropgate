@@ -41,7 +41,10 @@ textarea,
 }
 
 .upload-view > #upload-bulk,
-.upload-view > #action-bar {
+.upload-view > #action-bar,
+.upload-view > #download-bulk,
+.upload-view > #download-action-bar,
+.upload-view > .link-entry {
     flex-shrink: 0;
 }
 
@@ -68,8 +71,15 @@ textarea,
 .upload-area::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
 .empty-state[hidden],
-#upload-grid[hidden] {
+#upload-grid[hidden],
+#download-empty[hidden],
+#download-grid[hidden] {
     display: none;
+}
+
+/* Download's link box: the link, Add, and its help line, over the cards. */
+.link-entry .form-label {
+    margin-bottom: 0.25rem;
 }
 
 /* A waiting upload with files over it: they join it when they're dropped. The kit has no such state, so it's on the app's own class. */

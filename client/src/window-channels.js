@@ -2,7 +2,9 @@
 
 const fs = require('fs');
 const { IPC } = require('./constants');
-const { failureOf, filesToAdd, handleOf, linkOf, newUpload, optionsOf, pathList, serverAddress, transfersOf, uploadOf, uploadsToStart } = require('./core/payloads');
+const {
+    defaultFolderOf, downloadLink, failureOf, filesToAdd, handleOf, linkOf, newUpload, optionsOf, pathList, saveToOf, serverAddress, transfersOf, uploadOf, uploadsToStart,
+} = require('./core/payloads');
 const { view } = require('./core/transfers');
 
 // The window's channels: what its page asks main, through window.electronAPI.
@@ -37,6 +39,13 @@ const serverOf = (url) => ({ url, allowInsecure: /^http:\/\//i.test(url) });
  * @param {() => boolean} main.busy - Whether any transfer runs, is paused or is queued (or a share is under way).
  * @param {(result: { status: 'error', error: string }) => void} main.failed - An upload the page made never started.
  * @param {(link: string) => Promise<void>} main.copyLink - Copy a link, kept out of the clipboard's history.
+ * @param {(owner: number, download: { link: string, server: object, host: string }) => { id: string }} main.addDownload - A download of a link: its list of files read in the transfer window.
+ * @param {(ids: string[], folder: string, owner: number) => void} main.saveTo - Where downloads waiting are saved.
+ * @param {(id: string) => void} main.show - Show a finished download in its folder.
+ * @param {(sender: Electron.WebContents) => Promise<{ folder: string, label: string } | null>} main.chooseFolder - The system's folder picker.
+ * @param {(owner: number, folder: string) => boolean} main.chose - Whether this window chose this folder (folder:choose).
+ * @param {() => { path: string, label: string, chosen: boolean }} main.defaultFolder - Where new downloads are saved.
+ * @param {(owner: number, folder: string | null) => { path: string, label: string, chosen: boolean }} main.setDefaultFolder - Settings > Transfers' Browse or Reset.
  */
 function answerWindowChannels(main) {
     const { kit, handles, transfers } = main;
@@ -113,12 +122,57 @@ function answerWindowChannels(main) {
             return Boolean(upload) && upload.state === 'waiting' && (upload.owner === sender || upload.ask?.owner === sender);
         };
         const { ids, encrypt } = uploadsToStart(request, startable);
-        const own = ids.filter((id) => transfers.get(id).owner === sender);
+        // A link to several files waits: downloading them as files or a ZIP comes with bundles.
+        if (ids.some((id) => transfers.get(id).kind === 'download' && transfers.get(id).files.length !== 1)) {
+            throw new Error("Links to several files can't be downloaded here yet.");
+        }
+        // A download needs no word on encryption: its upload decided that.
+        const own = ids.filter((id) => transfers.get(id).owner === sender && transfers.get(id).kind === 'upload');
         if (own.length > 0 && encrypt === undefined) throw new Error('Expected whether to encrypt.');
         const { serverURL } = kit.settings.get();
         if (!serverURL && ids.some((id) => !transfers.get(id).server)) throw new Error('Server URL is not configured.');
         for (const id of own) transfers.get(id).options.encrypt = encrypt;
         for (const id of ids) main.start(id, transfers.get(id).server ?? serverOf(serverURL));
+    });
+
+    // A link pasted into Download, as the page holds it until now: main checks
+    // its shape and passes it to the transfer window, which reads its list of
+    // files (no lease: the server counts nothing). Main keeps where it points
+    // (the server's address and host), never the link: not stored, not logged.
+    kit.ipc.handle(IPC.TRANSFER_ADD_DOWNLOAD, (event, request) => main.addDownload(event.sender.id, downloadLink(request)));
+
+    // Save to, on downloads of this window's waiting (or reading their list):
+    // Settings > Transfers' folder, or one this window chose with the system's
+    // picker, by the ID main made for it. Never a path from the page.
+    kit.ipc.handle(IPC.TRANSFER_SAVE_TO, (event, request) => {
+        const owner = event.sender.id;
+        const own = (id) => {
+            const download = transfers.get(id);
+            return download?.kind === 'download' && download.owner === owner && ['reading', 'waiting'].includes(download.state);
+        };
+        const { ids, folder } = saveToOf(request, own, (chosen) => main.chose(owner, chosen));
+        main.saveTo(ids, folder, owner);
+    });
+
+    // Show in Folder, on a finished download: its folder, with it selected. Nothing received is ever opened.
+    kit.ipc.handle(IPC.TRANSFER_SHOW, (_event, request) => {
+        const id = uploadOf(request, has);
+        if (!transfers.get(id).saved || transfers.get(id).state !== 'done') throw new Error('Expected a finished download.');
+        main.show(id);
+    });
+
+    // The system's folder picker, for Save to and Settings > Transfers: the
+    // page gets an ID for the folder (this window's, for this run) and the
+    // folder's own name, never its path.
+    kit.ipc.handle(IPC.FOLDER_CHOOSE, (event) => main.chooseFolder(event.sender));
+
+    // Where new downloads are saved, for Settings > Transfers to show.
+    kit.ipc.handle(IPC.FOLDER_DEFAULT, () => main.defaultFolder());
+
+    // Settings > Transfers' Browse (a folder this window chose) or Reset (null: the system's Downloads).
+    kit.ipc.handle(IPC.FOLDER_SET_DEFAULT, (event, request) => {
+        const owner = event.sender.id;
+        return main.setDefaultFolder(owner, defaultFolderOf(request, (chosen) => main.chose(owner, chosen)));
     });
 
     // Advanced Options (and Bulk Edit, one call each) on an upload of this
@@ -140,7 +194,7 @@ function answerWindowChannels(main) {
 
     // Try a failed or cancelled upload again: it waits for this window's Upload once more.
     kit.ipc.handle(IPC.TRANSFER_RETRY, (event, request) => {
-        if (!transfers.retry(uploadOf(request, has), event.sender.id)) throw new Error('Expected an upload that failed or was cancelled.');
+        if (!transfers.retry(uploadOf(request, has), event.sender.id)) throw new Error('Expected an upload or a download that failed or was cancelled.');
     });
 
     // Pause Upload and Resume Upload, from any window. The answer is core's reason

@@ -127,7 +127,10 @@ test('a file gone before its first read answers { gone: true }, and one granted 
 
 test('the file service answers the transfer window\'s port, makes no request, and the transfer window turns a refusal into core\'s SOURCE_UNAVAILABLE', () => {
     const entry = readSource('file-service.js');
-    assert.match(entry, /port\.on\('message', \(\{ data \}\) => port\.postMessage\(service\.answer\(data\)\)\);/);
+    assert.match(entry, /Promise\.resolve\(service\.answer\(data\)\)\.then\(\(answer\) => port\.postMessage\(answer\)\);/);
+    assert.match(entry, /case FILE_SERVICE\.GRANT_OUTPUT:/);
+    // Main hears where a download landed, and nothing else.
+    assert.deepEqual([...entry.matchAll(/process\.parentPort\.postMessage\((\{[^}]*\})\)/g)].map((m) => m[1]), ['{ type: FILE_SERVICE.SAVED, output, path }']);
     assert.match(entry, /case FILE_SERVICE\.GRANT_READ:/);
     assert.match(entry, /case FILE_SERVICE\.REVOKE:/);
     for (const code of [entry, readSource('core/file-service.js')]) {

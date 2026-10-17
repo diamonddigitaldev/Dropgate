@@ -15,6 +15,9 @@
 //   { at, pid, event: 'window-shown', id }             it was shown
 //   { at, pid, event: 'window-ready', id }             it finished setting itself up
 //   { at, pid, event: 'upload-finished', status, error }  an upload's outcome (see below)
+//   { at, pid, event: 'download-finished', status, error }  a download's outcome, from the transfer window
+//   { at, pid, event: 'folder-picker', title, picked }  the system's folder picker was asked for, and what the test answered
+//   { at, pid, event: 'shell', method, path }          the app asked the system to show (showItemInFolder) or open (openPath) a path: never done
 //   { at, pid, event: 'request', url, session, persistent, page }
 //                                                      a request to a server, as its session sent it: from
 //                                                      which session, and which page (null: main's own)
@@ -76,6 +79,36 @@ if (!EVENTS) throw new Error('DROPGATE_TEST_EVENTS must name the file to write e
 const real = process.env.DROPGATE_TEST_REAL_CLIPBOARD === '1';
 
 const record = (event) => fs.appendFileSync(EVENTS, `${JSON.stringify({ at: Date.now(), pid: process.pid, ...event })}\n`);
+
+// The system's Downloads folder, as the app asks for it, is the test's own
+// (DROPGATE_TEST_DOWNLOADS): a test's downloads never land in yours.
+const DOWNLOADS = process.env.DROPGATE_TEST_DOWNLOADS;
+if (!DOWNLOADS || !path.isAbsolute(DOWNLOADS)) throw new Error("DROPGATE_TEST_DOWNLOADS must name the test's own Downloads folder.");
+const getPath = app.getPath.bind(app);
+app.getPath = (name) => (name === 'downloads' ? DOWNLOADS : getPath(name));
+
+// The system's folder picker is answered by the test: the folder it sets in
+// globalThis.__dropgateFolderPick (app.evaluate()), or none (cancelled), so a
+// test never waits on a dialog. Every one asked is written down.
+const { dialog, shell } = electron;
+const showOpenDialog = dialog.showOpenDialog.bind(dialog);
+dialog.showOpenDialog = async (...args) => {
+    const options = args.find((arg) => arg && typeof arg === 'object' && Array.isArray(arg.properties));
+    if (!options?.properties.includes('openDirectory')) return showOpenDialog(...args);
+    const pick = globalThis.__dropgateFolderPick;
+    record({ event: 'folder-picker', title: options.title ?? null, picked: pick ?? null });
+    return pick ? { canceled: false, filePaths: [pick] } : { canceled: true, filePaths: [] };
+};
+
+// Show in Folder, and anything the app asks the system to open: written down,
+// never done, so a test opens no Explorer window, and a test can tell nothing
+// received was ever opened (openPath) or shown but in its folder.
+for (const method of ['showItemInFolder', 'openPath']) {
+    shell[method] = (target) => {
+        record({ event: 'shell', method, path: target });
+        return method === 'openPath' ? Promise.resolve('') : undefined;
+    };
+}
 
 const DICTIONARIES = process.env.DROPGATE_TEST_DICTIONARY_URL;
 if (!DICTIONARIES?.startsWith('http://127.0.0.1:')) {
@@ -243,11 +276,14 @@ function noteRuns(channel, value) {
 // main's own push of it isn't written down again.
 let reportedByPage = false;
 const OUTCOMES = ['success', 'cancelled', 'error'];
+// The downloads main started in the transfer window (engine:download): their outcomes are downloads', not uploads'.
+const downloadIds = new Set();
 app.on('web-contents-created', (_event, contents) => {
     const send = contents.send;
     contents.send = function (channel, ...args) {
         measure(`main → page ${channel}`, args);
         const [push] = args;
+        if (channel === 'engine:download') downloadIds.add(push?.id);
         if (channel === 'upload:status' && OUTCOMES.includes(push?.type) && !reportedByPage) {
             record({ event: 'upload-finished', status: push.type, error: push.data?.error });
         }
@@ -289,7 +325,9 @@ ipcMain.handle = (channel, listener) => handle(channel, async (event, ...args) =
     measure(`page → main ${channel}`, args);
     if (channel === 'window:ready') record({ event: 'window-ready', id: BrowserWindow.fromWebContents(event.sender)?.id });
     if (channel === 'upload:finished') record({ event: 'upload-finished', status: args[0]?.status, error: args[0]?.error });
-    if (channel === 'engine:finished') record({ event: 'upload-finished', status: args[1]?.status, error: args[1]?.message });
+    if (channel === 'engine:finished') {
+        record({ event: downloadIds.has(args[0]) ? 'download-finished' : 'upload-finished', status: args[1]?.status, error: args[1]?.message });
+    }
     const reporting = channel === 'upload:finished' || channel === 'engine:finished';
     // The handler tells the main window as it runs, before its first await.
     if (reporting) reportedByPage = true;

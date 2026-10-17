@@ -32,6 +32,12 @@ const IPC = Object.freeze({
     TRANSFER_RETRY: 'transfer:retry',           // ({ id }) a failed or cancelled upload waits for the page's Upload once more
     TRANSFER_SET_OPTIONS: 'transfer:set-options', // ({ id, options: { lifetime?, maxDownloads?, files? } }) Advanced Options on the page's own upload waiting: files are the indexes it keeps
     TRANSFER_DELETE: 'transfer:delete',         // ({ id }) -> { message? }, a finished upload deleted from its server, with the manage token the transfer window holds
+    TRANSFER_ADD_DOWNLOAD: 'transfer:add-download', // ({ link }) -> { id }, a download that reads the link's list of files (no lease, nothing counted), then waits; main passes the link on and keeps none of it
+    TRANSFER_SAVE_TO: 'transfer:save-to',       // ({ ids, folder }) where downloads waiting are saved: 'default' (Settings > Transfers') or a folder from folder:choose
+    TRANSFER_SHOW: 'transfer:show',             // ({ id }) Show in Folder: the folder a finished download was saved in, with it selected; nothing received is ever opened
+    FOLDER_CHOOSE: 'folder:choose',             // () -> { folder, label } | null, the system's folder picker: an opaque ID for this run, and the folder's own name
+    FOLDER_DEFAULT: 'folder:default',           // () -> { path, label, chosen }, where new downloads are saved (Settings > Transfers): the system's Downloads unless one was chosen
+    FOLDER_SET_DEFAULT: 'folder:set-default',   // ({ folder }) Settings > Transfers' Browse (a folder from folder:choose) or Reset (null: the system's) -> folder:default's answer
     TRANSFER_PAUSE: 'transfer:pause',           // ({ id }) -> { message? }, core's reason when it couldn't
     TRANSFER_RESUME: 'transfer:resume',         // ({ id }) -> { message? }
     TRANSFER_CANCEL: 'transfer:cancel',         // ({ id }) a running upload, or one waiting: a share's question declined
@@ -47,6 +53,14 @@ const IPC = Object.freeze({
     TRANSFER_REMOVED: 'transfer:removed',       // push: [id], transfers gone from main's registry
     UPLOAD_STATUS: 'upload:status',             // push: { type: 'success' | 'cancelled' | 'error', data: { id?, link? | error? } }, an upload's outcome, to the main window
 });
+
+/**
+ * The kit's own channel for the page's settings changes, which main answers
+ * itself, with the kit's sender check, so the page can't change the settings
+ * only main changes (MAIN_ONLY_SETTINGS).
+ * kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/66
+ */
+const KIT_SETTINGS_SET = 'settings:set';
 
 /** The pushes, which main sends and the page only listens for. */
 const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.TRANSFER_CHANGED, IPC.TRANSFER_REMOVED, IPC.UPLOAD_STATUS]);
@@ -66,35 +80,48 @@ const ENGINE = Object.freeze({
     // Main to the transfer window.
     PORT: 'engine:port',                        // the file service's MessagePort, once its page is ready
     UPLOAD: 'engine:upload',                    // { id, server: { url, allowInsecure }, options, files: [{ handle, name, size }] }; handle is a read grant
+    METADATA: 'engine:metadata',                // { id, call, link } read a link's list of files, with no lease, and keep its secret for its download; answered with engine:answer ({ files, encrypted } | { message })
+    DOWNLOAD: 'engine:download',                // { id, output } download it into the output main granted the file service
     PAUSE: 'engine:pause',                      // { id, call }, answered with engine:answer
     RESUME: 'engine:resume',                    // { id, call }, answered with engine:answer
     CANCEL: 'engine:cancel',                    // { id }
     CHECK: 'engine:check',                      // { call, server: { url, allowInsecure } }, answered with engine:answer
     DELETE: 'engine:delete',                    // { id, call } delete a finished upload with its manage token, answered with engine:answer ({ message? })
-    FORGET: 'engine:forget',                    // { id } its card is gone: the finished upload's manage token goes too
-    QUIT: 'engine:quit',                        // { call } the app is quitting: cancel everything (its servers told), forget every manage token, then answer with engine:answer
+    FORGET: 'engine:forget',                    // { id } its card is gone: a finished upload's manage token, or a download's link, goes too
+    QUIT: 'engine:quit',                        // { call } the app is quitting: cancel everything (its servers told), forget every manage token and link, then answer with engine:answer
     // The transfer window to main.
     READY: 'engine:ready',                      // () its page has set itself up: main hands it the port, then its work
     UPDATE: 'engine:update',                    // (id, snapshot) core's snapshot, which names no file and holds no key
-    PAUSE_ENDING: 'engine:pause-ending',        // (id, deadline) a paused upload's server drops it at this time (ms since 1970): notify
-    FINISHED: 'engine:finished',                // (id, { status: 'success', link } | { status: 'cancelled' } | { status: 'error', message })
-    ANSWER: 'engine:answer',                    // (call, value) the answer to a check, a pause, a resume, a delete or a quit
+    PAUSE_ENDING: 'engine:pause-ending',        // (id, deadline) a paused upload's or download's server drops it at this time (ms since 1970): notify
+    FINISHED: 'engine:finished',                // (id, { status: 'success', link? } | { status: 'cancelled' } | { status: 'error', message }): a completed upload's link, a download's nothing
+    ANSWER: 'engine:answer',                    // (call, value) the answer to a check, a metadata read, a pause, a resume, a delete or a quit
 });
 
 /** What main sends the transfer window, which its page only listens for. */
-const ENGINE_PUSHES = Object.freeze([ENGINE.PORT, ENGINE.UPLOAD, ENGINE.PAUSE, ENGINE.RESUME, ENGINE.CANCEL, ENGINE.CHECK, ENGINE.DELETE, ENGINE.FORGET, ENGINE.QUIT]);
+const ENGINE_PUSHES = Object.freeze([ENGINE.PORT, ENGINE.UPLOAD, ENGINE.METADATA, ENGINE.DOWNLOAD,ENGINE.PAUSE, ENGINE.RESUME, ENGINE.CANCEL, ENGINE.CHECK, ENGINE.DELETE, ENGINE.FORGET, ENGINE.QUIT]);
 
 /**
  * The messages between main and the file service (a utilityProcess, over
  * process.parentPort). The service opens a file only for a read grant main
  * made, with the size and modification time the file had when it was handed
- * over, and makes no network request.
+ * over, and writes one only for an output main granted, into the folder main
+ * gave it. It makes no network request. Main starts it with the partial
+ * folder (PARTIAL_FOLDER) as its one argument.
  */
 const FILE_SERVICE = Object.freeze({
     GRANT_READ: 'grant-read',                   // { handle, path, size, mtimeMs }: at an upload's start, for each of its files
-    REVOKE: 'revoke',                           // { handle }: its upload has ended
+    GRANT_OUTPUT: 'grant-output',               // { output, folder, shape: 'file' }: at a download's start, the folder it's saved in
+    REVOKE: 'revoke',                           // { handle } | { output }: its transfer has ended (an output's file still being written is deleted)
     PORT: 'port',                               // the transfer window's MessagePort, with postMessage(…, [port])
+    SAVED: 'saved',                             // the file service to main: { output, path }, where a download landed, for Show in Folder
 });
+
+/**
+ * Where a download is written while it runs: a folder in the app's profile
+ * (userData), each file under a random name holding nothing of its own, moved
+ * into place once it's whole. Main empties it at every start and at quit.
+ */
+const PARTIAL_FOLDER = 'Partial Downloads';
 
 /**
  * How the transfer window reads a file from the file service, over their
@@ -116,14 +143,42 @@ const SETTINGS_DEFAULTS = Object.freeze({
     lifetimeValue: 24,
     lifetimeUnit: 'hours',
     maxDownloads: 1,
+    // Settings > Transfers: the folder downloads are saved in, null for the
+    // system's Downloads folder, chosen with the system's folder picker in
+    // main (the page can't set it: MAIN_ONLY_SETTINGS); and how many
+    // transfers run at once, uploads and downloads together.
+    downloadFolder: null,
+    transfersAtOnce: 3,
 });
+
+/** The settings only main changes: the page may read them, and is refused a change to one. */
+const MAIN_ONLY_SETTINGS = Object.freeze(['downloadFolder']);
+
+/** Transfers at once, as Settings > Transfers' stepped slider offers it. */
+const AT_ONCE_RANGE = Object.freeze({ MIN: 1, MAX: 6 });
 
 /**
  * The settings' version. 1: v4's first, under the kit's "settings" key. v3
  * kept its settings as top-level keys of config.json, which v4 doesn't carry
- * over (Will, 2026-10-03): the person enters their server once more.
+ * over (Will, 2026-10-03): the person enters their server once more. 2: the
+ * downloads folder and transfers at once (migrateSettings()).
  */
-const SETTINGS_SCHEMA_VERSION = 1;
+const SETTINGS_SCHEMA_VERSION = 2;
+
+/**
+ * Bring stored settings up to SETTINGS_SCHEMA_VERSION, once: the kit calls it
+ * as its store opens, with the version they were written at. Version 1's are
+ * kept as they are (the server and its settings for new uploads), and the new
+ * ones start at their defaults: the system's Downloads folder, 3 at once.
+ * Nothing older was ever under the kit's key (v3's, version 0, are deleted by
+ * V3_STORE_KEYS), so nothing of it is kept.
+ * @param {object} settings
+ * @param {number} from
+ */
+function migrateSettings(settings, from) {
+    if (from < 1) return {};
+    return { ...settings, downloadFolder: null, transfersAtOnce: 3 };
+}
 
 /** v3's top-level keys in config.json, deleted once by the kit's migration. windowBounds is the kit's key too, so it carries over. */
 const V3_STORE_KEYS = Object.freeze(['serverURL', 'lifetimeValue', 'lifetimeUnit', 'maxDownloads']);
@@ -138,7 +193,7 @@ const BATCH_DEBOUNCE_MS = 500;
  * How main's registry runs transfers, and how it tells of them (17 §4, §5):
  * - up to TRANSFERS_AT_ONCE run at once, uploads and downloads together; the
  *   rest wait as queued, in the order added, and a paused one takes no place
- *   (Settings > Transfers' slider sets it from phase 7's piece 5);
+ *   (AT_ONCE until the settings are read: Settings > Transfers' transfersAtOnce);
  * - each transfer reaches the window at most TRANSFER_UPDATES_PER_SECOND times
  *   a second (transfer:changed);
  * - transfers ending within NOTICE_GROUP_MS of the first are told of in one
@@ -156,4 +211,7 @@ const TRANSFERS = Object.freeze({
     QUIT_WAIT_MS: 5_000,
 });
 
-module.exports = { APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, READ_PIECE_BYTES, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS };
+module.exports = {
+    APP_NAME, IPC, PUSHES, KIT_SETTINGS_SET, ENGINE, ENGINE_PUSHES, FILE_SERVICE, PARTIAL_FOLDER, READ_PIECE_BYTES,
+    SETTINGS_DEFAULTS, MAIN_ONLY_SETTINGS, AT_ONCE_RANGE, SETTINGS_SCHEMA_VERSION, migrateSettings, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS,
+};

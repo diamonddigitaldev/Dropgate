@@ -34,6 +34,8 @@ const ENGINE_CHANNELS = Object.values(ENGINE).filter((channel) => !ENGINE_PUSHES
 const OPTIONS = { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true };
 const SERVER = { url: 'https://dropgate.test', allowInsecure: false };
 const SETTINGS = { serverURL: 'https://dropgate.test', lifetimeValue: 24, lifetimeUnit: 'hours', maxDownloads: 1 };
+/** A folder the window chose with the system's picker, by the ID main made for it. */
+const CHOSEN = randomUUID();
 const SNAPSHOT = {
     status: 'uploading', phase: 'chunk', text: 'Uploading chunk 1 of 3...', percent: 33.3,
     processedBytes: 5_242_880, totalBytes: 12_000_000, fileIndex: 0, totalFiles: 1, canPause: true, deadline: null,
@@ -78,6 +80,13 @@ function setUp({ settings = SETTINGS } = {}) {
         busy: record('busy', false),
         failed: record('failed'),
         copyLink: record('copyLink', Promise.resolve()),
+        addDownload: record('addDownload', { id: randomUUID() }),
+        saveTo: record('saveTo'),
+        show: record('show'),
+        chooseFolder: record('chooseFolder', Promise.resolve(null)),
+        chose: (_owner, chosen) => chosen === CHOSEN,
+        defaultFolder: record('defaultFolder', { path: folder, label: 'Downloads', chosen: false }),
+        setDefaultFolder: record('setDefaultFolder', { path: folder, label: 'Downloads', chosen: false }),
     });
 
     const { createTransferHost } = main.load('../src/transfer-host.js');
@@ -263,7 +272,7 @@ test('transfer:remove takes uploads main made, removing those waiting or ended; 
         [], [waiting], [{ ids: waiting }], [{ ids: [] }], [{ ids: [waiting, waiting] }], [{ ids: [FILE] }], [{ ids: [randomUUID()] }], [{ ids: [waiting], extra: 1 }],
     ], /Expected uploads\./);
     await refusesAll(setup, IPC.TRANSFER_RETRY, page, [[], [{ id: randomUUID() }], [{ id: FILE }]], /Expected an upload\./);
-    await refusesAll(setup, IPC.TRANSFER_RETRY, page, [[{ id: waiting }], [{ id: running }]], /Expected an upload that failed or was cancelled\./);
+    await refusesAll(setup, IPC.TRANSFER_RETRY, page, [[{ id: waiting }], [{ id: running }]], /Expected an upload or a download that failed or was cancelled\./);
 
     await setup.main.invoke(IPC.TRANSFER_RETRY, page, { id: failed });
     assert.equal(setup.transfers.get(failed).state, 'waiting');
@@ -489,4 +498,182 @@ test('the transfer window\'s channels take its own page only, an upload running 
     await refusesAll(setup, ENGINE.FINISHED, page, [[id, { status: 'cancelled' }]], /Expected how an upload running finished\./);
     // Its idle timer would hold the test open.
     host.close();
+});
+
+const UPLOAD_ID = 'f5aa7a2f-ce3a-4deb-b92f-2da74b6b9bae';
+const SECRET = 'CPuytR72dDo2WhXGdB6x6aXlPcJu7Ec0tYvcUn5GL0k';
+
+test('transfer:add-download takes a link to an upload, as Dropgate makes it, and main is told only where it points beside the link to pass on', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const link = `https://dropgate.test/${UPLOAD_ID}#${SECRET}`;
+    await refusesAll(setup, IPC.TRANSFER_ADD_DOWNLOAD, page, [
+        [], [link], [{ link: 42 }], [{ link, files: [0] }], [{ link: FILE }], [{ link: 'C:\\Users\\will\\file.bin' }], [{ link: `file:///${UPLOAD_ID}` }],
+        [{ link: `ftp://dropgate.test/${UPLOAD_ID}` }], [{ link: 'javascript:alert(1)' }], [{ link: 'https://dropgate.test/' }],
+        [{ link: 'https://dropgate.test/not-an-upload' }], [{ link: `https://dropgate.test/${UPLOAD_ID}/content` }], [{ link: `https://dropgate.test/b/${UPLOAD_ID}` }],
+        [{ link: `https://dropgate.test/p2p#${SECRET}` }], [{ link: `https://dropgate.test/${UPLOAD_ID}?x=1#${SECRET}` }],
+        [{ link: `https://user:pass@dropgate.test/${UPLOAD_ID}` }], [{ link: `https://dropgate.test/${UPLOAD_ID}#${SECRET.slice(1)}` }],
+        [{ link: `https://dropgate.test/${UPLOAD_ID}#${SECRET}=` }], [{ link: `https://dropgate.test/${UPLOAD_ID}#${'x'.repeat(9_000)}` }],
+        [{ link: `https://dropgate.test/${UPLOAD_ID} #${SECRET}` }],
+    ], /Expected a link to an upload\./);
+
+    await setup.main.invoke(IPC.TRANSFER_ADD_DOWNLOAD, page, { link });
+    await setup.main.invoke(IPC.TRANSFER_ADD_DOWNLOAD, page, { link: `http://192.168.1.2:52443/${UPLOAD_ID.toUpperCase()}` });
+    assert.deepEqual(setup.work.slice(-2), [
+        ['addDownload', page.sender.id, { link, server: { url: 'https://dropgate.test', allowInsecure: false }, host: 'dropgate.test' }],
+        ['addDownload', page.sender.id, { link: `http://192.168.1.2:52443/${UPLOAD_ID.toUpperCase()}`, server: { url: 'http://192.168.1.2:52443', allowInsecure: true }, host: '192.168.1.2:52443' }],
+    ]);
+});
+
+/** A download of this window's, its list read, waiting. */
+function waitingDownload(setup, owner, files = [{ name: 'Secret plans é.bin', size: 1000 }]) {
+    const card = setup.transfers.add({ kind: 'download', owner, server: SERVER, host: 'dropgate.test', files: [], options: null, saveTo: { folder: 'default', label: 'Downloads' } });
+    setup.transfers.read(card.id, { files, encrypted: true });
+    return card.id;
+}
+
+test('transfer:save-to takes downloads of this window\'s not started, and the default folder or one this window chose, never a path', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const other = setup.main.windowPage();
+    const mine = waitingDownload(setup, page.sender.id);
+    const theirs = waitingDownload(setup, other.sender.id);
+    const started = waitingDownload(setup, page.sender.id);
+    setup.transfers.start(started, SERVER);
+    const upload = setup.transfers.add({ owner: page.sender.id, files: [], options: OPTIONS }).id;
+    setup.work.length = 0;
+
+    await refusesAll(setup, IPC.TRANSFER_SAVE_TO, page, [
+        [], [{ ids: [mine] }], [{ folder: 'default' }], [{ ids: mine, folder: 'default' }], [{ ids: [], folder: 'default' }], [{ ids: [mine, mine], folder: 'default' }],
+        [{ ids: [theirs], folder: 'default' }], [{ ids: [started], folder: 'default' }], [{ ids: [upload], folder: 'default' }], [{ ids: [randomUUID()], folder: 'default' }],
+        [{ ids: [mine], folder: 'default', path: folder }],
+    ], /Expected downloads of this window's waiting to start\./);
+    await refusesAll(setup, IPC.TRANSFER_SAVE_TO, page, [
+        [{ ids: [mine], folder }], [{ ids: [mine], folder: FILE }], [{ ids: [mine], folder: randomUUID() }], [{ ids: [mine], folder: null }], [{ ids: [mine], folder: 42 }],
+    ], /Expected a folder this window chose\./);
+
+    await setup.main.invoke(IPC.TRANSFER_SAVE_TO, page, { ids: [mine], folder: CHOSEN });
+    await setup.main.invoke(IPC.TRANSFER_SAVE_TO, page, { ids: [mine], folder: 'default' });
+    assert.deepEqual(setup.work, [['saveTo', [mine], CHOSEN, page.sender.id], ['saveTo', [mine], 'default', page.sender.id]]);
+});
+
+test('transfer:show takes a finished download that was saved; folder:set-default a folder this window chose, or null; folder:choose and folder:default nothing', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const id = waitingDownload(setup, page.sender.id);
+    await refusesAll(setup, IPC.TRANSFER_SHOW, page, [[], [id], [{ id: FILE }], [{ id: randomUUID() }], [{ id, path: FILE }]], /Expected an upload\./);
+    await refusesAll(setup, IPC.TRANSFER_SHOW, page, [[{ id }]], /Expected a finished download\./);
+    setup.transfers.start(id, SERVER);
+    setup.transfers.saved(id, path.join(folder, 'Secret plans é.bin'));
+    setup.transfers.ended(id, { status: 'success' });
+    setup.work.length = 0;
+    await setup.main.invoke(IPC.TRANSFER_SHOW, page, { id });
+    assert.deepEqual(setup.work, [['show', id]]);
+
+    await refusesAll(setup, IPC.FOLDER_SET_DEFAULT, page, [
+        [], [CHOSEN], [{ folder }], [{ folder: FILE }], [{ folder: randomUUID() }], [{ folder: 'default' }], [{}], [{ folder: CHOSEN, path: folder }],
+    ], /Expected a folder this window chose\./);
+    assert.deepEqual(await setup.main.invoke(IPC.FOLDER_SET_DEFAULT, page, { folder: CHOSEN }), { path: folder, label: 'Downloads', chosen: false });
+    await setup.main.invoke(IPC.FOLDER_SET_DEFAULT, page, { folder: null });
+    assert.deepEqual(setup.work.slice(-2), [['setDefaultFolder', page.sender.id, CHOSEN], ['setDefaultFolder', page.sender.id, null]]);
+
+    assert.equal(await setup.main.invoke(IPC.FOLDER_CHOOSE, page), null);
+    assert.deepEqual(setup.work.at(-1), ['chooseFolder', page.sender]);
+    await setup.main.invoke(IPC.FOLDER_DEFAULT, page);
+    assert.deepEqual(setup.work.at(-1), ['defaultFolder']);
+});
+
+test('transfer:start takes downloads with no word on encryption, and refuses one of several files until they can be downloaded', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const one = waitingDownload(setup, page.sender.id);
+    const several = waitingDownload(setup, page.sender.id, [{ name: 'a.bin', size: 1 }, { name: 'b.bin', size: 2 }]);
+    setup.work.length = 0;
+    await refusesAll(setup, IPC.TRANSFER_START, page, [[{ ids: [several] }], [{ ids: [one, several] }]], /Links to several files can't be downloaded here yet\./);
+    await setup.main.invoke(IPC.TRANSFER_START, page, { ids: [one] });
+    assert.deepEqual(setup.work, [['start', one, SERVER]]);
+});
+
+test('the transfer window answers a metadata read with a list of files or why not, and finishes a download with no link', async () => {
+    const setup = setUp();
+    const { main, work, host } = setup;
+    const id = randomUUID();
+    const reading = host.metadata(id, `https://dropgate.test/${UPLOAD_ID}#${SECRET}`);
+    const [win] = main.windows;
+    const page = main.transferPage(win.webContents);
+    // Not sent until its page is ready; then the link goes, with the call.
+    assert.equal(win.webContents.sent.find(([channel]) => channel === ENGINE.METADATA), undefined);
+    await main.invoke(ENGINE.READY, page);
+    const [, { call, link }] = win.webContents.sent.find(([channel]) => channel === ENGINE.METADATA);
+    assert.equal(link, `https://dropgate.test/${UPLOAD_ID}#${SECRET}`);
+
+    const file = { name: 'Secret plans é.bin', size: 1000 };
+    await refusesAll(setup, ENGINE.ANSWER, page, [
+        [call, {}], [call, { files: [], encrypted: true }], [call, { files: [file] }], [call, { files: [file], encrypted: 'yes' }],
+        [call, { files: [{ name: '', size: 1 }], encrypted: true }], [call, { files: [{ name: 'x'.repeat(256), size: 1 }], encrypted: true }],
+        [call, { files: [{ name: 'a', size: -1 }], encrypted: true }], [call, { files: [{ name: 'a', size: 1, path: FILE }], encrypted: true }],
+        [call, { files: [file], encrypted: true, link: 'https://dropgate.test/' }], [call, { message: 42 }],
+    ], /Expected the answer to a call\./);
+    await main.invoke(ENGINE.ANSWER, page, call, { files: [file], encrypted: true });
+    assert.deepEqual(await reading, { files: [file], encrypted: true });
+    assert.equal(host.holds(id), true, 'the transfer window holds its link');
+
+    // Its download: the folder to the file service as an output, the output alone to the transfer window.
+    host.download(id, folder);
+    const grant = main.processes[0].messages.find((m) => m.type === 'grant-output');
+    assert.deepEqual(Object.keys(grant).sort(), ['folder', 'output', 'shape', 'type']);
+    assert.equal(grant.folder, folder);
+    const [, download] = win.webContents.sent.find(([channel]) => channel === ENGINE.DOWNLOAD);
+    assert.deepEqual(download, { id, output: grant.output });
+    await refusesAll(setup, ENGINE.FINISHED, page, [[id, { status: 'success', link: `https://dropgate.test/${UPLOAD_ID}` }]], /Expected how an upload running finished\./);
+    await main.invoke(ENGINE.FINISHED, page, id, { status: 'success' });
+    assert.deepEqual(work.at(-1), ['onFinished', id, { status: 'success' }]);
+    assert.deepEqual(main.processes[0].messages.at(-1), { type: 'revoke', output: grant.output });
+
+    // A link that couldn't be read is kept by no one.
+    const unread = randomUUID();
+    const failing = host.metadata(unread, `https://dropgate.test/${UPLOAD_ID}`);
+    const [, second] = win.webContents.sent.filter(([channel]) => channel === ENGINE.METADATA).at(-1);
+    await main.invoke(ENGINE.ANSWER, page, second.call, { message: 'The upload wasn\'t found. It may have expired.' });
+    assert.deepEqual(await failing, { message: 'The upload wasn\'t found. It may have expired.' });
+    assert.equal(host.holds(unread), false);
+    host.forget(id);
+    host.close();
+});
+
+test('where a download landed is taken from the file service for an output main granted, as an absolute path', () => {
+    const { savedOf } = require('../src/core/payloads.js');
+    const output = randomUUID();
+    const granted = (o) => o === output;
+    const where = path.join(folder, 'Secret plans é.bin');
+    for (const message of [null, { type: 'saved', output }, { type: 'saved', output: randomUUID(), path: where }, { type: 'saved', output, path: 'relative.bin' },
+        { type: 'saved', output, path: `${where}\0` }, { type: 'saved', output, path: where, name: 'Secret plans é.bin' }, { type: 'grant-output', output, path: where }]) {
+        assert.throws(() => savedOf(message, granted), /Expected where a download was saved\./, JSON.stringify(message));
+    }
+    assert.deepEqual(savedOf({ type: 'saved', output, path: where }, granted), { output, path: where });
+});
+
+test('the page\'s settings changes go through main: never the downloads folder, transfers at once from 1 to 6, and the rest to the kit', async () => {
+    const main = fakeMain();
+    const changes = [];
+    const kit = { settings: { set: (c) => { changes.push(c); return { ...c }; } } };
+    const heard = [];
+    main.electron.ipcMain.handle('settings:set', () => 'the kit\'s own');
+    const { guardSettings } = main.load('../src/settings-guard.js');
+    guardSettings({ kit, onChange: (c) => heard.push(c) });
+    const handler = main.handlers.get('settings:set');
+    const page = main.windowPage();
+    // The app's own page in the UI session, as the kit checks it; never the transfer window's.
+    await assert.rejects(async () => handler(main.transferPage(), { navCollapsed: true }), /for the app's own page only/);
+    await assert.rejects(async () => handler({ sender: page.sender, senderFrame: { url: 'https://dropgate.test/' } }, { navCollapsed: true }), /for the app's own page only/);
+    for (const [bad, message] of [
+        [{ downloadFolder: folder }, /downloadFolder can't be changed from the page\./], [{ downloadFolder: null }, /downloadFolder can't be changed from the page\./],
+        [{ transfersAtOnce: 0 }, /from 1 to 6/], [{ transfersAtOnce: 7 }, /from 1 to 6/], [{ transfersAtOnce: 2.5 }, /from 1 to 6/], [{ transfersAtOnce: '3' }, /from 1 to 6/],
+        [null, /Expected settings to change\./], [[], /Expected settings to change\./],
+    ]) {
+        await assert.rejects(async () => handler(page, bad), message, JSON.stringify(bad));
+    }
+    assert.deepEqual(changes, [], 'nothing refused reached the kit');
+    assert.deepEqual(await handler(page, { transfersAtOnce: 5, navCollapsed: true }), { transfersAtOnce: 5, navCollapsed: true });
+    assert.deepEqual([changes, heard], [[{ transfersAtOnce: 5, navCollapsed: true }], [{ transfersAtOnce: 5, navCollapsed: true }]]);
 });
