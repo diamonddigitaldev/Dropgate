@@ -3,8 +3,10 @@ import { DropgateClient, DropgateError, lifetime } from './dropgate-core.js';
 // The transfer window's page: hidden, sandboxed, in a session of its own, with
 // no bridge but window.engine (transfer-preload.js). It runs core, holds every
 // upload's key and link while the upload runs, and makes every request
-// Dropgate makes, server checks included. Main sends it work and hears how it
-// goes; the app's window never runs core. A file's bytes come from the file
+// Dropgate makes, server checks included and deletes. Main sends it work and
+// hears how it goes; the app's window never runs core. A finished upload's
+// manage token stays here, and only here, until its card is removed or the
+// app quits: main is told the upload's link, never its token. A file's bytes come from the file
 // service, over the MessagePort main hands this page, by the grant main made
 // for it: never through main, and never by path.
 
@@ -81,7 +83,7 @@ class GrantedFile {
         for (let at = start; at < end; at += READ_PIECE_BYTES) {
             const answer = await ask({ op: 'read', handle: this.handle, start: at, end: Math.min(end, at + READ_PIECE_BYTES) });
             if (answer.changed) throw unavailable("A file changed after the upload started, so the rest of it can't be read as it was.");
-            if (answer.gone) throw unavailable("A file can't be read any more: it was moved or deleted.");
+            if (answer.gone) throw unavailable("A file can't be read any more: It was moved or deleted.");
             if (!answer.bytes) throw unavailable("A file couldn't be read.");
             bytes.set(answer.bytes, at - start);
         }
@@ -151,6 +153,13 @@ engine.onCheck(async ({ call, server }) => {
 /** The uploads running, by the ID main gave each. */
 const uploads = new Map();
 
+/**
+ * Each finished upload's server, its ID there and its manage token, by the ID
+ * main gave it, for its Delete: from its completion until main says its card
+ * is gone (engine:forget), it's deleted, or the app quits.
+ */
+const finished = new Map();
+
 /** What main hears of a snapshot: core's own fields, which never name a file or hold a key. */
 const SNAPSHOT_FIELDS = ['status', 'phase', 'text', 'percent', 'processedBytes', 'totalBytes', 'fileIndex', 'totalFiles', 'canPause', 'deadline'];
 const pick = (snapshot) => Object.fromEntries(SNAPSHOT_FIELDS.filter((field) => snapshot[field] !== undefined).map((field) => [field, snapshot[field]]));
@@ -185,7 +194,10 @@ engine.onUpload(async ({ id, server, options, files }) => {
     uploads.delete(id);
     clearTimeout(upload.trailing);
     warnBeforeDeadline(id, upload, null);
-    if (outcome.status === 'completed') engine.finished(id, { status: 'success', link: outcome.value.downloadUrl });
+    if (outcome.status === 'completed') {
+        finished.set(id, { server, upload: outcome.value.id, manageToken: outcome.value.manageToken });
+        engine.finished(id, { status: 'success', link: outcome.value.downloadUrl });
+    }
     else if (outcome.status === 'cancelled') engine.finished(id, { status: 'cancelled' });
     else engine.finished(id, { status: 'error', message: outcome.error.message });
 });
@@ -253,11 +265,36 @@ engine.onPause((work) => pauseOrResume(work, true));
 engine.onResume((work) => pauseOrResume(work, false));
 engine.onCancel(({ id }) => uploads.get(id)?.operation.cancel());
 
-// The app is quitting: every upload is cancelled, each server told (core
-// asks it to drop the upload), and main is answered once they've all ended
-// and every request still going has finished: the ones telling the servers
-// among them. Nothing here outlives the app.
+// Delete a finished upload from its server, with its manage token, which then
+// goes. One the server no longer has (it expired, or reached its download
+// limit) is gone all the same: its link no longer works either way.
+engine.onDelete(async ({ id, call }) => {
+    const kept = finished.get(id);
+    let value = {};
+    if (!kept) {
+        value = { message: "This upload can't be deleted from here any more." };
+    } else {
+        try {
+            await (await clientFor(kept.server)).hosted.delete({ id: kept.upload, manageToken: kept.manageToken });
+            finished.delete(id);
+        } catch (error) {
+            if (DropgateError.is(error, 'NOT_FOUND')) finished.delete(id);
+            else value = { message: error?.message || "The upload couldn't be deleted." };
+        }
+    }
+    engine.answer(call, value);
+});
+
+// Its card is gone: so is its manage token.
+engine.onForget(({ id }) => finished.delete(id));
+
+// The app is quitting: every finished upload's manage token is forgotten,
+// every upload is cancelled, each server told (core asks it to drop the
+// upload), and main is answered once they've all ended and every request
+// still going has finished: the ones telling the servers among them. Nothing
+// here outlives the app.
 engine.onQuit(async ({ call }) => {
+    finished.clear();
     // Each upload's own operation: a check makes a new client, so an upload's may no longer be in clients.
     const operations = [...uploads.values()].map(({ operation }) => operation);
     for (const operation of operations) operation.cancel();

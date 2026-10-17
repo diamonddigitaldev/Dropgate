@@ -82,11 +82,12 @@ test('Keep log on disk for troubleshooting: off and no file by default; on, debu
     const privacy = await openSettings(window, 'Privacy');
     const keep = privacy.getByRole('switch', { name: 'Keep log on disk for troubleshooting' });
     await expect(keep, 'the switch, on a new profile').not.toBeChecked();
-    await expect(privacy, 'its privacy note').toContainText('none of your file names, folders or links');
     const log = path.join(desktop.profile, 'debug.log');
     expect(fs.existsSync(log), 'debug.log before it is turned on').toBe(false);
 
     await keep.click();
+    // Its help line says what the state it's in does: on, the privacy note.
+    await expect(privacy, 'its privacy note').toContainText('none of your file names, folders or links');
     await expect.poll(() => fs.existsSync(log), { message: 'whether debug.log was written' }).toBe(true);
     const text = fs.readFileSync(log, 'utf8');
     expect(text, "the run's banner").toMatch(/^=== Dropgate Client \S+ started at /);

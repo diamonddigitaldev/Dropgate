@@ -1,7 +1,9 @@
 // What the desktop app leaves in its profile: every file under it, searched
-// for a text in each way the app or Chromium would write it, and for any part
-// of a file's bytes. desktop/profile.spec.mjs and desktop/tray.spec.mjs scan
-// with it after a run (09 13.10's whole-profile scan).
+// for a text in each way the app or Chromium would write it, for any part of
+// a file's bytes, and for a 32-byte secret known only by its hash (an
+// upload's manage token). desktop/profile.spec.mjs, desktop/tray.spec.mjs and
+// desktop/delete-upload.spec.mjs scan the whole profile with it after a run.
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { holdsPlaintext } from './files.mjs';
@@ -39,4 +41,34 @@ export function heldIn(profile, { texts, bytes }) {
         }
     }
     return found;
+}
+
+/**
+ * Whether a text holds a 32-byte secret, in base64url, whose SHA-256 is
+ * `hash` (base64url): every 43 characters in a row that base64url can hold,
+ * hashed. An upload's manage token is known to its server only by that hash,
+ * so it can be found this way where it was never sent.
+ * @param {string} text
+ * @param {string} hash
+ */
+export function holdsSecretHashed(text, hash) {
+    for (const [run] of text.matchAll(/[A-Za-z0-9_-]{43,}/g)) {
+        for (let i = 0; i + 43 <= run.length; i++) {
+            if (createHash('sha256').update(Buffer.from(run.slice(i, i + 43), 'base64url')).digest('base64url') === hash) return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * The files in the profile holding a 32-byte secret by its hash, written as
+ * base64url text, in UTF-8 or UTF-16 (holdsSecretHashed()).
+ * @param {string} profile
+ * @param {string} hash
+ * @returns {string[]} each file, relative to the profile
+ */
+export function secretHashedIn(profile, hash) {
+    return filesUnder(profile)
+        .filter(({ bytes }) => [bytes.toString('latin1'), bytes.toString('utf16le'), bytes.subarray(1).toString('utf16le')].some((text) => holdsSecretHashed(text, hash)))
+        .map(({ file }) => path.relative(profile, file));
 }

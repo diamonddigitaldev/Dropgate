@@ -194,7 +194,7 @@ test('the window is sent a transfer\'s names and sizes and how it\'s going, neve
     assert.deepEqual(drawn, {
         id, kind: 'upload', state: 'running', files: [{ name: 'plans.bin', size: 1 }], status: 'uploading',
         step: RUNNING.text, phase: 'chunk', percent: 10, fileIndex: 0, canPause: true, deadline: null,
-        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true }, link: null, message: null,
+        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true }, link: null, message: null, canDelete: false,
     });
     assert.doesNotMatch(JSON.stringify(drawn), /secret/);
 });
@@ -248,4 +248,50 @@ test('each transfer reaches the window at most 4 times a second, its latest stat
     pacer.drop('a');
     advance(1000);
     assert.notEqual(sent.at(-1)[2], 'y', 'nothing of a dropped transfer is sent');
+});
+
+test('a waiting one takes new options and keeps the files chosen, in order; one that has started takes none', () => {
+    const { transfers } = registry();
+    const changed = [];
+    transfers.changed = (card) => changed.push(card.id);
+    const files = ['a.bin', 'b.bin', 'c.bin'].map((name, i) => ({ path: `/secret/${name}`, name, size: i + 1 }));
+    const card = transfers.add({ owner: 1, files, options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1 } });
+    changed.length = 0;
+
+    assert.equal(transfers.setOptions(card.id, { lifetime: { value: 3, unit: 'days' }, maxDownloads: 10 }), card);
+    assert.deepEqual(card.options, { lifetime: { value: 3, unit: 'days' }, maxDownloads: 10 });
+    assert.equal(transfers.setOptions(card.id, { files: [0, 2] }), card);
+    assert.deepEqual(card.files.map((file) => file.path), ['/secret/a.bin', '/secret/c.bin'], 'the files kept, with their paths');
+    assert.deepEqual(card.options, { lifetime: { value: 3, unit: 'days' }, maxDownloads: 10 }, 'what it wasn\'t given stays');
+    assert.equal(transfers.setOptions(card.id, { files: [2] }), null, 'no file it hasn\'t got');
+    assert.equal(changed.length, 2, 'the window hears of each change');
+
+    transfers.start(card.id, SERVER);
+    assert.equal(transfers.setOptions(card.id, { maxDownloads: 5 }), null, 'started: its options are sealed');
+    assert.equal(card.options.maxDownloads, 10);
+});
+
+test('a done upload can be deleted while the transfer window holds its token: then it says so, its link forgotten, and it can be removed', () => {
+    const { transfers, startMany } = registry();
+    const [done, other, failed] = startMany(3);
+    transfers.ended(done, DONE);
+    transfers.ended(other, DONE);
+    transfers.ended(failed, { status: 'error', error: 'The server closed the connection.' });
+    assert.deepEqual([done, other, failed].map((id) => view(transfers.get(id)).canDelete), [true, true, false]);
+
+    assert.equal(transfers.deleted(failed), null, 'only a done one is deleted');
+    assert.equal(transfers.deleted(done).state, 'deleted');
+    assert.deepEqual([view(transfers.get(done)).link, view(transfers.get(done)).canDelete], [null, false]);
+    assert.equal(transfers.deleted(done), null, 'once');
+    assert.equal(transfers.retry(done, 1), null, 'nothing to try again');
+    assert.equal(transfers.busy(), false, 'a deleted one is ended');
+
+    // The transfer window stopped: the other can't be deleted from here any more.
+    const changed = [];
+    transfers.changed = (card) => changed.push(card.id);
+    transfers.tokensLost([other, failed]);
+    assert.deepEqual([view(transfers.get(other)).canDelete, changed], [false, [other]]);
+    assert.equal(view(transfers.get(other)).link, DONE.link, 'its link still works');
+
+    assert.deepEqual(transfers.remove([done, other]).map((card) => card.id), [done, other]);
 });

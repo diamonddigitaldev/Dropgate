@@ -85,6 +85,99 @@ textarea,
     font-family: var(--bs-font-monospace);
 }
 
+/* ── Advanced Options ────────────────────────────────────────────────────── */
+
+/* The page's own form dialog, drawn as the kit's prompts are (its dialog
+   classes): the kit has no form dialog. A little narrower, its rows apart. */
+.options-dialog {
+    width: min(30rem, calc(100vw - 32px));
+}
+
+.options-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+/* The files of an upload of several, each with its Remove. */
+.options-files {
+    max-height: 180px;
+    overflow-y: auto;
+    border: 1px solid var(--bs-border-color);
+    border-radius: var(--radius-card);
+    padding: 0.25rem 0.6rem;
+}
+
+.options-file {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0;
+    font-size: 0.82rem;
+    border-bottom: 1px solid var(--bs-border-color);
+}
+
+.options-file:last-child {
+    border-bottom: 0;
+}
+
+.options-file .material-icons-round {
+    font-size: 18px;
+}
+
+.options-file-name {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.options-file-size {
+    color: var(--bs-secondary-color);
+    font-variant-numeric: tabular-nums;
+}
+
+/* A 20px round Remove, as a card's. */
+.options-file-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--bs-secondary-color);
+    transition: background-color var(--dur-state) var(--ease-standard);
+}
+
+.options-file-remove .material-icons-round {
+    font-size: 16px;
+}
+
+.options-file-remove:hover:not(:disabled) {
+    background-color: rgba(var(--accent-rgb), var(--wash-hover-fill));
+    color: var(--bs-body-color);
+}
+
+.options-file-remove:disabled {
+    opacity: var(--opacity-disabled);
+}
+
+/* How it will be sent: shown, never a control. */
+.options-encryption {
+    display: flex;
+    gap: 0.45rem;
+    align-items: flex-start;
+    font-size: 0.85rem;
+}
+
+.options-encryption .material-icons-round {
+    font-size: 18px;
+}
+
 /* ── How uploads will be sent (Settings > Server) ────────────────────────── */
 
 .security-status-card {

@@ -14,8 +14,9 @@ const { answerOf, deadlineOf, isId, outcomeOf, snapshotOf } = require('./core/pa
 //
 // - They start with the first server check or upload, and close
 //   TRANSFERS.WINDOW_IDLE_MS after the last of the transfer window's work
-//   ends (no upload running or paused there, no call waiting), unless more
-//   comes first. The file service lives as long as the transfer window: it
+//   ends (no upload running or paused there, no call waiting, and no
+//   finished upload's manage token held for its Delete), unless more comes
+//   first. The file service lives as long as the transfer window: it
 //   holds no file but those granted for an upload running or paused. (Started
 //   only for an upload and stopped after it, the app crashed in CI on Linux.)
 //
@@ -32,6 +33,10 @@ const { answerOf, deadlineOf, isId, outcomeOf, snapshotOf } = require('./core/pa
 // - The file service is a utility process with no window and no session. It
 //   reads a file only for a grant main made as its upload started, with the
 //   path main holds, and the grant is revoked as the upload ends.
+// - A finished upload's manage token stays in the transfer window, which
+//   deletes the upload with it when asked, until its card is removed
+//   (engine:forget) or the app quits (engine:quit). Main knows only which
+//   uploads it holds one for: the token never leaves the transfer window.
 
 /**
  * Start answering the transfer window's channels. Call once the app is ready
@@ -42,8 +47,9 @@ const { answerOf, deadlineOf, isId, outcomeOf, snapshotOf } = require('./core/pa
  * @param {(id: string, snapshot: object) => void} options.onUpdate - An upload's snapshot.
  * @param {(id: string, deadline: number) => void} options.onPauseEnding - A paused upload's server drops it at this time.
  * @param {(id: string, result: object) => void} options.onFinished - An upload's one outcome.
+ * @param {(ids: string[]) => void} [options.onTokensLost] - The transfer window stopped holding these finished uploads' manage tokens.
  */
-function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished }) {
+function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished, onTokensLost = () => {} }) {
     const session = kit.sessions.isolated('transfer');
 
     /** @type {BrowserWindow | null} */
@@ -63,6 +69,8 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
     const running = new Map();
     /** The calls waiting for the transfer window's answer. */
     const calls = new Map();
+    /** The finished uploads whose manage tokens the transfer window holds, by ID: never the tokens. */
+    const kept = new Set();
 
     const known = (id) => isId(id) && running.has(id);
 
@@ -98,7 +106,10 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
     kit.ipc.handle(ENGINE.FINISHED, (event, id, result) => {
         fromTransferWindow(event);
         const outcome = outcomeOf(result);
-        end(runningId(id, 'Expected how an upload running finished.'));
+        runningId(id, 'Expected how an upload running finished.');
+        // A completed upload's manage token stays there, for its Delete.
+        if (outcome.status === 'success') kept.add(id);
+        end(id);
         onFinished(id, outcome);
     }, { session });
 
@@ -137,14 +148,17 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         windowPort = null;
     }
 
-    /** With nothing running there and no call waiting, the transfer window closes after a while; any work calls that off. */
+    /** Whether the transfer window has anything to do or keep: an upload, a call waiting, a manage token. */
+    const working = () => running.size > 0 || calls.size > 0 || kept.size > 0;
+
+    /** With nothing running there, no call waiting and no token held, the transfer window closes after a while; any work calls that off. */
     function idleSoon() {
         clearTimeout(idleTimer);
         idleTimer = null;
-        if (!win || running.size > 0 || calls.size > 0) return;
+        if (!win || working()) return;
         idleTimer = setTimeout(() => {
             idleTimer = null;
-            if (running.size === 0 && calls.size === 0) close();
+            if (!working()) close();
         }, TRANSFERS.WINDOW_IDLE_MS);
     }
 
@@ -201,6 +215,10 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         ready = false;
         queued = [];
         stopFileService();
+        // Its tokens went with it: those uploads can't be deleted from here any more.
+        const lost = [...kept];
+        kept.clear();
+        if (lost.length > 0 && !closing) onTokensLost(lost);
         for (const id of [...running.keys()]) {
             running.delete(id);
             if (!closing) onFinished(id, { status: 'error', message });
@@ -218,7 +236,7 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
         else queued.push([channel, payload]);
     }
 
-    /** Send work that's answered, and wait for its answer: a check's, or a pause's, a resume's or a quit's (all three { message? }). */
+    /** Send work that's answered, and wait for its answer: a check's, or a pause's, a resume's, a delete's or a quit's (each { message? }). */
     function call(channel, payload) {
         const id = randomUUID();
         const kind = channel === ENGINE.CHECK ? 'check' : 'pause';
@@ -270,19 +288,47 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished 
             if (known(id)) send(ENGINE.CANCEL, { id });
         },
 
+        /**
+         * Delete a finished upload from its server, with the manage token the
+         * transfer window holds: the answer is the reason when it couldn't, or
+         * nothing, and then the token is gone.
+         * @param {string} id
+         */
+        async delete(id) {
+            if (!kept.has(id)) return { message: "This upload can't be deleted from here any more." };
+            const answer = await call(ENGINE.DELETE, { id });
+            if (!answer.message) kept.delete(id);
+            idleSoon();
+            return answer;
+        },
+
+        /** A finished upload's card is gone: the transfer window forgets its manage token. Nothing is started for it. */
+        forget(id) {
+            if (!kept.delete(id)) return;
+            if (win && ready) win.webContents.send(ENGINE.FORGET, { id });
+            else if (win) queued.push([ENGINE.FORGET, { id }]);
+            idleSoon();
+        },
+
         /** Whether an upload is running there, paused or not. */
         get busy() {
             return running.size > 0;
         },
 
+        /** Whether the transfer window holds a finished upload's manage token: quitting asks it to forget them. */
+        get keeping() {
+            return kept.size > 0;
+        },
+
         /**
          * The app is quitting: the transfer window cancels everything there,
-         * telling each server, and answers once it has (or after
-         * TRANSFERS.QUIT_WAIT_MS, whichever comes first). Its uploads' outcomes
-         * reach onFinished as they end.
+         * telling each server, forgets every manage token, and answers once it
+         * has (or after TRANSFERS.QUIT_WAIT_MS, whichever comes first). Its
+         * uploads' outcomes reach onFinished as they end.
          */
         async quit() {
-            if (!win || running.size === 0) return;
+            if (!win || (running.size === 0 && kept.size === 0)) return;
+            kept.clear();
             let timer;
             const waited = new Promise((resolve) => {
                 timer = setTimeout(resolve, TRANSFERS.QUIT_WAIT_MS);

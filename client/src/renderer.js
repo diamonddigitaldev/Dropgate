@@ -12,6 +12,14 @@
 // it is skipped), and onto one that has started make a new one. A new upload
 // takes the server's settings for new uploads (Settings > Server). Each card
 // starts with its Upload, or all waiting with the action bar's Upload All.
+// One waiting can have its own options (its Advanced Options, or Bulk Edit
+// on the bulk bar for those selected): its file lifetime and download limit,
+// bounded by what the server allows, and the files it keeps; its settings
+// line says what differs from the server's settings for new uploads. One
+// whose options get past that (an edited config.json, a server that lowered
+// its limits since) is stopped at its start by a warning, which can go on
+// with the server's limits. A finished one can be deleted from its server
+// (Delete), with the manage token only the transfer window holds.
 //
 // The page runs no core and makes no request: it holds each file as the
 // handle main made for it only until it's handed to an upload, never its
@@ -68,8 +76,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const securityStatus = $('security-status');
         const securityIcon = $('security-icon');
         const securityText = $('security-text');
-        const keepLogSwitch = $('keep-log-on-disk');
-        const { countOf, formatBytes } = kit.format;
+        const { countOf, formatBytes, plural } = kit.format;
 
         // Share with Dropgate is Windows' right-click entry: elsewhere, the Server tab doesn't mention it.
         if (!navigator.userAgent.includes('Windows')) $('server-help').textContent = 'Uploads go to this server.';
@@ -117,6 +124,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             target: { verb: 'Upload', control: bulkTarget, note: () => '' },
             actions: [
                 {
+                    // Advanced Options for those selected that are still waiting.
+                    label: 'Bulk Edit',
+                    variant: 'primary',
+                    selection: true,
+                    enabled: (picked) => picked.some((card) => editable(shown.get(idOf.get(card))?.view)),
+                    onClick: (picked) => openAdvanced(picked.map((card) => shown.get(idOf.get(card))).filter((entry) => editable(entry?.view))),
+                },
+                {
                     label: 'Remove',
                     variant: 'outline-danger',
                     selection: true,
@@ -140,6 +155,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const removable = (view) => Boolean(view) && (view.state === 'waiting' || ENDED.includes(view.state));
         /** Whether Upload starts it from here: waiting, and not a share being asked about. */
         const startable = (view) => view.state === 'waiting' && !asking.has(view.id);
+        /** Whether its options can be changed here: the same, as its options are sealed once it starts. */
+        const editable = (view) => Boolean(view) && startable(view);
 
         // Files dropped on Upload: onto a waiting upload's card they join it;
         // anywhere else they're a new upload. The drop zone reads the files'
@@ -231,16 +248,52 @@ document.addEventListener('DOMContentLoaded', async () => {
                 case 'done': return { text: view.options?.encrypt ? 'Uploaded · End-to-End Encrypted' : 'Uploaded · Not Encrypted', tone: 'success' };
                 case 'failed': return { text: `Failed: ${sentence(view.message ?? 'The upload stopped.')}`, tone: 'danger' };
                 case 'cancelled': return { text: 'Cancelled', tone: 'muted' };
+                case 'deleted': return { text: 'Deleted from the server. Its link no longer works.', tone: 'muted' };
                 default: return { text: view.state, tone: 'muted' };
             }
         }
 
-        /** Its settings line: only when it won't be end-to-end encrypted. */
+        /**
+         * Its settings line: that it won't be end-to-end encrypted, or else
+         * what it has that differs from the server's settings for new uploads
+         * ("3 Days · 10 Downloads"), or nothing.
+         */
         function settingsOf(view) {
             const plain = view.options?.encrypt === false || (view.state === 'waiting' && lastServerCheck.compatible && !serverEncrypts());
-            if (!plain) return undefined;
-            return { text: serverUrlInput.value.trim().startsWith('http://') ? 'Not encrypted: This server is plain HTTP.' : "Not encrypted: This server doesn't support it.", tone: 'warning' };
+            if (plain) {
+                return { text: serverUrlInput.value.trim().startsWith('http://') ? 'Not encrypted: This server is plain HTTP.' : "Not encrypted: This server doesn't support it.", tone: 'warning' };
+            }
+            if (!view.options) return undefined;
+            const usual = newUploadOptions();
+            const differs = [];
+            if (!sameLifetime(view.options.lifetime, usual.lifetime)) differs.push(lifetimeTitle(view.options.lifetime));
+            if (view.options.maxDownloads !== usual.maxDownloads) differs.push(downloadsTitle(view.options.maxDownloads));
+            return differs.length > 0 ? differs.join(' · ') : undefined;
         }
+
+        /** The server's settings for new uploads, as Settings > Server has them now: what main gives a new upload. */
+        function newUploadOptions() {
+            const unit = fileLifetimeUnitSelect.value;
+            return {
+                lifetime: { value: unit === 'unlimited' ? 0 : parseFloat(fileLifetimeValueInput.value), unit },
+                maxDownloads: parseInt(maxDownloadsValue.value, 10),
+            };
+        }
+
+        const sameLifetime = (a, b) => a.unit === b.unit && (a.unit === 'unlimited' || a.value === b.value);
+
+        /** A count that may be part of one, in words: countOf() would round 0.5 hours to 0. */
+        const amountOf = (n, one) => (Number.isInteger(n) ? countOf(n, one) : `${n} ${plural(2, one)}`);
+
+        /** A lifetime's unit as one of it, in a sentence and as a bullet-separated item. */
+        const UNIT_WORDS = { minutes: ['minute', 'Minute'], hours: ['hour', 'Hour'], days: ['day', 'Day'] };
+
+        /** A lifetime and a download limit as bullet-separated items, in Title Case: "3 Days", "No Time Limit", "10 Downloads". */
+        const lifetimeTitle = (lifetime) => (lifetime.unit === 'unlimited' ? 'No Time Limit' : amountOf(lifetime.value, UNIT_WORDS[lifetime.unit][1]));
+        const downloadsTitle = (n) => (n === 0 ? 'Unlimited Downloads' : countOf(n, 'Download'));
+        /** And in a sentence: "3 days", "no time limit", "10 downloads". */
+        const lifetimeText = (lifetime) => (lifetime.unit === 'unlimited' ? 'no time limit' : amountOf(lifetime.value, UNIT_WORDS[lifetime.unit][0]));
+        const downloadsText = (n) => (n === 0 ? 'unlimited downloads' : countOf(n, 'download'));
 
         /** Its buttons, for its state. A click on one that says "…ing…" shows it busy until the next state. */
         function actionsOf(view) {
@@ -251,20 +304,25 @@ document.addEventListener('DOMContentLoaded', async () => {
                 case 'running': {
                     // Pause, while core says it can be now, on a server that lets uploads pause (its pause length is 0 when its operator turned pausing off).
                     const pausable = (serverCapabilities?.upload?.maxPauseMinutes ?? 0) > 0 && view.canPause && ['initializing', 'uploading'].includes(view.status);
-                    return [
-                        ...(pausable ? [{ label: 'Pause', onClick: (button) => pauseOrResume(button, id, true) }] : []),
-                        { label: 'Cancel', variant: 'outline-danger', onClick: () => api.cancelTransfer(id).catch(() => {}) },
-                    ];
+                    // A pause or a resume asked from here keeps its busy button until it's seen through.
+                    const asked = settling.get(id)?.kind;
+                    const toggle = asked === 'resume' ? [{ label: 'Resume', onClick: () => {} }]
+                        : pausable || asked === 'pause' ? [{ label: 'Pause', onClick: (button) => pauseOrResume(button, id, true) }] : [];
+                    return [...toggle, { label: 'Cancel', variant: 'outline-danger', onClick: () => api.cancelTransfer(id).catch(() => {}) }];
                 }
                 case 'paused':
                     return [
-                        ...(view.canPause ? [{ label: 'Resume', onClick: (button) => pauseOrResume(button, id, false) }] : []),
+                        ...(view.canPause || settling.get(id)?.kind === 'resume' ? [{ label: 'Resume', onClick: (button) => pauseOrResume(button, id, false) }] : []),
                         { label: 'Cancel', variant: 'outline-danger', onClick: () => api.cancelTransfer(id).catch(() => {}) },
                     ];
                 case 'queued':
                     return [{ label: 'Cancel', variant: 'outline-danger', onClick: () => api.cancelTransfer(id).catch(() => {}) }];
                 case 'done':
-                    return [{ label: 'Copy Link', onClick: () => copyLink(view) }];
+                    return [
+                        { label: 'Copy Link', onClick: () => copyLink(view) },
+                        // While the transfer window holds its manage token: from its end until it's removed.
+                        ...(view.canDelete ? [{ label: 'Delete', variant: 'outline-danger', onClick: (button) => deleteUpload(button, view) }] : []),
+                    ];
                 case 'failed':
                 case 'cancelled':
                     return [{ label: 'Retry', onClick: () => api.retryTransfer(id).catch(() => {}) }];
@@ -274,16 +332,60 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         /**
+         * The pauses and resumes asked from here and not yet seen through, by
+         * upload: { kind, answered }. While one settles, core says the upload
+         * can't be paused, which would take its button away; the button stays
+         * on the card, busy, until the upload has moved on, or the request was
+         * answered and it hasn't (it was refused, or came too late).
+         */
+        const settling = new Map();
+
+        /** Whether a pause or a resume asked from here has been seen through, as the upload is now. */
+        function settled(view, { kind, answered }) {
+            if (!['running', 'paused'].includes(view.state)) return true;
+            if (kind === 'pause') return view.state === 'paused' || (answered && view.canPause);
+            return (view.state === 'running' && view.status !== 'paused') || (answered && view.state === 'paused');
+        }
+
+        /**
          * Pause or Resume: busy until the upload's next state; the upload
          * moving on before it landed is silent, and any other refusal is
          * core's reason, as a warning.
          */
         async function pauseOrResume(button, id, pause) {
+            const asked = { kind: pause ? 'pause' : 'resume', answered: false };
+            settling.set(id, asked);
             const restore = kit.ui.busy(button, pause ? 'Pausing…' : 'Resuming…');
             const { message } = await (pause ? api.pauseTransfer(id) : api.resumeTransfer(id)).catch(() => ({}));
+            asked.answered = true;
             if (message) {
+                settling.delete(id);
                 restore();
                 kit.ui.toast(message, { type: 'warning' });
+            }
+            // As the upload is now: it may have moved on before this answer came.
+            if (shown.has(id)) draw(shown.get(id).view);
+        }
+
+        /**
+         * Delete, once the person has said so: the transfer window deletes it
+         * from its server, with its manage token, and its card then says it's
+         * gone. Busy until then; the reason, if it couldn't be.
+         */
+        async function deleteUpload(button, view) {
+            const ok = await kit.ui.confirm({
+                title: 'Delete This Upload?',
+                body: `${serverName()} removes it at once, and its link stops working.`,
+                confirmLabel: 'Delete',
+                variant: 'danger',
+                icon: 'delete',
+            });
+            if (!ok || !button.isConnected) return;
+            const restore = kit.ui.busy(button, 'Deleting…');
+            const { message } = await api.deleteTransfer(view.id).catch((error) => ({ message: error?.message || String(error) }));
+            if (message) {
+                restore();
+                kit.ui.toast(`Couldn't delete ${nameOf(view)}: ${sentence(message)}`, { type: 'danger' });
             }
         }
 
@@ -309,6 +411,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const card = kit.ui.card({
                     icon: view.files.length > 1 ? 'file_copy' : 'upload_file',
                     name: nameOf(view),
+                    onConfigure: () => openAdvanced([shown.get(view.id)]),
                     onRemove: () => removeUploads([shown.get(view.id)]),
                     route: { label: 'To', control: select },
                 });
@@ -320,6 +423,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 grid.add(card);
             }
             entry.view = view;
+            if (settling.has(view.id) && settled(view, settling.get(view.id))) settling.delete(view.id);
             if (view.link && !entry.linkRow) {
                 entry.linkRow = document.createElement('input');
                 entry.linkRow.className = 'form-control form-control-sm selectable card-link';
@@ -336,7 +440,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 ...(bar ? { percent: view.phase === 'chunk' || view.state === 'paused' ? view.percent ?? null : null, paused: view.state === 'paused' } : {}),
                 actions: actionsOf(view),
                 rows: view.state === 'done' && entry.linkRow ? [entry.linkRow] : [],
-                locked: view.state !== 'waiting',
+                // Advanced Options and the server, until it starts (a share being asked about is the share's).
+                locked: !editable(view),
                 canRemove: removable(view),
             });
             drawBars();
@@ -418,8 +523,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         maxDownloadsValue.value = settings.maxDownloads;
         // The kit's own setting: on, the redacted log is kept in debug.log too; off, that file is deleted.
-        keepLogSwitch.checked = settings.keepLogOnDisk;
-        keepLogSwitch.addEventListener('change', () => kitApi.setSettings({ keepLogOnDisk: keepLogSwitch.checked }));
+        const keepLog = kit.ui.switchField({
+            id: 'keep-log-on-disk',
+            label: 'Keep log on disk for troubleshooting',
+            checked: settings.keepLogOnDisk,
+            help: {
+                on: "The app's log is also kept in a file on this computer, with none of your file names, folders or links in it, so you can send it with a bug report. Turning it off deletes the file.",
+                off: "The app's log is kept in memory only, and goes when the app closes.",
+            },
+            onChange: (checked) => kitApi.setSettings({ keepLogOnDisk: checked }),
+        });
+        $('privacy-settings').append(keepLog.element);
 
         await checkServerCompatibility();
 
@@ -610,11 +724,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         /**
-         * Start uploads waiting: the server checked first, each one's lifetime
-         * and download limit held to its limits, and the Upload Security
-         * Warning asked once when they won't be end-to-end encrypted. Main runs
-         * them in the transfer window, as places free. One stopped before it
-         * starts is told to main, and stays waiting.
+         * Start uploads waiting: the server checked first; any whose lifetime
+         * or download limit is outside what it allows now stops them, with a
+         * warning that can go on with the server's limits instead (or leave
+         * them all waiting); and the Upload Security Warning is asked once
+         * when they won't be end-to-end encrypted. Main runs them in the
+         * transfer window, as places free. One stopped before it starts is
+         * told to main, and stays waiting.
          */
         async function startUploads(ids) {
             if (ids.length === 0) return;
@@ -623,11 +739,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 api.uploadFinished({ status: 'error', error: serverCheck.message || 'Server is not compatible.' });
                 return;
             }
-            for (const id of ids) {
-                const problem = outsideLimits(shown.get(id)?.view.options);
-                if (problem) {
-                    api.uploadFinished({ status: 'error', error: problem });
-                    return;
+            const outside = ids.map((id) => shown.get(id)?.view).filter((view) => view && startable(view) && outsideLimits(view.options));
+            if (outside.length > 0) {
+                if (!(await askServerLimits(outside))) return;
+                try {
+                    for (const view of outside) await api.setTransferOptions(view.id, withinLimits(view.options));
+                } catch {
+                    // One started or went meanwhile: what's left goes on as it is, and the server refuses anything outside its limits.
                 }
             }
             const encrypt = serverEncrypts();
@@ -644,18 +762,284 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         }
 
-        /** Why an upload's options are outside the server's limits, or null when they're inside. */
+        /** The server's limits on a lifetime (in hours, 0 for none) and on downloads (0 for none), as it last said. */
+        const limitsOf = (upload) => ({ hours: upload.maxLifetimeHours, downloads: upload.maxFileDownloads ?? 1 });
+
+        /** Whether a lifetime is longer than the server allows: unlimited, or past its limit. */
+        function lifetimeOutside(lifetime, limits) {
+            if (limits.hours === 0) return false;
+            const ms = lifetime.unit === 'unlimited' ? 0 : lifetimeToMs(lifetime.value, lifetime.unit);
+            return ms === 0 || ms > limits.hours * 3_600_000;
+        }
+
+        /** Whether a download limit is more than the server allows: unlimited, or past its limit. */
+        const downloadsOutside = (n, limits) => limits.downloads > 0 && (n === 0 || n > limits.downloads);
+
+        /** Whether an upload's options are outside the server's limits, as it last said them. */
         function outsideLimits(options) {
             const upload = serverCapabilities?.upload;
-            if (!options || !upload) return null;
-            const limitHours = upload.maxLifetimeHours;
-            const ms = options.lifetime.unit === 'unlimited' ? 0 : lifetimeToMs(options.lifetime.value, options.lifetime.unit);
-            if (limitHours > 0 && (ms === 0 || ms > limitHours * 3_600_000)) return `File lifetime too long. Server limit: ${hours(limitHours)}.`;
-            const maxFileDownloads = upload.maxFileDownloads ?? 1;
-            if (maxFileDownloads > 0 && (options.maxDownloads === 0 || options.maxDownloads > maxFileDownloads)) {
-                return `Exceeds the server's limit of ${countOf(maxFileDownloads, 'download')}.`;
+            if (!options || !upload) return false;
+            const limits = limitsOf(upload);
+            return lifetimeOutside(options.lifetime, limits) || downloadsOutside(options.maxDownloads, limits);
+        }
+
+        /** An upload's options held to the server's limits: each one outside becomes its limit. */
+        function withinLimits(options) {
+            const limits = limitsOf(serverCapabilities.upload);
+            return {
+                lifetime: lifetimeOutside(options.lifetime, limits) ? { value: limits.hours, unit: 'hours' } : options.lifetime,
+                maxDownloads: downloadsOutside(options.maxDownloads, limits) ? limits.downloads : options.maxDownloads,
+            };
+        }
+
+        /** What the server allows, in a sentence: "keeps files up to 24 hours and allows up to 5 downloads". */
+        function limitsSentence(upload) {
+            const limits = limitsOf(upload);
+            const keeps = limits.hours === 0 ? 'keeps files with no time limit' : `keeps files up to ${hours(limits.hours)}`;
+            return `${keeps} and allows ${limits.downloads === 0 ? 'any number of downloads' : `up to ${countOf(limits.downloads, 'download')}`}`;
+        }
+
+        /**
+         * The warning before uploads whose options are outside the server's
+         * limits as it says them now: true to go on with its limits instead.
+         * @param {any[]} views - Those outside them.
+         */
+        function askServerLimits(views) {
+            const [one] = views;
+            const asks = views.length === 1
+                ? `This upload asks for ${lifetimeText(one.options.lifetime)} and ${downloadsText(one.options.maxDownloads)}.`
+                : `${countOf(views.length, 'upload')} here ask for more than that.`;
+            return kit.ui.confirm({
+                title: "Outside This Server's Limits",
+                body: `${serverName()} ${limitsSentence(serverCapabilities.upload)}. ${asks}`,
+                detail: views.length === 1
+                    ? 'The server may have lowered its limits since this upload was added.'
+                    : 'The server may have lowered its limits since these uploads were added.',
+                confirmLabel: "Use the Server's Limits",
+                variant: 'warning',
+                icon: 'warning',
+            });
+        }
+
+        /**
+         * Advanced Options, for one upload waiting (its card's) or several
+         * (Bulk Edit, for those selected): its file lifetime and download
+         * limit, offering only what the server allows (Apply is off, with the
+         * help line saying why, for a value outside); how it will be sent,
+         * shown, never switched off; and for one of several files, the files,
+         * each with its own Remove. The server's Allow Fallback comes with
+         * several servers (phase 14 of the plan, beyond this one server).
+         * Apply sets them on main's upload; Cancel leaves it as it was.
+         * @param {any[]} entries
+         */
+        async function openAdvanced(entries) {
+            const views = entries.map((entry) => entry?.view).filter(editable);
+            if (views.length === 0) return;
+            if (!serverCapabilities?.upload) await checkServerCompatibility();
+            const upload = serverCapabilities?.upload;
+            if (!lastServerCheck.compatible || !upload) {
+                kit.ui.toast(lastServerCheck.message || 'Could not connect to the server.', { type: 'warning' });
+                return;
             }
-            return null;
+            const [first] = views;
+            const many = views.length > 1;
+            const host = serverName();
+            const limits = limitsOf(upload);
+
+            const dialog = element('dialog', 'kit-dialog options-dialog');
+            dialog.setAttribute('aria-labelledby', 'options-title');
+            const title = element('h2', 'kit-dialog-title');
+            const titleText = element('span', '', 'Advanced Options');
+            titleText.id = 'options-title';
+            title.append(glyph('tune', 'kit-dialog-icon'), titleText);
+            const close = element('button', 'btn-close');
+            close.type = 'button';
+            close.setAttribute('aria-label', 'Close');
+            close.addEventListener('click', () => dialog.close());
+            const body = element('div', 'kit-dialog-body options-body');
+            const footer = element('div', 'kit-dialog-footer');
+            const header = element('div', 'kit-dialog-header');
+            header.append(title, close);
+            dialog.append(header, body, footer);
+            body.append(element('p', 'kit-dialog-text', many ? `For the ${countOf(views.length, 'upload')} selected.` : nameOf(first)));
+
+            // The files of one upload of several: each can be taken out, but the last.
+            let kept = first.files.map((file, index) => ({ ...file, index }));
+            const fileList = element('div', 'options-files');
+            fileList.setAttribute('role', 'list');
+            fileList.setAttribute('aria-label', 'Files');
+            const drawFiles = () => fileList.replaceChildren(...kept.map((file) => {
+                const row = element('div', 'options-file');
+                row.setAttribute('role', 'listitem');
+                const remove = element('button', 'options-file-remove');
+                remove.type = 'button';
+                remove.title = 'Remove';
+                remove.setAttribute('aria-label', `Remove ${file.name}`);
+                remove.disabled = kept.length === 1;
+                remove.append(glyph('close'));
+                remove.addEventListener('click', () => {
+                    kept = kept.filter((other) => other !== file);
+                    drawFiles();
+                });
+                row.append(glyph('insert_drive_file', 'text-secondary'), element('span', 'options-file-name', file.name), element('span', 'options-file-size', formatBytes(file.size)), remove);
+                return row;
+            }));
+            if (!many && first.files.length > 1) {
+                drawFiles();
+                body.append(element('div', 'form-label mb-0', 'Files'), fileList);
+            }
+
+            // File lifetime: no unit allows more than the server does, and Unlimited only where it has no limit.
+            const lifetime = first.options.lifetime;
+            const lifetimeValue = element('input', 'form-control');
+            lifetimeValue.type = 'number';
+            lifetimeValue.id = 'options-lifetime';
+            lifetimeValue.min = '0';
+            lifetimeValue.step = 'any';
+            lifetimeValue.value = lifetime.unit === 'unlimited' ? '' : String(lifetime.value);
+            const lifetimeUnit = element('select', 'form-select');
+            lifetimeUnit.id = 'options-lifetime-unit';
+            lifetimeUnit.setAttribute('aria-label', 'Unit');
+            for (const [value, label, most] of [['minutes', 'Minutes', limits.hours * 60], ['hours', 'Hours', limits.hours], ['days', 'Days', limits.hours / 24],
+                ['unlimited', limits.hours === 0 ? 'Unlimited' : 'Unlimited (not allowed by the server)', 0]]) {
+                const option = element('option', '', label);
+                option.value = value;
+                option.dataset.most = String(most);
+                option.disabled = (value === 'unlimited' && limits.hours !== 0) || (value === 'days' && limits.hours !== 0 && limits.hours < 24);
+                lifetimeUnit.append(option);
+            }
+            lifetimeUnit.value = lifetime.unit;
+            const lifetimeGroup = element('div', 'input-group input-group-sm');
+            lifetimeGroup.append(lifetimeValue, lifetimeUnit);
+            const lifetimeField = formField('File lifetime', lifetimeGroup, 'options-lifetime');
+
+            // Max downloads: up to the server's limit, 0 (unlimited) only where it has none, and fixed where it allows one.
+            const downloads = element('input', 'form-control form-control-sm');
+            downloads.type = 'number';
+            downloads.id = 'options-downloads';
+            downloads.min = limits.downloads === 0 ? '0' : '1';
+            if (limits.downloads > 0) downloads.max = String(limits.downloads);
+            downloads.step = '1';
+            // Where the server allows 1, it's the only value there is, whatever the upload had.
+            downloads.value = String(limits.downloads === 1 ? 1 : first.options.maxDownloads);
+            downloads.disabled = limits.downloads === 1;
+            const downloadsField = formField('Max downloads', downloads, 'options-downloads');
+
+            // How it will be sent: shown, and never switched off here.
+            const encryption = element('div', 'options-encryption');
+            const encrypts = serverEncrypts();
+            encryption.append(glyph(encrypts ? 'verified' : 'gpp_bad', encrypts ? 'text-success-emphasis' : 'text-danger-emphasis'), element('span', '', encrypts
+                ? `End-to-end encrypted. ${host} can't read your files or their names.`
+                : isPlainHttp(serverBaseUrl ?? '')
+                    ? `Not encrypted: ${host} is plain HTTP, so the server can read your files.`
+                    : `Not encrypted: ${host} doesn't support end-to-end encryption, so the server can read your files.`));
+            body.append(lifetimeField.wrap, downloadsField.wrap, encryption);
+
+            const cancel = element('button', 'btn btn-secondary', 'Cancel');
+            cancel.type = 'button';
+            cancel.addEventListener('click', () => dialog.close());
+            const apply = element('button', 'btn btn-primary', 'Apply');
+            apply.type = 'button';
+            footer.append(cancel, apply);
+
+            /** The lifetime as the fields say it, or null when it isn't one. */
+            const readLifetime = () => {
+                if (lifetimeUnit.value === 'unlimited') return { value: 0, unit: 'unlimited' };
+                const value = Number(lifetimeValue.value);
+                return lifetimeValue.value.trim() !== '' && Number.isFinite(value) && value > 0 ? { value, unit: lifetimeUnit.value } : null;
+            };
+            /** The download limit as its field says it, or null when it isn't a whole number. */
+            const readDownloads = () => {
+                const n = Number(downloads.value);
+                return downloads.value.trim() !== '' && Number.isSafeInteger(n) && n >= 0 ? n : null;
+            };
+
+            /** Each help line says what the server allows, or why a value is outside it; Apply is off while one is. */
+            const check = () => {
+                const unit = lifetimeUnit.value;
+                const most = Number(lifetimeUnit.selectedOptions[0]?.dataset.most ?? 0);
+                lifetimeValue.disabled = unit === 'unlimited';
+                if (unit === 'unlimited') lifetimeValue.value = '';
+                if (limits.hours !== 0) lifetimeValue.max = String(most);
+                else lifetimeValue.removeAttribute('max');
+
+                const allows = limits.hours === 0 ? `${host} has no time limit.` : `${host} keeps files up to ${hours(limits.hours)}.`;
+                const life = readLifetime();
+                let lifeWhy = null;
+                if (!life) lifeWhy = 'Enter a lifetime of more than 0.';
+                else if (lifetimeOutside(life, limits)) {
+                    lifeWhy = life.unit === 'unlimited'
+                        ? `${host} doesn't allow unlimited. It keeps files up to ${hours(limits.hours)}.`
+                        : `Too long for ${host}, which keeps files up to ${hours(limits.hours)}.`;
+                }
+                setHelp(lifetimeField.help, lifeWhy ?? allows, lifeWhy ? 'danger' : undefined);
+
+                const n = readDownloads();
+                let downloadsWhy = null;
+                if (n === null) downloadsWhy = limits.downloads === 0 ? 'Enter a whole number: 0 or more.' : `Enter a whole number from 1 to ${limits.downloads}.`;
+                else if (downloadsOutside(n, limits)) {
+                    downloadsWhy = n === 0
+                        ? `${host} doesn't allow unlimited downloads. It allows up to ${countOf(limits.downloads, 'download')}.`
+                        : `Too many for ${host}, which allows up to ${countOf(limits.downloads, 'download')}.`;
+                }
+                const downloadsAllow = limits.downloads === 0 ? '0 means unlimited downloads.'
+                    : limits.downloads === 1 ? `${host} allows 1 download.` : `${host} allows up to ${countOf(limits.downloads, 'download')}.`;
+                setHelp(downloadsField.help, downloadsWhy ?? downloadsAllow, downloadsWhy ? 'danger' : undefined);
+                apply.disabled = Boolean(lifeWhy || downloadsWhy);
+            };
+            for (const control of [lifetimeValue, downloads]) control.addEventListener('input', check);
+            lifetimeUnit.addEventListener('change', check);
+            check();
+
+            apply.addEventListener('click', async () => {
+                const options = { lifetime: readLifetime(), maxDownloads: readDownloads() };
+                if (!many && kept.length !== first.files.length) options.files = kept.map((file) => file.index);
+                dialog.close();
+                const refused = [];
+                for (const view of views) {
+                    await api.setTransferOptions(view.id, options).catch(() => refused.push(view));
+                }
+                if (refused.length > 0) {
+                    kit.ui.toast(refused.length === 1 ? 'That upload has already started, so its options stay as they were.'
+                        : `${countOf(refused.length, 'upload')} had already started, so their options stay as they were.`, { type: 'warning' });
+                }
+            });
+
+            dialog.addEventListener('close', () => dialog.remove());
+            document.body.append(dialog);
+            dialog.showModal();
+        }
+
+        /** An element of the page's own, with its class and its text: never markup. */
+        function element(tag, className, text) {
+            const made = document.createElement(tag);
+            if (className) made.className = className;
+            if (text !== undefined) made.textContent = text;
+            return made;
+        }
+
+        /** A Material Icons Round glyph, hidden from screen readers, in a tone if given. */
+        function glyph(name, tone) {
+            const icon = document.createElement('span');
+            icon.className = 'material-icons-round';
+            if (tone) icon.classList.add(tone);
+            icon.setAttribute('aria-hidden', 'true');
+            icon.textContent = name;
+            return icon;
+        }
+
+        /** A form row: its label above, the control, and its help line with its height kept, which describes it. */
+        function formField(label, control, id) {
+            const wrap = element('div');
+            const labelElement = element('label', 'form-label', label);
+            labelElement.htmlFor = id;
+            const help = element('div', 'form-text reserved');
+            help.id = `${id}-help`;
+            for (const input of control.matches('input, select') ? [control] : control.querySelectorAll('input, select')) {
+                input.setAttribute('aria-describedby', help.id);
+            }
+            wrap.append(labelElement, control, help);
+            return { wrap, help };
         }
 
         // --- Utility Functions ---
@@ -706,6 +1090,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (Number.isFinite(lifetime)) changes.lifetimeValue = lifetime;
             const downloads = parseInt(maxDownloadsValue.value, 10);
             if (Number.isInteger(downloads)) changes.maxDownloads = downloads;
+            // Each card's settings line says what differs from these.
+            for (const entry of shown.values()) draw(entry.view);
             return kitApi.setSettings(changes);
         }
 

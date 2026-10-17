@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const { IPC } = require('./constants');
-const { failureOf, filesToAdd, handleOf, linkOf, newUpload, pathList, serverAddress, transfersOf, uploadOf, uploadsToStart } = require('./core/payloads');
+const { failureOf, filesToAdd, handleOf, linkOf, newUpload, optionsOf, pathList, serverAddress, transfersOf, uploadOf, uploadsToStart } = require('./core/payloads');
 const { view } = require('./core/transfers');
 
 // The window's channels: what its page asks main, through window.electronAPI.
@@ -33,6 +33,7 @@ const serverOf = (url) => ({ url, allowInsecure: /^http:\/\//i.test(url) });
  * @param {(id: string) => Promise<{ message?: string }>} main.pause - Pause an upload, in the transfer window.
  * @param {(id: string) => Promise<{ message?: string }>} main.resume - Resume one, now or once it has a place.
  * @param {(id: string) => void} main.cancel - Cancel an upload, or decline a share's question.
+ * @param {(id: string) => Promise<{ message?: string }>} main.delete - Delete a finished upload from its server, in the transfer window.
  * @param {() => boolean} main.busy - Whether any transfer runs, is paused or is queued (or a share is under way).
  * @param {(result: { status: 'error', error: string }) => void} main.failed - An upload the page made never started.
  * @param {(link: string) => Promise<void>} main.copyLink - Copy a link, kept out of the clipboard's history.
@@ -120,6 +121,18 @@ function answerWindowChannels(main) {
         for (const id of ids) main.start(id, transfers.get(id).server ?? serverOf(serverURL));
     });
 
+    // Advanced Options (and Bulk Edit, one call each) on an upload of this
+    // window's waiting: its lifetime, download limit and the files it keeps.
+    // A share's, or one being asked about, is the share's own.
+    kit.ipc.handle(IPC.TRANSFER_SET_OPTIONS, (event, request) => {
+        const own = (id) => {
+            const upload = transfers.get(id);
+            return Boolean(upload) && upload.state === 'waiting' && upload.owner === event.sender.id && !upload.ask;
+        };
+        const { id, options } = optionsOf(request, own, (upload) => transfers.get(upload).files.length);
+        if (!transfers.setOptions(id, options)) throw new Error('Expected an upload of this window\'s waiting to start.');
+    });
+
     // Remove uploads waiting or ended (Remove, Clear Finished): one going is cancelled first.
     kit.ipc.handle(IPC.TRANSFER_REMOVE, (_event, request) => {
         transfers.remove(transfersOf(request, has));
@@ -140,6 +153,11 @@ function answerWindowChannels(main) {
     // person clicks Cancel in the main window. A share waiting on its question is
     // declined.
     kit.ipc.handle(IPC.TRANSFER_CANCEL, (_event, request) => main.cancel(uploadOf(request, has)));
+
+    // Delete, on a finished upload, from any window, once the window has asked
+    // the person: the transfer window deletes it with the upload's manage
+    // token, which only it holds. The answer is the reason when it couldn't.
+    kit.ipc.handle(IPC.TRANSFER_DELETE, (_event, request) => main.delete(uploadOf(request, has)));
 
     // Restart Now asks first while any transfer runs, is paused or is queued.
     kit.ipc.handle(IPC.TRANSFER_BUSY, () => main.busy());

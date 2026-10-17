@@ -30,6 +30,8 @@ const IPC = Object.freeze({
     TRANSFER_START: 'transfer:start',           // ({ ids, encrypt? }) start them, in the transfer window: the page's own (encrypt, as it found the server), or a share's it was asked about (Upload Anyway)
     TRANSFER_REMOVE: 'transfer:remove',         // ({ ids }) remove uploads waiting or ended: Remove, Clear Finished
     TRANSFER_RETRY: 'transfer:retry',           // ({ id }) a failed or cancelled upload waits for the page's Upload once more
+    TRANSFER_SET_OPTIONS: 'transfer:set-options', // ({ id, options: { lifetime?, maxDownloads?, files? } }) Advanced Options on the page's own upload waiting: files are the indexes it keeps
+    TRANSFER_DELETE: 'transfer:delete',         // ({ id }) -> { message? }, a finished upload deleted from its server, with the manage token the transfer window holds
     TRANSFER_PAUSE: 'transfer:pause',           // ({ id }) -> { message? }, core's reason when it couldn't
     TRANSFER_RESUME: 'transfer:resume',         // ({ id }) -> { message? }
     TRANSFER_CANCEL: 'transfer:cancel',         // ({ id }) a running upload, or one waiting: a share's question declined
@@ -68,17 +70,19 @@ const ENGINE = Object.freeze({
     RESUME: 'engine:resume',                    // { id, call }, answered with engine:answer
     CANCEL: 'engine:cancel',                    // { id }
     CHECK: 'engine:check',                      // { call, server: { url, allowInsecure } }, answered with engine:answer
-    QUIT: 'engine:quit',                        // { call } the app is quitting: cancel everything (its servers told), then answer with engine:answer
+    DELETE: 'engine:delete',                    // { id, call } delete a finished upload with its manage token, answered with engine:answer ({ message? })
+    FORGET: 'engine:forget',                    // { id } its card is gone: the finished upload's manage token goes too
+    QUIT: 'engine:quit',                        // { call } the app is quitting: cancel everything (its servers told), forget every manage token, then answer with engine:answer
     // The transfer window to main.
     READY: 'engine:ready',                      // () its page has set itself up: main hands it the port, then its work
     UPDATE: 'engine:update',                    // (id, snapshot) core's snapshot, which names no file and holds no key
     PAUSE_ENDING: 'engine:pause-ending',        // (id, deadline) a paused upload's server drops it at this time (ms since 1970): notify
     FINISHED: 'engine:finished',                // (id, { status: 'success', link } | { status: 'cancelled' } | { status: 'error', message })
-    ANSWER: 'engine:answer',                    // (call, value) the answer to a check, a pause, a resume or a quit
+    ANSWER: 'engine:answer',                    // (call, value) the answer to a check, a pause, a resume, a delete or a quit
 });
 
 /** What main sends the transfer window, which its page only listens for. */
-const ENGINE_PUSHES = Object.freeze([ENGINE.PORT, ENGINE.UPLOAD, ENGINE.PAUSE, ENGINE.RESUME, ENGINE.CANCEL, ENGINE.CHECK, ENGINE.QUIT]);
+const ENGINE_PUSHES = Object.freeze([ENGINE.PORT, ENGINE.UPLOAD, ENGINE.PAUSE, ENGINE.RESUME, ENGINE.CANCEL, ENGINE.CHECK, ENGINE.DELETE, ENGINE.FORGET, ENGINE.QUIT]);
 
 /**
  * The messages between main and the file service (a utilityProcess, over

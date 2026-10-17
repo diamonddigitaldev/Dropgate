@@ -199,7 +199,7 @@ test('the main window\'s page has a CSP: its own scripts, styles, fonts and imag
 
 test('the shell and the shared parts are the kit\'s: no modal, drop zone, progress bar or theme script of the client\'s own', () => {
     for (const call of ['kit.ui.mountShell(', 'kit.ui.dropZone(', 'kit.ui.actionBar(', 'kit.ui.card(', 'kit.ui.cardGrid(', 'kit.ui.bulkBar(', 'kit.ui.busy(',
-        'kit.ui.confirm(', 'kit.ui.toast(', 'kit.format']) {
+        'kit.ui.confirm(', 'kit.ui.toast(', 'kit.ui.switchField(', 'kit.format']) {
         assert.ok(renderer.includes(call), `renderer.js uses ${call}`);
     }
     assert.match(renderer, /busy: async \(\) =>/, 'Restart Now asks first while an upload runs');
@@ -236,7 +236,8 @@ test('the copy is the house\'s: Title Case buttons and titles, sentence case lab
     for (const slip of ['File Lifetime</label>', 'Max Downloads</label>', 'Your Link:', '...\'', '...`', '..."', 'file(s)', 'Upload successful!']) {
         assert.ok(!text.includes(slip), `"${slip}"`);
     }
-    for (const title of ['Upload Security Warning', 'Upload Anyway', 'Drag & Drop Files Here', 'Add Files', 'Upload All', 'Clear Finished', 'Copy Link', "label: 'Pause'", "label: 'Resume'", "label: 'Retry'"]) {
+    for (const title of ['Upload Security Warning', 'Upload Anyway', 'Drag & Drop Files Here', 'Add Files', 'Upload All', 'Clear Finished', 'Copy Link', "label: 'Pause'", "label: 'Resume'", "label: 'Retry'",
+        "label: 'Delete'", "label: 'Bulk Edit'", "'Advanced Options'", "'Apply'", "title: 'Delete This Upload?'", "title: \"Outside This Server's Limits\"", "confirmLabel: \"Use the Server's Limits\""]) {
         assert.ok(text.includes(title), `"${title}"`);
     }
 });

@@ -9,12 +9,15 @@ const { randomUUID } = require('crypto');
 // resumed with none free, it waits as queued, and is resumed when one frees.
 //
 // A transfer's states here: waiting (made, not started: it waits for Upload,
-// and can still take more files), queued, running (in the transfer window,
-// from its first step to its last), paused, and once it has ended, done,
-// failed or cancelled. An ended one stays, with its link or its reason, until
-// it's removed (Remove, Clear Finished) or the app quits; its place goes to
-// the next queued as it ends. A failed or cancelled one can be tried again,
-// and waits once more.
+// and can still take more files and new options), queued, running (in the
+// transfer window, from its first step to its last), paused, and once it has
+// ended, done, failed or cancelled, and a done upload deleted from its server,
+// deleted. An ended one stays, with its link or its reason, until it's
+// removed (Remove, Clear Finished) or the app quits; its place goes to the
+// next queued as it ends. A failed or cancelled one can be tried again, and
+// waits once more. A done upload can be deleted while the transfer window
+// holds its manage token (deletable): from its end until its card is removed,
+// unless the transfer window stopped first. Main never holds the token.
 //
 // It runs nothing itself: `start` and `resume` hand a transfer to the
 // transfer window, and `changed` hears each change, for the window, the tray,
@@ -25,7 +28,7 @@ const { randomUUID } = require('crypto');
 const GOING = Object.freeze(['queued', 'running', 'paused']);
 
 /** The states a transfer has once it has ended: it stays until it's removed. */
-const ENDED = Object.freeze(['done', 'failed', 'cancelled']);
+const ENDED = Object.freeze(['done', 'failed', 'cancelled', 'deleted']);
 
 /** The state an outcome ends a transfer in. */
 const ENDED_AS = Object.freeze({ success: 'done', error: 'failed', cancelled: 'cancelled' });
@@ -57,7 +60,7 @@ class Transfers {
      * @returns {any} the transfer, with its new ID
      */
     add(fields) {
-        const card = { id: randomUUID(), kind: 'upload', ...fields, state: 'waiting', started: false, snapshot: null, resumeWhenFree: false, resuming: false, link: null, message: null };
+        const card = { id: randomUUID(), kind: 'upload', ...fields, state: 'waiting', started: false, snapshot: null, resumeWhenFree: false, resuming: false, link: null, message: null, deletable: false };
         this.#cards.set(card.id, card);
         this.changed(card);
         return card;
@@ -190,6 +193,8 @@ class Transfers {
         if (!card || ENDED.includes(card.state)) return null;
         card.link = outcome.status === 'success' ? outcome.link : null;
         card.message = outcome.status === 'error' ? outcome.error : null;
+        // A finished upload's manage token stays in the transfer window, for its Delete.
+        card.deletable = outcome.status === 'success';
         card.resumeWhenFree = false;
         card.resuming = false;
         this.#set(card, ENDED_AS[outcome.status], { always: true });
@@ -216,6 +221,47 @@ class Transfers {
         card.files.push(...fresh);
         if (fresh.length > 0) this.changed(card);
         return { added: fresh.length, skipped: files.length - fresh.length };
+    }
+
+    /**
+     * Advanced Options on a waiting transfer: its lifetime and download limit,
+     * and the files it keeps (by their indexes, in order). Returns it, or null
+     * when it isn't waiting any more (it has started: its options are sealed).
+     * @param {string} id
+     * @param {{ lifetime?: { value: number, unit: string }, maxDownloads?: number, files?: number[] }} options
+     */
+    setOptions(id, { lifetime, maxDownloads, files }) {
+        const card = this.#cards.get(id);
+        if (!card || card.state !== 'waiting') return null;
+        if (files && files.some((index) => index >= card.files.length)) return null;
+        if (lifetime) card.options.lifetime = { value: lifetime.value, unit: lifetime.unit };
+        if (maxDownloads !== undefined) card.options.maxDownloads = maxDownloads;
+        if (files) card.files = files.map((index) => card.files[index]);
+        this.changed(card);
+        return card;
+    }
+
+    /**
+     * A done upload was deleted from its server: its link no longer works,
+     * so it's forgotten, and the transfer window has forgotten its token.
+     */
+    deleted(id) {
+        const card = this.#cards.get(id);
+        if (!card || card.state !== 'done') return null;
+        card.link = null;
+        card.deletable = false;
+        this.#set(card, 'deleted');
+        return card;
+    }
+
+    /** The transfer window stopped: the done uploads whose manage tokens it held can't be deleted from here any more. */
+    tokensLost(ids) {
+        for (const id of ids) {
+            const card = this.#cards.get(id);
+            if (!card?.deletable) continue;
+            card.deletable = false;
+            this.changed(card);
+        }
     }
 
     /**
@@ -246,7 +292,7 @@ class Transfers {
     retry(id, owner) {
         const card = this.#cards.get(id);
         if (!card || !['failed', 'cancelled'].includes(card.state)) return null;
-        Object.assign(card, { owner, started: false, snapshot: null, link: null, message: null, resumeWhenFree: false, resuming: false });
+        Object.assign(card, { owner, started: false, snapshot: null, link: null, message: null, resumeWhenFree: false, resuming: false, deletable: false });
         delete card.ask;
         this.#set(card, 'waiting');
         return card;
@@ -291,7 +337,7 @@ class Transfers {
  * A transfer as the window draws it: its files' names and sizes (never a
  * path), its state and options, how it's going, from core's snapshot (which
  * names no file and holds no key), and once it has ended, its link or its
- * reason.
+ * reason, and whether it can be deleted (never its manage token).
  */
 function view(card) {
     const { snapshot } = card;
@@ -312,6 +358,7 @@ function view(card) {
             : null,
         link: card.link,
         message: card.message,
+        canDelete: card.state === 'done' && card.deletable === true,
     };
 }
 

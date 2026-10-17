@@ -59,7 +59,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 **"The server dropped this paused upload."**
 - The upload was paused for longer than the server keeps a paused upload: `UPLOAD_MAX_PAUSE_MINUTES` (60 by default) from the pause, the time the Web UI showed ("The server keeps this upload until …"), and the Dropgate Client ("Kept until …", with a notification 5 minutes before). Nothing resumes by itself, so the server deleted what it had. Upload the files again; to allow longer pauses, raise `UPLOAD_MAX_PAUSE_MINUTES` (at most `1440`, a day).
 - A restart drops every upload in progress, paused ones too.
-- No **Pause** on the Dropgate Client's upload card: the server has pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`).
+- No **Pause** on an upload in the Dropgate Client: the server has pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`).
 
 **A download paused in the browser failed, or never finishes**
 - The download pages stream each file to disk through the page itself, so a browser's own Pause only works while that page stays open, and only in Chrome: Resume there carries on and saves the whole file. In Firefox, Pause ends the download, and the page says it failed. In Chrome with the page closed while paused, Resume never finishes: cancel it.

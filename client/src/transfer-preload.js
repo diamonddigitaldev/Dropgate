@@ -16,6 +16,8 @@ const CH = {
     RESUME: 'engine:resume',
     CANCEL: 'engine:cancel',
     CHECK: 'engine:check',
+    DELETE: 'engine:delete',
+    FORGET: 'engine:forget',
     QUIT: 'engine:quit',
     READY: 'engine:ready',
     UPDATE: 'engine:update',
@@ -42,5 +44,7 @@ contextBridge.exposeInMainWorld('engine', {
     onResume: (callback) => on(CH.RESUME, callback),
     onCancel: (callback) => on(CH.CANCEL, callback),
     onCheck: (callback) => on(CH.CHECK, callback),
+    onDelete: (callback) => on(CH.DELETE, callback),
+    onForget: (callback) => on(CH.FORGET, callback),
     onQuit: (callback) => on(CH.QUIT, callback),
 });

@@ -21,6 +21,9 @@
 //   { at, pid, event: 'ipc-large', channel, bytes }    a message to or from main bigger than IPC_LARGE
 //   { at, pid, event: 'ipc-sizes', sizes }             as it quits: the biggest message main sent or got
 //                                                      on each channel, in bytes, and how many
+//   { at, pid, event: 'ipc-run', channel, run }        a run of 43 or more base64url characters in a
+//                                                      message main sent or got, the first time it's seen:
+//                                                      a link's key, or anything else 32 bytes long or more
 //   { at, pid, event: 'transfer-changed', id, state }  main sent the window a transfer (transfer:changed):
 //                                                      its ID and state only
 //   { at, pid, event: 'tray', tooltip, labels }        the tray icon shows, or its menu changed
@@ -52,7 +55,9 @@
 // from that session's own request hooks (webRequest): Chromium's net log
 // names no session. And every message main sends or gets, over IPC or to and
 // from its utility processes, is measured (v8's serialisation, as structured
-// clone copies it), so a test can tell main never carries a file's bytes.
+// clone copies it), so a test can tell main never carries a file's bytes; and
+// every long base64url run in one is written down, so a test can tell main
+// never carried a secret 32 bytes long (an upload's manage token) either.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -212,6 +217,23 @@ function measure(channel, value) {
     const seen = sizes[channel] ?? { max: 0, count: 0 };
     sizes[channel] = { max: Math.max(seen.max, bytes), count: seen.count + 1 };
     if (bytes > IPC_LARGE) record({ event: 'ipc-large', channel, bytes });
+    noteRuns(channel, value);
+}
+// 32 bytes in base64url is 43 characters: a link's key, or a manage token.
+const runsSeen = new Set();
+function noteRuns(channel, value) {
+    let text;
+    try {
+        text = JSON.stringify(value);
+    } catch {
+        // Something JSON can't write (a port) carries no text.
+        return;
+    }
+    for (const [run] of (text ?? '').matchAll(/[A-Za-z0-9_-]{43,}/g)) {
+        if (runsSeen.has(run)) continue;
+        runsSeen.add(run);
+        record({ event: 'ipc-run', channel, run });
+    }
 }
 // An upload's outcome a page told main of (engine:finished, upload:finished)
 // is written down as main hears it. One main came to itself (Share with

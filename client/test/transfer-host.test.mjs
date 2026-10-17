@@ -7,7 +7,10 @@
 //   grant only while its upload runs or is paused, and the transfer window
 //   gets its port once its page is ready;
 // - quitting asks the transfer window to cancel everything, and waits at most
-//   5 seconds for its answer.
+//   5 seconds for its answer;
+// - a finished upload's manage token stays in the transfer window (main knows
+//   only which uploads have one) until its card goes, it's deleted, or the app
+//   quits, and the transfer window stays while it holds one.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -136,4 +139,100 @@ test('quitting asks the transfer window to cancel everything there, and waits fo
     await waiting;
     assert.equal(gaveUp, true);
     host.close();
+});
+
+/** A host whose uploads end as the test says, with the finished uploads whose tokens were lost noted. */
+function hostKeeping() {
+    const main = fakeMain();
+    const lost = [];
+    const { createTransferHost } = main.load('../src/transfer-host.js');
+    const host = createTransferHost({
+        kit: main.kit,
+        appInfo: { name: 'Dropgate Client', version: '4.0.0' },
+        onUpdate: () => {},
+        onPauseEnding: () => {},
+        onFinished: () => {},
+        onTokensLost: (ids) => lost.push(...ids),
+    });
+    /** Uploads started, and the transfer window's page ready. */
+    const started = async (ids) => {
+        for (const id of ids) host.upload(id, SERVER, OPTIONS, FILES);
+        const win = main.windows.at(-1);
+        const page = main.transferPage(win.webContents);
+        await main.invoke(ENGINE.READY, page);
+        return { win, page };
+    };
+    return { main, host, lost, started };
+}
+
+const LINK = 'https://dropgate.test/0b7e3c51-9d2a-4f6e-8a1c-000000000001#key';
+
+test('a finished upload\'s manage token keeps the transfer window until its card goes or it\'s deleted; main knows only which are held', async (t) => {
+    t.after(() => mock.timers.reset());
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const { main, host, lost, started } = hostKeeping();
+    const [first, second, third] = [randomUUID(), randomUUID(), randomUUID()];
+    const { win, page } = await started([first, second, third]);
+    for (const id of [first, second]) await main.invoke(ENGINE.FINISHED, page, id, { status: 'success', link: LINK });
+    await main.invoke(ENGINE.FINISHED, page, third, { status: 'cancelled' });
+    assert.equal(host.keeping, true);
+
+    // Held, the transfer window stays, however long.
+    mock.timers.tick(10 * 60_000);
+    assert.equal(win.destroyed, false);
+
+    // A delete is asked of the transfer window: refused, the token stays; done, it's gone.
+    const answer = async (value) => {
+        await new Promise(setImmediate);
+        const [, { call }] = win.webContents.sent.findLast(([channel]) => channel === ENGINE.DELETE);
+        await main.invoke(ENGINE.ANSWER, page, call, value);
+    };
+    let deleting = host.delete(first);
+    await answer({ message: 'The server closed the connection.' });
+    assert.deepEqual(await deleting, { message: 'The server closed the connection.' });
+    deleting = host.delete(first);
+    await answer({});
+    assert.deepEqual(await deleting, {});
+    const none = { message: "This upload can't be deleted from here any more." };
+    assert.deepEqual(await host.delete(first), none, 'once deleted, nothing to ask');
+    assert.deepEqual(await host.delete(third), none, 'a cancelled one has none');
+    assert.deepEqual(win.webContents.sent.filter(([channel]) => channel === ENGINE.DELETE).map(([, { id }]) => id), [first, first]);
+
+    // The other's card is removed: forgotten there, and the window closes 30 seconds on.
+    host.forget(second);
+    assert.deepEqual(win.webContents.sent.at(-1), [ENGINE.FORGET, { id: second }]);
+    assert.equal(host.keeping, false);
+    mock.timers.tick(29_999);
+    assert.equal(win.destroyed, false);
+    mock.timers.tick(1);
+    assert.equal(win.destroyed, true);
+    host.forget(second);
+    assert.equal(main.windows.length, 1, 'forgetting starts nothing');
+    assert.deepEqual(lost, [], 'closed by main, nothing was lost');
+});
+
+test('quitting with a finished upload\'s token held asks the transfer window to forget it; a transfer window that stops loses it, and main is told', async (t) => {
+    t.after(() => mock.timers.reset());
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const { main, host, lost, started } = hostKeeping();
+    const kept = randomUUID();
+    const { win, page } = await started([kept]);
+    await main.invoke(ENGINE.FINISHED, page, kept, { status: 'success', link: LINK });
+
+    const quitting = host.quit();
+    await new Promise(setImmediate);
+    const [, { call }] = win.webContents.sent.findLast(([channel]) => channel === ENGINE.QUIT);
+    assert.equal(host.keeping, false, 'quitting forgets them');
+    await main.invoke(ENGINE.ANSWER, page, call, {});
+    await quitting;
+    host.close();
+    assert.deepEqual(lost, []);
+
+    // One that stops by itself (its renderer gone) loses what it held.
+    const again = randomUUID();
+    const next = await started([again]);
+    await main.invoke(ENGINE.FINISHED, next.page, again, { status: 'success', link: LINK });
+    next.win.destroy();
+    assert.deepEqual(lost, [again]);
+    assert.equal(host.keeping, false);
 });

@@ -4,7 +4,7 @@
 // once nothing is left the app quits, as it would have when the window
 // closed. With nothing going, closing quits at once. Quit from the tray
 // cancels every transfer, each server told: the server holds none of it after,
-// and nothing of any of them is in the profile (13.10's whole-profile scan).
+// and nothing of any of them is in the profile (a scan of every file in it).
 //
 // And the notifications when transfers end: only while the window isn't in
 // front of the person, several ending together in one ("3 Uploads Finished"),

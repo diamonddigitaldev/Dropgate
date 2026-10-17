@@ -55,6 +55,11 @@ const { answerWindowChannels, serverOf } = require('./window-channels');
 //   the window closed. With nothing going, closing the window quits.
 // - Quitting (the tray's Quit, the menu's Exit, the OS) cancels every transfer
 //   in the transfer window, each server told, before the app goes.
+// - A finished upload can be deleted from its server (its Delete) while its
+//   card is there: the transfer window does it with the upload's manage
+//   token, which it keeps from the upload's end until the card is removed or
+//   the app quits. Main knows only whether it can: the token never leaves the
+//   transfer window.
 // - While anything runs, the system isn't let suspend the app
 //   ('prevent-app-suspension'); the transfer window's timers are never slowed.
 // - Notifications about transfers ending come only while the main window
@@ -122,6 +127,8 @@ const transfers = new Transfers({
     changed: transferChanged,
     removed: (card) => {
         pacer.drop(card.id);
+        // A finished upload's manage token goes with its card.
+        host?.forget(card.id);
         mainWindow()?.webContents.send(IPC.TRANSFER_REMOVED, [card.id]);
         followGoing();
     },
@@ -289,6 +296,7 @@ if (kit.primary) {
             appInfo: { name: APP_NAME, version: app.getVersion() },
             onUpdate: (id, snapshot) => transfers.updated(id, snapshot),
             onPauseEnding: pauseEnding,
+            onTokensLost: (ids) => transfers.tokensLost(ids),
             onFinished: (id, { status, link, message }) => {
                 const result = status === 'error' ? { status, error: message } : { status, ...(link ? { link } : {}) };
                 finishUpload(result, transfers.ended(id, result));
@@ -313,6 +321,7 @@ answerWindowChannels({
     pause: (id) => (transfers.pause(id) ? host.pause(id) : Promise.resolve({})),
     resume: (id) => (transfers.resume(id) ? host.resume(id).finally(() => transfers.resumed(id)) : Promise.resolve({})),
     cancel: cancelUpload,
+    delete: deleteUpload,
     busy: going,
     failed: (result) => finishUpload(result),
     copyLink: copyPrivately,
@@ -331,7 +340,8 @@ function beforeQuit(event) {
     flushEnds();
     if (readyToQuit) return;
     transfers.close();
-    if (host?.busy) {
+    // Running uploads are cancelled there, and finished ones' manage tokens forgotten.
+    if (host?.busy || host?.keeping) {
         event.preventDefault();
         host.quit().finally(() => {
             readyToQuit = true;
@@ -363,7 +373,7 @@ function handleArgs(argv) {
     // Every file in it, bar one already gathering, so none is uploaded twice at once.
     const filePaths = filesInArgs(argv).filter((filePath) => !batchFiles.includes(filePath));
     if (filePaths.length === 0 && batchFiles.length === 0) {
-        kit.log.info('Share with Dropgate: no file to upload in the arguments.');
+        kit.log.info('Share with Dropgate: No file to upload in the arguments.');
         return;
     }
 
@@ -502,7 +512,7 @@ function runUpload(card) {
 /** A paused upload asked to resume while every place was taken has one now. */
 function resumeQueued(card) {
     host.resume(card.id).then(({ message }) => {
-        if (message) kit.log.info('A queued upload couldn\'t be resumed: it stays paused.');
+        if (message) kit.log.info('A queued upload couldn\'t be resumed: It stays paused.');
     }, () => {}).finally(() => transfers.resumed(card.id));
 }
 
@@ -522,6 +532,32 @@ function cancelUpload(id) {
     } else if (upload.state === 'queued') {
         // Never started: it's told of as cancelled, and its card stays, as one cancelled while running does.
         finishUpload({ status: 'cancelled' }, transfers.ended(id, { status: 'cancelled' }));
+    }
+}
+
+/**
+ * Delete, from a window, once it has asked the person: a finished upload, by
+ * the transfer window, with the manage token only it holds. Once deleted, its
+ * card says so and its link is forgotten. The answer is the reason when it
+ * couldn't be, and the upload stays as it was.
+ * @param {string} id
+ * @returns {Promise<{ message?: string }>}
+ */
+async function deleteUpload(id) {
+    const card = transfers.get(id);
+    if (card.state !== 'done' || !card.deletable) throw new Error('Expected a finished upload that can be deleted.');
+    if (card.deleting) return { message: 'This upload is already being deleted.' };
+    card.deleting = true;
+    try {
+        const answer = await host.delete(id);
+        if (answer.message) return { message: answer.message };
+        transfers.deleted(id);
+        kit.log.info('A finished upload was deleted from its server.');
+        return {};
+    } catch {
+        return { message: "The upload couldn't be deleted: Dropgate's transfers stopped." };
+    } finally {
+        card.deleting = false;
     }
 }
 
@@ -714,7 +750,7 @@ function settle() {
         host?.close();
         app.quit();
     } else if (main && !main.isVisible() && tray.showing) {
-        kit.log.info('Every transfer has ended with the window in the tray: quitting.');
+        kit.log.info('Every transfer has ended with the window in the tray: Quitting.');
         app.quit();
     }
 }

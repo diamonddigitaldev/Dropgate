@@ -74,6 +74,7 @@ function setUp({ settings = SETTINGS } = {}) {
         pause: record('pause', Promise.resolve({})),
         resume: record('resume', Promise.resolve({})),
         cancel: record('cancel'),
+        delete: record('delete', Promise.resolve({})),
         busy: record('busy', false),
         failed: record('failed'),
         copyLink: record('copyLink', Promise.resolve()),
@@ -213,6 +214,7 @@ test('transfer:add-upload takes handles this window holds, and nothing else: its
         resuming: false,
         link: null,
         message: null,
+        deletable: false,
     });
 
     // Unlimited is a lifetime of 0, whatever value Settings kept beside it.
@@ -269,6 +271,64 @@ test('transfer:remove takes uploads main made, removing those waiting or ended; 
     // One that isn't waiting or ended stays; here, all three can go.
     await setup.main.invoke(IPC.TRANSFER_REMOVE, page, { ids: [waiting, running, failed] });
     assert.deepEqual(setup.transfers.list(), []);
+});
+
+test('transfer:set-options takes a lifetime, a download limit and the files kept, for an upload of this window\'s waiting, and nothing else', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const other = setup.main.windowPage();
+    const SECOND = path.join(folder, 'Second.bin');
+    fs.writeFileSync(SECOND, Buffer.alloc(10, 2));
+    const { files: [first, second] } = await setup.main.invoke(IPC.FILES_ADD, page, [FILE, SECOND]);
+    const { id } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, { files: [first.handle, second.handle] });
+    const { files: [theirs] } = await setup.main.invoke(IPC.FILES_ADD, other, [FILE]);
+    const { id: theirUpload } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, other, { files: [theirs.handle] });
+    const started = (await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, { files: [first.handle] })).id;
+    setup.transfers.start(started, SERVER);
+    const share = setup.transfers.add({ owner: null, share: {}, server: SERVER, files: [], options: OPTIONS });
+    share.ask = { owner: page.sender.id };
+    const before = structuredClone(setup.transfers.get(id).options);
+
+    await refusesAll(setup, IPC.TRANSFER_SET_OPTIONS, page, [
+        [], [{ id }], [{ options: { maxDownloads: 2 } }], [{ id: FILE, options: { maxDownloads: 2 } }], [{ id: randomUUID(), options: { maxDownloads: 2 } }],
+        [{ id: theirUpload, options: { maxDownloads: 2 } }], [{ id: started, options: { maxDownloads: 2 } }], [{ id: share.id, options: { maxDownloads: 2 } }],
+        [{ id, options: { maxDownloads: 2 }, extra: 1 }],
+    ], /Expected an upload of this window's waiting to start\./);
+    await refusesAll(setup, IPC.TRANSFER_SET_OPTIONS, page, [
+        [{ id, options: {} }], [{ id, options: null }], [{ id, options: 'all' }], [{ id, options: { encrypt: false } }], [{ id, options: { server: 'https://elsewhere.test' } }],
+    ], /Expected an upload's options\./);
+    await refusesAll(setup, IPC.TRANSFER_SET_OPTIONS, page, [
+        [{ id, options: { lifetime: 24 } }], [{ id, options: { lifetime: { value: 24 } } }], [{ id, options: { lifetime: { value: 24, unit: 'weeks' } } }],
+        [{ id, options: { lifetime: { value: 0, unit: 'hours' } } }], [{ id, options: { lifetime: { value: -1, unit: 'hours' } } }],
+        [{ id, options: { lifetime: { value: Infinity, unit: 'days' } } }], [{ id, options: { lifetime: { value: 2 ** 53, unit: 'days' } } }],
+        [{ id, options: { lifetime: { value: 7, unit: 'unlimited' } } }], [{ id, options: { lifetime: { value: '24', unit: 'hours' } } }],
+    ], /Expected a file lifetime\./);
+    await refusesAll(setup, IPC.TRANSFER_SET_OPTIONS, page, [
+        [{ id, options: { maxDownloads: -1 } }], [{ id, options: { maxDownloads: 1.5 } }], [{ id, options: { maxDownloads: 2 ** 53 } }], [{ id, options: { maxDownloads: '5' } }],
+    ], /Expected a download limit\./);
+    await refusesAll(setup, IPC.TRANSFER_SET_OPTIONS, page, [
+        [{ id, options: { files: [] } }], [{ id, options: { files: [2] } }], [{ id, options: { files: [1, 0] } }], [{ id, options: { files: [0, 0] } }],
+        [{ id, options: { files: [-1] } }], [{ id, options: { files: [0.5] } }], [{ id, options: { files: [first.handle] } }], [{ id, options: { files: [FILE] } }],
+        [{ id, options: { files: 0 } }],
+    ], /Expected the files it keeps\./);
+    assert.deepEqual(setup.transfers.get(id).options, before, 'nothing refused changed it');
+
+    await setup.main.invoke(IPC.TRANSFER_SET_OPTIONS, page, { id, options: { lifetime: { value: 3, unit: 'days' }, maxDownloads: 10, files: [1] } });
+    assert.deepEqual(setup.transfers.get(id).options, { lifetime: { value: 3, unit: 'days' }, maxDownloads: 10 });
+    assert.deepEqual(setup.transfers.get(id).files.map((file) => file.name), ['Second.bin']);
+    await setup.main.invoke(IPC.TRANSFER_SET_OPTIONS, page, { id, options: { lifetime: { value: 0, unit: 'unlimited' } } });
+    assert.deepEqual(setup.transfers.get(id).options, { lifetime: { value: 0, unit: 'unlimited' }, maxDownloads: 10 });
+});
+
+test('transfer:delete takes one upload main made, by its ID', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const { id } = setup.transfers.add({ owner: null, files: [], options: OPTIONS });
+    await refusesAll(setup, IPC.TRANSFER_DELETE, page, [
+        [], [id], [{ id: 42 }], [{ id: FILE }], [{ id: randomUUID() }], [{ id, manageToken: 'x'.repeat(43) }], [{ ids: [id] }],
+    ], /Expected an upload\./);
+    assert.deepEqual(await setup.main.invoke(IPC.TRANSFER_DELETE, page, { id }), {});
+    assert.deepEqual(setup.work.at(-1), ['delete', id]);
 });
 
 test('transfer:start takes uploads waiting that this window made, or a share it was asked about, and checks them all first', async () => {
@@ -346,7 +406,7 @@ test('transfers:list gives every transfer as the window draws it: names and size
     assert.deepEqual(list, [{
         id, kind: 'upload', state: 'running', files: [{ name: 'Secret plans é.bin', size: 1000 }], status: 'uploading',
         step: SNAPSHOT.text, phase: 'chunk', percent: 33.3, fileIndex: 0, canPause: true, deadline: null,
-        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true }, link: null, message: null,
+        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true }, link: null, message: null, canDelete: false,
     }]);
     assert.doesNotMatch(JSON.stringify(list), new RegExp(path.basename(folder)), 'no folder in what the window gets');
 });

@@ -94,22 +94,57 @@ function transfersOf(request, known) {
     return [...ids];
 }
 
+/** A file lifetime: a value in a unit, not more than core can count in ms, and 0 for an unlimited one. */
+function isLifetime(lifetime) {
+    const unitMs = isRecord(lifetime, ['value', 'unit']) && Object.hasOwn(LIFETIME_UNIT_MS, lifetime.unit) ? LIFETIME_UNIT_MS[lifetime.unit] : undefined;
+    const { value } = lifetime ?? {};
+    return unitMs !== undefined && typeof value === 'number' && Number.isFinite(value) && value >= 0
+        && (unitMs === 0 ? value === 0 : value > 0 && value * unitMs <= Number.MAX_SAFE_INTEGER);
+}
+
 /** An upload's options: its lifetime, download limit and whether it's encrypted. */
 function uploadOptions(options) {
     if (!isRecord(options, ['lifetime', 'maxDownloads', 'encrypt'])) throw new Error('Expected an upload\'s options.');
     const { lifetime, maxDownloads, encrypt } = options;
-    const unitMs = isRecord(lifetime, ['value', 'unit']) && Object.hasOwn(LIFETIME_UNIT_MS, lifetime.unit) ? LIFETIME_UNIT_MS[lifetime.unit] : undefined;
-    // Not more than core can count in ms, and nothing for an unlimited one.
-    const fits = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0
-        && (unitMs === 0 ? value === 0 : value * unitMs <= Number.MAX_SAFE_INTEGER);
-    if (unitMs === undefined || !fits(lifetime.value)) throw new Error('Expected a file lifetime.');
+    if (!isLifetime(lifetime)) throw new Error('Expected a file lifetime.');
     if (!isCount(maxDownloads)) throw new Error('Expected a download limit.');
     if (typeof encrypt !== 'boolean') throw new Error('Expected whether to encrypt.');
     return { lifetime: { value: lifetime.value, unit: lifetime.unit }, maxDownloads, encrypt };
 }
 
 /**
- * transfer:pause, transfer:resume, transfer:cancel: one upload main made.
+ * transfer:set-options: Advanced Options on one of this window's uploads
+ * waiting: its lifetime, its download limit, and the files it keeps (their
+ * indexes in it, in order, at least one), any of them, at least one. The
+ * server's limits aren't checked here: the window offers only what the server
+ * allows, and checks again as the upload starts (the server refuses anything
+ * outside them too).
+ * @param {(id: string) => boolean} own - Whether it's an upload of this window's, waiting.
+ * @param {(id: string) => number} fileCount - How many files it has.
+ * @returns {{ id: string, options: { lifetime?: { value: number, unit: string }, maxDownloads?: number, files?: number[] } }}
+ */
+function optionsOf(request, own, fileCount) {
+    if (!isRecord(request, ['id', 'options']) || !isId(request.id) || !own(request.id)) throw new Error('Expected an upload of this window\'s waiting to start.');
+    const { options } = request;
+    const keys = ['lifetime', 'maxDownloads', 'files'];
+    if (!isRecord(options, keys, []) || Object.keys(options).length === 0) throw new Error('Expected an upload\'s options.');
+    if (Object.hasOwn(options, 'lifetime') && !isLifetime(options.lifetime)) throw new Error('Expected a file lifetime.');
+    if (Object.hasOwn(options, 'maxDownloads') && !isCount(options.maxDownloads)) throw new Error('Expected a download limit.');
+    if (Object.hasOwn(options, 'files')) {
+        const count = fileCount(request.id);
+        const { files } = options;
+        const inOrder = Array.isArray(files) && files.length > 0 && files.every((index, i) => Number.isSafeInteger(index) && index >= 0 && index < count && (i === 0 || index > files[i - 1]));
+        if (!inOrder) throw new Error('Expected the files it keeps.');
+    }
+    const copy = {};
+    if (options.lifetime) copy.lifetime = { value: options.lifetime.value, unit: options.lifetime.unit };
+    if (Object.hasOwn(options, 'maxDownloads')) copy.maxDownloads = options.maxDownloads;
+    if (options.files) copy.files = [...options.files];
+    return { id: request.id, options: copy };
+}
+
+/**
+ * transfer:pause, transfer:resume, transfer:cancel, transfer:delete: one upload main made.
  * @param {(id: string) => boolean} known - Whether main has an upload by this ID.
  */
 function uploadOf(request, known) {
@@ -198,7 +233,7 @@ function outcomeOf(result) {
     throw new Error('Expected how an upload running finished.');
 }
 
-/** engine:answer: a server check's answer, or a pause's or a resume's. */
+/** engine:answer: a server check's answer, or a pause's, a resume's, a delete's or a quit's (core's reason when it couldn't, or nothing). */
 function answerOf(kind, value) {
     const ok = kind === 'check'
         ? isRecord(value, ['ok', 'baseUrl', 'serverVersion', 'serverInfo', 'dgup', 'code', 'message'], ['ok']) && typeof value.ok === 'boolean'
@@ -217,6 +252,7 @@ module.exports = {
     filesToAdd,
     transfersOf,
     uploadOptions,
+    optionsOf,
     uploadOf,
     uploadsToStart,
     serverAddress,
