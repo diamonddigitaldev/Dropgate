@@ -88,7 +88,8 @@ textarea,
 /* ── Advanced Options ────────────────────────────────────────────────────── */
 
 /* The page's own form dialog, drawn as the kit's prompts are (its dialog
-   classes): the kit has no form dialog. A little narrower, its rows apart. */
+   classes): the kit has no form dialog. A little narrower, its rows apart.
+   kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65 */
 .options-dialog {
     width: min(30rem, calc(100vw - 32px));
 }

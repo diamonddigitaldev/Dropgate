@@ -846,6 +846,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             const host = serverName();
             const limits = limitsOf(upload);
 
+            // The kit has no form dialog yet: the page's own, drawn on the kit's dialog classes.
+            // kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65
             const dialog = element('dialog', 'kit-dialog options-dialog');
             dialog.setAttribute('aria-labelledby', 'options-title');
             const title = element('h2', 'kit-dialog-title');
