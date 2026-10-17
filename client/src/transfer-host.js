@@ -34,8 +34,8 @@ const { answerOf, deadlineOf, isId, outcomeOf, savedOf, snapshotOf } = require('
 //   reads a file only for a grant main made as its upload started, with the
 //   path main holds, and writes one only for an output main granted as its
 //   download started, into the folder main chose; each is revoked as its
-//   transfer ends. It tells main where each download landed (saved), and
-//   nothing else.
+//   transfer ends. It tells main where each download landed (saved: a
+//   bundle's own folder, for one saved as files), and nothing else.
 // - A finished upload's manage token stays in the transfer window, which
 //   deletes the upload with it when asked, until its card is removed
 //   (engine:forget) or the app quits (engine:quit); so does a download's
@@ -341,19 +341,25 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
         /**
          * Start a download whose list of files was read: its folder is granted
          * to the file service as an output, and the transfer window gets the
-         * output, never the folder.
+         * output, never the folder. A bundle's files are saved into a new
+         * folder of their own in it, or as one ZIP.
          * @param {string} id
          * @param {string} folder - Where it's saved, as main resolved it.
+         * @param {{ files: number[] | null, asZip: boolean }} [how] - Which of its files (by index; null for all
+         *   of them, `count` in all), and whether as one ZIP.
+         * @param {number} [count] - How many files it has.
          */
-        download(id, folder) {
+        download(id, folder, { files = null, asZip = false } = {}, count = 1) {
             if (!isId(id) || running.has(id)) throw new Error('Expected a new download.');
             if (!kept.has(id)) throw new Error('The link to this download is no longer held: Paste it again.');
+            const saving = files ? files.length : count;
+            const shape = asZip ? 'zip' : saving > 1 ? 'files' : 'file';
             start();
             const output = randomUUID();
             running.set(id, { kind: 'download', grants: [], output });
             outputs.set(output, id);
-            fileService.postMessage({ type: FILE_SERVICE.GRANT_OUTPUT, output, folder, shape: 'file' });
-            send(ENGINE.DOWNLOAD, { id, output });
+            fileService.postMessage({ type: FILE_SERVICE.GRANT_OUTPUT, output, folder, shape, ...(shape === 'files' ? { count: saving } : {}) });
+            send(ENGINE.DOWNLOAD, { id, output, ...(files ? { files: [...files] } : {}), asZip });
         },
 
         /** Whether the transfer window holds a download's link: from its list being read until it's removed, unless the transfer window stopped. */

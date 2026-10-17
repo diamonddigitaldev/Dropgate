@@ -11,7 +11,7 @@ const { menuItems } = require('./menu');
 const { Handles, describeFile } = require('./core/handles');
 const { endNotice, countsLine } = require('./core/notices');
 const { shareUpload } = require('./core/share');
-const { GOING, Pacer, Transfers, view } = require('./core/transfers');
+const { GOING, Pacer, Transfers, inFolder, view } = require('./core/transfers');
 const { createTransferHost } = require('./transfer-host');
 const { createTray } = require('./tray');
 const { guardSettings } = require('./settings-guard');
@@ -79,9 +79,11 @@ const { answerWindowChannels, serverOf } = require('./window-channels');
 //   for it, which the window knows by an ID and a name): the file service
 //   writes it in the partial folder in the profile under a random name, and
 //   moves it into place under a name made safe and unique there, replacing
-//   nothing. Main empties the partial folder at every start and at quit, and
-//   shows a saved file in its folder when asked (Show in Folder), never
-//   opening it.
+//   nothing, with Windows' Mark of the Web. A bundle's (all its files, or
+//   those chosen) is saved as files in a new folder of its own there, or as
+//   one ZIP. Main empties the partial folder at every start and at quit, and
+//   shows a saved file in its folder when asked (Show in Folder), or opens a
+//   bundle's own folder (Open Folder), never opening anything received.
 // - The page changes its settings through main (settings-guard.js), which
 //   refuses the downloads folder from it, and tells the registry when
 //   transfers at once changes.
@@ -388,12 +390,35 @@ answerWindowChannels({
     copyLink: copyPrivately,
     addDownload,
     saveTo: (ids, folder, owner) => transfers.saveTo(ids, saveToOf(folder, owner)),
-    show: (id) => shell.showItemInFolder(transfers.get(id).saved),
+    show: showSaved,
     chooseFolder,
     chose: (owner, folder) => chosenFolders.get(folder)?.owner === owner,
     defaultFolder,
     setDefaultFolder,
 });
+
+/**
+ * Show in Folder: the folder a finished download was saved in, with its file
+ * (or ZIP) selected. Open Folder, for a bundle saved as files: its own folder,
+ * opened, once it's checked to be a folder still (never a file, or a link to
+ * one: nothing received is ever opened).
+ * @param {string} id
+ */
+function showSaved(id) {
+    const card = transfers.get(id);
+    if (!inFolder(card)) {
+        shell.showItemInFolder(card.saved);
+        return;
+    }
+    let folder = false;
+    try {
+        folder = fs.lstatSync(card.saved).isDirectory();
+    } catch {
+        // Moved or deleted since.
+    }
+    if (!folder) throw new Error("The download's folder isn't there any more.");
+    shell.openPath(card.saved);
+}
 
 /** A folder's name for the window: its own, or a drive's root as it's written. */
 const labelOf = (folder) => path.basename(folder) || folder;
@@ -670,7 +695,7 @@ function runDownload(card) {
     const folder = card.saveTo?.folder === 'default' || !card.saveTo ? defaultFolder().path : chosenFolders.get(card.saveTo.folder)?.path;
     try {
         if (!folder) throw new Error("The folder to save to isn't there any more.");
-        host.download(card.id, folder);
+        host.download(card.id, folder, { files: card.chosen, asZip: card.asZip }, card.files.length);
     } catch (error) {
         // Once the registry has finished starting what it's starting.
         const result = { status: 'error', error: error.message };

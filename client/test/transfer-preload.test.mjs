@@ -156,8 +156,8 @@ test('the file service is a utility process with no session, given one end of th
     assert.match(host, /fileService\.postMessage\(\{ type: FILE_SERVICE\.GRANT_READ, handle, path: filePath, size, mtimeMs \}\);/);
     assert.match(host, /fileService\?\.postMessage\(\{ type: FILE_SERVICE\.REVOKE, handle \}\);/);
     // A download's output is a folder for the file service, and an ID for the transfer window, never the folder.
-    assert.match(host, /fileService\.postMessage\(\{ type: FILE_SERVICE\.GRANT_OUTPUT, output, folder, shape: 'file' \}\);/);
-    assert.match(host, /send\(ENGINE\.DOWNLOAD, \{ id, output \}\);/);
+    assert.match(host, /fileService\.postMessage\(\{ type: FILE_SERVICE\.GRANT_OUTPUT, output, folder, shape, \.\.\.\(shape === 'files' \? \{ count: saving \} : \{\}\) \}\);/);
+    assert.match(host, /send\(ENGINE\.DOWNLOAD, \{ id, output, \.\.\.\(files \? \{ files: \[\.\.\.files\] \} : \{\}\), asZip \}\);/);
     assert.match(host, /fileService\?\.postMessage\(\{ type: FILE_SERVICE\.REVOKE, output \}\);/);
     assert.deepEqual(Object.values(FILE_SERVICE).sort(), ['grant-output', 'grant-read', 'port', 'revoke', 'saved']);
 });

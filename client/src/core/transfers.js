@@ -12,7 +12,10 @@ const { randomUUID } = require('crypto');
 // A download starts out reading (its link's list of files, read with no
 // lease, so the server counts nothing), then waits like an upload, with the
 // folder it's saved to (Save to), and once done can be shown in its folder.
-// It holds no link: the transfer window keeps that.
+// A bundle's download saves all its files or those chosen (by index), as
+// files in a folder of their own, or as one ZIP (Advanced Options), and once
+// done that folder can be opened. It holds no link: the transfer window keeps
+// that.
 //
 // A transfer's states here: reading (a download's list of files), waiting
 // (made, not started: it waits for Upload or Download, and an upload can
@@ -70,7 +73,7 @@ class Transfers {
         const kind = fields.kind ?? 'upload';
         const card = {
             id: randomUUID(), ...fields, kind, state: kind === 'download' ? 'reading' : 'waiting', started: false, snapshot: null,
-            resumeWhenFree: false, resuming: false, link: null, message: null, deletable: false, ...(kind === 'download' ? { encrypted: null, saved: null } : {}),
+            resumeWhenFree: false, resuming: false, link: null, message: null, deletable: false, ...(kind === 'download' ? { encrypted: null, saved: null, chosen: null, asZip: false } : {}),
         };
         this.#cards.set(card.id, card);
         this.changed(card);
@@ -106,7 +109,24 @@ class Transfers {
         }
     }
 
-    /** A finished download is in its folder, at this path: for Show in Folder. */
+    /**
+     * Advanced Options on a download waiting: which of its files it saves (by
+     * their indexes, in order; all of them is null), and whether as one ZIP.
+     * Returns it, or null when it isn't waiting any more (it has started).
+     * @param {string} id
+     * @param {{ files?: number[], asZip?: boolean }} choice
+     */
+    choose(id, { files, asZip }) {
+        const card = this.#cards.get(id);
+        if (!card || card.kind !== 'download' || card.state !== 'waiting') return null;
+        if (files && files.some((index) => index >= card.files.length)) return null;
+        if (files) card.chosen = files.length === card.files.length ? null : [...files];
+        if (asZip !== undefined) card.asZip = asZip;
+        this.changed(card);
+        return card;
+    }
+
+    /** A finished download is in its folder, at this path (a bundle saved as files: its own folder): for Show in Folder or Open Folder. */
     saved(id, filePath) {
         const card = this.#cards.get(id);
         if (card?.kind === 'download') card.saved = filePath;
@@ -388,6 +408,9 @@ class Transfers {
     }
 }
 
+/** Whether a download is saved as files in a folder of its own: a bundle's, more than one file, not as a ZIP. */
+const inFolder = (card) => card.kind === 'download' && !card.asZip && (card.chosen?.length ?? card.files.length) > 1;
+
 /**
  * A transfer as the window draws it: its files' names and sizes (never a
  * path), its state and options, how it's going, from core's snapshot (which
@@ -414,11 +437,16 @@ function view(card) {
         link: card.link,
         message: card.message,
         canDelete: card.state === 'done' && card.deletable === true,
-        // A download's: its server's host, whether it's encrypted (once read), where it's saved, and whether it can be shown there.
+        // A download's: its server's host, whether it's encrypted (once read), where it's saved, the files it
+        // saves (null for all) and whether as one ZIP, whether it's saved in a folder of its own, and whether
+        // it can be shown there.
         ...(card.kind === 'download' ? {
             host: card.host,
             encrypted: card.encrypted,
             saveTo: card.saveTo ? { folder: card.saveTo.folder, label: card.saveTo.label } : null,
+            chosen: card.chosen ? [...card.chosen] : null,
+            asZip: card.asZip,
+            inFolder: inFolder(card),
             canShow: card.state === 'done' && typeof card.saved === 'string',
         } : {}),
     };
@@ -479,4 +507,4 @@ class Pacer {
     }
 }
 
-module.exports = { Transfers, Pacer, view, GOING, ENDED };
+module.exports = { Transfers, Pacer, view, inFolder, GOING, ENDED };

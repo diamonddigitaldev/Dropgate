@@ -519,8 +519,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         // takes to hand it over. The download waits, Ready, with its Save to:
         // the folder new downloads are saved in (Settings > Transfers), or one
         // chosen with the system's picker (Choose Folder…), which the page knows
-        // by an ID and its name only. Download starts it; once it's saved, Show
-        // in Folder shows it in its folder, and nothing received is ever opened.
+        // by an ID and its name only. A link to several files (a bundle) is
+        // saved as files in a new folder of its own there, or as one ZIP, all
+        // its files or those chosen (Advanced Options; Bulk Edit for several).
+        // Download starts it; once it's saved, Show in Folder shows it in its
+        // folder (Open Folder opens a bundle's own), and nothing received is
+        // ever opened.
 
         /**
          * Each download drawn, by the ID main made: what main last said of it, its card and its Save to select.
@@ -581,6 +585,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         /** Whether a download's Save to can change: it hasn't started. */
         const saveable = (view) => Boolean(view) && ['reading', 'waiting'].includes(view.state);
+        /** Whether its files and Save as one ZIP can be chosen: a bundle's, waiting. */
+        const choosable = (view) => Boolean(view) && view.state === 'waiting' && view.files.length > 1;
         /** Whether it can go: reading, waiting, or ended. One going is cancelled first. */
         const downloadRemovable = (view) => Boolean(view) && (saveable(view) || ENDED.includes(view.state));
 
@@ -593,6 +599,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             noun: 'download',
             target: { verb: 'Save', control: saveAllTo, note: () => '' },
             actions: [{
+                // Advanced Options for those selected that are still waiting: Save as one ZIP, for a bundle's.
+                label: 'Bulk Edit',
+                variant: 'primary',
+                selection: true,
+                enabled: (picked) => picked.some((card) => choosable(downloadsShown.get(downloadIdOf.get(card))?.view)),
+                onClick: (picked) => openDownloadOptions(picked.map((card) => downloadsShown.get(downloadIdOf.get(card))?.view)),
+            }, {
                 label: 'Remove',
                 variant: 'outline-danger',
                 selection: true,
@@ -672,6 +685,25 @@ document.addEventListener('DOMContentLoaded', async () => {
             return `${formatBytes(total)}${more} · ${view.host}${view.encrypted ? ' · Encrypted' : ''}`;
         }
 
+        /**
+         * Its settings line, for a bundle: how many of its files it saves, if
+         * not all, and whether as one ZIP ("3 of 8 Files · As One ZIP"), or nothing.
+         */
+        function downloadSettings(view) {
+            if (view.files.length < 2) return undefined;
+            const parts = [];
+            if (view.chosen) parts.push(`${view.chosen.length} of ${view.files.length} Files`);
+            if (view.asZip) parts.push('As One ZIP');
+            return parts.length > 0 ? parts.join(' · ') : undefined;
+        }
+
+        /** Which file of those it saves is coming now, and of how many (" · File 2 of 8"), for a bundle's; or nothing. */
+        function fileOf(view) {
+            const saving = view.chosen ?? view.files.map((_, index) => index);
+            const at = saving.indexOf(view.fileIndex);
+            return saving.length > 1 && at >= 0 ? ` · File ${at + 1} of ${saving.length}` : '';
+        }
+
         /** Its status line. */
         function downloadStatus(view) {
             switch (view.state) {
@@ -684,10 +716,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                     // Finishing is moving it into its folder, which on another drive is a copy.
                     if (view.status === 'completing') return { text: 'Saving…', tone: 'running' };
                     if (view.phase === 'downloading' && typeof view.percent === 'number' && view.status === 'downloading') {
-                        return { text: `Downloading ${Math.floor(view.percent)}%`, tone: 'running' };
+                        return { text: `Downloading ${Math.floor(view.percent)}%${fileOf(view)}`, tone: 'running' };
                     }
                     return { text: tidy(view.step) || 'Starting…', tone: 'running' };
-                case 'done': return { text: `Saved to ${view.saveTo?.label ?? defaultFolder.label}`, tone: 'success' };
+                case 'done': {
+                    const where = `Saved to ${view.saveTo?.label ?? defaultFolder.label}`;
+                    return { text: view.inFolder ? `${where} · In a Folder of Its Own` : where, tone: 'success' };
+                }
                 case 'failed': return { text: `Failed: ${sentence(tidy(view.message) || 'The download stopped.')}`, tone: 'danger' };
                 case 'cancelled': return { text: 'Cancelled', tone: 'muted' };
                 default: return { text: view.state, tone: 'muted' };
@@ -712,7 +747,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 case 'paused':
                     return [...(view.canPause || settling.get(id)?.kind === 'resume' ? [{ label: 'Resume', onClick: (button) => pauseOrResume(button, id, false) }] : []), cancel];
                 case 'queued': return [cancel];
-                case 'done': return view.canShow ? [{ label: 'Show in Folder', onClick: () => api.showInFolder(id).catch(() => kit.ui.toast("Couldn't show the folder.", { type: 'danger' })) }] : [];
+                // A bundle saved as files opens its own folder; anything else shows its folder, with it selected.
+                case 'done': return view.canShow ? [{
+                    label: view.inFolder ? 'Open Folder' : 'Show in Folder',
+                    onClick: () => api.showInFolder(id).catch(() => kit.ui.toast(view.inFolder ? "Couldn't open the folder: It was moved or deleted." : "Couldn't show the folder.", { type: 'danger' })),
+                }] : [];
                 case 'failed':
                 case 'cancelled':
                     return view.files.length > 0 ? [{ label: 'Retry', onClick: () => api.retryTransfer(id).catch(() => {}) }] : [];
@@ -732,7 +771,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const card = kit.ui.card({
                     icon: 'download',
                     name: downloadName(view),
-                    onConfigure: () => openDownloadOptions(downloadsShown.get(view.id)?.view),
+                    onConfigure: () => openDownloadOptions([downloadsShown.get(view.id)?.view]),
                     onRemove: () => removeDownloads([downloadsShown.get(view.id)]),
                     route: { label: 'Save to', control: select },
                 });
@@ -748,6 +787,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             entry.card.update({
                 name: downloadName(view),
                 meta: downloadMeta(view),
+                settings: downloadSettings(view),
                 status: downloadStatus(view),
                 ...(bar ? { percent: view.status === 'completing' ? null : view.percent ?? null, paused: view.state === 'paused' } : {}),
                 actions: downloadButtons(view),
@@ -765,13 +805,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (ids.length > 0) api.removeTransfers(ids).catch(() => {});
         }
 
-        /** Start downloads waiting: each is queued, and runs as soon as it has a place. A link to several files isn't downloaded yet. */
+        /** Start downloads waiting: each is queued, and runs as soon as it has a place. */
         async function startDownloads(views) {
-            const single = views.filter((view) => view.files.length === 1);
-            if (single.length < views.length) kit.ui.toast("Links to several files can't be downloaded here yet.", { type: 'warning' });
-            if (single.length === 0) return;
+            if (views.length === 0) return;
             try {
-                await api.startTransfers(single.map((view) => view.id));
+                await api.startTransfers(views.map((view) => view.id));
             } catch (error) {
                 kit.ui.toast(`Couldn't start the download: ${sentence(error?.message || String(error))}`, { type: 'danger' });
             }
@@ -799,12 +837,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         /**
-         * Advanced Options on a download: a single file has nothing more to
-         * choose (where it's saved is its Save to). A bundle's files and Save
-         * as One ZIP come with links to several files.
+         * Advanced Options on downloads waiting. For a bundle (its card's): its
+         * files, each ticked to download or not (at least one), and Save as
+         * one ZIP. For several (Bulk Edit, those selected): Save as one ZIP,
+         * for each bundle among them. A single file has nothing more to
+         * choose: where it's saved is its Save to. Apply sets them on main's
+         * download; Cancel leaves it as it was.
+         * @param {any[]} views
          */
-        function openDownloadOptions(view) {
-            if (!view || !saveable(view)) return;
+        function openDownloadOptions(views) {
+            const waiting = views.filter((view) => view?.state === 'waiting');
+            if (waiting.length === 0) return;
+            const bundles = waiting.filter(choosable);
+            const many = waiting.length > 1;
             // kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65
             const dialog = element('dialog', 'kit-dialog options-dialog');
             dialog.setAttribute('aria-labelledby', 'download-options-title');
@@ -819,16 +864,83 @@ document.addEventListener('DOMContentLoaded', async () => {
             close.addEventListener('click', () => dialog.close());
             header.append(title, close);
             const body = element('div', 'kit-dialog-body options-body');
-            body.append(element('p', 'kit-dialog-text', downloadName(view)),
-                element('p', 'kit-dialog-detail', "A single file has nothing more to choose: Where it's saved is chosen beside Save to."));
             const footer = element('div', 'kit-dialog-footer');
-            const done = element('button', 'btn btn-secondary', 'Close');
-            done.type = 'button';
-            done.addEventListener('click', () => dialog.close());
-            footer.append(done);
+            body.append(element('p', 'kit-dialog-text', many ? `For the ${countOf(waiting.length, 'download')} selected.` : downloadName(waiting[0])));
             dialog.append(header, body, footer);
             dialog.addEventListener('close', () => dialog.remove());
             document.body.append(dialog);
+
+            if (bundles.length === 0) {
+                body.append(element('p', 'kit-dialog-detail', many
+                    ? 'None of these is a link to several files, so there is nothing more to choose: Where each is saved is chosen beside Save to.'
+                    : "A single file has nothing more to choose: Where it's saved is chosen beside Save to."));
+                const done = element('button', 'btn btn-secondary', 'Close');
+                done.type = 'button';
+                done.addEventListener('click', () => dialog.close());
+                footer.append(done);
+                dialog.showModal();
+                return;
+            }
+
+            // The files of one bundle: each ticked to download, or not.
+            const [first] = bundles;
+            const chosen = new Set(first.chosen ?? first.files.map((_, index) => index));
+            const filesHelp = element('div', 'form-text reserved');
+            filesHelp.id = 'options-download-files-help';
+            const apply = element('button', 'btn btn-primary', 'Apply');
+            apply.type = 'button';
+            const check = () => {
+                filesHelp.textContent = !many && chosen.size === 0 ? 'Choose at least one file to download.' : '';
+                apply.disabled = !many && chosen.size === 0;
+            };
+            if (!many) {
+                const list = element('div', 'options-files');
+                list.setAttribute('role', 'group');
+                list.setAttribute('aria-label', 'Files to download');
+                list.setAttribute('aria-describedby', filesHelp.id);
+                first.files.forEach((file, index) => {
+                    const row = element('label', 'options-file options-file-pick');
+                    const box = element('input', 'form-check-input m-0');
+                    box.type = 'checkbox';
+                    box.checked = chosen.has(index);
+                    box.addEventListener('change', () => {
+                        if (box.checked) chosen.add(index);
+                        else chosen.delete(index);
+                        check();
+                    });
+                    row.append(box, element('span', 'options-file-name', file.name), element('span', 'options-file-size', formatBytes(file.size)));
+                    list.append(row);
+                });
+                body.append(element('div', 'form-label mb-0', 'Files to download'), list, filesHelp);
+            }
+            const zip = kit.ui.switchField({
+                id: 'options-zip',
+                label: 'Save as one ZIP',
+                checked: bundles.every((view) => view.asZip),
+                help: {
+                    on: 'The files are saved together, as one ZIP file.',
+                    off: 'Each file is saved on its own, together in a new folder.',
+                },
+            });
+            body.append(zip.element);
+
+            const cancel = element('button', 'btn btn-secondary', 'Cancel');
+            cancel.type = 'button';
+            cancel.addEventListener('click', () => dialog.close());
+            apply.addEventListener('click', async () => {
+                const asZip = zip.input.checked;
+                const files = [...chosen].sort((a, b) => a - b);
+                let refused = 0;
+                for (const view of bundles) {
+                    await api.setTransferOptions(view.id, many ? { asZip } : { files, asZip }).catch(() => { refused++; });
+                }
+                if (refused > 0) {
+                    kit.ui.toast(many ? 'Some of those downloads have started, so their options stay as they were.' : 'That download has started, so its options stay as they were.', { type: 'warning' });
+                }
+                dialog.close();
+            });
+            footer.append(cancel, apply);
+            check();
             dialog.showModal();
         }
 

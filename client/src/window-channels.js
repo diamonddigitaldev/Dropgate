@@ -3,7 +3,8 @@
 const fs = require('fs');
 const { IPC } = require('./constants');
 const {
-    defaultFolderOf, downloadLink, failureOf, filesToAdd, handleOf, linkOf, newUpload, optionsOf, pathList, saveToOf, serverAddress, transfersOf, uploadOf, uploadsToStart,
+    defaultFolderOf, downloadLink, downloadOptionsOf, failureOf, filesToAdd, handleOf, isId, linkOf, newUpload, optionsOf, pathList, saveToOf, serverAddress, transfersOf, uploadOf,
+    uploadsToStart,
 } = require('./core/payloads');
 const { view } = require('./core/transfers');
 
@@ -122,10 +123,6 @@ function answerWindowChannels(main) {
             return Boolean(upload) && upload.state === 'waiting' && (upload.owner === sender || upload.ask?.owner === sender);
         };
         const { ids, encrypt } = uploadsToStart(request, startable);
-        // A link to several files waits: downloading them as files or a ZIP comes with bundles.
-        if (ids.some((id) => transfers.get(id).kind === 'download' && transfers.get(id).files.length !== 1)) {
-            throw new Error("Links to several files can't be downloaded here yet.");
-        }
         // A download needs no word on encryption: its upload decided that.
         const own = ids.filter((id) => transfers.get(id).owner === sender && transfers.get(id).kind === 'upload');
         if (own.length > 0 && encrypt === undefined) throw new Error('Expected whether to encrypt.');
@@ -154,7 +151,8 @@ function answerWindowChannels(main) {
         main.saveTo(ids, folder, owner);
     });
 
-    // Show in Folder, on a finished download: its folder, with it selected. Nothing received is ever opened.
+    // Show in Folder, on a finished download: its folder, with it selected; Open
+    // Folder, on a bundle saved as files: its own folder. Nothing received is ever opened.
     kit.ipc.handle(IPC.TRANSFER_SHOW, (_event, request) => {
         const id = uploadOf(request, has);
         if (!transfers.get(id).saved || transfers.get(id).state !== 'done') throw new Error('Expected a finished download.');
@@ -175,15 +173,22 @@ function answerWindowChannels(main) {
         return main.setDefaultFolder(owner, defaultFolderOf(request, (chosen) => main.chose(owner, chosen)));
     });
 
-    // Advanced Options (and Bulk Edit, one call each) on an upload of this
-    // window's waiting: its lifetime, download limit and the files it keeps.
-    // A share's, or one being asked about, is the share's own.
+    // Advanced Options (and Bulk Edit, one call each) on a transfer of this
+    // window's waiting: an upload's lifetime, download limit and the files it
+    // keeps (a share's, or one being asked about, is the share's own); a
+    // download's files it saves and whether as one ZIP.
     kit.ipc.handle(IPC.TRANSFER_SET_OPTIONS, (event, request) => {
-        const own = (id) => {
-            const upload = transfers.get(id);
-            return Boolean(upload) && upload.state === 'waiting' && upload.owner === event.sender.id && !upload.ask;
+        const own = (kind) => (id) => {
+            const transfer = transfers.get(id);
+            return Boolean(transfer) && transfer.kind === kind && transfer.state === 'waiting' && transfer.owner === event.sender.id && !transfer.ask;
         };
-        const { id, options } = optionsOf(request, own, (upload) => transfers.get(upload).files.length);
+        const fileCount = (id) => transfers.get(id).files.length;
+        if (isId(request?.id) && transfers.get(request.id)?.kind === 'download') {
+            const { id, options } = downloadOptionsOf(request, own('download'), fileCount);
+            if (!transfers.choose(id, options)) throw new Error('Expected a download of this window\'s waiting to start.');
+            return;
+        }
+        const { id, options } = optionsOf(request, own('upload'), fileCount);
         if (!transfers.setOptions(id, options)) throw new Error('Expected an upload of this window\'s waiting to start.');
     });
 

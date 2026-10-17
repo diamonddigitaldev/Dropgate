@@ -1,7 +1,8 @@
 // Where a download lands, whatever its name: every awkward name, received
 // through a real download, is saved inside its folder under the name core
-// makes safe (filenames.sanitize()), with no stream of its own made from a
-// name on Windows (a:b is a file named a_b); a deep folder and a long name
+// makes safe (filenames.sanitize()), with no stream made from a name on
+// Windows (a:b is a file named a_b): no stream but the Mark of the Web, which
+// every file saved there carries; a deep folder and a long name
 // either work or fail with a clear reason, and never leave a partial file
 // behind.
 //
@@ -24,7 +25,7 @@ const NAMES = ['ünïcode.txt', '日本語のファイル.txt', 'emoji 😀.txt'
 const partialsOf = (desktop) => path.join(desktop.profile, 'Partial Downloads');
 const listing = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir).sort() : []);
 
-/** The streams a file has on Windows' NTFS, besides its own data: none, before the Mark of the Web. */
+/** The streams a file has on Windows' NTFS, besides its own data: the Mark of the Web's alone. */
 function streamsOf(file) {
     const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:TARGET -Stream *).Stream -join "|"'], {
         env: { ...process.env, TARGET: file },
@@ -33,7 +34,7 @@ function streamsOf(file) {
     return out.trim().split('|').filter((stream) => stream && stream !== ':$DATA');
 }
 
-test('every awkward name, received through a real download, lands inside the folder under its made-safe name, with no stream made', async ({ desktop, server }) => {
+test('every awkward name, received through a real download, lands inside the folder under its made-safe name, with no stream but the mark', async ({ desktop, server }) => {
     const app = await desktop.launch();
     const window = await app.window();
     for (const [i, name] of NAMES.entries()) {
@@ -58,7 +59,7 @@ test('every awkward name, received through a real download, lands inside the fol
     expect(listing(desktop.root).filter((entry) => !['profile', 'Secret Folder', 'Downloads'].includes(entry) && !/^(events|netlog)-/.test(entry)), 'beside the folder').toEqual([]);
     expect(listing(partialsOf(desktop)), 'the partial folder, once they\'re saved').toEqual([]);
     if (process.platform === 'win32') {
-        for (const entry of listing(desktop.downloads)) expect(streamsOf(path.join(desktop.downloads, entry)), entry).toEqual([]);
+        for (const entry of listing(desktop.downloads)) expect(streamsOf(path.join(desktop.downloads, entry)), entry).toEqual(['Zone.Identifier']);
     }
 });
 

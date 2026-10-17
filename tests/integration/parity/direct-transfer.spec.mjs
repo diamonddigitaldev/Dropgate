@@ -191,7 +191,7 @@ test('several files sent together by direct transfer arrive intact as one ZIP, a
     await expect(receiver.locator('#file-name')).toHaveText(String(files.length));
 
     const zip = await takeDownload(receiver, page);
-    expect(zip.name).toBe(`dropgate-bundle-${sent.code}.zip`);
+    expect(zip.name).toMatch(/^dropgate-bundle-\d{8}-\d{6}\.zip$/);
     const entries = readZip(zip.bytes);
     expect(entries.map((e) => e.name)).toEqual(files.map((f) => f.name));
     for (const [i, file] of files.entries()) {

@@ -20,11 +20,26 @@ const KEYS = Object.freeze({
     abort: ['id', 'op', 'sink'],
 });
 
-/** How an output may be written: one file (a bundle's files and a ZIP come later). */
-const SHAPES = Object.freeze(['file']);
+/**
+ * How an output may be written: one file, straight into its folder; a
+ * bundle's files, into a new folder of their own in it, all of them or none;
+ * or a bundle as one ZIP, straight into its folder.
+ */
+const SHAPES = Object.freeze(['file', 'files', 'zip']);
+
+/** The most files one bundle's output may save: as many as one request may name (core/payloads.js). */
+const MOST_FILES = 10_000;
 
 /** The longest name the transfer window may ask for: core refuses one over 255 bytes of UTF-8. */
 const MAX_NAME = 255;
+
+/**
+ * Windows' Mark of the Web, as a saved file's Zone.Identifier stream: the
+ * Internet zone, and nothing else (no HostUrl or ReferrerUrl, so nothing
+ * says where it came from), so SmartScreen checks a program before it runs
+ * and Office opens a document in Protected View.
+ */
+const ZONE_IDENTIFIER = '[ZoneTransfer]\r\nZoneId=3\r\n';
 
 /** Why a write failed, for the person: by the system's error code, never with a path. */
 function writeFailure(error, doing) {
@@ -38,6 +53,20 @@ function writeFailure(error, doing) {
         case 'EROFS': return 'The folder to save to is on a disk that is read-only.';
         default: return `The file couldn't be ${doing}.`;
     }
+}
+
+/** Two digits. */
+const two = (n) => String(n).padStart(2, '0');
+
+/**
+ * The name of a bundle's folder, or a ZIP's (with .zip), for when it's saved,
+ * in local time: "dropgate-bundle-20261010-143205" (YYYYMMDD-HHMMSS), as the web
+ * UI names its ZIPs. It says nothing of the files or where they came from.
+ * @param {Date} at
+ */
+function savedName(at) {
+    const date = `${at.getFullYear()}${two(at.getMonth() + 1)}${two(at.getDate())}`;
+    return `dropgate-bundle-${date}-${two(at.getHours())}${two(at.getMinutes())}${two(at.getSeconds())}`;
 }
 
 /**
@@ -70,25 +99,51 @@ function writeFailure(error, doing) {
  * it's moved, so a folder swapped for a link in between is refused, and a
  * link planted under the name is never followed. A file aborted, or one that
  * can't be finished, is deleted, and nothing is left of it.
+ *
+ * A bundle's output saves several files, each its own sink: as each is
+ * whole it's closed and kept in the partial folder, and once the last is,
+ * a new folder is made in the output's folder, named for when it's saved
+ * ("dropgate-bundle-20261010-143205", made unique), and every file is moved into
+ * it. All of it or none: a bundle cancelled, failed or revoked part-way
+ * leaves no file and no folder. A bundle as one ZIP is one sink whose bytes
+ * are core's ZIP writer's, saved straight into the folder as
+ * "dropgate-bundle-20261010-143205.zip"; core makes its members' names safe.
+ *
+ * On Windows, each file saved, a ZIP and every file of a bundle, gets the
+ * Mark of the Web (ZONE_IDENTIFIER) as it's put in place, and no other
+ * stream; elsewhere, nothing.
  */
 class FileService {
     /** @type {Map<string, { path: string, size: number, mtimeMs: number, fd: number | null }>} */
     #grants = new Map();
-    /** @type {Map<string, { folder: string, shape: string, sinks: Set<string> }>} */
+    /** @type {Map<string, { folder: string, shape: string, count: number, opened: number, sinks: Set<string>, staged: string[] }>} */
     #outputs = new Map();
-    /** @type {Map<string, { output: string, folder: string, name: string, size: number, written: number, fd: number | null, partial: string, closing: boolean }>} */
+    /**
+     * Each file being written: its output; the folder it's saved in (null for
+     * a bundle's, until its own folder is made) and the folder it was opened
+     * for (by its real path); its name; its size (null for a ZIP's, which core
+     * writes as it goes); and whether it's being closed, or is whole and kept
+     * for the rest of its bundle.
+     * @type {Map<string, { output: string, folder: string | null, parent: string, name: string, size: number | null, written: number, fd: number | null, partial: string, closing: boolean }>}
+     */
     #sinks = new Map();
     #partials;
     #onSaved;
+    #markOfTheWeb;
+    #now;
 
     /**
      * @param {object} [options]
      * @param {string} [options.partials] - The partial folder, where downloads are written until they're whole.
-     * @param {(saved: { output: string, path: string }) => void} [options.onSaved] - A download is in place.
+     * @param {(saved: { output: string, path: string }) => void} [options.onSaved] - A download is in place (a bundle's: its folder).
+     * @param {boolean} [options.markOfTheWeb] - Whether each file saved gets Windows' Mark of the Web: on Windows only.
+     * @param {() => Date} [options.now] - The time, for a bundle's or a ZIP's name.
      */
-    constructor({ partials, onSaved = () => {} } = {}) {
+    constructor({ partials, onSaved = () => {}, markOfTheWeb = process.platform === 'win32', now = () => new Date() } = {}) {
         this.#partials = partials;
         this.#onSaved = onSaved;
+        this.#markOfTheWeb = markOfTheWeb;
+        this.#now = now;
     }
 
     /**
@@ -105,17 +160,19 @@ class FileService {
     }
 
     /**
-     * An output main has granted: a download may write its file into this
-     * folder from now on.
-     * @param {{ output: string, folder: string, shape: string }} grant
+     * An output main has granted: a download may write into this folder from
+     * now on, as one file, a bundle's `count` files, or one ZIP.
+     * @param {{ output: string, folder: string, shape: string, count?: number }} grant
      */
-    grantOutput({ output, folder, shape } = {}) {
+    grantOutput({ output, folder, shape, count } = {}) {
         if (typeof output !== 'string' || !GRANT_ID.test(output)) throw new Error('Expected an output.');
         if (typeof folder !== 'string' || !path.isAbsolute(folder)) throw new Error('Expected a folder.');
         if (!SHAPES.includes(shape)) throw new Error('Expected how the download is saved.');
+        const counted = shape === 'files' ? Number.isSafeInteger(count) && count >= 2 && count <= MOST_FILES : count === undefined;
+        if (!counted) throw new Error('Expected how many files the bundle saves.');
         if (typeof this.#partials !== 'string' || !path.isAbsolute(this.#partials)) throw new Error('Expected the partial folder.');
         this.revokeOutput(output);
-        this.#outputs.set(output, { folder, shape, sinks: new Set() });
+        this.#outputs.set(output, { folder, shape, count: count ?? 1, opened: 0, sinks: new Set(), staged: [] });
     }
 
     /** The upload is done with a file: its descriptor is closed, and it can't be read again. */
@@ -126,12 +183,11 @@ class FileService {
         if (grant.fd !== null) fs.closeSync(grant.fd);
     }
 
-    /** The download is done with its output: a file still being written there is deleted, and nothing more can be. */
+    /** The download is done with its output: a file still being written there is deleted, so are a bundle's kept so far, and nothing more can be. */
     revokeOutput(output) {
-        const granted = this.#outputs.get(output);
-        if (!granted) return;
+        if (!this.#outputs.has(output)) return;
+        this.#discardAll(output);
         this.#outputs.delete(output);
-        for (const sink of granted.sinks) this.#discard(sink);
     }
 
     /** Every grant and output revoked, as the service stops: nothing partial is left. */
@@ -148,10 +204,12 @@ class FileService {
      *   `{ changed: true }` if it has changed since it was handed over;
      *   `{ gone: true }` if it can't be opened any more;
      * - `open { output, name, size, index }`: `{ sink, name }`, the file's
-     *   sink and the name it will be saved under;
+     *   sink and the name it will be saved under (a ZIP's is named for when
+     *   it's saved, so its name may change by then);
      * - `write { sink, bytes }`: `{ ok: true }`, never past the size it was opened with;
-     * - `close { sink }`: `{ ok: true, name }`, the file whole and in place, under that name;
-     * - `abort { sink }`: `{ ok: true }`, the file deleted;
+     * - `close { sink }`: `{ ok: true, name }`, the file whole and in place, under that name (a
+     *   bundle's: whole and kept until the last is, then all of them in place in their folder);
+     * - `abort { sink }`: `{ ok: true }`, the file deleted (a bundle's: all of them);
      * - `{ failed }` with the reason, for the person, when a file couldn't be
      *   written or put in place (and then nothing of it is left);
      * - `{ error }` for a request refused: one of the wrong shape, an unknown
@@ -204,10 +262,13 @@ class FileService {
     #open({ id, output, name, size, index }, refuse) {
         const granted = typeof output === 'string' ? this.#outputs.get(output) : undefined;
         if (!granted) return refuse('not an output this download may write.');
-        if (typeof name !== 'string' || name.length === 0 || name.length > MAX_NAME || !Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(index) || index < 0) {
+        // A ZIP's name is the file service's own: core gives it none.
+        const named = typeof name === 'string' && name.length <= MAX_NAME && (name.length > 0 || granted.shape === 'zip');
+        if (!named || !Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(index) || index < 0) {
             return refuse('not a file to save.');
         }
-        if (granted.shape === 'file' && granted.sinks.size > 0) return refuse('this output saves one file.');
+        // Each file once: an output saves as many as it was granted, and no more, even once they're in place.
+        if (granted.opened >= granted.count) return refuse(granted.count === 1 ? 'this output saves one file.' : 'this output saves no more files.');
 
         let folder;
         try {
@@ -216,7 +277,14 @@ class FileService {
         } catch (error) {
             return { id, failed: writeFailure(error, 'saved') };
         }
-        const safe = this.#uniqueIn(folder, filenames.sanitize(name));
+        let safe;
+        if (granted.shape === 'files') {
+            // A bundle's file is named against the bundle's others alone: its folder is made new.
+            const others = new Set([...granted.sinks].map((other) => this.#sinks.get(other).name.toLowerCase()));
+            safe = filenames.unique(filenames.sanitize(name), (candidate) => others.has(candidate.toLowerCase()));
+        } else {
+            safe = this.#uniqueIn(folder, granted.shape === 'zip' ? `${savedName(this.#now())}.zip` : filenames.sanitize(name));
+        }
         const partial = path.join(this.#partials, randomUUID());
         let fd;
         try {
@@ -227,20 +295,31 @@ class FileService {
             return { id, failed: writeFailure(error, 'written') };
         }
         const sink = randomUUID();
-        this.#sinks.set(sink, { output, folder, name: safe, size, written: 0, fd, partial, closing: false });
+        this.#sinks.set(sink, {
+            output,
+            folder: granted.shape === 'files' ? null : folder,
+            parent: folder,
+            name: safe,
+            size: granted.shape === 'zip' ? null : size,
+            written: 0,
+            fd,
+            partial,
+            closing: false,
+        });
         granted.sinks.add(sink);
+        granted.opened++;
         return { id, sink, name: safe };
     }
 
     #write({ id, sink, bytes }, refuse) {
         const open = typeof sink === 'string' ? this.#sinks.get(sink) : undefined;
         if (!open || open.closing) return refuse('not a file being written.');
-        if (!(bytes instanceof Uint8Array) || open.written + bytes.byteLength > open.size) return refuse('not bytes of the file.');
+        if (!(bytes instanceof Uint8Array) || (open.size !== null && open.written + bytes.byteLength > open.size)) return refuse('not bytes of the file.');
         try {
             let at = 0;
             while (at < bytes.byteLength) at += fs.writeSync(open.fd, bytes, at, bytes.byteLength - at);
         } catch (error) {
-            this.#discard(sink);
+            this.#failed(sink);
             return { id, failed: writeFailure(error, 'written') };
         }
         open.written += bytes.byteLength;
@@ -250,29 +329,39 @@ class FileService {
     async #close({ id, sink }, refuse) {
         const open = typeof sink === 'string' ? this.#sinks.get(sink) : undefined;
         if (!open || open.closing) return refuse('not a file being written.');
-        if (open.written !== open.size) {
-            this.#discard(sink);
+        if (open.size !== null && open.written !== open.size) {
+            this.#failed(sink);
             return { id, failed: 'The download ended before the whole file came.' };
         }
         open.closing = true;
+        const granted = this.#outputs.get(open.output);
         let saved;
         try {
             fs.fsyncSync(open.fd);
             fs.closeSync(open.fd);
             open.fd = null;
-            saved = await this.#moveIntoPlace(open);
+            if (granted.shape === 'files') {
+                // Kept whole in the partial folder until the bundle's last file is.
+                granted.staged.push(sink);
+                if (granted.staged.length < granted.count) return { id, ok: true, name: open.name };
+                saved = await this.#putBundleInPlace(granted);
+            } else {
+                // A ZIP is named for when it's saved.
+                if (granted.shape === 'zip') open.name = this.#uniqueIn(open.folder, `${savedName(this.#now())}.zip`, open);
+                saved = await this.#moveIntoPlace(open);
+            }
         } catch (error) {
-            this.#discard(sink);
+            this.#failed(sink);
             return { id, failed: writeFailure(error, 'saved') };
         }
-        this.#forget(sink);
+        for (const done of granted.shape === 'files' ? [...granted.staged] : [sink]) this.#forget(done);
         this.#onSaved({ output: open.output, path: saved });
-        return { id, ok: true, name: path.basename(saved) };
+        return { id, ok: true, name: open.name };
     }
 
     #abort({ id, sink }, refuse) {
         if (typeof sink !== 'string' || !this.#sinks.has(sink)) return refuse('not a file being written.');
-        this.#discard(sink);
+        this.#failed(sink);
         return { id, ok: true };
     }
 
@@ -281,7 +370,8 @@ class FileService {
      * nothing: a hard link on the same drive, a copy onto another, each of
      * which fails if the name is taken, and then the next unique name is
      * tried. The folder must still be the one the file was opened for (by its
-     * real path), and the file lands directly in it. Gives its path.
+     * real path), and the file lands directly in it, with its mark on Windows.
+     * Gives its path.
      */
     async #moveIntoPlace(open) {
         if (fs.realpathSync(open.folder) !== open.folder) throw Object.assign(new Error('The folder changed.'), { code: 'EPERM' });
@@ -293,6 +383,7 @@ class FileService {
                 if (copying) await fs.promises.copyFile(open.partial, target, fs.constants.COPYFILE_EXCL);
                 else fs.linkSync(open.partial, target);
                 fs.rmSync(open.partial, { force: true });
+                this.#mark(target);
                 return target;
             } catch (error) {
                 if (error?.code === 'EEXIST') {
@@ -310,10 +401,66 @@ class FileService {
     }
 
     /**
+     * A bundle's files, all whole, moved into a new folder of their own in
+     * the output's folder, named for when it's saved and made unique there.
+     * The folder must still be the one the files were opened for (by its real
+     * path). If any can't be put in place, those that were are deleted, and so
+     * is the folder: nothing of the bundle is left. Gives the folder's path.
+     */
+    async #putBundleInPlace(granted) {
+        const { parent } = this.#sinks.get(granted.staged[0]);
+        if (fs.realpathSync(granted.folder) !== parent) throw Object.assign(new Error('The folder changed.'), { code: 'EPERM' });
+        let made = null;
+        while (!made) {
+            const target = path.join(parent, this.#uniqueIn(parent, savedName(this.#now()), null, { asFolder: true }));
+            try {
+                fs.mkdirSync(target);
+                made = target;
+            } catch (error) {
+                // Taken since it was named: the next one.
+                if (error?.code !== 'EEXIST') throw error;
+            }
+        }
+        const placed = [];
+        try {
+            for (const sink of granted.staged) {
+                const open = this.#sinks.get(sink);
+                open.folder = made;
+                placed.push(await this.#moveIntoPlace(open));
+            }
+        } catch (error) {
+            // Only what was put there, then the folder, if nothing else is in it.
+            for (const file of placed) fs.rmSync(file, { force: true });
+            try {
+                fs.rmdirSync(made);
+            } catch {
+                // Something else was put in it meanwhile, which stays.
+            }
+            throw error;
+        }
+        return made;
+    }
+
+    /**
+     * Windows' Mark of the Web on a file just put in place: its
+     * Zone.Identifier stream, holding the Internet zone and nothing else. A
+     * drive that can't hold streams (FAT, exFAT, some shares) can't hold the
+     * mark either, as for Windows' own downloads: the file is saved unmarked.
+     */
+    #mark(target) {
+        if (!this.#markOfTheWeb) return;
+        try {
+            fs.writeFileSync(`${target}:Zone.Identifier`, ZONE_IDENTIFIER);
+        } catch {
+            // No streams on this drive.
+        }
+    }
+
+    /**
      * A made-safe name, made unique in a folder: against what's there, and
      * the names other downloads are writing there, without regard to case.
      */
-    #uniqueIn(folder, name, except = null) {
+    #uniqueIn(folder, name, except = null, { asFolder = false } = {}) {
         const writing = [...this.#sinks.values()].filter((other) => other !== except && other.folder === folder).map((other) => other.name.toLowerCase());
         let there;
         try {
@@ -323,7 +470,24 @@ class FileService {
         }
         const taken = new Set([...there, ...writing]);
         // A name taken by the folder's own listing, or by one that appeared since (lstat: a link counts, followed or not).
-        return filenames.unique(name, (candidate) => taken.has(candidate.toLowerCase()) || exists(path.join(folder, candidate)));
+        const isTaken = (candidate) => taken.has(candidate.toLowerCase()) || exists(path.join(folder, candidate));
+        if (!asFolder) return filenames.unique(name, isTaken);
+        // A folder's name has no extension: anything after a dot in it is part of its name, before the "(1)".
+        let candidate = name;
+        for (let n = 1; isTaken(candidate); n++) candidate = `${name} (${n})`;
+        return candidate;
+    }
+
+    /** A file that won't be saved: deleted, and for a bundle's, every other of the bundle too (all of it or none). */
+    #failed(sink) {
+        const { output } = this.#sinks.get(sink);
+        if (this.#outputs.get(output)?.shape === 'files') this.#discardAll(output);
+        else this.#discard(sink);
+    }
+
+    /** Every file of an output deleted: one being written, and a bundle's kept so far. */
+    #discardAll(output) {
+        for (const sink of [...(this.#outputs.get(output)?.sinks ?? [])]) this.#discard(sink);
     }
 
     /** A sink's file deleted, and the sink forgotten. */
@@ -343,7 +507,11 @@ class FileService {
     #forget(sink) {
         const open = this.#sinks.get(sink);
         this.#sinks.delete(sink);
-        if (open) this.#outputs.get(open.output)?.sinks.delete(sink);
+        if (!open) return;
+        const granted = this.#outputs.get(open.output);
+        if (!granted) return;
+        granted.sinks.delete(sink);
+        granted.staged = granted.staged.filter((kept) => kept !== sink);
     }
 }
 
@@ -357,4 +525,4 @@ function exists(target) {
     }
 }
 
-module.exports = { FileService, GRANT_ID };
+module.exports = { FileService, GRANT_ID, ZONE_IDENTIFIER, savedName };

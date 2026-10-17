@@ -12,6 +12,17 @@ export function pageClient() {
 }
 
 /**
+ * The name a bundle's ZIP is saved under, for when it's saved, in local time:
+ * "dropgate-bundle-20261010-143205.zip" (YYYYMMDD-HHMMSS), as the desktop app
+ * names its own. It says nothing of the files, the upload or the code.
+ */
+export function bundleZipName(at = new Date()) {
+  const two = (n) => String(n).padStart(2, '0');
+  const date = `${at.getFullYear()}${two(at.getMonth() + 1)}${two(at.getDate())}`;
+  return `dropgate-bundle-${date}-${two(at.getHours())}${two(at.getMinutes())}${two(at.getSeconds())}.zip`;
+}
+
+/**
  * A StreamSaver write stream that saves a file under `name`. StreamSaver's
  * download address would end with the name, and a browser can ask the server
  * for that address itself: Firefox does when its own Resume restarts a paused

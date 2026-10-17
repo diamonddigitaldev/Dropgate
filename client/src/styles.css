@@ -132,6 +132,11 @@ textarea,
     border-bottom: 0;
 }
 
+/* A bundle's file, ticked to download or not: the whole row is its box's label. */
+.options-file-pick {
+    cursor: pointer;
+}
+
 .options-file .material-icons-round {
     font-size: 18px;
 }

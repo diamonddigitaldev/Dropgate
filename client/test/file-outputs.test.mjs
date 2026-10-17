@@ -4,7 +4,11 @@
 // moved into its folder under its name made safe (core's filenames.sanitize())
 // and unique there ("report (1).pdf"), replacing nothing, following no link
 // planted in the folder. Aborted, or unfinished, nothing of it is left.
+// A bundle's files go into a new folder of their own, all of them or none,
+// and a bundle as one ZIP is one file; on Windows, each file saved gets the
+// Mark of the Web, the zone alone.
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -195,7 +199,11 @@ test('only an output main granted is written, by its ID: never a path, and one f
     assert.ok(refused(ask({ op: 'write', sink: 'not-a-sink', bytes: 'text' })));
     assert.throws(() => service.grantOutput({ output: 'not-a-uuid', folder, shape: 'file' }), /output/);
     assert.throws(() => service.grantOutput({ output: randomUUID(), folder: 'relative', shape: 'file' }), /folder/);
-    assert.throws(() => service.grantOutput({ output: randomUUID(), folder, shape: 'zip' }), /how the download is saved/);
+    assert.throws(() => service.grantOutput({ output: randomUUID(), folder, shape: 'folder' }), /how the download is saved/);
+    assert.throws(() => service.grantOutput({ output: randomUUID(), folder, shape: 'files' }), /how many files/);
+    assert.throws(() => service.grantOutput({ output: randomUUID(), folder, shape: 'files', count: 1 }), /how many files/);
+    assert.throws(() => service.grantOutput({ output: randomUUID(), folder, shape: 'file', count: 2 }), /how many files/);
+    assert.throws(() => service.grantOutput({ output: randomUUID(), folder, shape: 'zip', count: 2 }), /how many files/);
     assert.throws(() => new FileService().grantOutput({ output: randomUUID(), folder, shape: 'file' }), /partial folder/);
 });
 
@@ -232,4 +240,155 @@ test('a deep folder and a long name: saved, long-path aware, with nothing left i
     assert.ok(path.join(deep, name).length > 600);
     assert.deepEqual(fs.readFileSync(path.join(deep, name)), bytes);
     assert.deepEqual(listing(partials), []);
+});
+
+// --- Bundles, ZIPs and the Mark of the Web ---
+
+/** 14:32:05 on 10 October 2026, local time: the moment a bundle or a ZIP is saved, in the tests below. */
+const SAVED_AT = new Date(2026, 9, 10, 14, 32, 5);
+
+/** A file service at SAVED_AT, with the Mark of the Web as given (off unless asked: the tests below on it are Windows' own). */
+function serviceAt({ markOfTheWeb = false } = {}) {
+    service.revokeAll();
+    service = new FileService({ partials, onSaved: (where) => saved.push(where), markOfTheWeb, now: () => SAVED_AT });
+    return service;
+}
+
+/** Grant an output of a shape, as main does, and return its ID. */
+function grantShaped(shape, count) {
+    const output = randomUUID();
+    service.grantOutput({ output, folder, shape, ...(count === undefined ? {} : { count }) });
+    return output;
+}
+
+/** Open, write and close one file of an output, as core does for each of a bundle's. */
+async function writeWhole(output, name, bytes, index) {
+    const opened = ask({ op: 'open', output, name, size: bytes.length, index });
+    assert.ok(opened.sink, `opened ${name}: ${JSON.stringify(opened)}`);
+    ask({ op: 'write', sink: opened.sink, bytes: new Uint8Array(bytes) });
+    return { opened, closed: await ask({ op: 'close', sink: opened.sink }) };
+}
+
+/** The streams a file has on Windows' NTFS, besides its own data, as PowerShell lists them. */
+function streamsOf(file) {
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', '(Get-Item -LiteralPath $env:TARGET -Stream *).Stream -join "|"'], {
+        env: { ...process.env, TARGET: file },
+        encoding: 'utf8',
+    });
+    return out.trim().split('|').filter((stream) => stream && stream !== ':$DATA');
+}
+
+test('a bundle\'s files are kept in the partial folder until the last is whole, then all of them go into a new folder of their own, named for when it\'s saved', async () => {
+    serviceAt();
+    // One there already under the name: the bundle's is made unique.
+    fs.mkdirSync(path.join(folder, 'dropgate-bundle-20261010-143205'));
+    const output = grantShaped('files', 3);
+    const a = await writeWhole(output, 'Minutes é.pdf', bytesOf(300, 3), 0);
+    const b = await writeWhole(output, 'notes.txt', bytesOf(200, 5), 1);
+    assert.deepEqual([a.closed.ok, b.closed.ok], [true, true]);
+    // Whole, but not in place: nothing in the folder but what was there, nothing told to main.
+    assert.deepEqual(listing(folder), ['dropgate-bundle-20261010-143205']);
+    assert.equal(listing(partials).length, 2);
+    assert.deepEqual(saved, []);
+
+    // Two of a bundle's files under one name (in any case) get a name each.
+    const c = await writeWhole(output, 'NOTES.txt', bytesOf(100, 7), 2);
+    assert.equal(c.opened.name, 'NOTES (1).txt');
+    const bundle = path.join(folder, 'dropgate-bundle-20261010-143205 (1)');
+    assert.deepEqual(listing(folder), ['dropgate-bundle-20261010-143205', 'dropgate-bundle-20261010-143205 (1)']);
+    assert.deepEqual(listing(bundle), ['Minutes é.pdf', 'NOTES (1).txt', 'notes.txt']);
+    assert.deepEqual(fs.readFileSync(path.join(bundle, 'Minutes é.pdf')), bytesOf(300, 3));
+    assert.deepEqual(fs.readFileSync(path.join(bundle, 'NOTES (1).txt')), bytesOf(100, 7));
+    assert.deepEqual(listing(partials), [], 'nothing left in the partial folder');
+    assert.deepEqual(saved, [{ output, path: bundle }], 'main is told the bundle\'s folder');
+    assert.ok(refused(ask({ op: 'open', output, name: 'd.bin', size: 1, index: 3 })), 'no more files than it was granted');
+});
+
+test('a bundle cancelled, failed or revoked part-way leaves no file and no folder: all of it or none', async () => {
+    serviceAt();
+    // Aborted on its second file, the first (whole) goes too.
+    const aborted = grantShaped('files', 2);
+    await writeWhole(aborted, 'first.bin', bytesOf(100), 0);
+    const second = ask({ op: 'open', output: aborted, name: 'second.bin', size: 100, index: 1 });
+    ask({ op: 'write', sink: second.sink, bytes: new Uint8Array(10) });
+    assert.equal(listing(partials).length, 2);
+    ask({ op: 'abort', sink: second.sink });
+    assert.deepEqual([listing(partials), listing(folder)], [[], []]);
+
+    // Its last file short: failed, and the rest go.
+    const short = grantShaped('files', 2);
+    await writeWhole(short, 'first.bin', bytesOf(100), 0);
+    const last = ask({ op: 'open', output: short, name: 'last.bin', size: 100, index: 1 });
+    ask({ op: 'write', sink: last.sink, bytes: new Uint8Array(40) });
+    assert.equal((await ask({ op: 'close', sink: last.sink })).failed, 'The download ended before the whole file came.');
+    assert.deepEqual([listing(partials), listing(folder)], [[], []]);
+
+    // Revoked (cancelled while paused, or the app quitting), with one kept whole.
+    const revoked = grantShaped('files', 3);
+    await writeWhole(revoked, 'first.bin', bytesOf(100), 0);
+    ask({ op: 'open', output: revoked, name: 'paused.bin', size: 100, index: 1 });
+    service.revokeOutput(revoked);
+    assert.deepEqual([listing(partials), listing(folder)], [[], []]);
+
+    // Its folder gone before the last is whole: failed, naming no folder, and nothing is left.
+    const gone = grantShaped('files', 2);
+    await writeWhole(gone, 'first.bin', bytesOf(100), 0);
+    const lastOne = ask({ op: 'open', output: gone, name: 'last.bin', size: 1, index: 1 });
+    ask({ op: 'write', sink: lastOne.sink, bytes: new Uint8Array([1]) });
+    fs.rmSync(folder, { recursive: true });
+    const closed = await ask({ op: 'close', sink: lastOne.sink });
+    assert.equal(typeof closed.failed, 'string');
+    assert.ok(!closed.failed.includes(root), 'no path in the reason');
+    assert.deepEqual(listing(partials), []);
+    assert.deepEqual(saved, []);
+});
+
+test('a bundle as one ZIP is one file, written as core gives it, named for when it\'s saved, made unique', async () => {
+    serviceAt();
+    fs.writeFileSync(path.join(folder, 'dropgate-bundle-20261010-143205.zip'), 'mine');
+    const output = grantShaped('zip');
+    // Core gives a ZIP no name, and its size isn't known before it's written.
+    const opened = ask({ op: 'open', output, name: '', size: 0, index: 0 });
+    assert.ok(opened.sink);
+    for (let i = 0; i < 3; i++) assert.equal(ask({ op: 'write', sink: opened.sink, bytes: new Uint8Array(bytesOf(1000, i + 2)) }).ok, true);
+    assert.ok(refused(ask({ op: 'open', output, name: '', size: 0, index: 0 })), 'one ZIP per output');
+    const closed = await ask({ op: 'close', sink: opened.sink });
+    assert.deepEqual(closed, { id: nextId - 1, ok: true, name: 'dropgate-bundle-20261010-143205 (1).zip' });
+    assert.equal(fs.statSync(path.join(folder, 'dropgate-bundle-20261010-143205 (1).zip')).size, 3000);
+    assert.equal(fs.readFileSync(path.join(folder, 'dropgate-bundle-20261010-143205.zip'), 'utf8'), 'mine', 'the one there is untouched');
+    assert.deepEqual(saved, [{ output, path: path.join(folder, 'dropgate-bundle-20261010-143205 (1).zip') }]);
+    assert.deepEqual(listing(partials), []);
+
+    // Cancelled, nothing of it is left.
+    const cancelled = grantShaped('zip');
+    const half = ask({ op: 'open', output: cancelled, name: '', size: 0, index: 0 });
+    ask({ op: 'write', sink: half.sink, bytes: new Uint8Array(500) });
+    ask({ op: 'abort', sink: half.sink });
+    assert.deepEqual(listing(partials), []);
+    assert.deepEqual(listing(folder), ['dropgate-bundle-20261010-143205 (1).zip', 'dropgate-bundle-20261010-143205.zip']);
+});
+
+test('on Windows, every file saved gets the Mark of the Web, the zone alone, and no other stream: one file, a ZIP and each of a bundle\'s', { skip: process.platform !== 'win32' && 'Windows\' NTFS streams' }, async () => {
+    serviceAt({ markOfTheWeb: true });
+    const one = await writeWhole(grantShaped('file'), 'report.pdf', bytesOf(100), 0);
+    const bundle = grantShaped('files', 2);
+    await writeWhole(bundle, 'a.bin', bytesOf(100), 0);
+    await writeWhole(bundle, 'b.bin', bytesOf(100), 1);
+    const zip = await writeWhole(grantShaped('zip'), '', bytesOf(100), 0);
+    const files = [path.join(folder, one.closed.name), path.join(folder, zip.closed.name), ...['a.bin', 'b.bin'].map((name) => path.join(folder, 'dropgate-bundle-20261010-143205', name))];
+    for (const file of files) {
+        assert.equal(fs.readFileSync(`${file}:Zone.Identifier`, 'utf8'), '[ZoneTransfer]\r\nZoneId=3\r\n', file);
+        assert.deepEqual(streamsOf(file), ['Zone.Identifier'], file);
+    }
+    // The bundle's folder holds the files alone: no stream of its own, and nothing else in it.
+    assert.deepEqual(streamsOf(path.join(folder, 'dropgate-bundle-20261010-143205')), []);
+    assert.deepEqual(listing(path.join(folder, 'dropgate-bundle-20261010-143205')), ['a.bin', 'b.bin']);
+});
+
+test('anywhere but Windows, nothing is written beside a file saved: no mark', { skip: process.platform === 'win32' && 'Windows marks its downloads' }, async () => {
+    // The service as the app makes it, marking only on Windows.
+    service.revokeAll();
+    service = new FileService({ partials, onSaved: (where) => saved.push(where) });
+    const { closed } = await writeWhole(grantShaped('file'), 'plain.bin', bytesOf(100), 0);
+    assert.deepEqual(listing(folder), [closed.name]);
 });

@@ -1,5 +1,5 @@
 import { hosts, zip, filenames } from './dropgate-core.js';
-import { formatBytes, pageClient, saveStream } from './page-common.js';
+import { bundleZipName, formatBytes, pageClient, saveStream } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard, clearStatusBorder } from './status-card.js';
 
 const elTitle = document.getElementById('title');
@@ -224,7 +224,7 @@ async function start() {
         fileCount = metaFileCount || 1;
         isMultiFile = fileCount > 1;
         // Shown and saved under its safe name: the one file name rule.
-        fileName = isMultiFile ? `dropgate-bundle-${code}.zip` : filenames.sanitize(name);
+        fileName = isMultiFile ? bundleZipName() : filenames.sanitize(name);
 
         // Store the sendReady function to call when user clicks download
         pendingSendReady = sendReady;

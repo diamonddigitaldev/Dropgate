@@ -142,17 +142,37 @@ function optionsOf(request, own, fileCount) {
     if (!isRecord(options, keys, []) || Object.keys(options).length === 0) throw new Error('Expected an upload\'s options.');
     if (Object.hasOwn(options, 'lifetime') && !isLifetime(options.lifetime)) throw new Error('Expected a file lifetime.');
     if (Object.hasOwn(options, 'maxDownloads') && !isCount(options.maxDownloads)) throw new Error('Expected a download limit.');
-    if (Object.hasOwn(options, 'files')) {
-        const count = fileCount(request.id);
-        const { files } = options;
-        const inOrder = Array.isArray(files) && files.length > 0 && files.every((index, i) => Number.isSafeInteger(index) && index >= 0 && index < count && (i === 0 || index > files[i - 1]));
-        if (!inOrder) throw new Error('Expected the files it keeps.');
-    }
+    if (Object.hasOwn(options, 'files') && !indexesOf(options.files, fileCount(request.id))) throw new Error('Expected the files it keeps.');
     const copy = {};
     if (options.lifetime) copy.lifetime = { value: options.lifetime.value, unit: options.lifetime.unit };
     if (Object.hasOwn(options, 'maxDownloads')) copy.maxDownloads = options.maxDownloads;
     if (options.files) copy.files = [...options.files];
     return { id: request.id, options: copy };
+}
+
+/** Indexes of a transfer's files: at least one, each a safe whole number below `count`, in order, none twice. */
+const indexesOf = (files, count) => Array.isArray(files) && files.length > 0
+    && files.every((index, i) => Number.isSafeInteger(index) && index >= 0 && index < count && (i === 0 || index > files[i - 1]));
+
+/**
+ * transfer:set-options, on a download: Advanced Options (and Bulk Edit, one
+ * call each) on one of this window's downloads waiting: the files it saves
+ * (their indexes in it, in order, at least one) and whether as one ZIP, either
+ * or both.
+ * @param {(id: string) => boolean} own - Whether it's a download of this window's, waiting.
+ * @param {(id: string) => number} fileCount - How many files it has.
+ * @returns {{ id: string, options: { files?: number[], asZip?: boolean } }}
+ */
+function downloadOptionsOf(request, own, fileCount) {
+    if (!isRecord(request, ['id', 'options']) || !isId(request.id) || !own(request.id)) throw new Error('Expected a download of this window\'s waiting to start.');
+    const { options } = request;
+    if (!isRecord(options, ['files', 'asZip'], []) || Object.keys(options).length === 0) throw new Error('Expected a download\'s options.');
+    if (Object.hasOwn(options, 'files') && !indexesOf(options.files, fileCount(request.id))) throw new Error('Expected the files it saves.');
+    if (Object.hasOwn(options, 'asZip') && typeof options.asZip !== 'boolean') throw new Error('Expected whether it\'s saved as one ZIP.');
+    return {
+        id: request.id,
+        options: { ...(options.files ? { files: [...options.files] } : {}), ...(Object.hasOwn(options, 'asZip') ? { asZip: options.asZip } : {}) },
+    };
 }
 
 /**
@@ -348,8 +368,9 @@ function answerOf(kind, value) {
 // --- The file service's ---
 
 /**
- * saved: where a download landed, for Show in Folder: its output, as main
- * granted it, and an absolute path.
+ * saved: where a download landed, for Show in Folder (a bundle saved as
+ * files: its own folder, for Open Folder): its output, as main granted it,
+ * and an absolute path.
  * @param {(output: string) => boolean} granted
  */
 function savedOf(message, granted) {
@@ -370,6 +391,7 @@ module.exports = {
     transfersOf,
     uploadOptions,
     optionsOf,
+    downloadOptionsOf,
     uploadOf,
     uploadsToStart,
     serverAddress,

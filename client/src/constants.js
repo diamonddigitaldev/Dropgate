@@ -27,14 +27,14 @@ const IPC = Object.freeze({
     SERVER_CHECK: 'server:check',               // (url) -> { ok: true, baseUrl, serverVersion, serverInfo, dgup } | { ok: false, code, message }, asked of the server by the transfer window
     TRANSFER_ADD_UPLOAD: 'transfer:add-upload', // ({ files: [handle] }) -> { id }, an upload waiting to start, with the server's settings for new uploads
     TRANSFER_ADD_FILES: 'transfer:add-files',   // ({ id, files: [handle] }) -> { added, skipped } onto the page's own upload waiting, or { started: true } once it has started
-    TRANSFER_START: 'transfer:start',           // ({ ids, encrypt? }) start them, in the transfer window: the page's own (encrypt, as it found the server), or a share's it was asked about (Upload Anyway)
+    TRANSFER_START: 'transfer:start',           // ({ ids, encrypt? }) start them, in the transfer window: the page's own uploads (encrypt, as it found the server) and downloads, or a share's it was asked about (Upload Anyway)
     TRANSFER_REMOVE: 'transfer:remove',         // ({ ids }) remove uploads waiting or ended: Remove, Clear Finished
     TRANSFER_RETRY: 'transfer:retry',           // ({ id }) a failed or cancelled upload waits for the page's Upload once more
-    TRANSFER_SET_OPTIONS: 'transfer:set-options', // ({ id, options: { lifetime?, maxDownloads?, files? } }) Advanced Options on the page's own upload waiting: files are the indexes it keeps
+    TRANSFER_SET_OPTIONS: 'transfer:set-options', // ({ id, options }) Advanced Options on the page's own transfer waiting: an upload's { lifetime?, maxDownloads?, files? } (the indexes it keeps), a download's { files?, asZip? } (the indexes it saves, and whether as one ZIP)
     TRANSFER_DELETE: 'transfer:delete',         // ({ id }) -> { message? }, a finished upload deleted from its server, with the manage token the transfer window holds
     TRANSFER_ADD_DOWNLOAD: 'transfer:add-download', // ({ link }) -> { id }, a download that reads the link's list of files (no lease, nothing counted), then waits; main passes the link on and keeps none of it
     TRANSFER_SAVE_TO: 'transfer:save-to',       // ({ ids, folder }) where downloads waiting are saved: 'default' (Settings > Transfers') or a folder from folder:choose
-    TRANSFER_SHOW: 'transfer:show',             // ({ id }) Show in Folder: the folder a finished download was saved in, with it selected; nothing received is ever opened
+    TRANSFER_SHOW: 'transfer:show',             // ({ id }) Show in Folder: the folder a finished download was saved in, with it selected; Open Folder: a bundle's own folder; nothing received is ever opened
     FOLDER_CHOOSE: 'folder:choose',             // () -> { folder, label } | null, the system's folder picker: an opaque ID for this run, and the folder's own name
     FOLDER_DEFAULT: 'folder:default',           // () -> { path, label, chosen }, where new downloads are saved (Settings > Transfers): the system's Downloads unless one was chosen
     FOLDER_SET_DEFAULT: 'folder:set-default',   // ({ folder }) Settings > Transfers' Browse (a folder from folder:choose) or Reset (null: the system's) -> folder:default's answer
@@ -81,7 +81,7 @@ const ENGINE = Object.freeze({
     PORT: 'engine:port',                        // the file service's MessagePort, once its page is ready
     UPLOAD: 'engine:upload',                    // { id, server: { url, allowInsecure }, options, files: [{ handle, name, size }] }; handle is a read grant
     METADATA: 'engine:metadata',                // { id, call, link } read a link's list of files, with no lease, and keep its secret for its download; answered with engine:answer ({ files, encrypted } | { message })
-    DOWNLOAD: 'engine:download',                // { id, output } download it into the output main granted the file service
+    DOWNLOAD: 'engine:download',                // { id, output, files?, asZip } download it (all its files, or those named, by index) into the output main granted the file service
     PAUSE: 'engine:pause',                      // { id, call }, answered with engine:answer
     RESUME: 'engine:resume',                    // { id, call }, answered with engine:answer
     CANCEL: 'engine:cancel',                    // { id }
@@ -98,7 +98,7 @@ const ENGINE = Object.freeze({
 });
 
 /** What main sends the transfer window, which its page only listens for. */
-const ENGINE_PUSHES = Object.freeze([ENGINE.PORT, ENGINE.UPLOAD, ENGINE.METADATA, ENGINE.DOWNLOAD,ENGINE.PAUSE, ENGINE.RESUME, ENGINE.CANCEL, ENGINE.CHECK, ENGINE.DELETE, ENGINE.FORGET, ENGINE.QUIT]);
+const ENGINE_PUSHES = Object.freeze([ENGINE.PORT, ENGINE.UPLOAD, ENGINE.METADATA, ENGINE.DOWNLOAD, ENGINE.PAUSE, ENGINE.RESUME, ENGINE.CANCEL, ENGINE.CHECK, ENGINE.DELETE, ENGINE.FORGET, ENGINE.QUIT]);
 
 /**
  * The messages between main and the file service (a utilityProcess, over
@@ -110,10 +110,10 @@ const ENGINE_PUSHES = Object.freeze([ENGINE.PORT, ENGINE.UPLOAD, ENGINE.METADATA
  */
 const FILE_SERVICE = Object.freeze({
     GRANT_READ: 'grant-read',                   // { handle, path, size, mtimeMs }: at an upload's start, for each of its files
-    GRANT_OUTPUT: 'grant-output',               // { output, folder, shape: 'file' }: at a download's start, the folder it's saved in
+    GRANT_OUTPUT: 'grant-output',               // { output, folder, shape: 'file' | 'files' | 'zip', count? }: at a download's start, the folder it's saved in, and how: one file, a bundle's files (count of them) into a folder of their own, or one ZIP
     REVOKE: 'revoke',                           // { handle } | { output }: its transfer has ended (an output's file still being written is deleted)
     PORT: 'port',                               // the transfer window's MessagePort, with postMessage(…, [port])
-    SAVED: 'saved',                             // the file service to main: { output, path }, where a download landed, for Show in Folder
+    SAVED: 'saved',                             // the file service to main: { output, path }, where a download landed (a bundle's: its own folder), for Show in Folder or Open Folder
 });
 
 /**

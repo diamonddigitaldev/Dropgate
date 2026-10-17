@@ -22,7 +22,7 @@ import { fakeMain } from './helpers/main-process.mjs';
 const require = createRequire(import.meta.url);
 const { ENGINE, ENGINE_PUSHES, IPC, PUSHES } = require('../src/constants.js');
 const { Handles } = require('../src/core/handles.js');
-const { Transfers } = require('../src/core/transfers.js');
+const { Transfers, view } = require('../src/core/transfers.js');
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-channels-'));
 after(() => fs.rmSync(folder, { recursive: true, force: true }));
@@ -583,15 +583,43 @@ test('transfer:show takes a finished download that was saved; folder:set-default
     assert.deepEqual(setup.work.at(-1), ['defaultFolder']);
 });
 
-test('transfer:start takes downloads with no word on encryption, and refuses one of several files until they can be downloaded', async () => {
+test('transfer:start takes downloads with no word on encryption, a link to several files among them', async () => {
     const setup = setUp();
     const page = setup.main.windowPage();
     const one = waitingDownload(setup, page.sender.id);
     const several = waitingDownload(setup, page.sender.id, [{ name: 'a.bin', size: 1 }, { name: 'b.bin', size: 2 }]);
     setup.work.length = 0;
-    await refusesAll(setup, IPC.TRANSFER_START, page, [[{ ids: [several] }], [{ ids: [one, several] }]], /Links to several files can't be downloaded here yet\./);
-    await setup.main.invoke(IPC.TRANSFER_START, page, { ids: [one] });
-    assert.deepEqual(setup.work, [['start', one, SERVER]]);
+    await setup.main.invoke(IPC.TRANSFER_START, page, { ids: [one, several] });
+    assert.deepEqual(setup.work, [['start', one, SERVER], ['start', several, SERVER]]);
+});
+
+test('transfer:set-options on a download takes the files it saves, in order, and whether as one ZIP: this window\'s, waiting, and nothing else', async () => {
+    const setup = setUp();
+    const page = setup.main.windowPage();
+    const other = setup.main.windowPage();
+    const files = [{ name: 'a.bin', size: 1 }, { name: 'b.bin', size: 2 }, { name: 'c.bin', size: 3 }];
+    const mine = waitingDownload(setup, page.sender.id, files);
+    const theirs = waitingDownload(setup, other.sender.id, files);
+    const started = waitingDownload(setup, page.sender.id, files);
+    setup.transfers.start(started, SERVER);
+    await refusesAll(setup, IPC.TRANSFER_SET_OPTIONS, page, [
+        [{ id: theirs, options: { asZip: true } }], [{ id: started, options: { asZip: true } }], [{ id: mine }], [{ id: mine, options: {} }],
+        [{ id: mine, options: { asZip: 'yes' } }], [{ id: mine, options: { files: [] } }], [{ id: mine, options: { files: [2, 0] } }],
+        [{ id: mine, options: { files: [0, 0] } }], [{ id: mine, options: { files: [3] } }], [{ id: mine, options: { files: [0.5] } }],
+        [{ id: mine, options: { files: [0], folder: FILE } }], [{ id: mine, options: { maxDownloads: 3 } }], [{ id: mine, options: { asZip: true }, path: FILE }],
+    ], /Expected (a download|the files it saves|whether it's saved as one ZIP)/);
+    await setup.main.invoke(IPC.TRANSFER_SET_OPTIONS, page, { id: mine, options: { files: [0, 2], asZip: true } });
+    assert.deepEqual(view(setup.transfers.get(mine)).chosen, [0, 2]);
+    assert.equal(view(setup.transfers.get(mine)).asZip, true);
+    assert.equal(view(setup.transfers.get(mine)).inFolder, false);
+    // All of them again is no choice at all; as files, a bundle is saved in a folder of its own.
+    await setup.main.invoke(IPC.TRANSFER_SET_OPTIONS, page, { id: mine, options: { files: [0, 1, 2], asZip: false } });
+    assert.equal(view(setup.transfers.get(mine)).chosen, null);
+    assert.equal(view(setup.transfers.get(mine)).inFolder, true);
+    // One file of several, as files: saved on its own, in no folder of its own.
+    await setup.main.invoke(IPC.TRANSFER_SET_OPTIONS, page, { id: mine, options: { files: [1] } });
+    assert.equal(view(setup.transfers.get(mine)).inFolder, false);
+    assert.deepEqual(view(setup.transfers.get(started)).chosen, null, 'one started keeps its choice');
 });
 
 test('the transfer window answers a metadata read with a list of files or why not, and finishes a download with no link', async () => {
@@ -624,7 +652,7 @@ test('the transfer window answers a metadata read with a list of files or why no
     assert.deepEqual(Object.keys(grant).sort(), ['folder', 'output', 'shape', 'type']);
     assert.equal(grant.folder, folder);
     const [, download] = win.webContents.sent.find(([channel]) => channel === ENGINE.DOWNLOAD);
-    assert.deepEqual(download, { id, output: grant.output });
+    assert.deepEqual(download, { id, output: grant.output, asZip: false });
     await refusesAll(setup, ENGINE.FINISHED, page, [[id, { status: 'success', link: `https://dropgate.test/${UPLOAD_ID}` }]], /Expected how an upload running finished\./);
     await main.invoke(ENGINE.FINISHED, page, id, { status: 'success' });
     assert.deepEqual(work.at(-1), ['onFinished', id, { status: 'success' }]);
@@ -638,6 +666,34 @@ test('the transfer window answers a metadata read with a list of files or why no
     assert.deepEqual(await failing, { message: 'The upload wasn\'t found. It may have expired.' });
     assert.equal(host.holds(unread), false);
     host.forget(id);
+    host.close();
+});
+
+test('a bundle\'s download: its files chosen go to the transfer window by index, and its folder to the file service as files (how many) or one ZIP', async () => {
+    const setup = setUp();
+    const { main, host } = setup;
+    const [asFiles, asZip, oneOfThem] = [randomUUID(), randomUUID(), randomUUID()];
+    const reads = [asFiles, asZip, oneOfThem].map((id) => host.metadata(id, `https://dropgate.test/${UPLOAD_ID}#${SECRET}`));
+    const [win] = main.windows;
+    const page = main.transferPage(win.webContents);
+    await main.invoke(ENGINE.READY, page);
+    const files = [{ name: 'a.bin', size: 1 }, { name: 'b.bin', size: 2 }, { name: 'c.bin', size: 3 }];
+    for (const [, { call }] of win.webContents.sent.filter(([channel]) => channel === ENGINE.METADATA)) await main.invoke(ENGINE.ANSWER, page, call, { files, encrypted: true });
+    await Promise.all(reads);
+
+    host.download(asFiles, folder, { files: null, asZip: false }, 3);
+    host.download(asZip, folder, { files: [0, 2], asZip: true }, 3);
+    host.download(oneOfThem, folder, { files: [1], asZip: false }, 3);
+    const grants = main.processes[0].messages.filter((m) => m.type === 'grant-output');
+    const sent = win.webContents.sent.filter(([channel]) => channel === ENGINE.DOWNLOAD).map(([, download]) => download);
+    assert.deepEqual(grants.map(({ shape, count }) => ({ shape, count })), [{ shape: 'files', count: 3 }, { shape: 'zip', count: undefined }, { shape: 'file', count: undefined }]);
+    assert.deepEqual(grants[1].count === undefined && Object.keys(grants[1]).sort(), ['folder', 'output', 'shape', 'type'], 'a ZIP has no count');
+    assert.deepEqual(sent, [
+        { id: asFiles, output: grants[0].output, asZip: false },
+        { id: asZip, output: grants[1].output, files: [0, 2], asZip: true },
+        { id: oneOfThem, output: grants[2].output, files: [1], asZip: false },
+    ]);
+    for (const id of [asFiles, asZip, oneOfThem]) await main.invoke(ENGINE.FINISHED, page, id, { status: 'cancelled' });
     host.close();
 });
 

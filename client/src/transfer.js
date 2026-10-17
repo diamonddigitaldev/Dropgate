@@ -142,6 +142,38 @@ class OutputSink {
     }
 }
 
+/**
+ * A bundle's ZIP, as core's one sink for it: core's ZIP writer gives it the
+ * archive's bytes, and the file service names it for when it's saved. Core
+ * takes a sink, not a function giving one, for a ZIP, so the file service's
+ * is opened as the first bytes come.
+ */
+class ZipSink {
+    #opening = null;
+
+    constructor(output) {
+        this.output = output;
+    }
+
+    /** The file service's sink, opened once. */
+    #sink() {
+        this.#opening ??= OutputSink.open(this.output, { name: '', size: 0, index: 0 });
+        return this.#opening;
+    }
+
+    async write(chunk) {
+        await (await this.#sink()).write(chunk);
+    }
+
+    async close() {
+        await (await this.#sink()).close();
+    }
+
+    async abort() {
+        if (this.#opening) await (await this.#opening).abort();
+    }
+}
+
 // --- Servers ---
 
 /** Main's answer to this page being ready: the app's name and version, for display only (core never sends them). */
@@ -290,8 +322,9 @@ engine.onMetadata(async ({ id, call, link }) => {
 
 // Download one, from the link kept for it, into the output main granted the
 // file service: core takes a lease, counted as one download, and gives each
-// file to a sink there as it starts.
-engine.onDownload(async ({ id, output }) => {
+// file to a sink there as it starts, or, as one ZIP, its ZIP writer's bytes to
+// one sink. Of a bundle, only the files chosen (by index) are asked for.
+engine.onDownload(async ({ id, output, files, asZip }) => {
     const kept = links.get(id);
     let operation;
     try {
@@ -299,7 +332,9 @@ engine.onDownload(async ({ id, output }) => {
         operation = (await clientFor(kept.server)).hosted.download({
             id: kept.upload,
             secret: kept.secret,
-            sink: (file) => OutputSink.open(output, file),
+            ...(files ? { files } : {}),
+            asZip,
+            sink: asZip ? new ZipSink(output) : (file) => OutputSink.open(output, file),
         });
     } catch (error) {
         // Only a download that never started gets here.

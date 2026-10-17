@@ -1,5 +1,5 @@
 import { filenames } from './dropgate-core.js';
-import { saveStream } from './page-common.js';
+import { bundleZipName, saveStream } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
 // The download page's half for an upload of several files. Every download it
@@ -270,7 +270,7 @@ async function downloadAllAsZip() {
   }
 
   try {
-    const zipName = `dropgate-bundle-${bundleState.id}.zip`;
+    const zipName = bundleZipName();
     statusTitle.textContent = bundleState.isEncrypted ? 'Downloading & Decrypting' : 'Downloading';
     statusMessage.textContent = `Your browser will ask you where to save "${zipName}".`;
 

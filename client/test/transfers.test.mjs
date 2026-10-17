@@ -331,6 +331,30 @@ test('a download reads its list of files, then waits; Save to changes until it s
     assert.deepEqual(transfers.remove([card.id]).map(({ id }) => id), [card.id]);
 });
 
+test('a bundle\'s download chooses its files and whether as one ZIP while it waits; saved as files it\'s in a folder of its own; a retry keeps the choice', () => {
+    const { transfers } = registry();
+    const card = addDownload(transfers);
+    assert.equal(transfers.choose(card.id, { asZip: true }), null, 'nothing to choose while its list is read');
+    transfers.read(card.id, { files: [{ name: 'a.bin', size: 1 }, { name: 'b.bin', size: 2 }, { name: 'c.bin', size: 3 }], encrypted: true });
+    assert.deepEqual([view(card).chosen, view(card).asZip, view(card).inFolder], [null, false, true], 'all of them, as files, in a folder of their own');
+    assert.equal(transfers.choose(card.id, { files: [0, 3] }), null, 'a file it hasn\'t');
+    transfers.choose(card.id, { files: [0, 2], asZip: true });
+    assert.deepEqual([view(card).chosen, view(card).asZip, view(card).inFolder], [[0, 2], true, false]);
+    transfers.choose(card.id, { asZip: false });
+    assert.deepEqual([view(card).chosen, view(card).inFolder], [[0, 2], true], 'the files stay as chosen');
+    transfers.choose(card.id, { files: [1] });
+    assert.equal(view(card).inFolder, false, 'one file: saved on its own');
+
+    transfers.start(card.id, SERVER);
+    assert.equal(transfers.choose(card.id, { files: [0, 1, 2] }), null, 'started: its choice is sealed');
+    transfers.ended(card.id, { status: 'error', error: 'The server dropped this download.' });
+    transfers.retry(card.id, card.owner);
+    assert.deepEqual([card.state, view(card).chosen], ['waiting', [1]], 'tried again, as it was chosen');
+    // All of them chosen is no choice.
+    transfers.choose(card.id, { files: [0, 1, 2] });
+    assert.equal(view(card).chosen, null);
+});
+
 test('a download whose list couldn\'t be read fails, with no Retry; one that failed with its list read can wait again; at once follows Settings', () => {
     const { transfers, started } = registry();
     const unread = addDownload(transfers);
