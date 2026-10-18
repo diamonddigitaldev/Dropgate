@@ -41,7 +41,7 @@ To prevent and monitor for abuse, `DEBUG`-level logging and strict rate limits a
 **Dropgate** is a modern, privacy-respecting file sharing system designed to be easy to self-host and easy to use.
 
 It ships as three parts:
-- [**Dropgate Client**](./client/README.md): A lightweight Electron app for uploading, encrypting, and sharing files.
+- [**Dropgate Client**](./client/README.md): An Electron-based desktop app for uploading, encrypting and sharing files, and downloading them again, for Windows and Linux.
 - [**Dropgate Server**](./server/README.md): A Node.js backend that hosts the API + Web UI, with optional end-to-end encryption and configurable storage.
 - [**@dropgate/core**](./packages/dropgate-core/README.md): A headless TypeScript library that powers the client and server, usable in custom projects.
 
@@ -77,7 +77,7 @@ Dropgate was built to make **secure file sharing accessible**, **transparent**, 
 
 ```
 /Dropgate
-├── client/                  # Electron-based uploader app (GPL-3.0)
+├── client/                  # Electron desktop app: uploads and downloads (GPL-3.0)
 ├── server/                  # Node.js server + Web UI (AGPL-3.0)
 ├── packages/
 │   └── dropgate-core/       # Shared TypeScript library (Apache-2.0)

@@ -3,7 +3,7 @@
 
    # Dropgate Client
 
-   <p style="margin-bottom:1rem;">An Electron-based, privacy-first file sharing client built for secure communication with Dropgate servers.</p>
+   <p style="margin-bottom:1rem;">An Electron-based desktop app for sharing files through Dropgate, a self-hosted, privacy-first file sharing system.</p>
 </div>
 
 <div align="center">
@@ -20,8 +20,8 @@
 
 ## Overview
 
-**Dropgate Client** is the desktop way to upload and share files through a Dropgate Server.
-It’s built to feel simple: pick a file, choose your options, hit upload, and share the link.
+**Dropgate Client** is the desktop app for uploading files to a Dropgate Server and downloading them again.
+It’s built to feel simple: drop your files, hit **Upload**, and share the link; paste a link, hit **Download**, and the files are in your folder.
 
 
 ## Features
@@ -30,19 +30,23 @@ It’s built to feel simple: pick a file, choose your options, hit upload, and s
 
 * **Server Agnostic** | Connect to any compatible Dropgate Server — whether it’s self-hosted at home, deployed via Docker, or behind a reverse proxy.
 
-* **Privacy by Design** | No telemetry, no analytics, and no personal identifiers. Your data stays between you and your chosen server.
+* **Privacy by Design** | No telemetry, no analytics, and no personal identifiers. It keeps no history: nothing of your uploads or downloads outlives quitting the app, but the files you download. Your data stays between you and your chosen server.
 
 * **Cross-Platform Support** | Available for Windows and Linux.
 
-* **Downloads** | Paste a Dropgate link to download its file into a folder of your choice, decrypted on your device, with Pause and Resume. A link to several files is saved as files in a folder of their own, or as one ZIP, all of them or those you choose.
+* **Downloads** | Paste a Dropgate link to download its file into a folder of your choice, decrypted on your device. A link to several files is saved as files in a folder of their own, or as one ZIP, all of them or those you choose.
 
-* **Multi-File Uploads** | Select or drag-and-drop multiple files at once — they're bundled together and uploaded in one go.
+* **Multi-File Uploads** | Select or drag-and-drop multiple files at once — they're bundled together and uploaded in one go, with one link.
 
-* **Fast, Lightweight Interface** | Simple drag-and-drop UI focused on minimalism and clarity.
+* **Several at Once** | Up to 3 uploads and downloads run at once (up to 6, if you choose), the rest waiting their turn, and they keep going in the tray when you close the window.
 
-* **Smart Compatibility Checks** | The client reads server capabilities (limits, encryption support, etc.) so you don’t run into surprises mid-upload.
+* **Pause and Resume** | Pause an upload or a download, and pick it up where it stopped, for as long as the server keeps it.
 
-* **Windows Context Menu Integration** | Right-click a file and upload in the background.
+* **Delete Your Upload** | A finished upload can be deleted from the server, so its link stops working.
+
+* **Smart Compatibility Checks** | The app reads the server's capabilities (limits, encryption support, etc.) and offers only what it allows, so you don’t run into surprises mid-upload.
+
+* **Windows Context Menu Integration** | Right-click a file and upload in the background with **Share with Dropgate**.
 
 
 ## Installation
@@ -86,65 +90,96 @@ It runs for whoever runs it, and adds itself to the menu and **Open With**, and 
 
 There's no right-click "Share with Dropgate" on Linux: use **Open With**, which adds the files to Upload.
 
-Then launch the client and connect to your server.
+The `latest.yml`, `latest-linux.yml` and `.blockmap` files on each release are for the app's updater: you don't need to download them.
+
+To go back to an earlier version, uninstall the app and install that version from the releases page.
+
+Then launch the app and connect to your server.
 
 
 ## Usage
 
-### Sending a file
+The app has two sections, in the sidebar: **Upload** and **Download**. Each upload and download waits on its own until you start it, runs with its own **Pause**, **Resume** and **Cancel**, and stays, with its link or where it was saved, until you remove it (its **×**, or select several and choose **Remove**), **Clear Finished** takes every one that has ended, or you quit. A failed or cancelled one has **Retry**, which makes it wait again. Click one to select it (**Ctrl** to add one, **Shift** for a range, **Ctrl+A** for all, **Delete** to remove those selected); the bar above them then acts on those selected, or on every one when none is.
 
-1. **Launch** the client.
-2. **Enter the server address** you want to connect to in **Settings**, under **Server**, and choose **Test** (for example, your home server or a private Dropgate instance). It's remembered from then on. Under **New uploads to this server**, set the file lifetime and max downloads each new upload starts with, within what the server allows. E2EE is applied whenever the server supports it over HTTPS.
-3. **Add files** on **Upload**: drag and drop them into the window, or choose **Add Files**. The files added together are one upload, with one link, and it waits on its own, **Ready**. Files dropped onto an upload that's waiting join it; a file already in it is skipped. Dropped onto one that has started, they're a new upload.
-4. **Hit Upload** on it, or **Upload All** for every one waiting. When it finishes, the **download link is copied to your clipboard**, and the upload shows it, with **Copy Link** to copy it again.
+### Uploading
 
-Each upload stays on **Upload**, with its link, until you remove it (its **×**, or select several and choose **Remove**), or **Clear Finished** takes every one that has ended, or you quit. A failed or cancelled upload has **Retry**, which makes it wait again. Click an upload to select it (**Ctrl** to add one, **Shift** for a range, **Ctrl+A** for all); the bar above them then acts on those selected.
-
-**Advanced Options.** An upload that's waiting has its own **Advanced Options**, and **Bulk Edit**, on the bar above, sets them for every one selected: the file lifetime and max downloads, offering only what the server allows (**Apply** is off, with the reason under the field, for a value outside it), and for one upload of several files, its files, each of which can be taken out. They also say whether it will be end-to-end encrypted, which they can't turn off. The line under an upload's name says what it has that differs from the server's settings for new uploads ("3 Days · 10 Downloads"). An upload whose settings are outside what the server allows as it starts (`config.json` edited by hand, or a server that has lowered its limits since) stops and asks first: **Use the Server's Limits** goes on with them, and **Cancel** leaves it waiting.
-
-**Deleting an upload.** A finished upload has **Delete**, which asks first, then deletes it from the server at once: its link stops working, and the upload says so. It's there until you remove the upload or quit: what deletes it, its manage token, is kept in the app's memory until then, and never written anywhere.
-
-**Pausing an upload.** On a server that allows it, **Pause** sits beside **Cancel** on an upload while it runs. Paused, its status line says until when the server keeps it ("Paused. Kept until 14:32."), as long as the server's operator allows (an hour by default). **Resume** carries on from where it stopped. Nothing resumes by itself: 5 minutes before that time (or as it pauses, if the server keeps it for less), a notification says so, naming no file, and an upload still paused then ends with "The server dropped this paused upload." A file changed while its upload runs or is paused can't be read on, so the upload fails rather than send part of the old file and part of the new one.
+1. **Enter the server address** you want to connect to in **Settings**, under **Server**, and choose **Test** (for example, your home server or a private Dropgate instance). It's remembered from then on. Under **New uploads to this server**, set the file lifetime and max downloads each new upload starts with, within what the server allows.
+2. **Add files** on **Upload**: drag and drop them into the window, or choose **Add Files**. The files added together are one upload, with one link, and it waits on its own, **Ready**. Files dropped onto an upload that's waiting join it; a file already in it is skipped. Dropped onto one that has started, they're a new upload. Folders and empty files are skipped, and the app says so.
+3. **Hit Upload** on it, or **Upload All** for every one waiting. An upload is end-to-end encrypted whenever the server supports it over HTTPS; when it can't be, Upload asks first (the **Upload Security Warning**, once for all the uploads it starts). When it finishes, the **download link is copied to your clipboard**, and the upload shows it, with **Copy Link** to copy it again.
 
 Files opened with the app (**Open with**, files dropped on its icon, or opened while it's running) are added to **Upload**, every one of them: the files of one opening are one upload, waiting. On a Wayland desktop (such as GNOME's), a file opened while the app is running is added, but the desktop may only mark the app's icon as wanting attention instead of bringing its window forward.
 
-**Protip (Windows):** Right-click a file, or several, and choose **"Share with Dropgate"** to upload in the background, several files as one bundle. E2EE is auto-applied when available; if not, you'll see a warning. (On Windows 11, it's under **Show more options**.) Share again while one is going and they upload side by side.
+### Downloading
 
-**Several at once.** Up to 3 transfers run at once, uploads and downloads together (**Settings**, under **Transfers**, sets it from 1 to 6); any more wait as queued, and start in the order they were added as one finishes. A paused one doesn't hold a place: resumed while the others take every place, it waits for one. When uploads finish while the window isn't in front of you, one notification tells of those ending together ("3 Uploads Finished"), with counts and never a file's name, and the latest link is the one on the clipboard. While an upload runs, your computer isn't let suspend the app.
+1. **Paste a Dropgate link** into the box on **Download**, and choose **Add** (or press **Enter**). The app reads the upload's list of files first, which counts as no download, and shows its name and size (or how many files it has), waiting, **Ready**. A direct transfer's code or link isn't taken yet: the desktop app gets direct transfers later.
+2. **Save to** on it says where it's saved: the folder in **Settings**, under **Transfers** (your system's Downloads folder unless you've chosen another), or **Choose Folder…** to pick one for it. **Save all to**, on the bar above, sets it for every download waiting, or those selected.
+3. **Hit Download** on it, or **Download All**. The file is decrypted on your device as it comes, and its status line says **Saving…** as it's put in place, then where it was saved.
 
-**Closing the window.** With uploads or downloads running, paused or queued, closing the window keeps them going: it hides, and Dropgate's icon shows in the notification area (or your Linux desktop's tray, where it has one), with **Open Dropgate Client**, how many are going, and **Quit**. The first time, a notification says so. Once they've all ended, the app quits, as it would have when you closed it. With nothing going, closing the window quits. **Quitting**, from the tray or the menu, cancels every upload, each server told to drop it, and every download, its part-written file deleted: nothing of them is kept.
+A file is never saved over one already there: if its name is taken, it's saved as `name (1).ext`, and so on. Its name is made safe for every system first (a name such as `CON.txt` is saved as `_CON.txt`, and a character that would hide part of a name is shown, as `[U+202E]`). Until it's whole, it's written in a folder in the app's own data folder, `Partial Downloads`, under a random name, and only then moved into its folder; that folder is emptied whenever the app starts and quits, so a download that didn't finish (cancelled, failed, or cut off by a crash) leaves nothing behind.
 
-### Settings and updates
+Or open the link in your web browser, and download it there. Either way, an end-to-end encrypted file is decrypted on your device.
+
+### A Link to Several Files: As Files or One ZIP
+
+A link to several files is downloaded all at once, as one download, counted once. Its **Advanced Options** lists its files, each ticked to download or not, and **Save as one ZIP**:
+
+* **Saved as files** (the default), they go into a new folder of their own in its Save to folder, named for when they're saved (`dropgate-bundle-20261010-143205`, the date and time), and only once every one is whole: one cancelled part-way leaves no file and no folder. A single file chosen of them is saved on its own, as a link to one file is.
+* **Saved as one ZIP**, it's one file in its Save to folder, named the same way (`dropgate-bundle-20261010-143205.zip`), holding only the files chosen; a ZIP of any size, written as ZIP64 where it needs it.
+
+The line under its name says what's set ("3 of 8 Files · As One ZIP"), and while it downloads, which file it's on ("Downloading 41% · File 2 of 8"). **Bulk Edit**, on the bar above, sets **Save as one ZIP** for every one selected.
+
+### Show in Folder and Open Folder
+
+A finished download has **Show in Folder**, which opens the folder it was saved in with it selected, or, for files saved in a folder of their own, **Open Folder**, which opens that folder. The app never opens a file it has received.
+
+### The Mark of the Web (Windows)
+
+On Windows, every file the app saves, a ZIP and each of a bundle's files, is marked as having come from the internet, as your browser's downloads are: the Mark of the Web, which says only that, with no address in it. So Windows checks a program before it runs, and Office opens a document in Protected View. A drive that can't hold the mark (FAT, exFAT, some network shares) gets the file unmarked, as it would from your browser. On Linux, nothing is added.
+
+### Advanced Options and Bulk Edit
+
+An upload that's waiting has its own **Advanced Options**, and **Bulk Edit**, on the bar above, sets them for every one selected: the file lifetime and max downloads, offering only what the server allows (**Apply** is off, with the reason under the field, for a value outside it), and for one upload of several files, its files, each of which can be taken out. They also say whether it will be end-to-end encrypted, which they can't turn off. The line under an upload's name says what it has that differs from the server's settings for new uploads ("3 Days · 10 Downloads"). An upload whose settings are outside what the server allows as it starts (`config.json` edited by hand, or a server that has lowered its limits since) stops and asks first: **Use the Server's Limits** goes on with them, and **Cancel** leaves it waiting.
+
+A download's Advanced Options are for a link to several files ([above](#a-link-to-several-files-as-files-or-one-zip)): a link to one file has nothing more to choose but its Save to.
+
+### Pause and Resume
+
+On a server that allows it, **Pause** sits beside **Cancel** on an upload or a download while it runs. Paused, its status line says until when the server keeps it ("Paused. Kept until 14:32."), as long as the server's operator allows (an hour by default). **Resume** carries on from where it stopped; a download is still counted as one. Nothing resumes by itself: 5 minutes before that time (or as it pauses, if the server keeps it for less), a notification says so ("Upload Still Paused" or "Download Still Paused"), naming no file, and one still paused then ends with "The server dropped this paused upload." (or download). A file changed while its upload runs or is paused can't be read on, so the upload fails rather than send part of the old file and part of the new one. A paused download's part-written file waits in `Partial Downloads`.
+
+### Deleting an Upload
+
+A finished upload has **Delete**, which asks first, then deletes it from the server at once: its link stops working, and the upload says so. It's there until you remove the upload or quit: what deletes it, its manage token, is kept in the app's memory until then, and never written anywhere.
+
+### Several at Once
+
+Up to 3 transfers run at once, uploads and downloads together (**Settings**, under **Transfers**, sets it from 1 to 6); any more wait as queued ("Queued: Starts when one of the 3 running finishes."), and start in the order they were added as one finishes. A paused one doesn't hold a place: resumed while the others take every place, it waits for one. When transfers end while the window isn't in front of you, one notification tells of those ending together ("3 Uploads Finished", "2 Downloads Finished"), with counts and never a file's name, and after uploads the latest link is the one on the clipboard. While a transfer runs, your computer isn't let suspend the app.
+
+### The Tray and Quitting
+
+With uploads or downloads running, paused or queued, closing the window keeps them going: it hides, and Dropgate's icon shows in the notification area (or your Linux desktop's tray, where it has one), with **Open Dropgate Client**, how many are going ("2 Uploading • 1 Queued"), and **Quit**. The first time, a notification says so. Once they've all ended, the app quits, as it would have when you closed it. With nothing going, closing the window quits.
+
+**Quitting**, from the tray or the menu, cancels every upload, each server told to drop it, and every download, its part-written file deleted: nothing of them is kept, and every link and manage token the app held goes with it.
+
+### Share with Dropgate (Windows)
+
+Right-click a file, or several, and choose **"Share with Dropgate"** to upload them in the background, several files as one upload with one link, to the server in **Settings**, with its settings for new uploads (held to what the server allows). (On Windows 11, it's under **Show more options**.) It's end-to-end encrypted when the server supports it over HTTPS; if it can't be, the window opens to ask first (the **Upload Security Warning**). Notifications say how it goes, counting the files and never naming them, and its link is copied once it's done. If the app wasn't open, it quits once the upload has ended; share again while one is going and they upload side by side.
+
+### Settings and Updates
 
 **Settings** is at the bottom of the sidebar, and in the menu (`Ctrl+,`). Its tabs are:
 
-* **Server**: the server your uploads go to, and **Share with Dropgate**'s.
+* **Server**: the server your uploads go to, and **Share with Dropgate**'s, and its settings for **New uploads to this server**.
 * **Transfers**: **Save downloads to**, the folder new downloads are saved in (your system's Downloads folder unless you choose another with **Browse**; **Reset** goes back), and **Transfers at once**, how many uploads and downloads run at once, from 1 to 6 (3 by default).
 * **Privacy**: **Keep log on disk for troubleshooting**, off by default: the app's log is kept in memory only, and goes when the app closes. Turned on, it's also kept in `debug.log` in its user data folder, with none of your file names, folders or links in it, to send with a bug report; turning it off deletes the file.
 * **Update**: the version you're running, **Check for Updates**, and whether updates download by themselves (on by default; an update downloaded is installed when you close the app). The update channel is **Stable**, **Beta** or **Alpha**: a new install starts on its own version's channel, and your choice is kept from then on. The app never offers an older version than the one you have.
 * **Credits**.
 
-The app checks GitHub for updates a few seconds after it starts, and sends nothing that identifies your installation. Its log is kept in memory, and on disk only if you turn that on. A link it copies is left out of Windows' clipboard history and cloud clipboard, since it holds the key. What it stores and sends is in [Data Processing](../docs/technical/DATA-PROCESSING.md#25-dropgate-client-electron).
-
-### Downloading a file
-
-1. **Paste a Dropgate link** into the box on **Download**, and choose **Add** (or press **Enter**). The app reads the upload's list of files first, which counts as no download, and shows its name and size (or how many files it has), waiting, **Ready**. A direct transfer's code or link isn't taken yet: the desktop app gets direct transfers later.
-2. **Save to** on it says where it's saved: the folder in **Settings**, under **Transfers** (your system's Downloads folder unless you've chosen another), or **Choose Folder…** to pick one for it. **Save all to**, on the bar above, sets it for every download waiting, or those selected.
-3. **Hit Download** on it, or **Download All**. The file is decrypted on your device as it comes, and its status line says **Saving…** as it's put in place, then where it was saved. **Show in Folder** opens its folder with it selected (**Open Folder**, for files saved in a folder of their own): the app never opens a file it has received.
-
-A file is never saved over one already there: if its name is taken, it's saved as `name (1).ext`, and so on. Its name is made safe for every system first (a name such as `CON.txt` is saved as `_CON.txt`, and a character that would hide part of a name is shown, as `[U+202E]`). Until it's whole, it's written in a folder in the app's own data folder, `Partial Downloads`, under a random name, and only then moved into its folder; that folder is emptied whenever the app starts and quits, so a download that didn't finish (cancelled, failed, or cut off by a crash) leaves nothing behind. On Windows, every file it saves is marked as having come from the internet, as your browser's downloads are (the Mark of the Web, with no address in it), so Windows checks a program before it runs, and Office opens a document in Protected View.
-
-**A link to several files.** Its **Advanced Options** lists its files, each ticked to download or not, and **Save as one ZIP**. Saved as files (the default), they go into a new folder of their own in its Save to folder, named for when they're saved (`dropgate-bundle-20261010-143205`, the date and time), and only once every one is whole: one cancelled part-way leaves no file and no folder. Saved as one ZIP, it's one file there, named the same way (`dropgate-bundle-20261010-143205.zip`), which any system's ZIP tool opens, however big. The line under its name says what's set ("3 of 8 Files · As One ZIP"). **Bulk Edit**, on the bar above, sets **Save as one ZIP** for every one selected.
-
-**Pausing a download.** On a server that allows it, **Pause** sits beside **Cancel** while it runs, as an upload's does: paused, its status line says until when the server keeps it, a notification comes 5 minutes before that time, and nothing resumes by itself ("The server dropped this paused download." if it's still paused then). **Resume** carries on from where it stopped, and it's still counted as one download.
-
-Or open the link in your web browser, and download it there. Either way, an end-to-end encrypted file is decrypted on your device.
+The app checks GitHub for updates a few seconds after it starts, and sends nothing that identifies your installation. Its log is kept in memory, and on disk only if you turn that on. A link it copies is left out of Windows' clipboard history and cloud clipboard, since it holds the key. What it stores and sends is in [Data Processing](../docs/technical/DATA-PROCESSING.md#25-dropgate-client-electron), and what to do when something goes wrong in [Troubleshooting](../docs/TROUBLESHOOTING.md#7-the-desktop-app).
 
 
 ## Direct Transfer (P2P)
 
-The desktop client focuses on the classic hosted-upload flow.
-If your server has **Direct Transfer (P2P)** enabled, you can use it from the server’s **Web UI** in your browser.
+The desktop app doesn't do direct transfers yet: **Download** takes links to uploads, and says so when it's given a direct transfer's code or link. If your server has **Direct Transfer (P2P)** enabled, you can use it from the server’s **Web UI** in your browser.
 
 
 ## Development
@@ -162,7 +197,7 @@ The app is built on [electron-kit](https://github.com/diamonddigitaldev/electron
 
 It runs on [`@dropgate/core`](../packages/dropgate-core/README.md), loaded from [`src/dropgate-core.js`](src/dropgate-core.js) by its transfer window: a hidden window, in a session of its own, that makes every request the app makes to a server, and reads the files it uploads from a file service, a utility process, which also writes the files it downloads, so neither the app's window nor its main process ever holds a file's bytes. That file is core's build, written by `npm run build` in `packages/dropgate-core` and committed, so the app runs and packages without building core first. Don't edit it: change core's source and build it again ([Building and Testing](../docs/core/building-and-testing.md)). GitHub Actions fails if it isn't core's build.
 
-The main process keeps every upload, the window's and Share with Dropgate's, and every download, in a registry, in memory only ([`src/core/transfers.js`](src/core/transfers.js)): it decides which run (3 at once, unless **Transfers at once** says otherwise) and which wait, and tells the window of each at most 4 times a second. The transfer window and the file service start together with the first server check or upload, and close 30 seconds after the transfer window's last work ends; the file service holds a file only while its upload runs or is paused. The tray icon is the app's own ([`src/tray.js`](src/tray.js)).
+The main process keeps every upload, the window's and Share with Dropgate's, and every download, in a registry, in memory only ([`src/core/transfers.js`](src/core/transfers.js)): it decides which run (3 at once, unless **Transfers at once** says otherwise) and which wait, and tells the window of each at most 4 times a second. The transfer window and the file service start together with the first server check, upload or link pasted into Download, and close 30 seconds after the transfer window's last work ends, unless it still holds a finished upload's manage token or a download's link; the file service holds a file only while its upload runs or is paused, and writes one only while its download runs or is paused. The tray icon is the app's own ([`src/tray.js`](src/tray.js)).
 
 
 ## Building
@@ -192,12 +227,12 @@ npm test
 These tests read the app's source rather than launching it, so they don't need a display and don't download Electron. (The app itself is tested end to end, [below](#the-app-end-to-end).) Several use electron-kit's own test helpers. They guard the things that break quietly:
 
 * **The preload contract.** The preload is run as a sandboxed preload would be, and only loads what one can. Every call of its bridge reaches a channel in `src/constants.js`, every channel the page asks is answered in `window-channels.js` through electron-kit (which answers the app's own page only), and every message `main.js` sends reaches the page. Only one channel takes a file's path, `files:add`: from then on the page holds a handle. A mistake in any of these leaves the app doing nothing, with no error in the main process.
-* **The transfer window's contract.** Uploads and server checks run in a hidden transfer window, in a session of its own, and its files are read by a file service, a utility process, never by the page or `main.js`. Its preload loads only what a sandboxed one can, and gives its page `window.engine` alone; every engine channel is answered for its session only; its page has no Node and no bridge but its own, and a CSP allowing nothing but its own scripts and requests to servers; it can't navigate or open a window; and the page of the app's window imports no core and makes no request.
+* **The transfer window's contract.** Uploads, downloads and server checks run in a hidden transfer window, in a session of its own, and its files are read and written by a file service, a utility process, never by the page or `main.js`. Its preload loads only what a sandboxed one can, and gives its page `window.engine` alone; every engine channel is answered for its session only; its page has no Node and no bridge but its own, and a CSP allowing nothing but its own scripts and requests to servers; it can't navigate or open a window; and the page of the app's window imports no core and makes no request.
 * **Every channel's session and shape.** The handlers are loaded as the app registers them, with electron-kit's own check on who's asking and a stand-in for Electron: the app's window is refused every channel of the transfer window's, and the transfer window every one of the app's window's; and every channel refuses a value of the wrong kind, an unsafe number, a path where a handle or an ID goes, and a handle or an upload the main process never made (or made for another window), before it does anything.
 * **Share with Dropgate's upload.** The main process makes it with no window, from the server's check: the settings for new uploads held to the server's limits, end-to-end encrypted when the server can be over HTTPS, and Upload's own message when it can't go.
-* **Upload's cards.** The page is built on electron-kit's cards, card grid, bulk bar, action bar, busy buttons and switch, and lights a waiting card files are dragged over but never reads what's dropped itself (the drop zone does). A new upload takes the server's settings for new uploads from the main process, which also adds files to one only while it waits (each file once, by its path), sets a waiting one's Advanced Options (a lifetime in a known unit, a whole download limit, the files it keeps by their place in it, nothing else), removes only those waiting or ended, makes a failed or cancelled one wait again, and takes whether an upload is encrypted only as the page starts its own. A finished upload's Delete is the transfer window's, with the manage token the main process never holds.
+* **Upload and Download.** The page is built on electron-kit's page components (`card()`, `cardGrid()`, `bulkBar()`, `actionBar()`, `busy()`, `switchField()` and `stepSlider()`), and lights a waiting upload files are dragged over but never reads what's dropped itself (the drop zone does). A new upload takes the server's settings for new uploads from the main process, which also adds files to one only while it waits (each file once, by its path), sets a waiting one's Advanced Options (a lifetime in a known unit, a whole download limit, the files it keeps by their place in it, nothing else), removes only those waiting or ended, makes a failed or cancelled one wait again, and takes whether an upload is encrypted only as the page starts its own. A finished upload's Delete is the transfer window's, with the manage token the main process never holds.
 * **Window security.** Every window the app makes itself, the transfer window, keeps `contextIsolation` on, `nodeIntegration` off and the sandbox on, as the main window (electron-kit's) does; Share with Dropgate makes none. The main window's page has a CSP too: only its own scripts, styles, fonts and images, and no request at all; nothing in it is inline.
-* **Several at once.** The main process's registry runs 3 uploads at once, queues the rest in the order added and starts them as places free, gives a paused one no place (resumed with none free, it waits as queued; while its resume is asked of the server, it keeps its place), answers Restart Now's question while any runs, is paused or is queued, and starts nothing once the app is quitting. One that has ended keeps its link or its reason until it's removed, and takes no place. The window gets each upload's names and sizes, never a path, at most 4 times a second.
+* **Several at once.** The main process's registry runs 3 transfers at once (or as many as **Transfers at once** says), uploads and downloads together, queues the rest in the order added and starts them as places free, gives a paused one no place (resumed with none free, it waits as queued; while its resume is asked of the server, it keeps its place), answers Restart Now's question while any runs, is paused or is queued, and starts nothing once the app is quitting. One that has ended keeps its link or its reason until it's removed, and takes no place. The window gets each transfer's names and sizes, never a path, at most 4 times a second.
 * **When the transfer window and the file service run.** On a stand-in Electron with its clock mocked: the transfer window closes 30 seconds after its last work ends, and not while any runs or it holds a finished upload's manage token (which it forgets as its upload is removed or deleted, or the app quits), and the file service with it; the transfer window gets its port to the file service once its page is ready, before any upload's work, and each upload's grants are revoked as it ends; quitting asks the transfer window to cancel everything, and waits 5 seconds for it at most.
 * **What notifications and the tray say.** Uploads ending together are one notification ("3 Uploads Finished", a failure counted), downloads likewise, and both together "Transfers", a cancelled one none, every title in Title Case, and nothing but counts and core's reason; the tray gives counts only ("2 Uploading • 1 Downloading • 1 Queued").
 * **The house's copy.** Every word the app can show, read from its source: one-character ellipses, never "card", a capital after a colon, items between bullets in Title Case, file names and addresses never recased, and every button that says it's doing something electron-kit's busy button.

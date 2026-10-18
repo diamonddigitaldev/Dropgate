@@ -59,7 +59,8 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 **"The server dropped this paused upload."**
 - The upload was paused for longer than the server keeps a paused upload: `UPLOAD_MAX_PAUSE_MINUTES` (60 by default) from the pause, the time the Web UI showed ("The server keeps this upload until …"), and the Dropgate Client ("Kept until …", with a notification 5 minutes before). Nothing resumes by itself, so the server deleted what it had. Upload the files again; to allow longer pauses, raise `UPLOAD_MAX_PAUSE_MINUTES` (at most `1440`, a day).
 - A restart drops every upload in progress, paused ones too.
-- No **Pause** on an upload in the Dropgate Client: the server has pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`).
+- **"The server dropped this paused download."** in the Dropgate Client is the same for a download: the server let its lease go once the pause ran out, and it counts as one download, since it got part of the file. Nothing of it is left on your disk. Choose **Retry** to download it again from the start, if the upload is still there.
+- No **Pause** on an upload or a download in the Dropgate Client: the server has pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`).
 
 **A download paused in the browser failed, or never finishes**
 - The download pages stream each file to disk through the page itself, so a browser's own Pause only works while that page stays open, and only in Chrome: Resume there carries on and saves the whole file. In Firefox, Pause ends the download, and the page says it failed. In Chrome with the page closed while paused, Resume never finishes: cancel it.
@@ -116,11 +117,39 @@ If clients see “Too many requests”:
 **To send its log with a bug report**
 - Turn on **Keep log on disk for troubleshooting** in **Settings**, under **Privacy**, and do what went wrong again. The log is `debug.log` in the app's user data folder (`%APPDATA%\dropgate-client` on Windows, `~/.config/dropgate-client` on Linux). It holds none of your file names, folders or links. Turn the setting off afterwards, and the file is deleted.
 
-**A download says "The folder to save to isn't there any more."**
-- The folder it was to be saved in was moved or deleted after it was chosen. Choose another in its **Save to** (or, for every new download, in **Settings**, under **Transfers**), and choose **Retry**. Nothing of the download is left behind: until it's whole, a download is written in `Partial Downloads` in the app's user data folder, which is emptied whenever the app starts and quits.
+**Nothing is left behind when a download fails**
+- Until it's whole, a download is written in `Partial Downloads` in the app's user data folder, under a random name, and only then moved into its folder. One that fails or is cancelled is deleted at once (a link to several files' with every file of it, and no folder made), and the folder is emptied whenever the app starts and quits, so a crash leaves nothing there either. Fix what it says, then choose **Retry**, and the download waits again. The server counts each try that got any of the file as one download, so on an upload with a download limit, a try that failed part-way has used one.
+
+**"Failed: The folder to save to isn't there any more."**
+- The folder it was to be saved in was moved or deleted after it was chosen. Choose another in its **Save to** (or, for every new download, in **Settings**, under **Transfers**), and choose **Retry**.
+
+**"Failed: There is no space left on the disk."**
+- Free some space and choose **Retry**. A download needs room on the drive that holds the app's user data folder while it runs, as that's where it's written until it's whole; saved to another drive, it's then copied there (it says **Saving…** while it is), so that drive needs room for it too.
+
+**"Failed: The folder's path and the file's name are too long together."**
+- Long paths work, on Windows too, so this is a path past what the drive itself takes. Choose a folder nearer the top of the drive in **Save to**, and choose **Retry**.
+
+**"Failed: The folder to save to can't be written to." / "… is on a disk that is read-only."**
+- Your account can't write in that folder, or the drive is read-only (a locked memory card, a share mounted read-only). Choose another folder in **Save to**.
+
+**A download to a USB stick or a network share takes longer to say Saved**
+- A drive with no hard links (FAT and exFAT, as most USB sticks and memory cards are, and many network shares) gets a copy of the finished file, where another folder on the app's own drive gets it at once. It says **Saving…** while it copies.
+- On Windows, a file saved there has no Mark of the Web, since those drives can't hold one: Windows won't warn before running a program from it, as it wouldn't for a browser's download there. Check a program before you run it.
+
+**"Failed: The download ended before the whole file came."**
+- The file's bytes stopped short of the size its upload gave. Choose **Retry**. If it keeps happening, see [Received data didn't pass its integrity check](#3-hosted-upload-issues), which has the same causes.
+
+**"Failed: The link to this download is no longer held: Paste it again."**
+- The app's transfer window, which holds each download's link (its key with it) and nothing else does, stopped by itself, so the link went with it. Remove the download, paste the link again, and choose **Download**.
+
+**"Couldn't open the folder: It was moved or deleted."**
+- **Open Folder** opens the folder a link to several files was saved in, and it isn't where it was. The files are wherever it was moved to.
 
 **A pasted link isn't taken**
-- **Download** takes a link to an upload, `https://<server>/<id>`, with `#` and its key after it when it's encrypted. A direct transfer's code or link isn't taken yet: open it in your browser. A link made by Dropgate 3 can't be downloaded by this version. A link to several files can't be downloaded in the app yet either: open it in your browser.
+- **Download** takes a link to an upload, `https://<server>/<id>`, with `#` and its key after it when it's encrypted.
+- **"Direct transfers come to the desktop app later. For now, this box takes links to uploads."** A direct transfer's code, with its dash or without, or its link: open it in your browser instead, on the server's Web UI.
+- **"That link was made with an older version of Dropgate, which this app can't download."** A link from Dropgate 3: a bundle's (`/b/<id>`), or a single file's whose key after the `#` is 44 characters ending in `=`. Ask its sender to update and send the files again.
+- **"That isn't a Dropgate link."** Anything else, such as a link with a query, or one to a page that isn't an upload's.
 
 **A `.*` key left in the registry after upgrading from version 3 (Windows)**
 - Version 3, installed for all users, registered an association for a literal `.*` extension, which never did anything, and its uninstaller leaves that key behind. Nothing reads it. To remove it, from a Command Prompt run as administrator:

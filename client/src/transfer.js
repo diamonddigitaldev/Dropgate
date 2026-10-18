@@ -31,9 +31,9 @@ const GOING = ['initializing', 'uploading', 'downloading', 'paused', 'completing
 // --- The file service ---
 
 // The file service's port, taken only from this window's own preload. Main
-// starts the file service for the first upload that reads, and stops it once
-// none is left, so each time it starts again this page is handed a new port,
-// before the upload that needs it.
+// starts the file service with this window and stops it with it, and hands
+// this page its port once the page is ready, before any work that needs it; a
+// new port is taken whenever one comes.
 let nextRequest = 0;
 const waiting = new Map();
 let takePort;

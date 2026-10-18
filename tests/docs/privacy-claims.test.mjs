@@ -69,3 +69,43 @@ test('what isn\'t a claim needs no test: what is logged or stored, and what the 
         assert.deepEqual(problemsIn(markdown), [], markdown);
     }
 });
+
+// What the desktop app keeps, where and for how long, is stated in both docs:
+// a section that loses one of these no longer says all it keeps.
+const DESKTOP_KEEPS = {
+    'docs/PRIVACY.md': {
+        section: '## 🖥️ The desktop app',
+        names: ['`config.json`', '`Partial Downloads`', 'transfer window', 'manage token', 'Mark of the Web', 'tray', '`dropgate-bundle-'],
+    },
+    'docs/technical/DATA-PROCESSING.md': {
+        section: '### 2.5 Dropgate Client (Electron)',
+        names: ['`settingsSchema`', '`downloadFolder`', '`transfersAtOnce`', '`Partial Downloads`', '**The tray icon**', '**The Mark of the Web**',
+            "**The app's own browser files**", 'transfer window', 'manage token', '`dropgate-bundle-'],
+    },
+};
+
+/** A doc's section: from its heading to the next heading of the same level or higher. */
+function sectionOf(markdown, heading) {
+    const lines = markdown.split(/\r?\n/);
+    const start = lines.indexOf(heading);
+    if (start === -1) return null;
+    const level = heading.match(/^#+/)[0].length;
+    const end = lines.findIndex((line, i) => i > start && /^#+\s/.test(line) && line.match(/^#+/)[0].length <= level);
+    return lines.slice(start, end === -1 ? undefined : end).join('\n');
+}
+
+test('the privacy docs say what the desktop app keeps: its settings, the partial folder, the tray, the transfer window\'s secrets, the bundle names and the Mark of the Web', () => {
+    const missing = Object.entries(DESKTOP_KEEPS).flatMap(([doc, { section, names }]) => {
+        const text = sectionOf(read(doc), section);
+        if (text === null) return [`${doc}: no "${section}" section`];
+        return names.filter((name) => !text.includes(name)).map((name) => `${doc}, "${section}": doesn't name ${name}`);
+    });
+    expectNone(missing, 'Say what the desktop app keeps:');
+});
+
+test('a section is read to the next heading of its level, so a name past it doesn\'t count', () => {
+    const markdown = '## A\n\nkeeps `x`\n\n### A.1\n\nkeeps `y`\n\n## B\n\nkeeps `z`';
+    assert.equal(sectionOf(markdown, '## A').includes('`y`'), true);
+    assert.equal(sectionOf(markdown, '## A').includes('`z`'), false);
+    assert.equal(sectionOf(markdown, '## C'), null);
+});
