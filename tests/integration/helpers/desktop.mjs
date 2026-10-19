@@ -308,29 +308,28 @@ class Desktop {
     }
 
     /**
-     * Point the app at the test's server, in Settings > Server, and set its
-     * settings for new uploads there ("New uploads to this server"), as a
-     * person would, then go back to Upload.
+     * Add the test's server, in Settings > Servers, as a person would: Add
+     * Server, its address, Check, then Add Server once it has found it. The
+     * first saved is the default. Then set its settings for new uploads in its
+     * row ("New uploads to this server"), if any are given, and go back to
+     * Upload.
      * @param {import('@playwright/test').Page} window
      * @param {object} [opts]
+     * @param {string} [opts.url] - The address to add: the test's server's, by default.
      * @param {{ value: number, unit: 'minutes' | 'hours' | 'days' }} [opts.lifetime]
      * @param {number} [opts.maxDownloads]
      */
-    async setUp(window, { lifetime, maxDownloads } = {}) {
-        await window.getByRole('button', { name: 'Settings', exact: true }).click();
-        await window.getByRole('tab', { name: 'Server' }).click();
-        await window.locator('#server-url').fill(this.serverUrl);
-        await window.locator('#test-connection-btn').click();
-        await expect(window.locator('#connection-status')).toHaveText(/connection successful/i);
-        await expect(window.locator('#security-status')).toBeVisible();
-        if (lifetime) {
-            await window.locator('#file-lifetime-unit').selectOption(lifetime.unit);
-            await window.locator('#file-lifetime-value').fill(String(lifetime.value));
-        }
-        if (maxDownloads !== undefined) {
-            await window.locator('#max-downloads-value').fill(String(maxDownloads));
-        }
-        await saved(window);
+    async setUp(window, { url = this.serverUrl, lifetime, maxDownloads } = {}) {
+        await openServers(window);
+        await window.locator('#add-server-btn').click();
+        const dialog = addServerDialog(window);
+        await dialog.getByLabel('Server address').fill(url);
+        await dialog.getByRole('button', { name: 'Check', exact: true }).click();
+        await expect(dialog.getByRole('button', { name: 'Add Server', exact: true }), 'the server, found').toBeVisible();
+        await dialog.getByRole('button', { name: 'Add Server', exact: true }).click();
+        await expect(dialog).toBeHidden();
+        await expect(serverStatus(serverRow(window, url))).toHaveText(/^Online · /);
+        await setServerOptions(window, url, { lifetime, maxDownloads });
         await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
     }
 
@@ -348,7 +347,7 @@ class Desktop {
      */
     async upload(window, files, { encrypted }) {
         this.secrets.addFiles(files, { storedByServer: !encrypted });
-        await expect(window.locator('#security-text')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
+        await expect(serverStatus(defaultServerRow(window)), 'how uploads go to the default server, as its row says').toHaveText(encrypted ? ENCRYPTED : NOT_ENCRYPTED);
         const before = await uploadCards(window).count();
         await window.locator('#file-input').setInputFiles(files.map((file) => this.addFile(file)));
         await expect(uploadCards(window), 'the upload of the files picked').toHaveCount(before + 1);
@@ -514,6 +513,48 @@ function expectNoLookups(desktop) {
  * @param {import('@playwright/test').Page} window
  */
 export const saved = (window) => window.evaluate(() => window.kitAPI.getSettings());
+
+/** Settings, open at its Servers tab. */
+export async function openServers(window) {
+    await window.getByRole('button', { name: 'Settings', exact: true }).click();
+    await window.getByRole('tab', { name: 'Servers' }).click();
+}
+
+/** Settings > Servers' rows, one for each saved server, in its order. */
+export const serverRows = (window) => window.locator('#server-list .server-row');
+
+/** A saved server's row, by its address as the app saved it (its tooltip is the whole address). */
+export const serverRow = (window, url) => serverRows(window).filter({ has: window.locator(`.server-address[title="${url}"]`) });
+
+/** The default server's row: the one marked Default. */
+export const defaultServerRow = (window) => serverRows(window).filter({ has: window.locator('.pill-default:not([hidden])') });
+
+/** A server row's status line: what its last check found ("Online · Dropgate 4.0.0 · End-to-End Encrypted"), or "Not checked yet". */
+export const serverStatus = (row) => row.locator('.server-status');
+
+/** How a server's status line ends when uploads there are end-to-end encrypted, and when they aren't. */
+export const ENCRYPTED = /^Online · Dropgate \S+ · End-to-End Encrypted$/;
+export const NOT_ENCRYPTED = /^Online · Dropgate \S+ · (Plain HTTP · )?Not Encrypted$/;
+
+/** Add Server's dialog. */
+export const addServerDialog = (window) => window.getByRole('dialog', { name: 'Add Server' });
+
+/**
+ * Set a saved server's settings for new uploads in its row, open in Settings
+ * > Servers, as a person would, and wait for main to have saved them.
+ * @param {import('@playwright/test').Page} window
+ * @param {string} url - The server's address, as saved.
+ * @param {{ lifetime?: { value: number, unit: string }, maxDownloads?: number }} options
+ */
+export async function setServerOptions(window, url, { lifetime, maxDownloads }) {
+    const row = serverRow(window, url);
+    if (lifetime) {
+        await row.getByRole('combobox', { name: 'Unit' }).selectOption(lifetime.unit);
+        await row.getByLabel('File lifetime').fill(String(lifetime.value));
+    }
+    if (maxDownloads !== undefined) await row.getByLabel('Max downloads').fill(String(maxDownloads));
+    await saved(window);
+}
 
 /** Upload's cards, one for each upload, in the order they were made. */
 export const uploadCards = (window) => window.locator('#upload-grid .kit-card');

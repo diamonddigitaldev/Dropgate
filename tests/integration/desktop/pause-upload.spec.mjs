@@ -13,7 +13,7 @@
 // that's where its chunks are held, and its clock moved.
 import fs from 'node:fs';
 import { madeUpFile, summary } from '../helpers/files.mjs';
-import { cardButton, expect, securityWarning, test, uploadButton, uploadCard, uploadLink, uploadStatus } from '../helpers/desktop.mjs';
+import { ENCRYPTED, NOT_ENCRYPTED, cardButton, defaultServerRow, expect, securityWarning, serverStatus, test, uploadButton, uploadCard, uploadLink, uploadStatus } from '../helpers/desktop.mjs';
 import { download } from '../helpers/webui.mjs';
 
 // Three 5 MiB chunks.
@@ -58,7 +58,7 @@ async function startUpload(desktop, name, seed, { encrypted, clock = false }) {
     const uploader = await app.transferWindow();
     if (clock) await uploader.clock.install();
     await expect(uploadCard(window).locator('.kit-card-name')).toHaveText([name]);
-    await expect(window.locator('#security-text')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
+    await expect(serverStatus(defaultServerRow(window))).toHaveText(encrypted ? ENCRYPTED : NOT_ENCRYPTED);
     const chunks = await holdChunks(uploader);
     await uploadButton(window).click();
     if (!encrypted) await securityWarning(window).getByRole('button', { name: 'Upload Anyway' }).click();

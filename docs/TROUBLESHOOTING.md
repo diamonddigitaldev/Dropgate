@@ -117,6 +117,29 @@ If clients see “Too many requests”:
 **To send its log with a bug report**
 - Turn on **Keep log on disk for troubleshooting** in **Settings**, under **Privacy**, and do what went wrong again. The log is `debug.log` in the app's user data folder (`%APPDATA%\dropgate-client` on Windows, `~/.config/dropgate-client` on Linux). It holds none of your file names, folders or links. Turn the setting off afterwards, and the file is deleted.
 
+**Add Server says "Connection failed. Check the URL, and that the server is running."**
+- Its **Check** couldn't reach the server. Check the address and the port, that the server is running, and that nothing in between blocks it. Nothing is saved until **Check** has found a Dropgate server there ([Add Server checks an address first…](../tests/integration/desktop/servers.spec.mjs)).
+- An address with no `http://` or `https://` is tried over HTTPS, and the app never falls back to plain HTTP by itself. If the server only serves plain HTTP, the message says to enter its address starting with `http://`; uploads to it aren't end-to-end encrypted ([Add Server's Check never retries a server over plain HTTP…](../tests/integration/desktop/no-http-fallback.spec.mjs)).
+
+**Add Server says "That address answered, but not as a Dropgate server."**
+- Something answered at that address, but not Dropgate's `/api/info`. Check the port, and, behind a reverse proxy, that the address reaches the Dropgate Server itself.
+
+**An invite link isn't taken**
+- Invite links aren't supported yet. Add the server by its address.
+
+**A server's row says "Can't connect"**
+- Its last check couldn't reach it; hold the pointer over the status for why. Once the server is back, choose **Test**. Uploads go to the default server, so a default that can't be reached stops new uploads until it's back, or until you choose **Set as Default** on another.
+
+**A server's row says "Not checked yet"**
+- As the app starts it checks only the default server, so the others aren't asked anything until they're used. Choose **Test** to check one: its limits then show, and its settings for new uploads can be changed ([a row looks as the mockup…](../tests/integration/desktop/servers.spec.mjs)).
+
+**A server's row says "Needs an Update" or "Uploads Off"**
+- **Needs an Update**: the server and the app run different major versions of Dropgate, and can't work together; hold the pointer over the status to see which needs updating.
+- **Uploads Off**: the server's operator has turned hosted uploads off (`ENABLE_UPLOAD=false`).
+
+**A server's file lifetime or max downloads says "Too long" or "Too many"**
+- It's outside what the server allows, so it isn't saved: the help under the field says the server's limit. Enter a value within it ([Add, Set as Default, Move Up, Move Down and Remove…](../tests/integration/desktop/servers.spec.mjs)).
+
 **Nothing is left behind when a download fails**
 - Until it's whole, a download is written in `Partial Downloads` in the app's user data folder, under a random name, and only then moved into its folder. One that fails or is cancelled is deleted at once (a link to several files' with every file of it, and no folder made), and the folder is emptied whenever the app starts and quits, so a crash leaves nothing there either. Fix what it says, then choose **Retry**, and the download waits again. The server counts each try that got any of the file as one download, so on an upload with a download limit, a try that failed part-way has used one.
 

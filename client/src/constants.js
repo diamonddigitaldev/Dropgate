@@ -26,12 +26,15 @@ const IPC = Object.freeze({
     WINDOW_READY: 'window:ready',               // () the page has set itself up; main sends it a question waiting for it then (transfer:ask-insecure)
     FILES_ADD: 'files:add',                     // (paths) dropped, picked or opened files' paths -> { files: [{ handle, name, size }], folders }
     FILE_REVOKE: 'file:revoke',                 // (handle) the page is done with it
-    SERVER_CHECK: 'server:check',               // (url) -> { ok: true, baseUrl, serverVersion, serverInfo, dgup } | { ok: false, code, message }, asked of the server by the transfer window
-    SERVER_ADD: 'server:add',                   // ({ url }) -> { check, server?, servers, defaultServer }: the server checked (by the transfer window), and saved once it can take uploads (one saved already is given back)
-    SERVER_REMOVE: 'server:remove',             // ({ id }) -> { servers, defaultServer }: a saved server forgotten, with its settings
-    SERVER_MOVE: 'server:move',                 // ({ id, by }) -> { servers, defaultServer }: Move Up (-1) or Move Down (1) in the order
-    SERVER_SET_DEFAULT: 'server:set-default',   // ({ id }) -> { servers, defaultServer }: new uploads and Share with Dropgate start on it
-    SERVER_SET_OPTIONS: 'server:set-options',   // ({ id, options }) -> { servers, defaultServer }: its settings for new uploads, { lifetime?, maxDownloads?, allowFallback? }
+    SERVER_CHECK: 'server:check',               // (url) -> { ok: true, baseUrl, serverVersion, serverInfo, dgup } | { ok: false, code, message }, an address not saved (Add Server's Check), asked of the server by the transfer window; kept nowhere
+    // The saved servers: each answers the list as it is now, { servers, defaultServer, checks }, checks being what each one's
+    // last check this run found, by its ID (main's memory only).
+    SERVER_ADD: 'server:add',                   // ({ url }) -> { check, server?, ...list }: the server checked (by the transfer window), and saved once it answers as a Dropgate server (one saved already is given back)
+    SERVER_TEST: 'server:test',                 // ({ id }) -> { check, ...list }: a saved server checked again (Test, the default as the window opens, and before an upload)
+    SERVER_REMOVE: 'server:remove',             // ({ id }) -> list: a saved server forgotten, with its settings and its check
+    SERVER_MOVE: 'server:move',                 // ({ id, by }) -> list: Move Up (-1) or Move Down (1) in the order
+    SERVER_SET_DEFAULT: 'server:set-default',   // ({ id }) -> list: new uploads and Share with Dropgate start on it
+    SERVER_SET_OPTIONS: 'server:set-options',   // ({ id, options }) -> list: its settings for new uploads, { lifetime?, maxDownloads?, allowFallback? }
     TRANSFER_ADD_UPLOAD: 'transfer:add-upload', // ({ files: [handle] }) -> { id }, an upload waiting to start, with the server's settings for new uploads
     TRANSFER_ADD_FILES: 'transfer:add-files',   // ({ id, files: [handle] }) -> { added, skipped } onto the page's own upload waiting, or { started: true } once it has started
     TRANSFER_START: 'transfer:start',           // ({ ids, encrypt? }) start them, in the transfer window: the page's own uploads (encrypt, as it found the server) and downloads, or a share's it was asked about (Upload Anyway)

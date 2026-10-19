@@ -84,7 +84,7 @@ test('a file\'s name or a server\'s address is never recased: nothing the page s
 test('a button that says it\'s doing something is the kit\'s busy button: disabled, with its spinner', () => {
     const renderer = readFileSync(new URL('../src/renderer.js', import.meta.url), 'utf8');
     const labels = [...renderer.matchAll(/kit\.ui\.busy\(\w+, ([^)]+)\)/g)].map(([, label]) => label);
-    assert.deepEqual(labels, ["pause ? 'Pausing…' : 'Resuming…'", "'Deleting…'", "'Testing…'"]);
+    assert.deepEqual(labels, ["pause ? 'Pausing…' : 'Resuming…'", "'Deleting…'", "'Testing…'", "'Checking…'", "'Adding…'"]);
     // Never a label the page writes itself: a button's text is the kit's, or its own label.
     assert.doesNotMatch(renderer, /(Btn|Button|button)\.textContent = ['`][^'`]*ing…/);
     assert.doesNotMatch(readSource('index.html'), /<button[^>]*>[^<]*ing…/);

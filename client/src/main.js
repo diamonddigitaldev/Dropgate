@@ -10,7 +10,7 @@ const {
 const { menuItems } = require('./menu');
 const { Handles, describeFile } = require('./core/handles');
 const { endNotice, countsLine } = require('./core/notices');
-const { Servers, serverOf } = require('./core/servers');
+const { ServerChecks, Servers, serverOf } = require('./core/servers');
 const { shareUpload } = require('./core/share');
 const { GOING, Pacer, Transfers, inFolder, view } = require('./core/transfers');
 const { createTransferHost } = require('./transfer-host');
@@ -92,7 +92,8 @@ const { answerWindowChannels } = require('./window-channels');
 //   each with its settings for new uploads, and one of them the default: a
 //   new upload and Share with Dropgate start on it. Main alone changes them,
 //   as the page asks (window-channels.js); a server is checked by the
-//   transfer window before it's saved, and nothing a check found is kept.
+//   transfer window before it's saved, and what a check found is kept in
+//   memory only, for Settings > Servers to show.
 // Share with Dropgate (Windows' context menu) launches the app with a file's
 // path and --upload. Main makes the upload itself, with no window: to the
 // default server, checked by the transfer window, with its settings for new
@@ -149,8 +150,10 @@ guardSettings({
     },
 });
 
-// The saved servers, and the default, in the settings: main's alone.
+// The saved servers, and the default, in the settings: main's alone. What
+// each one's last check found is kept in memory only.
 const servers = new Servers(kit.settings);
+const checks = new ServerChecks();
 
 // Where downloads are written until they're whole: emptied at every start and at quit.
 const partials = path.join(app.getPath('userData'), PARTIAL_FOLDER);
@@ -388,6 +391,7 @@ answerWindowChannels({
     handles,
     transfers,
     servers,
+    checks,
     host: () => host,
     windowReady,
     start: startUpload,
@@ -631,6 +635,8 @@ async function startShare(share, filePaths) {
     }
     const server = serverOf(saved.url);
     const check = await host.check(server).catch(() => ({ ok: false }));
+    // The default's row says what this check found, as its Test would.
+    if (servers.get(saved.id)) checks.set(saved.id, check);
     if (quitting) {
         endShare(share);
         return;

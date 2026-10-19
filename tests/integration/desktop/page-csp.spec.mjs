@@ -4,7 +4,7 @@
 // a server is the transfer window's. Nothing the page does by itself is
 // refused (the console says nothing of the policy as every view is opened),
 // and what it doesn't do is: an inline script, an inline style, a request.
-import { expect, test } from '../helpers/desktop.mjs';
+import { defaultServerRow, expect, test } from '../helpers/desktop.mjs';
 
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'";
 
@@ -16,15 +16,15 @@ test('the main window\'s page has its CSP: nothing it does is refused, and an in
     // Every view and tab, a server tested and a toast: none of it refused.
     await desktop.setUp(window);
     await window.getByRole('button', { name: 'Settings', exact: true }).click();
-    for (const tab of ['Server', 'Privacy', 'Update', 'Credits']) {
+    for (const tab of ['Servers', 'Privacy', 'Update', 'Credits']) {
         await window.getByRole('tab', { name: tab }).click();
         await expect(window.getByRole('tab', { name: tab })).toHaveAttribute('aria-selected', 'true');
     }
     await expect(window.locator('img[src$="dropgate.png"]'), "Credits' logo").toBeVisible();
     await window.getByRole('tab', { name: 'Privacy' }).click();
     await expect(window.locator('#keep-log-on-disk'), 'a switch, drawn with a data: SVG').toBeVisible();
-    await window.getByRole('tab', { name: 'Server' }).click();
-    await expect(window.locator('#file-lifetime-unit'), 'a select, drawn with a data: SVG').toBeVisible();
+    await window.getByRole('tab', { name: 'Servers' }).click();
+    await expect(defaultServerRow(window).getByRole('combobox', { name: 'Unit' }), 'a select, drawn with a data: SVG').toBeVisible();
     await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
     await expect(window.locator('#add-files-btn .button-icon')).toHaveCSS('font-size', '16px');
     await window.evaluate(() => window.kit.ui.toast('A toast.', { type: 'success' }));

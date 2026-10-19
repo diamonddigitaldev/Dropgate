@@ -27,6 +27,7 @@ const { view } = require('./core/transfers');
  * @param {any} main.kit - The kit, from start(): its ipc and settings.
  * @param {import('./core/handles').Handles} main.handles - The files handed to each window.
  * @param {import('./core/servers').Servers} main.servers - The saved servers, and the default.
+ * @param {import('./core/servers').ServerChecks} main.checks - What each saved server's last check found, in memory.
  * @param {import('./core/transfers').Transfers} main.transfers
  *   Main's registry of transfers, by the ID it made: a window's own (owner), or a share's (no owner), which may be waiting on a window's answer (ask).
  * @param {() => any} main.host - The transfer host (transfer-host.js), once the app is ready.
@@ -48,7 +49,7 @@ const { view } = require('./core/transfers');
  * @param {(owner: number, folder: string | null) => { path: string, label: string, chosen: boolean }} main.setDefaultFolder - Settings > Transfers' Browse or Reset.
  */
 function answerWindowChannels(main) {
-    const { kit, handles, transfers, servers } = main;
+    const { kit, handles, transfers, servers, checks } = main;
     const has = (id) => transfers.has(id);
 
     // A window's page has set itself up: a share's question waiting for it is sent now.
@@ -79,16 +80,23 @@ function answerWindowChannels(main) {
         handles.revoke(event.sender.id, handle);
     });
 
-    // Test, and the check before an upload: asked of the server by the transfer window.
+    // Add Server's Check: an address not saved, asked of the server by the
+    // transfer window, before the person chooses to add it. What it found is
+    // the page's to show, and kept nowhere.
     kit.ipc.handle(IPC.SERVER_CHECK, (_event, url) => main.host().check(serverOf(serverAddress(url))));
 
-    // The saved servers (Settings > Server). Each change is main's: the page
-    // asks, and is answered with the list as it is now. A server is checked
-    // by the transfer window before it's saved, and saved once it answered as
-    // a Dropgate server, under its address as the client read it, with the
-    // settings for new uploads a new server starts with. Nothing the check
-    // found is saved.
+    // The saved servers (Settings > Servers). Each change is main's: the page
+    // asks, and is answered with the list as it is now, with what each one's
+    // last check found (main's memory only: checks). A server is checked by
+    // the transfer window before it's saved, and saved once it answered as a
+    // Dropgate server, under its address as the client read it, with the
+    // settings for new uploads a new server starts with. Nothing a check found
+    // is saved.
     const saved = (id) => Boolean(servers.get(id));
+    const listed = () => {
+        const list = servers.list();
+        return { ...list, checks: checks.of(list.servers) };
+    };
     kit.ipc.handle(IPC.SERVER_ADD, async (_event, request) => {
         const url = serverToAdd(request);
         const check = await main.host().check(serverOf(url));
@@ -100,25 +108,37 @@ function answerWindowChannels(main) {
             found = null;
         }
         const server = found ? servers.add(found, check.serverInfo).server : null;
-        return { check, ...(server ? { server } : {}), ...servers.list() };
+        if (server) checks.set(server.id, check);
+        return { check, ...(server ? { server } : {}), ...listed() };
+    });
+    // Test, the default server as the window opens, and the default again
+    // before an upload starts on it: a saved server checked at its address.
+    // Its check is kept in memory, unless it was removed meanwhile.
+    kit.ipc.handle(IPC.SERVER_TEST, async (_event, request) => {
+        const id = savedServerOf(request, saved);
+        const check = await main.host().check(serverOf(servers.get(id).url));
+        if (saved(id)) checks.set(id, check);
+        return { check, ...listed() };
     });
     kit.ipc.handle(IPC.SERVER_REMOVE, (_event, request) => {
-        servers.remove(savedServerOf(request, saved));
-        return servers.list();
+        const id = savedServerOf(request, saved);
+        servers.remove(id);
+        checks.forget(id);
+        return listed();
     });
     kit.ipc.handle(IPC.SERVER_MOVE, (_event, request) => {
         const { id, by } = serverMoveOf(request, saved);
         servers.move(id, by);
-        return servers.list();
+        return listed();
     });
     kit.ipc.handle(IPC.SERVER_SET_DEFAULT, (_event, request) => {
         servers.setDefault(savedServerOf(request, saved));
-        return servers.list();
+        return listed();
     });
     kit.ipc.handle(IPC.SERVER_SET_OPTIONS, (_event, request) => {
         const { id, options } = serverOptionsOf(request, saved);
         servers.setOptions(id, options);
-        return servers.list();
+        return listed();
     });
 
     /** The files handed to this window, as the registry keeps them: each one's path, name, size and modification time. */

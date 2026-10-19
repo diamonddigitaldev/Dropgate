@@ -186,7 +186,40 @@ class Servers {
     }
 }
 
+/**
+ * What each saved server's last check found, by its ID, as the transfer
+ * window answered it: whether it was there, its version, its capabilities and
+ * limits, or why it couldn't be reached. In main's memory only, never
+ * written: it goes when the server is removed, and when the app quits.
+ */
+class ServerChecks {
+    #found = new Map();
+
+    /** Keep a saved server's latest check, in place of the one before. */
+    set(id, check) {
+        this.#found.set(id, check);
+    }
+
+    get(id) {
+        return this.#found.get(id) ?? null;
+    }
+
+    /** A removed server's check goes with it. */
+    forget(id) {
+        this.#found.delete(id);
+    }
+
+    /**
+     * The checks of the servers given (those saved now), by ID: one not
+     * checked since the app started has none.
+     * @param {{ id: string }[]} servers
+     */
+    of(servers) {
+        return Object.fromEntries(servers.filter(({ id }) => this.#found.has(id)).map(({ id }) => [id, this.#found.get(id)]));
+    }
+}
+
 /** The server an upload or a check goes to: plain HTTP only for an address typed with http://. */
 const serverOf = (url) => ({ url, allowInsecure: /^http:\/\//i.test(url) });
 
-module.exports = { NEW_SERVER, SERVER_KEYS, Servers, hostOf, newServer, serverOf, serversFrom };
+module.exports = { NEW_SERVER, SERVER_KEYS, ServerChecks, Servers, hostOf, newServer, serverOf, serversFrom };

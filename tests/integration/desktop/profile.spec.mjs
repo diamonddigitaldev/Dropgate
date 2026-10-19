@@ -11,7 +11,7 @@
 // that's where its chunks are held.
 import path from 'node:path';
 import { madeUpFile } from '../helpers/files.mjs';
-import { cardButton, expect, test, uploadButton, uploadCard, uploadLink, uploadStatus } from '../helpers/desktop.mjs';
+import { ENCRYPTED, cardButton, defaultServerRow, expect, serverStatus, test, uploadButton, uploadCard, uploadLink, uploadStatus } from '../helpers/desktop.mjs';
 import { heldIn } from '../helpers/profile.mjs';
 
 // End-to-end encrypted, so the link carries a key.
@@ -25,7 +25,7 @@ async function launchWith(desktop, file) {
     const window = await app.window();
     await desktop.setUp(window);
     await expect(uploadCard(window).locator('.kit-card-name')).toHaveText([file.name]);
-    await expect(window.locator('#security-text')).toHaveText(/will be end-to-end encrypted/i);
+    await expect(serverStatus(defaultServerRow(window))).toHaveText(ENCRYPTED);
     return { app, window, filePath };
 }
 

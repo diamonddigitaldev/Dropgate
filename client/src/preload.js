@@ -20,6 +20,7 @@ const CH = {
     FILE_REVOKE: 'file:revoke',
     SERVER_CHECK: 'server:check',
     SERVER_ADD: 'server:add',
+    SERVER_TEST: 'server:test',
     SERVER_REMOVE: 'server:remove',
     SERVER_MOVE: 'server:move',
     SERVER_SET_DEFAULT: 'server:set-default',
@@ -60,8 +61,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     addFiles: (paths) => ipcRenderer.invoke(CH.FILES_ADD, paths),
     revokeFileAccess: (handle) => ipcRenderer.invoke(CH.FILE_REVOKE, handle),
     checkServer: (url) => ipcRenderer.invoke(CH.SERVER_CHECK, url),
-    // The saved servers are main's: each change is asked of it, and answered with the list as it is now.
+    // The saved servers are main's: each change is asked of it, and answered with the list as it is now, and what each one's last check found.
     addServer: (url) => ipcRenderer.invoke(CH.SERVER_ADD, { url }),
+    testServer: (id) => ipcRenderer.invoke(CH.SERVER_TEST, { id }),
     removeServer: (id) => ipcRenderer.invoke(CH.SERVER_REMOVE, { id }),
     moveServer: (id, by) => ipcRenderer.invoke(CH.SERVER_MOVE, { id, by }),
     setDefaultServer: (id) => ipcRenderer.invoke(CH.SERVER_SET_DEFAULT, { id }),

@@ -11,7 +11,7 @@
 //   and the server's address as they are.
 import { copySlips } from '../../../client/test/helpers/copy.mjs';
 import { madeUpFile } from '../helpers/files.mjs';
-import { cardButton, expect, holdChunks, test, uploadCard, uploadCards } from '../helpers/desktop.mjs';
+import { cardButton, expect, holdChunks, openServers, serverRow, serverStatus, test, uploadCard, uploadCards } from '../helpers/desktop.mjs';
 
 // Three 5 MiB chunks: the first goes through, the rest can be held.
 const SIZE = 12_000_000;
@@ -81,11 +81,12 @@ test('every card button is one size, busy or not; every button that says it\'s d
     const names = [host, desktop.serverUrl];
     const slips = [];
 
-    // Test, in Settings > Server: "Testing…".
-    await window.getByRole('button', { name: 'Settings', exact: true }).click();
-    await window.getByRole('tab', { name: 'Server' }).click();
-    await window.locator('#test-connection-btn').click();
-    await expect(window.locator('#connection-status')).toHaveText(/connection successful/i);
+    // Test, on the server's row in Settings > Servers: "Testing…".
+    await openServers(window);
+    const row = serverRow(window, desktop.serverUrl);
+    await row.getByRole('button', { name: 'Test', exact: true }).click();
+    await expect(serverStatus(row)).toHaveText(/^Online · /);
+    await expect(row.getByRole('button', { name: 'Test', exact: true })).toBeEnabled();
     await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
 
     // An upload done, one cancelled (Retry), one running (Pause, Cancel), one waiting (Upload).
@@ -158,7 +159,7 @@ test('every switch\'s help line says what its state does, and changes as it\'s f
     const names = [new URL(desktop.serverUrl).host, desktop.serverUrl];
     const slips = [];
     await window.getByRole('button', { name: 'Settings', exact: true }).click();
-    for (const tab of ['Server', 'Privacy', 'Update', 'Credits']) {
+    for (const tab of ['Servers', 'Privacy', 'Update', 'Credits']) {
         await window.getByRole('tab', { name: tab }).click();
         await expect(window.getByRole('tabpanel')).toBeVisible();
         slips.push(...await copySlipsShown(window, names, `Settings > ${tab}`));
@@ -177,7 +178,7 @@ test('every switch\'s help line says what its state does, and changes as it\'s f
     expect(await help(keep)).toBe("The app's log is kept in memory only, and goes when the app closes.");
 
     let switches = 0;
-    for (const tab of ['Server', 'Privacy', 'Update']) {
+    for (const tab of ['Servers', 'Privacy', 'Update']) {
         await window.getByRole('tab', { name: tab }).click();
         for (const sw of await window.getByRole('tabpanel').getByRole('switch').all()) {
             switches++;

@@ -1,5 +1,5 @@
 // The desktop app's Settings view, which is electron-kit's: Dropgate's own
-// Server and Privacy tabs, then Update, then Credits last. The Update tab's preferences are
+// Servers, Transfers and Privacy tabs, then Update, then Credits last. The Update tab's preferences are
 // kept across a restart, and Credits shows the app's logo. The updater itself
 // only runs in a packaged app (desktop/updates.spec.mjs).
 //
@@ -17,12 +17,12 @@ async function openSettings(window, tab) {
     return window.getByRole('tabpanel', { name: new RegExp(`^${tab}`) });
 }
 
-test('Settings has Dropgate\'s Server tab, then Update, then Credits, last, with its logo, and keeps the Update tab\'s choices after a restart', async ({ desktop }) => {
+test('Settings has Dropgate\'s Servers tab, then Update, then Credits, last, with its logo, and keeps the Update tab\'s choices after a restart', async ({ desktop }) => {
     let app = await desktop.launch();
     let window = await app.window();
 
     const update = await openSettings(window, 'Update');
-    expect(await window.getByRole('tab').allTextContents(), 'the Settings tabs').toEqual(['Server', 'Transfers', 'Privacy', 'Update', 'Credits']);
+    expect(await window.getByRole('tab').allTextContents(), 'the Settings tabs').toEqual(['Servers', 'Transfers', 'Privacy', 'Update', 'Credits']);
     const automatic = update.getByRole('switch', { name: 'Download updates automatically' });
     await expect(automatic, 'automatic downloads, on a new profile').toBeChecked();
     // Run from source, a 3.x build is a stable one.

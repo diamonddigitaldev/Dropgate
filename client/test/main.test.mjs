@@ -224,9 +224,14 @@ test('the shell and the shared parts are the kit\'s: no modal, drop zone, progre
     }
     assert.match(renderer, /busy: async \(\) =>/, 'Restart Now asks first while an upload runs');
     // Drops are the kit's: the page lights the card files are over, and never reads what's dropped itself.
-    for (const own of ['bootstrap.Modal', 'bootstrap.Tooltip', 'innerHTML', 'alert(', 'dataTransfer', 'xfer-card', 'card-status']) {
+    for (const own of ['bootstrap.Modal', 'bootstrap.Tooltip', 'innerHTML', 'alert(', 'dataTransfer', 'xfer-card']) {
         assert.ok(!renderer.includes(own), `renderer.js has ${own}`);
     }
+    // No status line of the page's own: a server's row draws the kit's, on its classes, until the kit makes one alone.
+    assert.doesNotMatch(renderer, /(?<!kit-)card-status/, 'renderer.js has a card-status of its own');
+    assert.match(fs.readFileSync(new URL('../src/renderer.js', import.meta.url), 'utf8'),
+        /kit-gap: https:\/\/github\.com\/diamonddigitaldev\/electron-kit\/issues\/67\r?\n\s+const statusText = element\('span', 'kit-status-text'\);/,
+        "a server row's status line is the kit's, marked as its gap");
     for (const markup of ['insecure-upload-modal', 'progress-bar', 'drop-zone', 'prefers-color-scheme', 'data-bs-theme']) {
         assert.ok(!html.includes(markup), `index.html has ${markup}`);
     }

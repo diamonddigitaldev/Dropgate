@@ -1,10 +1,10 @@
 // The desktop app's page at its smallest: nothing on Upload scrolls sideways
 // (Linux's VM pass, 2026-10-04, saw a horizontal scrollbar under the link: the
 // lifetime and downloads row's negative margins reached past the column), nor
-// on Settings > Server, where that row is now. And the Server tab names Share
-// with Dropgate only on Windows, which has it.
+// on Settings > Servers, where each server's row of them is now. And the
+// Servers tab names Share with Dropgate only on Windows, which has it.
 import { madeUpFile } from '../helpers/files.mjs';
-import { expect, test, uploadLink } from '../helpers/desktop.mjs';
+import { expect, openServers, test, uploadLink } from '../helpers/desktop.mjs';
 
 /** How far an element's content reaches sideways past it, and the height of its horizontal scrollbar. */
 const sideways = (window, selector) => window.evaluate((sel) => {
@@ -26,10 +26,10 @@ test('at the window\'s smallest, with a link shown, nothing on Upload scrolls si
     });
     expect(min.width, "the window's minimum width").toBeGreaterThan(0);
     await desktop.setUp(window);
-    // The Server tab, with the settings for new uploads in it.
-    await window.getByRole('button', { name: 'Settings', exact: true }).click();
-    await window.getByRole('tab', { name: 'Server' }).click();
-    expect(await window.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), 'how far Settings > Server scrolls sideways').toBeLessThanOrEqual(0);
+    // The Servers tab, with the server's settings for new uploads shown.
+    await openServers(window);
+    await expect(window.locator('#server-list .server-body').first()).toBeVisible();
+    expect(await window.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), 'how far Settings > Servers scrolls sideways').toBeLessThanOrEqual(0);
     await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
 
     // An upload's card as it is when it's done, with a long link.
@@ -42,12 +42,11 @@ test('at the window\'s smallest, with a link shown, nothing on Upload scrolls si
     expect(await window.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth), 'how far the page scrolls sideways').toBeLessThanOrEqual(0);
 });
 
-test('the Server tab mentions Share with Dropgate only on Windows', async ({ desktop }) => {
+test('the Servers tab mentions Share with Dropgate only on Windows', async ({ desktop }) => {
     const app = await desktop.launch();
     const window = await app.window();
-    await window.getByRole('button', { name: 'Settings', exact: true }).click();
-    await window.getByRole('tab', { name: 'Server' }).click();
-    await expect(window.locator('#server-help')).toHaveText(process.platform === 'win32'
-        ? 'Uploads go to this server, and so does Share with Dropgate.'
-        : 'Uploads go to this server.');
+    await openServers(window);
+    await expect(window.locator('#servers-help')).toHaveText(process.platform === 'win32'
+        ? "A new upload starts on the default server, with that server's settings, and so does Share with Dropgate. Each server is checked only when it's used."
+        : "A new upload starts on the default server, with that server's settings. Each server is checked only when it's used.");
 });

@@ -97,8 +97,9 @@ textarea,
 
 /* ── Advanced Options ────────────────────────────────────────────────────── */
 
-/* The page's own form dialog, drawn as the kit's prompts are (its dialog
-   classes): the kit has no form dialog. A little narrower, its rows apart.
+/* The page's own form dialog (Advanced Options, and Add Server), drawn as the
+   kit's prompts are (its dialog classes): the kit has no form dialog. A little
+   narrower, its rows apart.
    kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65 */
 .options-dialog {
     width: min(30rem, calc(100vw - 32px));
@@ -194,32 +195,141 @@ textarea,
     font-size: 18px;
 }
 
-/* ── How uploads will be sent (Settings > Server) ────────────────────────── */
+/* ── Settings > Servers ──────────────────────────────────────────────────── */
 
-.security-status-card {
-    padding: 0.75rem 1rem;
+/* A row per saved server: its name and Default, its address under it, its
+   status line (the kit's, as a card's), its limits once checked, its settings
+   for new uploads (shown or hidden), then its buttons. */
+.server-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.server-row {
+    border: 1px solid var(--bs-border-color);
     border-radius: var(--radius-card);
+    padding: 0.65rem 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+}
+
+.server-head {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    min-width: 0;
+}
+
+.server-head .kind-icon {
+    font-size: 18px;
+    color: var(--bs-secondary-color);
+}
+
+.server-name {
+    font-weight: 500;
+    font-size: 0.9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* A server's address is never recased, and can be copied. */
+.server-address {
+    font-family: var(--bs-font-monospace);
+    font-size: 0.75rem;
+    color: var(--bs-secondary-color);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.pill-default {
+    flex-shrink: 0;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    color: var(--accent-text);
+    background: rgba(var(--accent-rgb), var(--wash-semantic-fill));
+    border: 1px solid rgba(var(--accent-rgb), var(--wash-semantic-border));
+}
+
+.server-limits {
+    font-size: 0.75rem;
+    color: var(--bs-secondary-color);
+}
+
+.server-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    padding-top: 0.2rem;
+    border-top: 1px solid var(--bs-border-color);
+}
+
+.server-body .row {
+    --bs-gutter-x: 0.75rem;
+}
+
+/* The account's place, which accounts fill in a later version. */
+.server-slot {
+    border: 1px dashed var(--bs-border-color);
+    border-radius: var(--radius-card);
+    padding: 0.5rem 0.65rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.server-slot-caption {
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--bs-secondary-color);
+}
+
+.server-slot-text {
+    font-size: 0.8rem;
+}
+
+.server-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    align-items: center;
+}
+
+.server-actions .btn {
+    --bs-btn-padding-y: 0.12rem;
+    --bs-btn-padding-x: 0.5rem;
+    --bs-btn-font-size: 0.75rem;
+}
+
+.icon-btn {
+    display: inline-flex;
+    align-items: center;
+}
+
+.icon-btn .material-icons-round {
+    font-size: 16px;
+}
+
+/* Add Server's: what the address's check found, before it's added. */
+.server-found {
     border: 1px solid var(--bs-border-color);
+    border-radius: var(--radius-card);
+    padding: 0.55rem 0.7rem;
+    font-size: 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
 }
 
-.security-status-card .material-icons-round {
-    font-size: 24px;
-}
-
-.security-status-card.security-green {
-    background: var(--bs-success-bg-subtle);
-    border-color: var(--bs-success-border-subtle);
-}
-
-.security-status-card.security-yellow {
-    background: var(--bs-warning-bg-subtle);
-    border-color: var(--bs-warning-border-subtle);
-}
-
-.security-status-card.security-red {
-    background: var(--bs-danger-bg-subtle);
-    border-color: var(--bs-danger-border-subtle);
+.server-found[hidden] {
+    display: none;
 }

@@ -22,7 +22,7 @@ import { fakeMain } from './helpers/main-process.mjs';
 const require = createRequire(import.meta.url);
 const { ENGINE, ENGINE_PUSHES, IPC, PUSHES } = require('../src/constants.js');
 const { Handles } = require('../src/core/handles.js');
-const { Servers } = require('../src/core/servers.js');
+const { ServerChecks, Servers } = require('../src/core/servers.js');
 const { Transfers, view } = require('../src/core/transfers.js');
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-channels-'));
@@ -61,6 +61,7 @@ function setUp({ settings = SETTINGS, check = { ok: true } } = {}) {
     // The kit's settings, as main's server list reads and writes them.
     let current = structuredClone(settings);
     const servers = new Servers({ get: () => current, set: (changes) => { current = { ...current, ...changes }; return current; } });
+    const checks = new ServerChecks();
     const record = (name, answer) => (...args) => {
         work.push([name, ...args]);
         return answer;
@@ -84,6 +85,7 @@ function setUp({ settings = SETTINGS, check = { ok: true } } = {}) {
         handles,
         transfers,
         servers,
+        checks,
         host: () => transferHost,
         windowReady: record('windowReady'),
         start: record('start'),
@@ -111,7 +113,7 @@ function setUp({ settings = SETTINGS, check = { ok: true } } = {}) {
         onPauseEnding: record('onPauseEnding'),
         onFinished: record('onFinished'),
     });
-    return { main, work, handles, transfers, host, servers, stored: () => current };
+    return { main, work, handles, transfers, host, servers, checks, stored: () => current };
 }
 
 /** Each payload, invoked on a channel from a page, is refused with this message, and nothing is done. */
@@ -270,6 +272,7 @@ test('server:add takes a server\'s address, checks it in the transfer window, an
     assert.deepEqual(added.server, { id: added.server.id, url: 'https://dropgate.test', name: 'Example Drop', lifetime: { value: 6, unit: 'hours' }, maxDownloads: 1, allowFallback: false });
     assert.deepEqual(setup.stored(), { servers: [added.server], defaultServer: added.server.id }, 'the first saved is the default');
     assert.deepEqual({ servers: added.servers, defaultServer: added.defaultServer }, setup.stored());
+    assert.deepEqual(added.checks, { [added.server.id]: FOUND }, 'what its check found, in memory');
 
     // Saved already, by its address: given back as it is, never twice.
     const again = await setup.main.invoke(IPC.SERVER_ADD, page, { url: 'https://dropgate.test' });
@@ -283,6 +286,36 @@ test('server:add takes a server\'s address, checks it in the transfer window, an
         const answer = await elsewhere.main.invoke(IPC.SERVER_ADD, elsewhere.main.windowPage(), { url: 'https://elsewhere.test' });
         assert.deepEqual([answer.check, answer.server, answer.servers], [check, undefined, []], JSON.stringify(check));
     }
+});
+
+test('server:test checks a saved server, by its ID, at its saved address; main keeps what it found in memory only, and every list answer says it until the server goes', async () => {
+    const [first, second] = [saved({ url: 'https://one.test' }), saved({ url: 'http://two.test' })];
+    const setup = setUp({ settings: { servers: [first, second], defaultServer: first.id }, check: FOUND });
+    const page = setup.main.windowPage();
+    await refusesAll(setup, IPC.SERVER_TEST, page, [
+        [], [first.id], [{ id: FILE }], [{ id: randomUUID() }], [{ id: 'not an ID' }], [{ id: first.id, url: 'https://elsewhere.test' }], [{ url: 'https://one.test' }],
+    ], /Expected a saved server./);
+
+    const tested = await setup.main.invoke(IPC.SERVER_TEST, page, { id: second.id });
+    assert.deepEqual(setup.work.at(-1), ['host.check', { url: 'http://two.test', allowInsecure: true }], 'its saved address, never one from the page');
+    assert.deepEqual(tested, { check: FOUND, servers: [first, second], defaultServer: first.id, checks: { [second.id]: FOUND } });
+    assert.deepEqual(setup.stored(), { servers: [first, second], defaultServer: first.id }, 'nothing a check found is written');
+    for (const [channel, request] of [[IPC.SERVER_MOVE, { id: second.id, by: -1 }], [IPC.SERVER_SET_DEFAULT, { id: second.id }], [IPC.SERVER_SET_OPTIONS, { id: first.id, options: { maxDownloads: 2 } }]]) {
+        assert.deepEqual((await setup.main.invoke(channel, page, request)).checks, { [second.id]: FOUND }, channel);
+    }
+    // A removed server's check goes with it.
+    assert.deepEqual((await setup.main.invoke(IPC.SERVER_REMOVE, page, { id: second.id })).checks, {});
+    assert.equal(setup.checks.get(second.id), null);
+
+    // Nor is one kept for a server removed while it was checked.
+    let answer;
+    const slow = setUp({ settings: { servers: [first], defaultServer: first.id }, check: new Promise((resolve) => { answer = resolve; }) });
+    const slowPage = slow.main.windowPage();
+    const testing = slow.main.invoke(IPC.SERVER_TEST, slowPage, { id: first.id });
+    await slow.main.invoke(IPC.SERVER_REMOVE, slowPage, { id: first.id });
+    answer(FOUND);
+    assert.deepEqual(await testing, { check: FOUND, servers: [], defaultServer: null, checks: {} });
+    assert.equal(slow.checks.get(first.id), null);
 });
 
 test('server:remove, server:move, server:set-default and server:set-options take a saved server, by its ID, and main changes the list', async () => {

@@ -1,4 +1,4 @@
-// The page: Dropgate's Upload and Download sections and its Server, Transfers and Privacy tabs, in the
+// The page: Dropgate's Upload and Download sections and its Servers, Transfers and Privacy tabs, in the
 // kit's frame (kit.ui.mountShell()): the nav rail, the header (with Add
 // Files), and the Settings view, with Update and Credits after Dropgate's own
 // tabs. The drop zone, the cards, their grid and bulk bar, the action bar, the
@@ -14,7 +14,7 @@
 // cancelled, until it's removed. Files dropped, picked or opened together make
 // one upload; files dropped onto one still waiting join it (a file already in
 // it is skipped), and onto one that has started make a new one. A new upload
-// takes the default server's settings for new uploads (Settings > Server). Each card
+// takes the default server's settings for new uploads (Settings > Servers). Each card
 // starts with its Upload, or all waiting with the action bar's Upload All.
 // One waiting can have its own options (its Advanced Options, or Bulk Edit
 // on the bulk bar for those selected): its file lifetime and download limit,
@@ -33,6 +33,14 @@
 // (onUploadStatus). Share with Dropgate's uploads are cards too, and the page
 // asks the Upload Security Warning for one to a server with no end-to-end
 // encryption, when main opens it to (onAskInsecure).
+//
+// Settings > Servers (below, "--- Settings > Servers ---") is a row for each
+// saved server, in order, as main keeps them: its name, its address, its
+// status (what its last check this run found, which main holds in memory, or
+// "Not checked yet"), its limits once checked, its settings for new uploads
+// (bounded by its limits), Test, Set as Default, Move Up, Move Down and
+// Remove; Add Server checks an address before it's added. The page changes
+// none of it itself: main does, as it asks.
 
 const api = window.electronAPI;
 const kitApi = window.kitAPI;
@@ -66,37 +74,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         const gridElement = $('upload-grid');
         const fileInput = $('file-input');
         const addFilesBtn = $('add-files-btn');
-        const maxUploadHint = $('max-upload-hint');
-        const serverUrlInput = $('server-url');
-        const testConnectionBtn = $('test-connection-btn');
-        const connectionStatus = $('connection-status');
-        const fileLifetimeValueInput = $('file-lifetime-value');
-        const fileLifetimeUnitSelect = $('file-lifetime-unit');
-        const fileLifetimeHelp = $('file-lifetime-help');
-        const maxDownloadsValue = $('max-downloads-value');
-        const maxDownloadsHelp = $('max-downloads-help');
-        const securityStatus = $('security-status');
-        const securityIcon = $('security-icon');
-        const securityText = $('security-text');
         const { countOf, formatBytes, plural } = kit.format;
 
-        // Share with Dropgate is Windows' right-click entry: elsewhere, the Server tab doesn't mention it.
-        if (!navigator.userAgent.includes('Windows')) $('server-help').textContent = 'Uploads go to this server.';
+        // Share with Dropgate is Windows' right-click entry: elsewhere, the Servers tab doesn't mention it.
+        if (!navigator.userAgent.includes('Windows')) {
+            $('servers-help').textContent = "A new upload starts on the default server, with that server's settings. Each server is checked only when it's used.";
+        }
 
         /** How many transfers run at once: Settings > Transfers' transfersAtOnce, read with the settings. */
         let atOnce = 3;
 
         /**
-         * The saved servers and the default's ID, as main last answered
-         * (main alone changes them). Settings > Server shows the default:
-         * Test saves the address it finds, as the default, and its fields
-         * are the default's settings for new uploads.
-         * @type {{ servers: any[], defaultServer: string | null }}
+         * The saved servers, the default's ID, and what each one's last
+         * check this run found, by its ID, as main last answered (main alone
+         * changes them, and holds the checks in memory). Settings > Servers
+         * shows them.
+         * @type {{ servers: any[], defaultServer: string | null, checks: Record<string, any> }}
          */
-        let saved = { servers: [], defaultServer: null };
-        /** The default server, as saved: new uploads and Share with Dropgate start on it. */
-        const defaultSaved = () => saved.servers.find((server) => server.id === saved.defaultServer) ?? null;
+        let saved = { servers: [], defaultServer: null, checks: {} };
+        /** The default server, as main reads it (the first, if the one named is gone): new uploads and Share with Dropgate start on it. */
+        const defaultSaved = () => saved.servers.find((server) => server.id === saved.defaultServer) ?? saved.servers[0] ?? null;
 
+        /** The default server's capabilities and its address as found, from its last check: what uploads are held to, and whether they're encrypted. */
         let serverCapabilities = null;
         /** @type {{compatible:boolean, message?:string}} */
         let lastServerCheck = { compatible: false, message: '' };
@@ -110,7 +109,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             ],
             toolbar: $('toolbar'),
             settingsTabs: [
-                { id: 'server', label: 'Server', render: (pane) => pane.append($('server-settings')) },
+                { id: 'servers', label: 'Servers', render: (pane) => pane.append($('servers-settings')) },
                 { id: 'transfers', label: 'Transfers', render: (pane) => pane.append($('transfers-settings')) },
                 { id: 'privacy', label: 'Privacy', render: (pane) => pane.append($('privacy-settings')) },
             ],
@@ -136,7 +135,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         /** The uploads a bar acts on: those selected, or every one when none is. */
         const scope = () => (grid.selection.length > 0 ? grid.selection : grid.cards).map((card) => shown.get(idOf.get(card))).filter(Boolean);
 
-        // The server a new upload goes to: the one in Settings > Server, until there are several (phase 14).
+        // The server a new upload goes to: the default, in Settings > Servers, until each upload picks its own.
         const bulkTarget = document.createElement('select');
         bulkTarget.className = 'form-select form-select-sm';
         const bulk = kit.ui.bulkBar(grid, {
@@ -227,7 +226,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         }
 
-        /** Fill a server select: the one server, the default (phase 14 lists them all). */
+        /** Fill a server select: the default (each upload picks its own later). */
         function fillServers(select) {
             const option = document.createElement('option');
             option.value = 'default';
@@ -291,13 +290,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             return differs.length > 0 ? differs.join(' · ') : undefined;
         }
 
-        /** The server's settings for new uploads, as Settings > Server has them now: what main gives a new upload. */
+        /** The default server's settings for new uploads, as saved: what main gives a new upload (a new server's, with none saved). */
         function newUploadOptions() {
-            const unit = fileLifetimeUnitSelect.value;
-            return {
-                lifetime: { value: unit === 'unlimited' ? 0 : parseFloat(fileLifetimeValueInput.value), unit },
-                maxDownloads: parseInt(maxDownloadsValue.value, 10),
-            };
+            const server = defaultSaved();
+            return server ? { lifetime: server.lifetime, maxDownloads: server.maxDownloads } : { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1 };
         }
 
         const sameLifetime = (a, b) => a.unit === b.unit && (a.unit === 'unlimited' || a.value === b.value);
@@ -958,9 +954,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         // --- The server ---
         // The app's own version, for display only.
         const appVersion = await kitApi.getVersion();
-        // The server's address as the client reads it (https:// added if it had
-        // no scheme), from the last check that reached it. Checks are asked of
-        // the server by the transfer window, through main (api.checkServer()).
+        // The default server's address as the client reads it (https:// added
+        // if it had no scheme), from its last check that reached it. Checks
+        // are asked of the server by the transfer window, through main, which
+        // keeps what each saved server's found in memory.
         let serverBaseUrl = null;
 
         /** Whether an address is plain HTTP, as typed: one without a scheme is HTTPS. */
@@ -969,20 +966,491 @@ document.addEventListener('DOMContentLoaded', async () => {
         /** Whether uploads to the server are end-to-end encrypted: it has it, and it's reached over HTTPS. */
         const serverEncrypts = () => Boolean(serverCapabilities?.upload?.e2ee && serverBaseUrl?.startsWith('https://'));
 
-        /** Ask the server, through main: what it allows, or why it couldn't be reached. */
-        const checkServer = (serverUrl) => api.checkServer(serverUrl).catch(() => ({ ok: false }));
-
-        /** Why Test couldn't connect, and what to try. */
+        /** Why a check couldn't connect, and what to try. */
         function connectionFailedText(serverUrl, error) {
             if (error?.code === 'REDIRECT_NOT_FOLLOWED') return error.message;
             const text = 'Connection failed. Check the URL, and that the server is running.';
             return isPlainHttp(serverUrl) ? text : `${text} If the server only serves plain HTTP, enter its address starting with http://.`;
         }
 
+        // --- Settings > Servers ---
+        // A row for each saved server, in main's order: its name (its own, or
+        // its address's host) with Default on the default's, its address under
+        // it (many servers keep the name "Dropgate Server"), its status line in
+        // its tone, and once checked, its limits. Shown, its settings for new
+        // uploads: File lifetime and Max downloads, offering only what its
+        // last check said it allows (off until it's checked), saved through
+        // main as each becomes a value it allows; and the account's place,
+        // which accounts fill in later. Then Test, Set as Default, Move Up,
+        // Move Down and Remove (which asks first). A row is built once and
+        // drawn again as the list or a check changes, so a field being typed
+        // in keeps its focus and what's in it.
+
+        const serverList = $('server-list');
+        /** Each saved server's row, by its ID. */
+        const rows = new Map();
+        /** The rows whose settings for new uploads are shown, by server ID: the default's as the window opens, and one just added. */
+        const opened = new Set();
+        /** The saved servers being checked now, by ID: their rows say so, with Test busy. */
+        const checking = new Set();
+
+        /** Take main's answer: the list, the default and the checks as they are now; every row, and what uploads go by, follow. */
+        function takeList(list) {
+            saved = { servers: list.servers, defaultServer: list.defaultServer, checks: list.checks ?? {} };
+            renderServers();
+            useDefaultCheck();
+        }
+
+        /** Check a saved server again, through main, which keeps what it finds in memory: its row says Checking… until then. */
+        async function testServer(id) {
+            checking.add(id);
+            renderServers();
+            try {
+                const answer = await api.testServer(id);
+                checking.delete(id);
+                takeList(answer);
+                return answer.check;
+            } catch {
+                // Removed meanwhile: there's nothing to say of it.
+                checking.delete(id);
+                renderServers();
+                return { ok: false };
+            }
+        }
+
+        /** Every row, in the list's order, with the count above them; a removed server's row goes. */
+        function renderServers() {
+            $('servers-count').textContent = saved.servers.length > 0 ? countOf(saved.servers.length, 'server') : 'No servers yet';
+            for (const [id, row] of rows) {
+                if (!saved.servers.some((server) => server.id === id)) {
+                    row.element.remove();
+                    rows.delete(id);
+                    opened.delete(id);
+                }
+            }
+            saved.servers.forEach((server, index) => {
+                if (!rows.has(server.id)) rows.set(server.id, serverRow(server.id));
+                rows.get(server.id).paint(server, index);
+            });
+            // In order, moved only when the order changed: a button just pressed keeps its focus.
+            const order = saved.servers.map((server) => rows.get(server.id).element);
+            if (order.some((row, index) => serverList.children[index] !== row)) {
+                const focused = document.activeElement;
+                serverList.replaceChildren(...order);
+                if (focused instanceof HTMLElement && serverList.contains(focused)) focused.focus();
+            }
+        }
+
+        /**
+         * What a server's last check found, as its status line's items and
+         * tone: "Online", its version, then how uploads go there; or why it
+         * can't be used. detail is the reason in full, for its tooltip.
+         * @returns {{ items: string[], tone: string, detail?: string }}
+         */
+        function serverState(server, check) {
+            if (!check) return { items: ['Not checked yet'], tone: 'muted' };
+            if (!check.ok) return { items: ["Can't connect"], tone: 'danger', detail: connectionFailedText(server.url, check) };
+            const info = check.serverInfo;
+            if (!info?.version || !info?.capabilities) return { items: ['Not a Dropgate server'], tone: 'danger' };
+            const online = ['Online', `Dropgate ${check.serverVersion ?? info.version}`];
+            if (!check.dgup?.compatible) return { items: [...online, 'Needs an Update'], tone: 'danger', detail: check.dgup?.message };
+            if (info.capabilities.upload?.enabled === false) return { items: [...online, 'Uploads Off'], tone: 'warning', detail: 'File uploads are disabled on this server.' };
+            if (!check.baseUrl?.startsWith('https://')) return { items: [...online, 'Plain HTTP', 'Not Encrypted'], tone: 'warning' };
+            if (!info.capabilities.upload?.e2ee) return { items: [...online, 'Not Encrypted'], tone: 'warning' };
+            return { items: [...online, 'End-to-End Encrypted'], tone: 'success' };
+        }
+
+        /** A number of hours as a bullet-separated item: "24 Hours". */
+        const hoursTitle = (n) => (Number.isInteger(n) ? countOf(n, 'Hour') : `${n} Hours`);
+
+        /** A server's limits, as bullet-separated items in Title Case: "Keeps Files Up to 24 Hours · Up to 5 Downloads · Up to 500 MB". */
+        function limitsTitle(upload) {
+            const limits = limitsOf(upload);
+            const size = upload.maxSizeMB;
+            return [
+                limits.hours === 0 ? 'No Time Limit' : `Keeps Files Up to ${hoursTitle(limits.hours)}`,
+                limits.downloads === 0 ? 'Any Number of Downloads' : `Up to ${countOf(limits.downloads, 'Download')}`,
+                size === 0 ? 'Any Size' : Number.isFinite(size) ? `Up to ${formatBytes(size * 1024 * 1024)}` : null,
+            ].filter(Boolean).join(' · ');
+        }
+
+        /** What a server allows uploads, from its last check: its capabilities' upload part, or null until a check found one. */
+        const uploadsOf = (check) => (check?.ok && check.serverInfo?.version && check.serverInfo?.capabilities?.upload) || null;
+
+        /** A small button of a row's own. */
+        function rowButton(label, variant, onClick) {
+            const button = element('button', `btn ${variant}`, label);
+            button.type = 'button';
+            button.addEventListener('click', onClick);
+            return button;
+        }
+
+        /** A button that's an icon alone, named for screen readers and its tooltip. */
+        function iconButton(icon, label, onClick) {
+            const button = rowButton(undefined, 'btn-outline-secondary icon-btn', onClick);
+            button.append(glyph(icon));
+            button.setAttribute('aria-label', label);
+            button.title = label;
+            return button;
+        }
+
+        /** A saved server's row, built once: paint() draws it as the server, its place and its check are now. */
+        function serverRow(id) {
+            const row = element('div', 'server-row');
+            row.setAttribute('role', 'group');
+            const icon = glyph('dns', 'kind-icon');
+            const name = element('span', 'server-name');
+            const pill = element('span', 'pill-default', 'Default');
+            const toggle = element('button', 'btn btn-sm btn-link ms-auto p-0 icon-btn');
+            toggle.type = 'button';
+            const toggleIcon = glyph('expand_more');
+            toggle.append(toggleIcon);
+            toggle.addEventListener('click', () => {
+                if (opened.has(id)) opened.delete(id);
+                else opened.add(id);
+                renderServers();
+            });
+            const head = element('div', 'server-head');
+            head.append(icon, name, pill, toggle);
+            const address = element('div', 'server-address selectable');
+            // The kit makes a status line only inside a card: the row's is drawn on its classes, as a card's is.
+            // kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/67
+            const statusText = element('span', 'kit-status-text');
+            const status = element('div', 'kit-card-status server-status');
+            status.append(element('span', 'kit-status-dot'), statusText);
+            const limitsLine = element('div', 'server-limits');
+
+            // Its settings for new uploads: no unit allows more than it does, and Unlimited only where it has no limit.
+            const lifetimeValue = element('input', 'form-control');
+            lifetimeValue.type = 'number';
+            lifetimeValue.id = `server-${id}-lifetime`;
+            lifetimeValue.min = '0';
+            lifetimeValue.step = 'any';
+            const lifetimeUnit = element('select', 'form-select');
+            lifetimeUnit.id = `server-${id}-lifetime-unit`;
+            lifetimeUnit.setAttribute('aria-label', 'Unit');
+            for (const [value, label] of [['minutes', 'Minutes'], ['hours', 'Hours'], ['days', 'Days'], ['unlimited', 'Unlimited']]) {
+                const option = element('option', '', label);
+                option.value = value;
+                lifetimeUnit.append(option);
+            }
+            const lifetimeGroup = element('div', 'input-group input-group-sm');
+            lifetimeGroup.append(lifetimeValue, lifetimeUnit);
+            const lifetimeField = formField('File lifetime', lifetimeGroup, `server-${id}-lifetime`);
+            const downloads = element('input', 'form-control form-control-sm');
+            downloads.type = 'number';
+            downloads.id = `server-${id}-downloads`;
+            downloads.step = '1';
+            const downloadsField = formField('Max downloads', downloads, `server-${id}-downloads`);
+            const fields = element('div', 'row g-2');
+            const lifetimeColumn = element('div', 'col-sm-7');
+            const downloadsColumn = element('div', 'col-sm-5');
+            lifetimeColumn.append(lifetimeField.wrap);
+            downloadsColumn.append(downloadsField.wrap);
+            fields.append(lifetimeColumn, downloadsColumn);
+
+            // The account's place: accounts come later, so only what a server without them says.
+            const slot = element('div', 'server-slot');
+            slot.append(element('div', 'server-slot-caption', 'Account'), element('div', 'server-slot-text text-body-secondary', "This server doesn't use accounts."));
+
+            const body = element('div', 'server-body');
+            body.append(element('div', 'small fw-semibold mt-1', 'New uploads to this server'), fields, slot);
+
+            const test = rowButton('Test', 'btn-outline-secondary', () => testServer(id));
+            const makeDefault = rowButton('Set as Default', 'btn-outline-secondary', async () => {
+                takeList(await api.setDefaultServer(id).catch(() => saved));
+            });
+            const up = iconButton('arrow_upward', 'Move Up', async () => takeList(await api.moveServer(id, -1).catch(() => saved)));
+            const down = iconButton('arrow_downward', 'Move Down', async () => takeList(await api.moveServer(id, 1).catch(() => saved)));
+            const remove = rowButton('Remove', 'btn-outline-danger ms-auto', async () => {
+                const server = saved.servers.find((s) => s.id === id);
+                if (!server) return;
+                const ok = await kit.ui.confirm({
+                    title: 'Remove This Server?',
+                    body: `${server.name} leaves your list, with its settings for new uploads. Uploads already under way to it carry on.`,
+                    confirmLabel: 'Remove',
+                    variant: 'danger',
+                    icon: 'delete',
+                });
+                if (ok) takeList(await api.removeServer(id).catch(() => saved));
+            });
+            const actions = element('div', 'server-actions');
+            actions.append(test, makeDefault, up, down, remove);
+            row.append(head, address, status, limitsLine, body, actions);
+
+            /** Test's busy state, while the server is checked from anywhere: as the window opens, before an upload, or Test itself. */
+            let restoreTest = null;
+            /** What it allows, as its last check said, for its fields. */
+            let limits = null;
+
+            /** The lifetime as the fields say it, or null when it isn't one. */
+            const readLifetime = () => {
+                if (lifetimeUnit.value === 'unlimited') return { value: 0, unit: 'unlimited' };
+                const value = Number(lifetimeValue.value);
+                return lifetimeValue.value.trim() !== '' && Number.isFinite(value) && value > 0 ? { value, unit: lifetimeUnit.value } : null;
+            };
+            /** The download limit as its field says it, or null when it isn't a whole number. */
+            const readDownloads = () => {
+                const n = Number(downloads.value);
+                return downloads.value.trim() !== '' && Number.isSafeInteger(n) && n >= 0 ? n : null;
+            };
+
+            /**
+             * Each help line says what the server allows, or why a value is
+             * outside it; each value it allows is what's saved. Nothing is
+             * saved until a check has said what it allows.
+             * @returns {{ lifetime?: object, maxDownloads?: number }} the values within its limits
+             */
+            const checkFields = () => {
+                if (!limits) {
+                    setHelp(lifetimeField.help, 'Test the server to see its limits.');
+                    setHelp(downloadsField.help, '');
+                    return {};
+                }
+                const most = Number(lifetimeUnit.selectedOptions[0]?.dataset.most ?? 0);
+                if (lifetimeUnit.value === 'unlimited') lifetimeValue.value = '';
+                if (limits.hours !== 0) lifetimeValue.max = String(most);
+                else lifetimeValue.removeAttribute('max');
+                const within = {};
+
+                const life = readLifetime();
+                let lifeWhy = null;
+                if (!life) lifeWhy = 'Enter a lifetime of more than 0.';
+                else if (lifetimeOutside(life, limits)) {
+                    lifeWhy = life.unit === 'unlimited'
+                        ? `This server doesn't allow unlimited. It keeps files up to ${hours(limits.hours)}.`
+                        : `Too long: This server keeps files up to ${hours(limits.hours)}.`;
+                } else within.lifetime = life;
+                setHelp(lifetimeField.help, lifeWhy ?? (limits.hours === 0 ? 'No time limit on this server.' : `Up to ${hours(limits.hours)}.`), lifeWhy ? 'danger' : undefined);
+
+                const n = readDownloads();
+                let downloadsWhy = null;
+                if (n === null) downloadsWhy = limits.downloads === 0 ? 'Enter a whole number: 0 or more.' : `Enter a whole number from 1 to ${limits.downloads}.`;
+                else if (downloadsOutside(n, limits)) {
+                    downloadsWhy = n === 0
+                        ? `This server doesn't allow unlimited downloads. It allows up to ${countOf(limits.downloads, 'download')}.`
+                        : `Too many: This server allows up to ${countOf(limits.downloads, 'download')}.`;
+                } else within.maxDownloads = n;
+                const allows = limits.downloads === 0 ? '0 means unlimited.' : limits.downloads === 1 ? 'This server allows 1 download.' : `Up to ${countOf(limits.downloads, 'download')}.`;
+                setHelp(downloadsField.help, downloadsWhy ?? allows, downloadsWhy ? 'danger' : undefined);
+                return within;
+            };
+
+            /** A field changed: what's now within the server's limits is saved, through main. */
+            const changed = async () => {
+                lifetimeValue.disabled = lifetimeUnit.value === 'unlimited';
+                const within = checkFields();
+                const server = saved.servers.find((s) => s.id === id);
+                if (!server) return;
+                const options = {};
+                if (within.lifetime && !sameLifetime(within.lifetime, server.lifetime)) options.lifetime = within.lifetime;
+                if (within.maxDownloads !== undefined && within.maxDownloads !== server.maxDownloads) options.maxDownloads = within.maxDownloads;
+                if (Object.keys(options).length > 0) takeList(await api.setServerOptions(id, options).catch(() => saved));
+            };
+            for (const control of [lifetimeValue, downloads]) control.addEventListener('input', changed);
+            lifetimeUnit.addEventListener('change', changed);
+
+            /** The fields as the server's settings are, and as far as its limits let them go. One being typed in is left as it is. */
+            function paintFields(server, upload) {
+                limits = upload ? limitsOf(upload) : null;
+                const typing = [lifetimeValue, lifetimeUnit, downloads].includes(document.activeElement);
+                if (!typing) {
+                    lifetimeUnit.value = server.lifetime.unit;
+                    lifetimeValue.value = server.lifetime.unit === 'unlimited' ? '' : String(server.lifetime.value);
+                    downloads.value = String(server.maxDownloads);
+                }
+                for (const option of lifetimeUnit.options) {
+                    const most = limits ? { minutes: limits.hours * 60, hours: limits.hours, days: limits.hours / 24, unlimited: 0 }[option.value] : 0;
+                    option.dataset.most = String(most);
+                    option.disabled = Boolean(limits) && ((option.value === 'unlimited' && limits.hours !== 0) || (option.value === 'days' && limits.hours !== 0 && limits.hours < 24));
+                    if (option.value === 'unlimited') option.textContent = limits && limits.hours !== 0 ? 'Unlimited (not allowed by the server)' : 'Unlimited';
+                }
+                downloads.min = limits?.downloads === 0 ? '0' : '1';
+                if (limits && limits.downloads > 0) downloads.max = String(limits.downloads);
+                else downloads.removeAttribute('max');
+                lifetimeUnit.disabled = !limits;
+                lifetimeValue.disabled = !limits || lifetimeUnit.value === 'unlimited';
+                // Where the server allows 1, and 1 is saved, it's the only value there is.
+                if (!typing) downloads.disabled = !limits || (limits.downloads === 1 && server.maxDownloads === 1);
+                checkFields();
+            }
+
+            function paint(server, index) {
+                const check = saved.checks[server.id] ?? null;
+                const busy = checking.has(server.id);
+                const isDefault = server.id === defaultSaved()?.id;
+                row.setAttribute('aria-label', server.name);
+                icon.textContent = isPlainHttp(server.url) ? 'lan' : 'dns';
+                name.textContent = server.name;
+                name.title = server.name;
+                pill.hidden = !isDefault;
+                address.textContent = server.url;
+                address.title = server.url;
+                const state = busy ? { items: ['Checking…'], tone: 'running' } : serverState(server, check);
+                status.className = `kit-card-status server-status kit-tone-${state.tone}`;
+                statusText.textContent = state.items.join(' · ');
+                statusText.title = state.detail ?? statusText.textContent;
+                const upload = uploadsOf(check);
+                limitsLine.hidden = !upload || busy;
+                limitsLine.textContent = upload ? limitsTitle(upload) : '';
+                const open = opened.has(server.id);
+                body.hidden = !open;
+                toggle.setAttribute('aria-expanded', String(open));
+                toggle.setAttribute('aria-label', open ? 'Hide Settings' : 'Show Settings');
+                toggle.title = open ? 'Hide Settings' : 'Show Settings';
+                toggleIcon.textContent = open ? 'expand_less' : 'expand_more';
+                paintFields(server, upload);
+                slot.hidden = !upload;
+                makeDefault.hidden = isDefault;
+                up.disabled = index === 0;
+                down.disabled = index === saved.servers.length - 1;
+                if (busy && !restoreTest) restoreTest = kit.ui.busy(test, 'Testing…');
+                if (!busy && restoreTest) {
+                    restoreTest();
+                    restoreTest = null;
+                }
+            }
+
+            return { element: row, paint };
+        }
+
+        /**
+         * Add Server: an address, checked by the transfer window (Check),
+         * showing what it found (its name and version, how uploads go there,
+         * its limits) before it's added; Add Server then asks main, which
+         * checks it again and saves it, as the default if it's the first.
+         * Nothing is saved until then. An invite link isn't taken yet: it
+         * comes with accounts. The kit has no form dialog yet: the page's own,
+         * drawn on the kit's dialog classes, as Advanced Options is.
+         * kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65
+         */
+        function openAddServer() {
+            const dialog = element('dialog', 'kit-dialog options-dialog');
+            dialog.setAttribute('aria-labelledby', 'add-server-title');
+            const title = element('h2', 'kit-dialog-title');
+            const titleText = element('span', '', 'Add Server');
+            titleText.id = 'add-server-title';
+            title.append(glyph('dns', 'kit-dialog-icon'), titleText);
+            const close = element('button', 'btn-close');
+            close.type = 'button';
+            close.setAttribute('aria-label', 'Close');
+            close.addEventListener('click', () => dialog.close());
+            const header = element('div', 'kit-dialog-header');
+            header.append(title, close);
+            const body = element('div', 'kit-dialog-body options-body');
+            const footer = element('div', 'kit-dialog-footer');
+            dialog.append(header, body, footer);
+
+            const input = element('input', 'form-control selectable');
+            input.type = 'text';
+            input.id = 'add-server-address';
+            input.placeholder = 'https://drop.example.com';
+            input.spellcheck = false;
+            input.autocomplete = 'off';
+            const field = formField('Server address', input, 'add-server-address');
+            const usual = "Its address, starting with https://, or http:// for a server with no HTTPS. Invite links aren't supported yet.";
+            setHelp(field.help, usual);
+            const found = element('div', 'server-found');
+            found.hidden = true;
+            found.setAttribute('aria-live', 'polite');
+            body.append(field.wrap, found);
+
+            const cancel = element('button', 'btn btn-secondary', 'Cancel');
+            cancel.type = 'button';
+            cancel.addEventListener('click', () => dialog.close());
+            const go = element('button', 'btn btn-primary', 'Check');
+            go.type = 'button';
+            footer.append(cancel, go);
+
+            /** The address its check found a Dropgate server at, as typed: Add Server adds it. */
+            let checked = null;
+            const reset = () => {
+                checked = null;
+                found.hidden = true;
+                go.textContent = 'Check';
+                setHelp(field.help, usual);
+            };
+            input.addEventListener('input', reset);
+            input.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' && !go.disabled) go.click();
+            });
+
+            /** What a check found: its name and version, how uploads go there, its limits, and the address it was found at. */
+            function showFound(check) {
+                const info = check.serverInfo;
+                const state = serverState({ url: check.baseUrl }, check);
+                const upload = uploadsOf(check);
+                const how = element('div', `small text-${state.tone}-emphasis`, state.items.filter((item) => !item.startsWith('Dropgate ')).join(' · '));
+                found.replaceChildren(element('div', 'fw-semibold', `${info.name || hostName(check.baseUrl)} · Dropgate ${check.serverVersion ?? info.version}`), how,
+                    ...(upload ? [element('div', 'small text-body-secondary', limitsTitle(upload))] : []),
+                    ...(state.detail ? [element('div', 'small', state.detail)] : []),
+                    element('div', 'server-address selectable', check.baseUrl));
+                found.hidden = false;
+            }
+
+            go.addEventListener('click', async () => {
+                const value = input.value.trim();
+                if (!value) {
+                    setHelp(field.help, "Enter the server's address.", 'danger');
+                    return;
+                }
+                if (checked !== value) {
+                    // Check: asked of the server, and nothing saved.
+                    const restore = kit.ui.busy(go, 'Checking…');
+                    const check = await api.checkServer(value).catch(() => null);
+                    restore();
+                    if (!dialog.open || input.value.trim() !== value) return;
+                    if (!check) setHelp(field.help, "That isn't a server's address: Enter one such as https://drop.example.com.", 'danger');
+                    else if (!check.ok) setHelp(field.help, connectionFailedText(value, check), 'danger');
+                    else if (!check.serverInfo?.version || !check.serverInfo?.capabilities) setHelp(field.help, 'That address answered, but not as a Dropgate server.', 'danger');
+                    else {
+                        showFound(check);
+                        checked = value;
+                        go.textContent = 'Add Server';
+                        setHelp(field.help, '');
+                    }
+                    return;
+                }
+                // Add Server: main checks it again, and saves it once it answers as a Dropgate server.
+                const before = new Set(saved.servers.map((server) => server.id));
+                const restore = kit.ui.busy(go, 'Adding…');
+                const answer = await api.addServer(value).catch(() => null);
+                restore();
+                if (!answer?.server) {
+                    if (dialog.open) {
+                        reset();
+                        setHelp(field.help, answer && !answer.check?.ok ? connectionFailedText(value, answer.check) : 'That address no longer answers as a Dropgate server.', 'danger');
+                    }
+                    if (answer) takeList(answer);
+                    return;
+                }
+                opened.add(answer.server.id);
+                takeList(answer);
+                dialog.close();
+                if (before.has(answer.server.id)) kit.ui.toast(`${answer.server.name} is saved already.`, { type: 'info' });
+            });
+
+            dialog.addEventListener('close', () => dialog.remove());
+            document.body.append(dialog);
+            dialog.showModal();
+            input.focus();
+        }
+
+        /** An address's host, as a server's name until it gives its own. */
+        function hostName(address) {
+            try {
+                return new URL(address).host;
+            } catch {
+                return address;
+            }
+        }
+
         // --- Initial Settings Load ---
         const settings = await kitApi.getSettings();
-        saved = { servers: settings.servers, defaultServer: settings.defaultServer };
-        showDefaultServer();
+        saved = { servers: settings.servers, defaultServer: settings.defaultServer, checks: {} };
+        // The default's row opens with its settings for new uploads shown.
+        if (defaultSaved()) opened.add(defaultSaved().id);
+        renderServers();
         // The kit's own setting: on, the redacted log is kept in debug.log too; off, that file is deleted.
         const keepLog = kit.ui.switchField({
             id: 'keep-log-on-disk',
@@ -1038,36 +1506,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         await checkServerCompatibility();
 
         // --- Event Listeners ---
-        const updateLifetimeSettings = () => {
-            const isUnlimited = fileLifetimeUnitSelect.value === 'unlimited';
-            fileLifetimeValueInput.disabled = isUnlimited;
-
-            if (isUnlimited) {
-                fileLifetimeValueInput.value = 0;
-            } else {
-                const value = parseFloat(fileLifetimeValueInput.value);
-                if (isNaN(value) || value <= 0) {
-                    fileLifetimeValueInput.value = 0.5;
-                }
-            }
-            validateLifetimeInput();
-            saveSettings();
-        };
-
-        const updateMaxDownloadsSettings = () => {
-            if (maxDownloadsValue.value === '') {
-                maxDownloadsValue.value = 1;
-            }
-            validateMaxDownloadsInput();
-            saveSettings();
-        };
-
-        fileLifetimeValueInput.addEventListener('blur', () => updateLifetimeSettings());
-        fileLifetimeValueInput.addEventListener('input', () => updateLifetimeSettings());
-        fileLifetimeUnitSelect.addEventListener('change', () => updateLifetimeSettings());
-        maxDownloadsValue.addEventListener('input', () => updateMaxDownloadsSettings());
-        maxDownloadsValue.addEventListener('blur', () => updateMaxDownloadsSettings());
-
         addFilesBtn.addEventListener('click', () => fileInput.click());
         // Files picked with Add Files or the drop zone: by their paths, as a drop's are, together one upload.
         fileInput.addEventListener('change', (e) => {
@@ -1081,46 +1519,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         });
 
-        testConnectionBtn.addEventListener('click', async () => {
-            const serverUrl = serverUrlInput.value.trim();
-            if (!serverUrl) {
-                updateUploadabilityState(false);
-                connectionStatus.textContent = 'Enter a server URL.';
-                connectionStatus.className = 'form-text reserved text-warning-emphasis';
-                return;
-            }
-
-            const restore = kit.ui.busy(testConnectionBtn, 'Testing…');
-            connectionStatus.textContent = 'Checking server…';
-            connectionStatus.className = 'form-text reserved';
-
-            try {
-                // Main checks it, and saves it once it answers as a Dropgate server.
-                const added = await api.addServer(serverUrl).catch(() => ({ check: { ok: false } }));
-                const result = added.check;
-                if (!result.ok) {
-                    connectionStatus.textContent = connectionFailedText(serverUrl, result);
-                    updateUploadabilityState(false);
-                    connectionStatus.className = 'form-text reserved text-danger-emphasis';
-                    return;
-                }
-                serverBaseUrl = result.baseUrl;
-
-                if (serverBaseUrl.startsWith('https://')) {
-                    connectionStatus.textContent = 'Connection successful (HTTPS).';
-                    connectionStatus.className = 'form-text reserved text-success-emphasis';
-                } else {
-                    connectionStatus.textContent = 'Connection successful (HTTP), but the connection is insecure.';
-                    connectionStatus.className = 'form-text reserved text-warning-emphasis';
-                }
-
-                if (added.server) await makeDefault(added.server.id, added);
-
-                await checkServerCompatibility();
-            } finally {
-                restore();
-            }
-        });
+        $('add-server-btn').addEventListener('click', () => openAddServer());
 
         // --- IPC Listeners (Communication from Main Process) ---
 
@@ -1261,7 +1660,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         /** The server's limits on a lifetime (in hours, 0 for none) and on downloads (0 for none), as it last said. */
-        const limitsOf = (upload) => ({ hours: upload.maxLifetimeHours, downloads: upload.maxFileDownloads ?? 1 });
+        function limitsOf(upload) {
+            return { hours: upload.maxLifetimeHours, downloads: upload.maxFileDownloads ?? 1 };
+        }
 
         /** Whether a lifetime is longer than the server allows: unlimited, or past its limit. */
         function lifetimeOutside(lifetime, limits) {
@@ -1271,7 +1672,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         /** Whether a download limit is more than the server allows: unlimited, or past its limit. */
-        const downloadsOutside = (n, limits) => limits.downloads > 0 && (n === 0 || n > limits.downloads);
+        function downloadsOutside(n, limits) {
+            return limits.downloads > 0 && (n === 0 || n > limits.downloads);
+        }
 
         /** Whether an upload's options are outside the server's limits, as it last said them. */
         function outsideLimits(options) {
@@ -1555,83 +1958,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             return at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
         }
 
-        /**
-         * Update the security status card based on E2EE and HTTPS availability.
-         */
-        function updateSecurityStatus() {
-            // What counts is the server's address: its capability, and whether it's reached over HTTPS.
-            const isTargetSecure = serverBaseUrl?.startsWith('https://') ?? false;
-
-            if (serverEncrypts()) {
-                // Green: Full E2EE
-                securityIcon.textContent = 'verified';
-                securityIcon.className = 'material-icons-round text-success-emphasis';
-                securityText.textContent = 'Your upload will be end-to-end encrypted.';
-                securityStatus.className = 'security-status-card security-green';
-            } else if (isTargetSecure) {
-                // Yellow: HTTPS but no E2EE
-                securityIcon.textContent = 'warning';
-                securityIcon.className = 'material-icons-round text-warning-emphasis';
-                securityText.textContent = "This server doesn't support encryption. Your upload is protected in transit by HTTPS.";
-                securityStatus.className = 'security-status-card security-yellow';
-            } else {
-                // Red: HTTP, no encryption at all
-                securityIcon.textContent = 'gpp_bad';
-                securityIcon.className = 'material-icons-round text-danger-emphasis';
-                securityText.textContent = 'This connection is not secure. Your upload will not be encrypted.';
-                securityStatus.className = 'security-status-card security-red';
-            }
-        }
-
-        /**
-         * Keep the default server's settings for new uploads, as they change,
-         * through main. A value that isn't a number yet is left as it was.
-         */
-        async function saveSettings() {
-            // Each card's settings line says what differs from these.
-            for (const entry of shown.values()) draw(entry.view);
-            const server = defaultSaved();
-            if (!server) return;
-            const options = {};
-            const unit = fileLifetimeUnitSelect.value;
-            const lifetime = parseFloat(fileLifetimeValueInput.value);
-            if (unit === 'unlimited') options.lifetime = { value: 0, unit };
-            else if (Number.isFinite(lifetime) && lifetime > 0) options.lifetime = { value: lifetime, unit };
-            const downloads = parseInt(maxDownloadsValue.value, 10);
-            if (Number.isInteger(downloads) && downloads >= 0) options.maxDownloads = downloads;
-            if (Object.keys(options).length === 0) return;
-            saved = await api.setServerOptions(server.id, options).catch(() => saved);
-        }
-
-        /**
-         * A server Test saved becomes the default, in place of the one before
-         * (Settings > Server shows one): its address and its settings for new
-         * uploads are shown.
-         * @param {string} id
-         * @param {{ servers: any[], defaultServer: string | null }} list - Main's answer as it saved it.
-         */
-        async function makeDefault(id, list) {
-            saved = { servers: list.servers, defaultServer: list.defaultServer };
-            const before = saved.defaultServer;
-            if (before !== id) {
-                saved = await api.setDefaultServer(id);
-                if (before) saved = await api.removeServer(before);
-            }
-            showDefaultServer();
-        }
-
-        /** The default server's address and settings for new uploads, in Settings > Server. With none saved, the fields keep what they have. */
-        function showDefaultServer() {
-            const server = defaultSaved();
-            if (!server) return;
-            serverUrlInput.value = server.url;
-            fileLifetimeUnitSelect.value = server.lifetime.unit;
-            fileLifetimeValueInput.disabled = server.lifetime.unit === 'unlimited';
-            fileLifetimeValueInput.value = server.lifetime.unit === 'unlimited' ? 0 : server.lifetime.value;
-            maxDownloadsValue.value = server.maxDownloads;
-        }
-
-        /** The server's name on every card and the bulk bar, and whether a waiting upload says it won't be encrypted. */
+        /** The server's name on every upload and the bulk bar, and whether a waiting upload says it won't be encrypted. */
         function refreshServer() {
             fillServers(bulkTarget);
             for (const entry of shown.values()) {
@@ -1641,127 +1968,43 @@ document.addEventListener('DOMContentLoaded', async () => {
             drawBars();
         }
 
-        function getLifetimeInMs() {
-            const unit = fileLifetimeUnitSelect.value;
-            if (unit === 'unlimited') return 0;
-            const value = parseFloat(fileLifetimeValueInput.value);
-            return lifetimeToMs(value, unit);
-        }
-
+        /**
+         * Check the default server again, through main (its row says so
+         * while it's checked), and say whether uploads can start on it. With
+         * none saved, nothing is asked of any server.
+         */
         async function checkServerCompatibility() {
-            lastServerCheck = await findServer();
-            refreshServer();
+            const server = defaultSaved();
+            if (server) await testServer(server.id);
+            else useDefaultCheck();
             return lastServerCheck;
         }
 
-        async function findServer() {
-            const inputUrl = defaultSaved()?.url ?? '';
-            if (!inputUrl) {
-                const message = 'No server URL. Add one in Settings, under Server.';
-                updateUploadabilityState(false);
-                return { compatible: false, message };
-            }
+        /**
+         * What the default server's last check found, for uploads: its
+         * capabilities, its address as found, and whether uploads can start
+         * there, or why not. Every upload's line is drawn again with it.
+         */
+        function useDefaultCheck() {
+            const server = defaultSaved();
+            const check = server ? saved.checks[server.id] ?? null : null;
+            serverCapabilities = check?.ok ? check.serverInfo?.capabilities ?? null : null;
+            serverBaseUrl = check?.ok ? check.baseUrl : null;
+            lastServerCheck = compatibilityOf(server, check);
+            refreshServer();
+        }
 
-            const compat = await checkServer(inputUrl);
-            if (!compat.ok) {
-                updateUploadabilityState(false);
-                return { compatible: false, message: 'Could not connect to the server.' };
-            }
-            serverBaseUrl = compat.baseUrl;
-
-            const { serverInfo } = compat;
-
-            if (!serverInfo || !serverInfo?.version || !serverInfo?.capabilities) {
-                updateUploadabilityState(false);
-                return { compatible: false, message: 'Cannot determine the server\'s version or capabilities.' };
-            }
-
-            serverCapabilities = serverInfo.capabilities;
-
-            // Check if uploads are explicitly disabled by the server
-            if (serverCapabilities.upload && serverCapabilities.upload.enabled === false) {
-                updateUploadabilityState(false);
-                return { compatible: false, message: 'File uploads are disabled on this server.' };
-            }
-            updateUploadabilityState(true);
-
-            applyServerLimits();
-
+        /** Whether uploads can start on a server, from its last check, or why not. */
+        function compatibilityOf(server, check) {
+            if (!server) return { compatible: false, message: 'No server URL. Add one in Settings, under Servers.' };
+            if (!check) return { compatible: false, message: '' };
+            if (!check.ok) return { compatible: false, message: 'Could not connect to the server.' };
+            const { serverInfo } = check;
+            if (!serverInfo?.version || !serverInfo?.capabilities) return { compatible: false, message: "Cannot determine the server's version or capabilities." };
+            if (serverInfo.capabilities.upload?.enabled === false) return { compatible: false, message: 'File uploads are disabled on this server.' };
             // Uploads need the server's hosted transfer protocol to work with this app's.
-            if (!compat.dgup.compatible) {
-                updateUploadabilityState(false);
-                return { compatible: false, message: compat.dgup.message };
-            }
-
-            return { compatible: true, message: `Server: v${compat.serverVersion}${serverInfo.name ? ` (${serverInfo.name})` : ''}, Client: v${appVersion}.` };
-        }
-
-        function validateLifetimeInput() {
-            if (!serverCapabilities || !serverCapabilities.upload) return true;
-
-            const limitHours = serverCapabilities.upload.maxLifetimeHours;
-            const unit = fileLifetimeUnitSelect.value;
-
-            // If server allows unlimited, and user selected unlimited, we are good.
-            if (limitHours === 0 && unit === 'unlimited') {
-                setHelp(fileLifetimeHelp, 'No lifetime limit enforced by the server.');
-                return true;
-            }
-
-            // If user selected unlimited but server forbids it
-            if (limitHours > 0 && unit === 'unlimited') {
-                fileLifetimeUnitSelect.value = 'hours';
-                fileLifetimeValueInput.disabled = false;
-            }
-
-            const currentMs = getLifetimeInMs();
-            const limitMs = limitHours * 60 * 60 * 1000;
-
-            if (limitHours > 0 && currentMs > limitMs) {
-                setHelp(fileLifetimeHelp, `File lifetime too long. Server limit: ${hours(limitHours)}.`, 'danger');
-                return false;
-            }
-            setHelp(fileLifetimeHelp, limitHours === 0 ? 'No lifetime limit enforced by the server.' : `Max: ${hours(limitHours)}`);
-            return true;
-        }
-
-        function validateMaxDownloadsInput() {
-            if (!serverCapabilities || !serverCapabilities.upload) return true;
-
-            const maxFileDownloads = serverCapabilities.upload.maxFileDownloads ?? 1;
-            const value = parseInt(maxDownloadsValue.value, 10);
-
-            // Handle invalid input
-            if (isNaN(value) || value < 0) {
-                setHelp(maxDownloadsHelp, 'Max downloads must be 0 or more.', 'danger');
-                return false;
-            }
-
-            // Server allows unlimited (0) - any value is valid
-            if (maxFileDownloads === 0) {
-                setHelp(maxDownloadsHelp, '0 means unlimited downloads.');
-                return true;
-            }
-
-            // Server has limit of 1 - input should be disabled anyway (handled by applyServerLimits)
-            if (maxFileDownloads === 1) {
-                setHelp(maxDownloadsHelp, 'Server enforces single-use download links.');
-                return true;
-            }
-
-            // Server has limit > 1
-            if (value === 0) {
-                setHelp(maxDownloadsHelp, `0 (unlimited) not allowed. Server limit: ${countOf(maxFileDownloads, 'download')}.`, 'danger');
-                return false;
-            }
-
-            if (value > maxFileDownloads) {
-                setHelp(maxDownloadsHelp, `Exceeds the server's limit of ${countOf(maxFileDownloads, 'download')}.`, 'danger');
-                return false;
-            }
-
-            setHelp(maxDownloadsHelp, `Max: ${countOf(maxFileDownloads, 'download')}`);
-            return true;
+            if (!check.dgup?.compatible) return { compatible: false, message: check.dgup?.message ?? 'Server is not compatible.' };
+            return { compatible: true, message: `Server: v${check.serverVersion}${serverInfo.name ? ` (${serverInfo.name})` : ''}, Client: v${appVersion}.` };
         }
 
         /** A number of hours: a server's limit can be part of one, which countOf() would round. */
@@ -1773,96 +2016,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         function setHelp(element, text, tone) {
             element.textContent = text;
             element.className = `form-text reserved${tone ? ` text-${tone}-emphasis` : ''}`;
-        }
-
-        // The settings for new uploads, as the server allows them: off while there's no server to hold them to.
-        function updateUploadabilityState(enabled) {
-            if (!enabled) {
-                // Clear loading text and hide security badge
-                setHelp(fileLifetimeHelp, '');
-                setHelp(maxDownloadsHelp, '');
-                maxUploadHint.textContent = '';
-                securityStatus.classList.add('d-none');
-
-                fileLifetimeValueInput.disabled = true;
-                fileLifetimeUnitSelect.disabled = true;
-                maxDownloadsValue.disabled = true;
-            } else {
-                securityStatus.classList.remove('d-none');
-
-                // Inputs will be further refined by applyServerLimits, but enable them generally here
-                fileLifetimeValueInput.disabled = fileLifetimeUnitSelect.value === 'unlimited';
-                fileLifetimeUnitSelect.disabled = false;
-                maxDownloadsValue.disabled = false;
-            }
-        }
-
-        // Apply server-enforced limits to the settings for new uploads
-        function applyServerLimits() {
-            if (!serverCapabilities || !serverCapabilities.upload) return;
-
-            const limitHours = serverCapabilities.upload.maxLifetimeHours;
-            const unlimitedOption = fileLifetimeUnitSelect.querySelector('option[value="unlimited"]');
-
-            if (limitHours > 0) {
-                // Server has a limit: Disable "Unlimited"
-                if (unlimitedOption) {
-                    unlimitedOption.disabled = true;
-                    unlimitedOption.textContent = 'Unlimited (not allowed by the server)';
-                }
-
-                // If currently selected is unlimited, switch to hours
-                if (fileLifetimeUnitSelect.value === 'unlimited') {
-                    fileLifetimeUnitSelect.value = 'hours';
-                    fileLifetimeValueInput.disabled = false;
-                    fileLifetimeValueInput.value = Math.min(24, limitHours);
-                }
-            } else if (unlimitedOption) {
-                // Server allows unlimited
-                unlimitedOption.disabled = false;
-                unlimitedOption.textContent = 'Unlimited';
-            }
-
-            // The server's limit, as its operator set it, in MB.
-            const maxSizeMB = serverCapabilities.upload.maxSizeMB;
-            maxUploadHint.textContent = maxSizeMB === 0 ? 'You can upload files of any size.' : `Max upload size: ${maxSizeMB} MB.`;
-
-            // Update Security Status UI (Auto-managed E2EE)
-            updateSecurityStatus();
-
-            // Max Downloads UI
-            const maxFileDownloads = serverCapabilities.upload.maxFileDownloads ?? 1;
-
-            // Get current value (loaded from settings or user input)
-            let currentValue = parseInt(maxDownloadsValue.value, 10);
-            if (isNaN(currentValue)) currentValue = 1;
-
-            if (maxFileDownloads === 1) {
-                // Server forces single-download: disable input
-                maxDownloadsValue.value = '1';
-                maxDownloadsValue.min = '1';
-                maxDownloadsValue.disabled = true;
-                setHelp(maxDownloadsHelp, 'Server enforces single-use download links.');
-            } else if (maxFileDownloads === 0) {
-                // Server allows unlimited
-                maxDownloadsValue.disabled = false;
-                maxDownloadsValue.min = '0';
-                setHelp(maxDownloadsHelp, '0 means unlimited downloads.');
-            } else {
-                // Server has a limit > 1 (0 is not allowed)
-                maxDownloadsValue.disabled = false;
-                maxDownloadsValue.min = '1';
-                setHelp(maxDownloadsHelp, `Max: ${countOf(maxFileDownloads, 'download')}`);
-
-                // Auto-clamp if needed (if current is 0/unlimited or exceeds limit)
-                if (currentValue === 0 || currentValue > maxFileDownloads) {
-                    maxDownloadsValue.value = String(maxFileDownloads);
-                }
-            }
-
-            // Re-validate current inputs, and keep what was held to the server's limits: new uploads take these.
-            validateLifetimeInput();
-            saveSettings();
         }
 
         // From now on the files the app is opened with go straight in; any that came early, now.

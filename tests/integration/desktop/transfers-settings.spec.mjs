@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { madeUpFile, summary } from '../helpers/files.mjs';
 import {
-    addLink, cardButton, downloadCard, downloadStatus, expect, holdChunks, pickFolder, securityWarning, test, uploadButton, uploadCard, uploadStatus, uploadsStarted,
+    addLink, cardButton, defaultServerRow, downloadCard, downloadStatus, expect, holdChunks, openServers, pickFolder, securityWarning, test, uploadButton, uploadCard, uploadStatus, uploadsStarted,
 } from '../helpers/desktop.mjs';
 import { uploadWithCore } from '../helpers/hosted.mjs';
 
@@ -90,13 +90,13 @@ test.describe('on a server allowing 5 downloads', () => {
         await expect.poll(() => stored(desktop).settingsSchema).toBe(3);
         for (const key of ['serverURL', 'lifetimeValue', 'lifetimeUnit', 'maxDownloads']) expect(Object.keys(stored(desktop).settings), `${key} after version 3`).not.toContain(key);
 
-        // Settings > Server shows it, and a new upload takes its settings.
-        await window.getByRole('button', { name: 'Settings', exact: true }).click();
-        await window.getByRole('tab', { name: 'Server' }).click();
-        await expect(window.locator('#server-url')).toHaveValue(desktop.serverUrl);
-        await expect(window.locator('#file-lifetime-value')).toHaveValue('12');
-        await expect(window.locator('#file-lifetime-unit')).toHaveValue('hours');
-        await expect(window.locator('#max-downloads-value')).toHaveValue('5');
+        // Settings > Servers shows it, the default, and a new upload takes its settings.
+        await openServers(window);
+        const row = defaultServerRow(window);
+        await expect(row.locator('.server-address')).toHaveText(desktop.serverUrl);
+        await expect(row.getByLabel('File lifetime')).toHaveValue('12');
+        await expect(row.getByRole('combobox', { name: 'Unit' })).toHaveValue('hours');
+        await expect(row.getByLabel('Max downloads')).toHaveValue('5');
         await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
         const sent = madeUpFile('From version 1.bin', 20_000, 104);
         await desktop.upload(window, [sent], { encrypted: false });
