@@ -990,7 +990,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         /** Each saved server's row, by its ID. */
         const rows = new Map();
         /** The rows whose settings for new uploads are shown, by server ID: the default's as the window opens, and one just added. */
-        const opened = new Set();
+        const openRows = new Set();
         /** The saved servers being checked now, by ID: their rows say so, with Test busy. */
         const checking = new Set();
 
@@ -1025,7 +1025,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (!saved.servers.some((server) => server.id === id)) {
                     row.element.remove();
                     rows.delete(id);
-                    opened.delete(id);
+                    openRows.delete(id);
                 }
             }
             saved.servers.forEach((server, index) => {
@@ -1106,8 +1106,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             const toggleIcon = glyph('expand_more');
             toggle.append(toggleIcon);
             toggle.addEventListener('click', () => {
-                if (opened.has(id)) opened.delete(id);
-                else opened.add(id);
+                if (openRows.has(id)) openRows.delete(id);
+                else openRows.add(id);
                 renderServers();
             });
             const head = element('div', 'server-head');
@@ -1293,7 +1293,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const upload = uploadsOf(check);
                 limitsLine.hidden = !upload || busy;
                 limitsLine.textContent = upload ? limitsTitle(upload) : '';
-                const open = opened.has(server.id);
+                const open = openRows.has(server.id);
                 body.hidden = !open;
                 toggle.setAttribute('aria-expanded', String(open));
                 toggle.setAttribute('aria-label', open ? 'Hide Settings' : 'Show Settings');
@@ -1424,7 +1424,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     if (answer) takeList(answer);
                     return;
                 }
-                opened.add(answer.server.id);
+                openRows.add(answer.server.id);
                 takeList(answer);
                 dialog.close();
                 if (before.has(answer.server.id)) kit.ui.toast(`${answer.server.name} is saved already.`, { type: 'info' });
@@ -1449,7 +1449,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const settings = await kitApi.getSettings();
         saved = { servers: settings.servers, defaultServer: settings.defaultServer, checks: {} };
         // The default's row opens with its settings for new uploads shown.
-        if (defaultSaved()) opened.add(defaultSaved().id);
+        if (defaultSaved()) openRows.add(defaultSaved().id);
         renderServers();
         // The kit's own setting: on, the redacted log is kept in debug.log too; off, that file is deleted.
         const keepLog = kit.ui.switchField({

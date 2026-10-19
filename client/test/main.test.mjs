@@ -227,6 +227,9 @@ test('the shell and the shared parts are the kit\'s: no modal, drop zone, progre
     for (const own of ['bootstrap.Modal', 'bootstrap.Tooltip', 'innerHTML', 'alert(', 'dataTransfer', 'xfer-card']) {
         assert.ok(!renderer.includes(own), `renderer.js has ${own}`);
     }
+    // The files the app is opened with wait in one list until the page is set up: a second name like it inside would
+    // hide it from the setup's end, and files arriving while the page sets itself up would be lost (CI's timing).
+    assert.equal(renderer.match(/\b(?:const|let|var) opened\b/g)?.length, 1, 'renderer.js declares opened once');
     // No status line of the page's own: a server's row draws the kit's, on its classes, until the kit makes one alone.
     assert.doesNotMatch(renderer, /(?<!kit-)card-status/, 'renderer.js has a card-status of its own');
     assert.match(fs.readFileSync(new URL('../src/renderer.js', import.meta.url), 'utf8'),
