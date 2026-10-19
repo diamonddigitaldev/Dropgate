@@ -4,8 +4,8 @@ const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 const { LIFETIME_UNIT_MS } = require('./payloads');
 
 /**
- * Share with Dropgate's upload: to the server in Settings, with Settings'
- * lifetime and download limit, held to what the server allows as Upload holds
+ * Share with Dropgate's upload: to the default server, with its settings for
+ * new uploads (lifetime and download limit), held to what it allows as Upload holds
  * them, end-to-end encrypted when the server can be over HTTPS. Main makes it
  * from the server's check, with no window: the same rules as the page's own
  * checks (renderer.js' checkServerCompatibility(), applyServerLimits() and
@@ -16,7 +16,7 @@ const { LIFETIME_UNIT_MS } = require('./payloads');
  * allowed, becomes the server's; a lifetime longer than the server's limit
  * stops the share, as it stops an upload from Upload. Nothing is saved.
  *
- * @param {{ lifetimeValue: number, lifetimeUnit: string, maxDownloads: number }} settings
+ * @param {{ lifetime: { value: number, unit: string }, maxDownloads: number }} settings - The default server's settings for new uploads.
  * @param {{ ok: boolean, baseUrl?: string, serverInfo?: any, dgup?: { compatible: boolean, message: string } }} check - The server's check, from the transfer window.
  * @returns {{ ok: true, options: { lifetime: { value: number, unit: string }, maxDownloads: number, encrypt: boolean } } | { ok: false, message: string }}
  */
@@ -29,8 +29,8 @@ function shareUpload(settings, check) {
     if (upload && upload.enabled === false) return stop('File uploads are disabled on this server.');
     if (!check.dgup?.compatible) return stop(check.dgup?.message || 'Server is not compatible.');
 
-    let unit = Object.hasOwn(LIFETIME_UNIT_MS, settings.lifetimeUnit) ? settings.lifetimeUnit : 'hours';
-    let value = unit === 'unlimited' ? 0 : settings.lifetimeValue;
+    let unit = Object.hasOwn(LIFETIME_UNIT_MS, settings.lifetime?.unit) ? settings.lifetime.unit : 'hours';
+    let value = unit === 'unlimited' ? 0 : settings.lifetime?.value;
     let maxDownloads = Number.isSafeInteger(settings.maxDownloads) && settings.maxDownloads >= 0 ? settings.maxDownloads : 1;
 
     if (upload) {

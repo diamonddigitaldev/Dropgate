@@ -125,7 +125,7 @@ export function fakeMain({ settings = {} } = {}) {
     const kit = {
         ipc: { handle: (channel, handler, options) => ipc.handleApp(channel, handler, options, (ses) => ses === transferSession) },
         sessions: { isolated: (name) => (name === 'transfer' ? transferSession : null) },
-        settings: { get: () => ({ serverURL: '', ...settings }) },
+        settings: { get: () => ({ servers: [], defaultServer: null, ...settings }) },
     };
 
     /**

@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { madeUpFile, summary } from '../helpers/files.mjs';
 import {
-    addLink, cardButton, downloadCard, downloadStatus, expect, holdChunks, pickFolder, securityWarning, test, uploadButton, uploadCard, uploadStatus,
+    addLink, cardButton, downloadCard, downloadStatus, expect, holdChunks, pickFolder, securityWarning, test, uploadButton, uploadCard, uploadStatus, uploadsStarted,
 } from '../helpers/desktop.mjs';
 import { uploadWithCore } from '../helpers/hosted.mjs';
 
@@ -76,23 +76,41 @@ test.describe('on a server allowing 5 downloads', () => {
     // The page holds Max downloads to the server's limit, so the server allows the profile's 5.
     test.use({ serverEnv: { UPLOAD_MAX_FILE_DOWNLOADS: '5' } });
 
-    test('a version 1 profile is brought to version 2 once, keeping its server and settings; the page can\'t set the downloads folder', async ({ desktop }) => {
+    test('a version 1 profile is brought to version 3 once, its server the first saved and the default, with its settings; the page can\'t set the downloads folder or the saved servers', async ({ desktop, server }) => {
         fs.mkdirSync(desktop.profile, { recursive: true });
-        const v1 = { serverURL: desktop.serverUrl, lifetimeValue: 3, lifetimeUnit: 'days', maxDownloads: 5, navCollapsed: true };
+        // Within the server's limits (24 hours, 5 downloads), so the upload below goes as it was set.
+        const v1 = { serverURL: desktop.serverUrl, lifetimeValue: 12, lifetimeUnit: 'hours', maxDownloads: 5, navCollapsed: true };
         fs.writeFileSync(path.join(desktop.profile, 'config.json'), JSON.stringify({ settings: v1, settingsSchema: 1 }));
         const app = await desktop.launch();
         const window = await app.window();
         const settings = await window.evaluate(() => window.kitAPI.getSettings());
-        expect(settings).toMatchObject({ ...v1, downloadFolder: null, transfersAtOnce: 3 });
-        await expect.poll(() => stored(desktop).settingsSchema).toBe(2);
+        const [saved] = settings.servers;
+        expect(settings).toMatchObject({ navCollapsed: true, downloadFolder: null, transfersAtOnce: 3, defaultServer: saved.id });
+        expect(settings.servers).toEqual([{ id: saved.id, url: desktop.serverUrl, name: new URL(desktop.serverUrl).host, lifetime: { value: 12, unit: 'hours' }, maxDownloads: 5, allowFallback: false }]);
+        await expect.poll(() => stored(desktop).settingsSchema).toBe(3);
+        for (const key of ['serverURL', 'lifetimeValue', 'lifetimeUnit', 'maxDownloads']) expect(Object.keys(stored(desktop).settings), `${key} after version 3`).not.toContain(key);
 
-        // Only main's folder picker chooses where downloads land, and the slider's range holds.
+        // Settings > Server shows it, and a new upload takes its settings.
+        await window.getByRole('button', { name: 'Settings', exact: true }).click();
+        await window.getByRole('tab', { name: 'Server' }).click();
+        await expect(window.locator('#server-url')).toHaveValue(desktop.serverUrl);
+        await expect(window.locator('#file-lifetime-value')).toHaveValue('12');
+        await expect(window.locator('#file-lifetime-unit')).toHaveValue('hours');
+        await expect(window.locator('#max-downloads-value')).toHaveValue('5');
+        await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
+        const sent = madeUpFile('From version 1.bin', 20_000, 104);
+        await desktop.upload(window, [sent], { encrypted: false });
+        expect(uploadsStarted(server).map(({ lifetimeMs, maxDownloads }) => ({ lifetimeMs, maxDownloads }))).toEqual([{ lifetimeMs: 12 * 3_600_000, maxDownloads: 5 }]);
+
+        // Only main's folder picker chooses where downloads land, only main changes the saved servers, and the slider's range holds.
         const refusal = (changes) => window.evaluate((c) => window.kitAPI.setSettings(c).then(() => 'set', (error) => error.message), changes);
         expect(await refusal({ downloadFolder: desktop.root })).toMatch(/downloadFolder can't be changed from the page\./);
         expect(await refusal({ downloadFolder: null, transfersAtOnce: 2 })).toMatch(/downloadFolder can't be changed from the page\./);
+        expect(await refusal({ servers: [{ ...saved, url: 'https://elsewhere.example' }] })).toMatch(/servers can't be changed from the page\./);
+        expect(await refusal({ defaultServer: null })).toMatch(/defaultServer can't be changed from the page\./);
         expect(await refusal({ transfersAtOnce: 9 })).toMatch(/Expected transfers at once from 1 to 6\./);
         expect(await refusal({ transfersAtOnce: 2.5 })).toMatch(/Expected transfers at once from 1 to 6\./);
-        expect(stored(desktop).settings, 'nothing refused was kept').toMatchObject({ downloadFolder: null, transfersAtOnce: 3 });
+        expect(stored(desktop).settings, 'nothing refused was kept').toMatchObject({ downloadFolder: null, transfersAtOnce: 3, servers: [saved], defaultServer: saved.id });
         // The kit's own settings still change from the page.
         expect(await refusal({ navCollapsed: false })).toBe('set');
     });

@@ -3,9 +3,10 @@
 const fs = require('fs');
 const { IPC } = require('./constants');
 const {
-    defaultFolderOf, downloadLink, downloadOptionsOf, failureOf, filesToAdd, handleOf, isId, linkOf, newUpload, optionsOf, pathList, saveToOf, serverAddress, transfersOf, uploadOf,
-    uploadsToStart,
+    defaultFolderOf, downloadLink, downloadOptionsOf, failureOf, filesToAdd, handleOf, isId, linkOf, newUpload, optionsOf, pathList, saveToOf, savedServerOf, serverAddress,
+    serverMoveOf, serverOptionsOf, serverToAdd, transfersOf, uploadOf, uploadsToStart,
 } = require('./core/payloads');
+const { NEW_SERVER, serverOf } = require('./core/servers');
 const { view } = require('./core/transfers');
 
 // The window's channels: what its page asks main, through window.electronAPI.
@@ -20,14 +21,12 @@ const { view } = require('./core/transfers');
 // Kept apart from main.js, with what they act on passed in, so the client's
 // tests can load them without Electron.
 
-/** The server an upload or a check goes to: plain HTTP only for an address typed with http://. */
-const serverOf = (url) => ({ url, allowInsecure: /^http:\/\//i.test(url) });
-
 /**
  * Answer the window's channels.
  * @param {object} main - What they act on, from main.js.
  * @param {any} main.kit - The kit, from start(): its ipc and settings.
  * @param {import('./core/handles').Handles} main.handles - The files handed to each window.
+ * @param {import('./core/servers').Servers} main.servers - The saved servers, and the default.
  * @param {import('./core/transfers').Transfers} main.transfers
  *   Main's registry of transfers, by the ID it made: a window's own (owner), or a share's (no owner), which may be waiting on a window's answer (ask).
  * @param {() => any} main.host - The transfer host (transfer-host.js), once the app is ready.
@@ -49,7 +48,7 @@ const serverOf = (url) => ({ url, allowInsecure: /^http:\/\//i.test(url) });
  * @param {(owner: number, folder: string | null) => { path: string, label: string, chosen: boolean }} main.setDefaultFolder - Settings > Transfers' Browse or Reset.
  */
 function answerWindowChannels(main) {
-    const { kit, handles, transfers } = main;
+    const { kit, handles, transfers, servers } = main;
     const has = (id) => transfers.has(id);
 
     // A window's page has set itself up: a share's question waiting for it is sent now.
@@ -83,6 +82,45 @@ function answerWindowChannels(main) {
     // Test, and the check before an upload: asked of the server by the transfer window.
     kit.ipc.handle(IPC.SERVER_CHECK, (_event, url) => main.host().check(serverOf(serverAddress(url))));
 
+    // The saved servers (Settings > Server). Each change is main's: the page
+    // asks, and is answered with the list as it is now. A server is checked
+    // by the transfer window before it's saved, and saved once it answered as
+    // a Dropgate server, under its address as the client read it, with the
+    // settings for new uploads a new server starts with. Nothing the check
+    // found is saved.
+    const saved = (id) => Boolean(servers.get(id));
+    kit.ipc.handle(IPC.SERVER_ADD, async (_event, request) => {
+        const url = serverToAdd(request);
+        const check = await main.host().check(serverOf(url));
+        // The transfer window's answer is checked too: the address it found must be one.
+        let found = null;
+        try {
+            found = check.ok && check.serverInfo?.version && check.serverInfo?.capabilities ? serverAddress(check.baseUrl) : null;
+        } catch {
+            found = null;
+        }
+        const server = found ? servers.add(found, check.serverInfo).server : null;
+        return { check, ...(server ? { server } : {}), ...servers.list() };
+    });
+    kit.ipc.handle(IPC.SERVER_REMOVE, (_event, request) => {
+        servers.remove(savedServerOf(request, saved));
+        return servers.list();
+    });
+    kit.ipc.handle(IPC.SERVER_MOVE, (_event, request) => {
+        const { id, by } = serverMoveOf(request, saved);
+        servers.move(id, by);
+        return servers.list();
+    });
+    kit.ipc.handle(IPC.SERVER_SET_DEFAULT, (_event, request) => {
+        servers.setDefault(savedServerOf(request, saved));
+        return servers.list();
+    });
+    kit.ipc.handle(IPC.SERVER_SET_OPTIONS, (_event, request) => {
+        const { id, options } = serverOptionsOf(request, saved);
+        servers.setOptions(id, options);
+        return servers.list();
+    });
+
     /** The files handed to this window, as the registry keeps them: each one's path, name, size and modification time. */
     const heldFiles = (sender, list) => {
         const held = list.map((handle) => handles.get(sender, handle));
@@ -91,15 +129,16 @@ function answerWindowChannels(main) {
     };
 
     // An upload of files handed to this window, waiting to start, with the
-    // server's settings for new uploads (Settings > Server): its lifetime and
-    // download limit. Whether it's encrypted is decided as it starts.
+    // default server's settings for new uploads: its lifetime and download
+    // limit (a new server's, with none saved). Whether it's encrypted is
+    // decided as it starts.
     kit.ipc.handle(IPC.TRANSFER_ADD_UPLOAD, (event, request) => {
         const { files } = newUpload(request);
-        const { lifetimeValue, lifetimeUnit, maxDownloads } = kit.settings.get();
+        const { lifetime, maxDownloads } = servers.default() ?? NEW_SERVER;
         const { id } = transfers.add({
             owner: event.sender.id,
             files: heldFiles(event.sender.id, files),
-            options: { lifetime: { value: lifetimeUnit === 'unlimited' ? 0 : lifetimeValue, unit: lifetimeUnit }, maxDownloads },
+            options: { lifetime: { value: lifetime.unit === 'unlimited' ? 0 : lifetime.value, unit: lifetime.unit }, maxDownloads },
         });
         return { id };
     });
@@ -112,7 +151,7 @@ function answerWindowChannels(main) {
         return transfers.addFiles(id, heldFiles(event.sender.id, files)) ?? { started: true };
     });
 
-    // Start uploads waiting: this window's own, to the server in Settings,
+    // Start uploads waiting: this window's own, to the default server,
     // end-to-end encrypted or not as the window found the server (encrypt), or
     // a share it was asked about (Upload Anyway), to the share's server, as
     // the share decided. Each is queued, and runs as soon as it has a place.
@@ -126,10 +165,10 @@ function answerWindowChannels(main) {
         // A download needs no word on encryption: its upload decided that.
         const own = ids.filter((id) => transfers.get(id).owner === sender && transfers.get(id).kind === 'upload');
         if (own.length > 0 && encrypt === undefined) throw new Error('Expected whether to encrypt.');
-        const { serverURL } = kit.settings.get();
-        if (!serverURL && ids.some((id) => !transfers.get(id).server)) throw new Error('Server URL is not configured.');
+        const server = servers.default();
+        if (!server && ids.some((id) => !transfers.get(id).server)) throw new Error('Server URL is not configured.');
         for (const id of own) transfers.get(id).options.encrypt = encrypt;
-        for (const id of ids) main.start(id, transfers.get(id).server ?? serverOf(serverURL));
+        for (const id of ids) main.start(id, transfers.get(id).server ?? serverOf(server.url));
     });
 
     // A link pasted into Download, as the page holds it until now: main checks
@@ -231,4 +270,4 @@ function answerWindowChannels(main) {
     kit.ipc.handle(IPC.LINK_COPY, (_event, link) => main.copyLink(linkOf(link)));
 }
 
-module.exports = { answerWindowChannels, serverOf };
+module.exports = { answerWindowChannels };

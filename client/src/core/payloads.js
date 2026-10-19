@@ -215,6 +215,54 @@ function serverAddress(url) {
     return address;
 }
 
+/** server:add: a server's address, as typed (serverAddress()). */
+function serverToAdd(request) {
+    if (!isRecord(request, ['url'])) throw new Error('Expected a server address.');
+    return serverAddress(request.url);
+}
+
+/**
+ * server:remove, server:set-default: a saved server, by its ID.
+ * @param {(id: string) => boolean} saved - Whether main has saved a server by this ID.
+ */
+function savedServerOf(request, saved) {
+    if (!isRecord(request, ['id']) || !isId(request.id) || !saved(request.id)) throw new Error('Expected a saved server.');
+    return request.id;
+}
+
+/**
+ * server:move: a saved server, and which way it goes: up (-1) or down (1).
+ * @param {(id: string) => boolean} saved
+ * @returns {{ id: string, by: -1 | 1 }}
+ */
+function serverMoveOf(request, saved) {
+    if (!isRecord(request, ['id', 'by']) || !isId(request.id) || !saved(request.id) || ![-1, 1].includes(request.by)) {
+        throw new Error('Expected a saved server, and which way it moves.');
+    }
+    return { id: request.id, by: request.by };
+}
+
+/**
+ * server:set-options: a saved server's settings for new uploads, any of its
+ * file lifetime, download limit and Allow Fallback, at least one. Bounded by
+ * what the server allows on the page, which the server holds to as well.
+ * @param {(id: string) => boolean} saved
+ * @returns {{ id: string, options: { lifetime?: { value: number, unit: string }, maxDownloads?: number, allowFallback?: boolean } }}
+ */
+function serverOptionsOf(request, saved) {
+    if (!isRecord(request, ['id', 'options']) || !isId(request.id) || !saved(request.id)) throw new Error('Expected a saved server.');
+    const { options } = request;
+    if (!isRecord(options, ['lifetime', 'maxDownloads', 'allowFallback'], []) || Object.keys(options).length === 0) throw new Error('Expected a server\'s settings for new uploads.');
+    if (Object.hasOwn(options, 'lifetime') && !isLifetime(options.lifetime)) throw new Error('Expected a file lifetime.');
+    if (Object.hasOwn(options, 'maxDownloads') && !isCount(options.maxDownloads)) throw new Error('Expected a download limit.');
+    if (Object.hasOwn(options, 'allowFallback') && typeof options.allowFallback !== 'boolean') throw new Error('Expected whether to allow fallback.');
+    const copy = {};
+    if (options.lifetime) copy.lifetime = { value: options.lifetime.value, unit: options.lifetime.unit };
+    if (Object.hasOwn(options, 'maxDownloads')) copy.maxDownloads = options.maxDownloads;
+    if (Object.hasOwn(options, 'allowFallback')) copy.allowFallback = options.allowFallback;
+    return { id: request.id, options: copy };
+}
+
 /** link:copy: an upload's link, to the web. */
 function linkOf(link) {
     if (!isWebLink(link, MAX_LINK)) throw new Error('Expected a link.');
@@ -395,6 +443,10 @@ module.exports = {
     uploadOf,
     uploadsToStart,
     serverAddress,
+    serverToAdd,
+    savedServerOf,
+    serverMoveOf,
+    serverOptionsOf,
     linkOf,
     downloadLink,
     saveToOf,

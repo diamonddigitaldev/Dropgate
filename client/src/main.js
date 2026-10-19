@@ -10,12 +10,13 @@ const {
 const { menuItems } = require('./menu');
 const { Handles, describeFile } = require('./core/handles');
 const { endNotice, countsLine } = require('./core/notices');
+const { Servers, serverOf } = require('./core/servers');
 const { shareUpload } = require('./core/share');
 const { GOING, Pacer, Transfers, inFolder, view } = require('./core/transfers');
 const { createTransferHost } = require('./transfer-host');
 const { createTray } = require('./tray');
 const { guardSettings } = require('./settings-guard');
-const { answerWindowChannels, serverOf } = require('./window-channels');
+const { answerWindowChannels } = require('./window-channels');
 
 // The house frame (electron-kit): one instance, the shared preload
 // (window.kitAPI) on the app's session, the settings, the log, the menu, the
@@ -85,12 +86,17 @@ const { answerWindowChannels, serverOf } = require('./window-channels');
 //   shows a saved file in its folder when asked (Show in Folder), or opens a
 //   bundle's own folder (Open Folder), never opening anything received.
 // - The page changes its settings through main (settings-guard.js), which
-//   refuses the downloads folder from it, and tells the registry when
-//   transfers at once changes.
+//   refuses the downloads folder and the saved servers from it, and tells
+//   the registry when transfers at once changes.
+// - The saved servers (core/servers.js) are kept in the settings, in order,
+//   each with its settings for new uploads, and one of them the default: a
+//   new upload and Share with Dropgate start on it. Main alone changes them,
+//   as the page asks (window-channels.js); a server is checked by the
+//   transfer window before it's saved, and nothing a check found is kept.
 // Share with Dropgate (Windows' context menu) launches the app with a file's
-// path and --upload. Main makes the upload itself, with no window: the server
-// in Settings, checked by the transfer window, with Settings' lifetime and
-// download limit, queued in the registry like any other. A server with no
+// path and --upload. Main makes the upload itself, with no window: to the
+// default server, checked by the transfer window, with its settings for new
+// uploads, queued in the registry like any other. A server with no
 // end-to-end encryption opens the main window to ask first (the Upload
 // Security Warning), and the share waits for the answer. A launch made only
 // for sharing quits once every share has ended. Windows starts one launch per
@@ -142,6 +148,9 @@ guardSettings({
         if (Object.hasOwn(changes, 'transfersAtOnce')) transfers.setAtOnce(atOnceSetting());
     },
 });
+
+// The saved servers, and the default, in the settings: main's alone.
+const servers = new Servers(kit.settings);
 
 // Where downloads are written until they're whole: emptied at every start and at quit.
 const partials = path.join(app.getPath('userData'), PARTIAL_FOLDER);
@@ -378,6 +387,7 @@ answerWindowChannels({
     kit,
     handles,
     transfers,
+    servers,
     host: () => host,
     windowReady,
     start: startUpload,
@@ -587,9 +597,9 @@ function shareBatch(filePaths) {
 }
 
 /**
- * Share a batch: its files read as they are now, the server in Settings
- * checked by the transfer window, and an upload made with Settings' lifetime
- * and download limit, held to the server's (core/share.js). It's queued at
+ * Share a batch: its files read as they are now, the default server checked
+ * by the transfer window, and an upload made with its settings for new
+ * uploads, held to what it allows (core/share.js). It's queued at
  * once, or, on a server with no end-to-end encryption, once the person says
  * so in the main window.
  * @param {{ notice: Notification | null }} share
@@ -614,18 +624,18 @@ async function startShare(share, filePaths) {
         return;
     }
 
-    const settings = kit.settings.get();
-    if (!settings.serverURL) {
+    const saved = servers.default();
+    if (!saved) {
         finishUpload({ status: 'error', error: 'Server URL is not configured.' }, { share });
         return;
     }
-    const server = serverOf(settings.serverURL);
+    const server = serverOf(saved.url);
     const check = await host.check(server).catch(() => ({ ok: false }));
     if (quitting) {
         endShare(share);
         return;
     }
-    const decided = shareUpload(settings, check);
+    const decided = shareUpload(saved, check);
     if (!decided.ok) {
         finishUpload({ status: 'error', error: decided.message }, { share });
         return;

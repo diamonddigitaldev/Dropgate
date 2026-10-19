@@ -137,7 +137,8 @@ test.describe('on a server that keeps files up to 24 hours and allows up to 5 do
         // config.json edited by hand: a week, past the server's 24 hours.
         const config = path.join(desktop.profile, 'config.json');
         const saved = JSON.parse(fs.readFileSync(config, 'utf8'));
-        fs.writeFileSync(config, JSON.stringify({ ...saved, settings: { ...saved.settings, lifetimeValue: 7, lifetimeUnit: 'days' } }));
+        const [savedServer] = saved.settings.servers;
+        fs.writeFileSync(config, JSON.stringify({ ...saved, settings: { ...saved.settings, servers: [{ ...savedServer, lifetime: { value: 7, unit: 'days' } }] } }));
 
         app = await desktop.launch();
         window = await app.window();

@@ -5,7 +5,8 @@
 // The window holds no path but the ones it hands main once (addFiles), and
 // where new downloads are saved, to show it (Settings > Transfers); it asks
 // no server anything itself: main runs checks and uploads in the
-// transfer window, which has a bridge of its own (transfer-preload.js).
+// transfer window, which has a bridge of its own (transfer-preload.js). It
+// changes no saved server itself either: main does, as it asks.
 //
 // This runs in a sandboxed preload, where require() can only load "electron"
 // and a few others. Requiring ./constants here would leave the bridge
@@ -18,6 +19,11 @@ const CH = {
     FILES_ADD: 'files:add',
     FILE_REVOKE: 'file:revoke',
     SERVER_CHECK: 'server:check',
+    SERVER_ADD: 'server:add',
+    SERVER_REMOVE: 'server:remove',
+    SERVER_MOVE: 'server:move',
+    SERVER_SET_DEFAULT: 'server:set-default',
+    SERVER_SET_OPTIONS: 'server:set-options',
     TRANSFER_ADD_UPLOAD: 'transfer:add-upload',
     TRANSFER_ADD_FILES: 'transfer:add-files',
     TRANSFER_START: 'transfer:start',
@@ -54,6 +60,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     addFiles: (paths) => ipcRenderer.invoke(CH.FILES_ADD, paths),
     revokeFileAccess: (handle) => ipcRenderer.invoke(CH.FILE_REVOKE, handle),
     checkServer: (url) => ipcRenderer.invoke(CH.SERVER_CHECK, url),
+    // The saved servers are main's: each change is asked of it, and answered with the list as it is now.
+    addServer: (url) => ipcRenderer.invoke(CH.SERVER_ADD, { url }),
+    removeServer: (id) => ipcRenderer.invoke(CH.SERVER_REMOVE, { id }),
+    moveServer: (id, by) => ipcRenderer.invoke(CH.SERVER_MOVE, { id, by }),
+    setDefaultServer: (id) => ipcRenderer.invoke(CH.SERVER_SET_DEFAULT, { id }),
+    setServerOptions: (id, options) => ipcRenderer.invoke(CH.SERVER_SET_OPTIONS, { id, options }),
     addUpload: (upload) => ipcRenderer.invoke(CH.TRANSFER_ADD_UPLOAD, upload),
     addToUpload: (id, files) => ipcRenderer.invoke(CH.TRANSFER_ADD_FILES, { id, files }),
     // encrypt is given for the page's own uploads only: a share it was asked about decided its own.

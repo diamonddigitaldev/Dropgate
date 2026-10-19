@@ -14,7 +14,7 @@
 // cancelled, until it's removed. Files dropped, picked or opened together make
 // one upload; files dropped onto one still waiting join it (a file already in
 // it is skipped), and onto one that has started make a new one. A new upload
-// takes the server's settings for new uploads (Settings > Server). Each card
+// takes the default server's settings for new uploads (Settings > Server). Each card
 // starts with its Upload, or all waiting with the action bar's Upload All.
 // One waiting can have its own options (its Advanced Options, or Bulk Edit
 // on the bulk bar for those selected): its file lifetime and download limit,
@@ -85,6 +85,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         /** How many transfers run at once: Settings > Transfers' transfersAtOnce, read with the settings. */
         let atOnce = 3;
+
+        /**
+         * The saved servers and the default's ID, as main last answered
+         * (main alone changes them). Settings > Server shows the default:
+         * Test saves the address it finds, as the default, and its fields
+         * are the default's settings for new uploads.
+         * @type {{ servers: any[], defaultServer: string | null }}
+         */
+        let saved = { servers: [], defaultServer: null };
+        /** The default server, as saved: new uploads and Share with Dropgate start on it. */
+        const defaultSaved = () => saved.servers.find((server) => server.id === saved.defaultServer) ?? null;
 
         let serverCapabilities = null;
         /** @type {{compatible:boolean, message?:string}} */
@@ -205,9 +216,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             removeUploads(scope());
         }, { view: 'upload' });
 
-        /** The server's name for a card's "To": its host, as typed or as the client reads it. */
+        /** The server's name for a card's "To": the default's host, as the client reads it. */
         function serverName() {
-            const address = serverUrlInput.value.trim();
+            const address = defaultSaved()?.url ?? '';
             if (!address) return 'No server';
             try {
                 return new URL(/^[a-z]+:\/\//i.test(address) ? address : `https://${address}`).host;
@@ -220,7 +231,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         function fillServers(select) {
             const option = document.createElement('option');
             option.value = 'default';
-            option.textContent = serverUrlInput.value.trim() ? `${serverName()} (default)` : serverName();
+            option.textContent = defaultSaved() ? `${serverName()} (default)` : serverName();
             select.replaceChildren(option);
         }
         fillServers(bulkTarget);
@@ -270,7 +281,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         function settingsOf(view) {
             const plain = view.options?.encrypt === false || (view.state === 'waiting' && lastServerCheck.compatible && !serverEncrypts());
             if (plain) {
-                return { text: serverUrlInput.value.trim().startsWith('http://') ? 'Not encrypted: This server is plain HTTP.' : "Not encrypted: This server doesn't support it.", tone: 'warning' };
+                return { text: isPlainHttp(defaultSaved()?.url ?? '') ? 'Not encrypted: This server is plain HTTP.' : "Not encrypted: This server doesn't support it.", tone: 'warning' };
             }
             if (!view.options) return undefined;
             const usual = newUploadOptions();
@@ -970,14 +981,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // --- Initial Settings Load ---
         const settings = await kitApi.getSettings();
-        serverUrlInput.value = settings.serverURL;
-        fileLifetimeValueInput.value = settings.lifetimeValue;
-        fileLifetimeUnitSelect.value = settings.lifetimeUnit;
-        if (fileLifetimeUnitSelect.value === 'unlimited') {
-            fileLifetimeValueInput.disabled = true;
-            fileLifetimeValueInput.value = 0;
-        }
-        maxDownloadsValue.value = settings.maxDownloads;
+        saved = { servers: settings.servers, defaultServer: settings.defaultServer };
+        showDefaultServer();
         // The kit's own setting: on, the redacted log is kept in debug.log too; off, that file is deleted.
         const keepLog = kit.ui.switchField({
             id: 'keep-log-on-disk',
@@ -1076,12 +1081,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         });
 
-        // The server is kept as it's changed, and as Test finds it.
-        serverUrlInput.addEventListener('change', () => {
-            saveServer(serverUrlInput.value.trim());
-            refreshServer();
-        });
-
         testConnectionBtn.addEventListener('click', async () => {
             const serverUrl = serverUrlInput.value.trim();
             if (!serverUrl) {
@@ -1096,7 +1095,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             connectionStatus.className = 'form-text reserved';
 
             try {
-                const result = await checkServer(serverUrl);
+                // Main checks it, and saves it once it answers as a Dropgate server.
+                const added = await api.addServer(serverUrl).catch(() => ({ check: { ok: false } }));
+                const result = added.check;
                 if (!result.ok) {
                     connectionStatus.textContent = connectionFailedText(serverUrl, result);
                     updateUploadabilityState(false);
@@ -1113,9 +1114,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     connectionStatus.className = 'form-text reserved text-warning-emphasis';
                 }
 
-                // The address as the client reads it: https:// added if it had no scheme.
-                serverUrlInput.value = serverBaseUrl;
-                await saveServer(serverBaseUrl);
+                if (added.server) await makeDefault(added.server.id, added);
 
                 await checkServerCompatibility();
             } finally {
@@ -1584,21 +1583,52 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         }
 
-        /** Keep the settings for new uploads, as they change. A value that isn't a number yet is left as it was. */
-        function saveSettings() {
-            const changes = { lifetimeUnit: fileLifetimeUnitSelect.value };
-            const lifetime = parseFloat(fileLifetimeValueInput.value);
-            if (Number.isFinite(lifetime)) changes.lifetimeValue = lifetime;
-            const downloads = parseInt(maxDownloadsValue.value, 10);
-            if (Number.isInteger(downloads)) changes.maxDownloads = downloads;
+        /**
+         * Keep the default server's settings for new uploads, as they change,
+         * through main. A value that isn't a number yet is left as it was.
+         */
+        async function saveSettings() {
             // Each card's settings line says what differs from these.
             for (const entry of shown.values()) draw(entry.view);
-            return kitApi.setSettings(changes);
+            const server = defaultSaved();
+            if (!server) return;
+            const options = {};
+            const unit = fileLifetimeUnitSelect.value;
+            const lifetime = parseFloat(fileLifetimeValueInput.value);
+            if (unit === 'unlimited') options.lifetime = { value: 0, unit };
+            else if (Number.isFinite(lifetime) && lifetime > 0) options.lifetime = { value: lifetime, unit };
+            const downloads = parseInt(maxDownloadsValue.value, 10);
+            if (Number.isInteger(downloads) && downloads >= 0) options.maxDownloads = downloads;
+            if (Object.keys(options).length === 0) return;
+            saved = await api.setServerOptions(server.id, options).catch(() => saved);
         }
 
-        /** Keep the server. */
-        function saveServer(url) {
-            return kitApi.setSettings({ serverURL: url });
+        /**
+         * A server Test saved becomes the default, in place of the one before
+         * (Settings > Server shows one): its address and its settings for new
+         * uploads are shown.
+         * @param {string} id
+         * @param {{ servers: any[], defaultServer: string | null }} list - Main's answer as it saved it.
+         */
+        async function makeDefault(id, list) {
+            saved = { servers: list.servers, defaultServer: list.defaultServer };
+            const before = saved.defaultServer;
+            if (before !== id) {
+                saved = await api.setDefaultServer(id);
+                if (before) saved = await api.removeServer(before);
+            }
+            showDefaultServer();
+        }
+
+        /** The default server's address and settings for new uploads, in Settings > Server. With none saved, the fields keep what they have. */
+        function showDefaultServer() {
+            const server = defaultSaved();
+            if (!server) return;
+            serverUrlInput.value = server.url;
+            fileLifetimeUnitSelect.value = server.lifetime.unit;
+            fileLifetimeValueInput.disabled = server.lifetime.unit === 'unlimited';
+            fileLifetimeValueInput.value = server.lifetime.unit === 'unlimited' ? 0 : server.lifetime.value;
+            maxDownloadsValue.value = server.maxDownloads;
         }
 
         /** The server's name on every card and the bulk bar, and whether a waiting upload says it won't be encrypted. */
@@ -1625,7 +1655,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         async function findServer() {
-            const inputUrl = serverUrlInput.value.trim();
+            const inputUrl = defaultSaved()?.url ?? '';
             if (!inputUrl) {
                 const message = 'No server URL. Add one in Settings, under Server.';
                 updateUploadabilityState(false);
@@ -1638,8 +1668,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return { compatible: false, message: 'Could not connect to the server.' };
             }
             serverBaseUrl = compat.baseUrl;
-            // The address as the client reads it: https:// added if it had no scheme.
-            serverUrlInput.value = serverBaseUrl;
 
             const { serverInfo } = compat;
 

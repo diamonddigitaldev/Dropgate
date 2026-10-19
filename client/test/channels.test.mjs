@@ -22,6 +22,7 @@ import { fakeMain } from './helpers/main-process.mjs';
 const require = createRequire(import.meta.url);
 const { ENGINE, ENGINE_PUSHES, IPC, PUSHES } = require('../src/constants.js');
 const { Handles } = require('../src/core/handles.js');
+const { Servers } = require('../src/core/servers.js');
 const { Transfers, view } = require('../src/core/transfers.js');
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-channels-'));
@@ -33,7 +34,16 @@ const WINDOW_CHANNELS = Object.values(IPC).filter((channel) => !PUSHES.includes(
 const ENGINE_CHANNELS = Object.values(ENGINE).filter((channel) => !ENGINE_PUSHES.includes(channel));
 const OPTIONS = { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true };
 const SERVER = { url: 'https://dropgate.test', allowInsecure: false };
-const SETTINGS = { serverURL: 'https://dropgate.test', lifetimeValue: 24, lifetimeUnit: 'hours', maxDownloads: 1 };
+/** A saved server, as core/servers.js keeps it, and the settings with it saved as the default. */
+const saved = (change = {}) => ({ id: randomUUID(), url: 'https://dropgate.test', name: 'dropgate.test', lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, allowFallback: false, ...change });
+const savedAsDefault = (server) => ({ servers: [server], defaultServer: server.id });
+const SETTINGS = savedAsDefault(saved());
+/** A server check that found a Dropgate server. */
+const FOUND = {
+    ok: true, baseUrl: 'https://dropgate.test', serverVersion: '4.0.0',
+    serverInfo: { name: 'Example Drop', version: '4.0.0', capabilities: { upload: { enabled: true, e2ee: true, maxLifetimeHours: 6, maxFileDownloads: 5 } } },
+    dgup: { compatible: true, message: 'Compatible.' },
+};
 /** A folder the window chose with the system's picker, by the ID main made for it. */
 const CHOSEN = randomUUID();
 const SNAPSHOT = {
@@ -45,9 +55,12 @@ const SNAPSHOT = {
  * Both sets of channels, answered as main answers them, with everything they
  * act on recording what it's asked to do in `work`.
  */
-function setUp({ settings = SETTINGS } = {}) {
+function setUp({ settings = SETTINGS, check = { ok: true } } = {}) {
     const main = fakeMain({ settings });
     const work = [];
+    // The kit's settings, as main's server list reads and writes them.
+    let current = structuredClone(settings);
+    const servers = new Servers({ get: () => current, set: (changes) => { current = { ...current, ...changes }; return current; } });
     const record = (name, answer) => (...args) => {
         work.push([name, ...args]);
         return answer;
@@ -62,7 +75,7 @@ function setUp({ settings = SETTINGS } = {}) {
     }
     const transfers = new Transfers({ atOnce: 3, start: record('run'), resume: record('resumeQueued') });
     const transferHost = {
-        check: record('host.check', Promise.resolve({ ok: true })),
+        check: record('host.check', Promise.resolve(check)),
     };
 
     const { answerWindowChannels } = main.load('../src/window-channels.js');
@@ -70,6 +83,7 @@ function setUp({ settings = SETTINGS } = {}) {
         kit: main.kit,
         handles,
         transfers,
+        servers,
         host: () => transferHost,
         windowReady: record('windowReady'),
         start: record('start'),
@@ -97,7 +111,7 @@ function setUp({ settings = SETTINGS } = {}) {
         onPauseEnding: record('onPauseEnding'),
         onFinished: record('onFinished'),
     });
-    return { main, work, handles, transfers, host };
+    return { main, work, handles, transfers, host, servers, stored: () => current };
 }
 
 /** Each payload, invoked on a channel from a page, is refused with this message, and nothing is done. */
@@ -194,8 +208,8 @@ test('server:check takes a server\'s address, never a path or another scheme', a
     }
 });
 
-test('transfer:add-upload takes handles this window holds, and nothing else: its options are the server\'s settings for new uploads', async () => {
-    const setup = setUp({ settings: { ...SETTINGS, lifetimeValue: 0.5, lifetimeUnit: 'hours', maxDownloads: 3 } });
+test('transfer:add-upload takes handles this window holds, and nothing else: its options are the default server\'s settings for new uploads', async () => {
+    const setup = setUp({ settings: savedAsDefault(saved({ lifetime: { value: 0.5, unit: 'hours' }, maxDownloads: 3 })) });
     const page = setup.main.windowPage();
     const { files: [mine] } = await setup.main.invoke(IPC.FILES_ADD, page, [FILE]);
     const { files: [theirs] } = await setup.main.invoke(IPC.FILES_ADD, setup.main.windowPage(), [FILE]);
@@ -226,12 +240,84 @@ test('transfer:add-upload takes handles this window holds, and nothing else: its
         deletable: false,
     });
 
-    // Unlimited is a lifetime of 0, whatever value Settings kept beside it.
-    const unlimited = setUp({ settings: { ...SETTINGS, lifetimeValue: 24, lifetimeUnit: 'unlimited' } });
+    // Unlimited is a lifetime of 0, whatever value was kept beside it.
+    const unlimited = setUp({ settings: savedAsDefault(saved({ lifetime: { value: 24, unit: 'unlimited' } })) });
     const unlimitedPage = unlimited.main.windowPage();
     const { files: [file] } = await unlimited.main.invoke(IPC.FILES_ADD, unlimitedPage, [FILE]);
     const made = await unlimited.main.invoke(IPC.TRANSFER_ADD_UPLOAD, unlimitedPage, { files: [file.handle] });
     assert.deepEqual(unlimited.transfers.get(made.id).options.lifetime, { value: 0, unit: 'unlimited' });
+
+    // With no server saved, a new server's: 24 hours, 1 download.
+    const none = setUp({ settings: { servers: [], defaultServer: null } });
+    const nonePage = none.main.windowPage();
+    const { files: [alone] } = await none.main.invoke(IPC.FILES_ADD, nonePage, [FILE]);
+    const waiting = await none.main.invoke(IPC.TRANSFER_ADD_UPLOAD, nonePage, { files: [alone.handle] });
+    assert.deepEqual(none.transfers.get(waiting.id).options, { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1 });
+});
+
+test('server:add takes a server\'s address, checks it in the transfer window, and saves it once it answers as a Dropgate server, under the address it was found at', async () => {
+    const setup = setUp({ settings: { servers: [], defaultServer: null }, check: FOUND });
+    const page = setup.main.windowPage();
+    await refusesAll(setup, IPC.SERVER_ADD, page, [
+        [], ['https://dropgate.test'], [{ url: FILE }], [{ url: 'file:///etc/passwd' }], [{ url: 'https://dropgate.test', name: 'Mine' }], [{ url: '' }],
+    ], /Expected a server address./);
+    assert.deepEqual(setup.stored().servers, [], 'nothing refused was saved');
+
+    const added = await setup.main.invoke(IPC.SERVER_ADD, page, { url: 'dropgate.test' });
+    assert.deepEqual(setup.work.at(-1), ['host.check', { url: 'dropgate.test', allowInsecure: false }]);
+    assert.deepEqual(added.check, FOUND, 'the page is told what the check found');
+    // Its name, its address as found, and a new server's settings within its limits (6 hours here): nothing else the check found.
+    assert.deepEqual(added.server, { id: added.server.id, url: 'https://dropgate.test', name: 'Example Drop', lifetime: { value: 6, unit: 'hours' }, maxDownloads: 1, allowFallback: false });
+    assert.deepEqual(setup.stored(), { servers: [added.server], defaultServer: added.server.id }, 'the first saved is the default');
+    assert.deepEqual({ servers: added.servers, defaultServer: added.defaultServer }, setup.stored());
+
+    // Saved already, by its address: given back as it is, never twice.
+    const again = await setup.main.invoke(IPC.SERVER_ADD, page, { url: 'https://dropgate.test' });
+    assert.equal(again.server.id, added.server.id);
+    assert.equal(setup.stored().servers.length, 1);
+
+    // A server that couldn't be reached, or isn't a Dropgate server, isn't saved: the page is told why.
+    // Nor one the transfer window says was found at an address that isn't one.
+    for (const check of [{ ok: false, code: 'NETWORK', message: 'fetch failed' }, { ...FOUND, serverInfo: null }, { ok: true }, { ...FOUND, baseUrl: FILE }, { ...FOUND, baseUrl: 'file:///etc' }, { ...FOUND, baseUrl: 42 }]) {
+        const elsewhere = setUp({ settings: { servers: [], defaultServer: null }, check });
+        const answer = await elsewhere.main.invoke(IPC.SERVER_ADD, elsewhere.main.windowPage(), { url: 'https://elsewhere.test' });
+        assert.deepEqual([answer.check, answer.server, answer.servers], [check, undefined, []], JSON.stringify(check));
+    }
+});
+
+test('server:remove, server:move, server:set-default and server:set-options take a saved server, by its ID, and main changes the list', async () => {
+    const [first, second, third] = [saved({ url: 'https://one.test' }), saved({ url: 'https://two.test' }), saved({ url: 'http://three.test' })];
+    const setup = setUp({ settings: { servers: [first, second, third], defaultServer: first.id } });
+    const page = setup.main.windowPage();
+    const ids = (list) => list.servers.map((server) => server.id);
+    const known = [[], [first.id], [{ id: FILE }], [{ id: randomUUID() }], [{ id: 'not an ID' }], [{ id: first.id, url: 'https://one.test' }]];
+    await refusesAll(setup, IPC.SERVER_REMOVE, page, known, /Expected a saved server./);
+    await refusesAll(setup, IPC.SERVER_SET_DEFAULT, page, known, /Expected a saved server./);
+    await refusesAll(setup, IPC.SERVER_MOVE, page, [
+        [{ id: first.id }], [{ id: first.id, by: 2 }], [{ id: first.id, by: 0 }], [{ id: first.id, by: '1' }], [{ id: randomUUID(), by: 1 }], [{ id: first.id, by: 1, to: 2 }],
+    ], /Expected a saved server, and which way it moves./);
+    await refusesAll(setup, IPC.SERVER_SET_OPTIONS, page, [[{ id: first.id }], [{ id: randomUUID(), options: { maxDownloads: 2 } }]], /Expected a saved server./);
+    await refusesAll(setup, IPC.SERVER_SET_OPTIONS, page, [
+        [{ id: first.id, options: {} }], [{ id: first.id, options: { url: 'https://elsewhere.test' } }], [{ id: first.id, options: { name: 'Mine' } }],
+    ], /Expected a server's settings for new uploads./);
+    await refusesAll(setup, IPC.SERVER_SET_OPTIONS, page, [
+        [{ id: first.id, options: { lifetime: { value: -1, unit: 'hours' } } }], [{ id: first.id, options: { lifetime: { value: 1, unit: 'weeks' } } }],
+    ], /Expected a file lifetime./);
+    await refusesAll(setup, IPC.SERVER_SET_OPTIONS, page, [[{ id: first.id, options: { maxDownloads: 1.5 } }], [{ id: first.id, options: { maxDownloads: -1 } }]],
+        /Expected a download limit./);
+    await refusesAll(setup, IPC.SERVER_SET_OPTIONS, page, [[{ id: first.id, options: { allowFallback: 'yes' } }]], /Expected whether to allow fallback./);
+    assert.deepEqual(setup.stored(), { servers: [first, second, third], defaultServer: first.id }, 'nothing refused was saved');
+
+    assert.deepEqual(ids(await setup.main.invoke(IPC.SERVER_MOVE, page, { id: first.id, by: -1 })), [first.id, second.id, third.id], "the first can't go up");
+    assert.deepEqual(ids(await setup.main.invoke(IPC.SERVER_MOVE, page, { id: first.id, by: 1 })), [second.id, first.id, third.id]);
+    assert.deepEqual(ids(await setup.main.invoke(IPC.SERVER_MOVE, page, { id: third.id, by: 1 })), [second.id, first.id, third.id], "the last can't go down");
+    assert.equal((await setup.main.invoke(IPC.SERVER_SET_DEFAULT, page, { id: third.id })).defaultServer, third.id);
+    const changed = await setup.main.invoke(IPC.SERVER_SET_OPTIONS, page, { id: second.id, options: { lifetime: { value: 3, unit: 'days' }, maxDownloads: 0, allowFallback: true } });
+    assert.deepEqual(changed.servers[0], { ...second, lifetime: { value: 3, unit: 'days' }, maxDownloads: 0, allowFallback: true });
+    // The default removed: its place goes to the first left.
+    const left = await setup.main.invoke(IPC.SERVER_REMOVE, page, { id: third.id });
+    assert.deepEqual([ids(left), left.defaultServer], [[second.id, first.id], second.id]);
+    assert.deepEqual(setup.stored(), { servers: left.servers, defaultServer: left.defaultServer });
 });
 
 test('transfer:add-files adds files this window holds to its own upload waiting, each once; one started takes none', async () => {
@@ -380,8 +466,8 @@ test('transfer:start takes uploads waiting that this window made, or a share it 
     await setup.main.invoke(IPC.TRANSFER_START, page, { ids: [alone] });
     assert.equal(setup.transfers.get(alone).options.encrypt, false);
 
-    // With no server in Settings, a window's own upload has nowhere to go: refused before any starts.
-    const unset = setUp({ settings: { ...SETTINGS, serverURL: '' } });
+    // With no server saved, a window's own upload has nowhere to go: refused before any starts.
+    const unset = setUp({ settings: { servers: [], defaultServer: null } });
     const unsetPage = unset.main.windowPage();
     const { files: [file] } = await unset.main.invoke(IPC.FILES_ADD, unsetPage, [FILE]);
     const { id } = await unset.main.invoke(IPC.TRANSFER_ADD_UPLOAD, unsetPage, { files: [file.handle] });

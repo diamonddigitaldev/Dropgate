@@ -1,5 +1,7 @@
 'use strict';
 
+const { serversFrom } = require('./core/servers');
+
 // The contract between the client's processes: its IPC channels (the window's,
 // the transfer window's and the file service's), its settings and their
 // defaults, and the main window's size. main.js, the file service and the
@@ -25,6 +27,11 @@ const IPC = Object.freeze({
     FILES_ADD: 'files:add',                     // (paths) dropped, picked or opened files' paths -> { files: [{ handle, name, size }], folders }
     FILE_REVOKE: 'file:revoke',                 // (handle) the page is done with it
     SERVER_CHECK: 'server:check',               // (url) -> { ok: true, baseUrl, serverVersion, serverInfo, dgup } | { ok: false, code, message }, asked of the server by the transfer window
+    SERVER_ADD: 'server:add',                   // ({ url }) -> { check, server?, servers, defaultServer }: the server checked (by the transfer window), and saved once it can take uploads (one saved already is given back)
+    SERVER_REMOVE: 'server:remove',             // ({ id }) -> { servers, defaultServer }: a saved server forgotten, with its settings
+    SERVER_MOVE: 'server:move',                 // ({ id, by }) -> { servers, defaultServer }: Move Up (-1) or Move Down (1) in the order
+    SERVER_SET_DEFAULT: 'server:set-default',   // ({ id }) -> { servers, defaultServer }: new uploads and Share with Dropgate start on it
+    SERVER_SET_OPTIONS: 'server:set-options',   // ({ id, options }) -> { servers, defaultServer }: its settings for new uploads, { lifetime?, maxDownloads?, allowFallback? }
     TRANSFER_ADD_UPLOAD: 'transfer:add-upload', // ({ files: [handle] }) -> { id }, an upload waiting to start, with the server's settings for new uploads
     TRANSFER_ADD_FILES: 'transfer:add-files',   // ({ id, files: [handle] }) -> { added, skipped } onto the page's own upload waiting, or { started: true } once it has started
     TRANSFER_START: 'transfer:start',           // ({ ids, encrypt? }) start them, in the transfer window: the page's own uploads (encrypt, as it found the server) and downloads, or a share's it was asked about (Upload Anyway)
@@ -135,14 +142,13 @@ const READ_PIECE_BYTES = 1024 * 1024;
  * change of kind, so the numbers stay numbers (v3 kept them as text).
  */
 const SETTINGS_DEFAULTS = Object.freeze({
-    // The server uploads go to; empty until the person gives one.
-    serverURL: '',
-    // The server's settings for new uploads (Settings > Server, "New uploads
-    // to this server"): each new upload's lifetime and download limit, Share
-    // with Dropgate's too.
-    lifetimeValue: 24,
-    lifetimeUnit: 'hours',
-    maxDownloads: 1,
+    // The saved servers (core/servers.js), in order: each one's ID, address,
+    // name and settings for new uploads (file lifetime, max downloads, Allow
+    // Fallback); and the default's ID, which new uploads and Share with
+    // Dropgate start on (null with none saved). Main alone changes them
+    // (MAIN_ONLY_SETTINGS): the page asks it to (server:add and the rest).
+    servers: [],
+    defaultServer: null,
     // Settings > Transfers: the folder downloads are saved in, null for the
     // system's Downloads folder, chosen with the system's folder picker in
     // main (the page can't set it: MAIN_ONLY_SETTINGS); and how many
@@ -152,7 +158,7 @@ const SETTINGS_DEFAULTS = Object.freeze({
 });
 
 /** The settings only main changes: the page may read them, and is refused a change to one. */
-const MAIN_ONLY_SETTINGS = Object.freeze(['downloadFolder']);
+const MAIN_ONLY_SETTINGS = Object.freeze(['servers', 'defaultServer', 'downloadFolder']);
 
 /** Transfers at once, as Settings > Transfers' stepped slider offers it. */
 const AT_ONCE_RANGE = Object.freeze({ MIN: 1, MAX: 6 });
@@ -161,15 +167,17 @@ const AT_ONCE_RANGE = Object.freeze({ MIN: 1, MAX: 6 });
  * The settings' version. 1: v4's first, under the kit's "settings" key. v3
  * kept its settings as top-level keys of config.json, which v4 doesn't carry
  * over (Will, 2026-10-03): the person enters their server once more. 2: the
- * downloads folder and transfers at once (migrateSettings()).
+ * downloads folder and transfers at once. 3: the saved servers, in place of
+ * the one server and its settings for new uploads (migrateSettings()).
  */
-const SETTINGS_SCHEMA_VERSION = 2;
+const SETTINGS_SCHEMA_VERSION = 3;
 
 /**
  * Bring stored settings up to SETTINGS_SCHEMA_VERSION, once: the kit calls it
- * as its store opens, with the version they were written at. Version 1's are
- * kept as they are (the server and its settings for new uploads), and the new
- * ones start at their defaults: the system's Downloads folder, 3 at once.
+ * as its store opens, with the version they were written at. Version 1's
+ * gain version 2's at their defaults (the system's Downloads folder, 3 at
+ * once); version 1's and 2's one server, with its settings for new uploads,
+ * becomes the first saved server, and the default (none, if none was given).
  * Nothing older was ever under the kit's key (v3's, version 0, are deleted by
  * V3_STORE_KEYS), so nothing of it is kept.
  * @param {object} settings
@@ -177,7 +185,9 @@ const SETTINGS_SCHEMA_VERSION = 2;
  */
 function migrateSettings(settings, from) {
     if (from < 1) return {};
-    return { ...settings, downloadFolder: null, transfersAtOnce: 3 };
+    const { serverURL, lifetimeValue, lifetimeUnit, maxDownloads, ...rest } = settings;
+    const two = from < 2 ? { downloadFolder: null, transfersAtOnce: 3 } : {};
+    return { ...rest, ...two, ...serversFrom({ serverURL, lifetimeValue, lifetimeUnit, maxDownloads }) };
 }
 
 /** v3's top-level keys in config.json, deleted once by the kit's migration. windowBounds is the kit's key too, so it carries over. */
