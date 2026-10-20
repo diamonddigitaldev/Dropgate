@@ -70,6 +70,20 @@ textarea,
 .upload-area::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
 .upload-area::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
+/* The drop zone while there are no uploads, and Download's line while there are no downloads: in the middle of the area, as Diamond File Converter's drop zone is. */
+.upload-area:has(> .empty-state:not([hidden])) {
+    display: flex;
+    flex-direction: column;
+}
+
+.empty-state {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+}
+
 .empty-state[hidden],
 #upload-grid[hidden],
 #download-empty[hidden],
