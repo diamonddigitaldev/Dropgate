@@ -14,16 +14,21 @@
 // cancelled, until it's removed. Files dropped, picked or opened together make
 // one upload; files dropped onto one still waiting join it (a file already in
 // it is skipped), and onto one that has started make a new one. A new upload
-// takes the default server's settings for new uploads (Settings > Servers). Each card
-// starts with its Upload, or all waiting with the action bar's Upload All.
-// One waiting can have its own options (its Advanced Options, or Bulk Edit
-// on the bulk bar for those selected): its file lifetime and download limit,
-// bounded by what the server allows, and the files it keeps; its settings
-// line says what differs from the server's settings for new uploads. One
-// whose options get past that (an edited config.json, a server that lowered
-// its limits since) is stopped at its start by a warning, which can go on
-// with the server's limits. A finished one can be deleted from its server
-// (Delete), with the manage token only the transfer window holds.
+// starts on the default server, with its settings for new uploads (Settings >
+// Servers); its "To" (or the bulk bar's "Upload all to", for several) moves it
+// to another saved server while it waits, and it takes that server's
+// settings. A server is checked as an upload picks it, unless this run found
+// it already, and again as uploads start on it. Each card starts with its
+// Upload, or all waiting with the action bar's Upload All. One waiting can
+// have its own options (its Advanced Options, or Bulk Edit on the bulk bar for
+// those selected): its file lifetime and download limit, bounded by what its
+// server allows, and the files it keeps; its settings line says what differs
+// from its server's settings for new uploads. One whose options get past that
+// (an edited config.json, a server that lowered its limits since) is stopped
+// at its start by a warning, which can go on with the server's limits. Its
+// encryption, the Upload Security Warning and Pause go by its own server's
+// last check. A finished one can be deleted from its server (Delete), with
+// the manage token only the transfer window holds.
 //
 // The page runs no core and makes no request: it holds each file as the
 // handle main made for it only until it's handed to an upload, never its
@@ -94,11 +99,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         let saved = { servers: [], defaultServer: null, checks: {} };
         /** The default server, as main reads it (the first, if the one named is gone): new uploads and Share with Dropgate start on it. */
         const defaultSaved = () => saved.servers.find((server) => server.id === saved.defaultServer) ?? saved.servers[0] ?? null;
+        /** A saved server, by its ID, or null when it isn't saved (removed, or none given). */
+        const savedById = (id) => saved.servers.find((server) => server.id === id) ?? null;
 
-        /** The default server's capabilities and its address as found, from its last check: what uploads are held to, and whether they're encrypted. */
-        let serverCapabilities = null;
-        /** @type {{compatible:boolean, message?:string}} */
-        let lastServerCheck = { compatible: false, message: '' };
+        /**
+         * Each server's last check this run, by ID, as main answered it: what
+         * its uploads are held to, whether they're encrypted, and whether they
+         * can pause. Kept here too for a server removed since, whose uploads
+         * under way carry on (main forgets a removed server's).
+         */
+        const seenChecks = new Map();
+        const checkOf = (id) => (id ? seenChecks.get(id) ?? null : null);
 
         // --- The frame ---
         const shell = kit.ui.mountShell({
@@ -135,9 +146,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         /** The uploads a bar acts on: those selected, or every one when none is. */
         const scope = () => (grid.selection.length > 0 ? grid.selection : grid.cards).map((card) => shown.get(idOf.get(card))).filter(Boolean);
 
-        // The server a new upload goes to: the default, in Settings > Servers, until each upload picks its own.
+        // "Upload all to" (or "Upload selected to"): the saved server for every upload waiting, or those selected.
         const bulkTarget = document.createElement('select');
         bulkTarget.className = 'form-select form-select-sm';
+        bulkTarget.addEventListener('change', () => pickServer(scope().map(({ view }) => view), bulkTarget.value));
         const bulk = kit.ui.bulkBar(grid, {
             noun: 'upload',
             target: { verb: 'Upload', control: bulkTarget, note: () => '' },
@@ -215,25 +227,58 @@ document.addEventListener('DOMContentLoaded', async () => {
             removeUploads(scope());
         }, { view: 'upload' });
 
-        /** The server's name for a card's "To": the default's host, as the client reads it. */
-        function serverName() {
-            const address = defaultSaved()?.url ?? '';
-            if (!address) return 'No server';
-            try {
-                return new URL(/^[a-z]+:\/\//i.test(address) ? address : `https://${address}`).host;
-            } catch {
-                return address;
-            }
+        /**
+         * A saved server's name in a "To" select: its name, with its host
+         * where another saved server has the same name (many keep "Dropgate
+         * Server"), and "(default)" on the default.
+         */
+        function serverLabel(server) {
+            const twin = saved.servers.some((other) => other.id !== server.id && other.name === server.name);
+            const name = twin ? `${server.name} (${hostName(server.url)})` : server.name;
+            return server.id === defaultSaved()?.id ? `${name} (default)` : name;
         }
 
-        /** Fill a server select: the default (each upload picks its own later). */
-        function fillServers(select) {
-            const option = document.createElement('option');
-            option.value = 'default';
-            option.textContent = defaultSaved() ? `${serverName()} (default)` : serverName();
-            select.replaceChildren(option);
+        /**
+         * Fill a "To" select: every saved server, in order, by name, with
+         * `chosen` (a server's ID) chosen, or the default. An upload's server
+         * removed since it started (`gone`, as its card names it) is shown
+         * for it too; with none saved, "No server".
+         * @param {HTMLSelectElement} select
+         * @param {string | null} chosen
+         * @param {{ id: string, name: string } | null} [gone]
+         */
+        function fillServers(select, chosen, gone = null) {
+            const option = (value, label) => {
+                const made = element('option', '', label);
+                made.value = value;
+                return made;
+            };
+            const options = saved.servers.map((server) => option(server.id, serverLabel(server)));
+            if (gone && !savedById(gone.id)) options.push(option(gone.id, gone.name));
+            if (options.length === 0) options.push(option('', 'No server'));
+            select.replaceChildren(...options);
+            select.value = [...select.options].some((o) => o.value === chosen) ? chosen : defaultSaved()?.id ?? select.options[0].value;
         }
-        fillServers(bulkTarget);
+
+        /**
+         * An upload's "To", or "Upload all to" for several, changed: each
+         * waiting goes to that saved server, with its settings for new
+         * uploads, as main gives them. The server is checked now unless this
+         * run found it already: its row says so meanwhile.
+         * @param {any[]} views
+         * @param {string} id - The saved server's ID.
+         */
+        async function pickServer(views, id) {
+            const moving = views.filter((view) => editable(view) && view.server?.id !== id);
+            if (!savedById(id) || moving.length === 0) return;
+            let refused = 0;
+            for (const view of moving) await api.setTransferOptions(view.id, { server: id }).catch(() => { refused++; });
+            if (refused > 0) {
+                kit.ui.toast(refused === 1 ? 'That upload has already started, so its server stays as it was.'
+                    : `${countOf(refused, 'upload')} had already started, so their servers stay as they were.`, { type: 'warning' });
+            }
+            if (!checkOf(id)?.ok && !checking.has(id)) await testServer(id);
+        }
 
         /** An upload's name on its card: its file's, or how many files. A file's name is never recased. */
         const nameOf = (view) => (view.files.length === 1 ? view.files[0].name : countOf(view.files.length, 'file'));
@@ -273,27 +318,34 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         /**
-         * Its settings line: that it won't be end-to-end encrypted, or else
-         * what it has that differs from the server's settings for new uploads
-         * ("3 Days · 10 Downloads"), or nothing.
+         * Its settings line, by its own server: that it won't be end-to-end
+         * encrypted, or else what it has that differs from that server's
+         * settings for new uploads ("3 Days · 10 Downloads"), or nothing.
          */
         function settingsOf(view) {
-            const plain = view.options?.encrypt === false || (view.state === 'waiting' && lastServerCheck.compatible && !serverEncrypts());
+            const server = savedById(view.server?.id);
+            const check = checkOf(view.server?.id);
+            const plain = view.options?.encrypt === false || (view.state === 'waiting' && compatibilityOf(server, check).compatible && !encryptsBy(check));
             if (plain) {
-                return { text: isPlainHttp(defaultSaved()?.url ?? '') ? 'Not encrypted: This server is plain HTTP.' : "Not encrypted: This server doesn't support it.", tone: 'warning' };
+                return { text: isPlainHttp(server?.url ?? check?.baseUrl ?? '') ? 'Not encrypted: This server is plain HTTP.' : "Not encrypted: This server doesn't support it.", tone: 'warning' };
             }
-            if (!view.options) return undefined;
-            const usual = newUploadOptions();
+            const usual = newUploadOptions(view);
+            if (!view.options || !usual) return undefined;
             const differs = [];
             if (!sameLifetime(view.options.lifetime, usual.lifetime)) differs.push(lifetimeTitle(view.options.lifetime));
             if (view.options.maxDownloads !== usual.maxDownloads) differs.push(downloadsTitle(view.options.maxDownloads));
             return differs.length > 0 ? differs.join(' · ') : undefined;
         }
 
-        /** The default server's settings for new uploads, as saved: what main gives a new upload (a new server's, with none saved). */
-        function newUploadOptions() {
-            const server = defaultSaved();
-            return server ? { lifetime: server.lifetime, maxDownloads: server.maxDownloads } : { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1 };
+        /**
+         * An upload's server's settings for new uploads, as saved: what main
+         * gave it (a new server's, with none saved when it was made); null for
+         * a server removed since.
+         */
+        function newUploadOptions(view) {
+            if (!view.server) return { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1 };
+            const server = savedById(view.server.id);
+            return server ? { lifetime: server.lifetime, maxDownloads: server.maxDownloads } : null;
         }
 
         const sameLifetime = (a, b) => a.unit === b.unit && (a.unit === 'unlimited' || a.value === b.value);
@@ -319,7 +371,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     return startable(view) ? [{ label: 'Upload', variant: 'primary', onClick: () => startUploads([id]) }] : [];
                 case 'running': {
                     // Pause, while core says it can be now, on a server that lets uploads pause (its pause length is 0 when its operator turned pausing off).
-                    const pausable = (serverCapabilities?.upload?.maxPauseMinutes ?? 0) > 0 && view.canPause && ['initializing', 'uploading'].includes(view.status);
+                    const pausable = (uploadsOf(checkOf(view.server?.id))?.maxPauseMinutes ?? 0) > 0 && view.canPause && ['initializing', 'uploading'].includes(view.status);
                     // A pause or a resume asked from here keeps its busy button until it's seen through.
                     const asked = settling.get(id)?.kind;
                     const toggle = asked === 'resume' ? [{ label: 'Resume', onClick: () => {} }]
@@ -392,7 +444,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         async function deleteUpload(button, view) {
             const ok = await kit.ui.confirm({
                 title: 'Delete This Upload?',
-                body: `${serverName()} removes it at once, and its link stops working.`,
+                body: `${view.server?.host ?? 'The server'} removes it at once, and its link stops working.`,
                 confirmLabel: 'Delete',
                 variant: 'danger',
                 icon: 'delete',
@@ -429,7 +481,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const select = document.createElement('select');
                 select.className = 'form-select form-select-sm';
                 select.setAttribute('aria-label', 'Upload to');
-                fillServers(select);
+                select.addEventListener('change', () => pickServer([shown.get(view.id)?.view].filter(Boolean), select.value));
                 const card = kit.ui.card({
                     icon: view.files.length > 1 ? 'file_copy' : 'upload_file',
                     name: nameOf(view),
@@ -446,6 +498,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
             entry.view = view;
             if (settling.has(view.id) && settled(view, settling.get(view.id))) settling.delete(view.id);
+            // Its server, as main says, unless the select is in use.
+            if (document.activeElement !== entry.select) fillServers(entry.select, view.server?.id ?? null, view.server);
             if (view.link && !entry.linkRow) {
                 entry.linkRow = document.createElement('input');
                 entry.linkRow.className = 'form-control form-control-sm selectable card-link';
@@ -508,8 +562,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 .filter(([n]) => n > 0).map(([n, word]) => `${n} ${word}`);
             const percents = running.map((view) => view.percent).filter((percent) => typeof percent === 'number');
             actions.update({
-                // With nothing to upload yet, the line says why uploads can't start, if they can't.
-                summary: views.length > 0 ? countOf(views.length, 'upload') : lastServerCheck.compatible ? '' : lastServerCheck.message,
+                // With nothing to upload yet, the line says why uploads can't start on the default, if they can't.
+                summary: views.length > 0 ? countOf(views.length, 'upload') : defaultCompatibility().compatible ? '' : defaultCompatibility().message,
                 detail: parts.join(' · '),
                 percent: percents.length ? percents.reduce((sum, percent) => sum + percent, 0) / percents.length : 0,
                 running: false,
@@ -954,17 +1008,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         // --- The server ---
         // The app's own version, for display only.
         const appVersion = await kitApi.getVersion();
-        // The default server's address as the client reads it (https:// added
-        // if it had no scheme), from its last check that reached it. Checks
-        // are asked of the server by the transfer window, through main, which
-        // keeps what each saved server's found in memory.
-        let serverBaseUrl = null;
+        // Checks are asked of a server by the transfer window, through main,
+        // which keeps what each saved server's found in memory.
 
         /** Whether an address is plain HTTP, as typed: one without a scheme is HTTPS. */
         const isPlainHttp = (serverUrl) => /^http:\/\//i.test(serverUrl);
 
-        /** Whether uploads to the server are end-to-end encrypted: it has it, and it's reached over HTTPS. */
-        const serverEncrypts = () => Boolean(serverCapabilities?.upload?.e2ee && serverBaseUrl?.startsWith('https://'));
+        /** Whether uploads go end-to-end encrypted to a server, as a check found it: it has it, and was reached over HTTPS (as main reads it too). */
+        const encryptsBy = (check) => Boolean(check?.ok && check.serverInfo?.capabilities?.upload?.e2ee && check.baseUrl?.startsWith('https://'));
 
         /** Why a check couldn't connect, and what to try. */
         function connectionFailedText(serverUrl, error) {
@@ -997,8 +1048,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         /** Take main's answer: the list, the default and the checks as they are now; every row, and what uploads go by, follow. */
         function takeList(list) {
             saved = { servers: list.servers, defaultServer: list.defaultServer, checks: list.checks ?? {} };
+            for (const [id, check] of Object.entries(saved.checks)) seenChecks.set(id, check);
             renderServers();
-            useDefaultCheck();
+            refreshServer();
         }
 
         /** Check a saved server again, through main, which keeps what it finds in memory: its row says Checking… until then. */
@@ -1436,10 +1488,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             input.focus();
         }
 
-        /** An address's host, as a server's name until it gives its own. */
+        /** An address's host, as the client reads it (one with no scheme is HTTPS): a server's name until it gives its own. */
         function hostName(address) {
             try {
-                return new URL(address).host;
+                return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(address) ? address : `https://${address}`).host || address;
             } catch {
                 return address;
             }
@@ -1503,7 +1555,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
         $('at-once-field').append(atOnceSlider.element);
 
-        await checkServerCompatibility();
+        await checkDefaultServer();
 
         // --- Event Listeners ---
         addFilesBtn.addEventListener('click', () => fileInput.click());
@@ -1621,36 +1673,55 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         /**
-         * Start uploads waiting: the server checked first; any whose lifetime
-         * or download limit is outside what it allows now stops them, with a
-         * warning that can go on with the server's limits instead (or leave
-         * them all waiting); and the Upload Security Warning is asked once
-         * when they won't be end-to-end encrypted. Main runs them in the
-         * transfer window, as places free. One stopped before it starts is
-         * told to main, and stays waiting.
+         * Start uploads waiting, each server's together, in the order first
+         * met: each server checked first; any whose lifetime or download limit
+         * is outside what it allows now stops them, with a warning that can go
+         * on with the server's limits instead (or leave them waiting); and the
+         * Upload Security Warning is asked once for a server they won't be
+         * end-to-end encrypted on. Main runs them in the transfer window, as
+         * places free. One stopped before it starts is told to main, and stays
+         * waiting.
          */
         async function startUploads(ids) {
-            if (ids.length === 0) return;
-            const serverCheck = await checkServerCompatibility();
-            if (!serverCheck.compatible) {
-                api.uploadFinished({ status: 'error', error: serverCheck.message || 'Server is not compatible.' });
+            const left = new Set(ids);
+            const waiting = () => [...left].map((id) => shown.get(id)?.view).filter((view) => view && startable(view));
+            const serverOf = (view) => view.server?.id ?? '';
+            while (waiting().length > 0) {
+                // The first one's server, as main last said: one moved meanwhile goes with its new server's, next time round.
+                const server = serverOf(waiting()[0]);
+                const group = waiting().filter((view) => serverOf(view) === server).map((view) => view.id);
+                for (const id of group) left.delete(id);
+                await startOn(savedById(server), group);
+                for (const view of group.map((id) => shown.get(id)?.view)) if (view && startable(view) && serverOf(view) !== server) left.add(view.id);
+            }
+        }
+
+        /** Start uploads waiting that go to one saved server (null: none saved, so they can't). */
+        async function startOn(server, ids) {
+            const check = server ? await testServer(server.id) : null;
+            const compatible = compatibilityOf(server, check);
+            if (!compatible.compatible) {
+                api.uploadFinished({ status: 'error', error: compatible.message || 'Server is not compatible.' });
                 return;
             }
-            const outside = ids.map((id) => shown.get(id)?.view).filter((view) => view && startable(view) && outsideLimits(view.options));
+            const upload = uploadsOf(check);
+            // Still waiting, on this server: one picked another meanwhile goes with that one's.
+            const current = () => ids.map((id) => shown.get(id)?.view).filter((view) => view && startable(view) && view.server?.id === server.id);
+            const outside = current().filter((view) => outsideLimits(view.options, upload));
             if (outside.length > 0) {
-                if (!(await askServerLimits(outside))) return;
+                if (!(await askServerLimits(outside, server, upload))) return;
                 try {
-                    for (const view of outside) await api.setTransferOptions(view.id, withinLimits(view.options));
+                    for (const view of outside) await api.setTransferOptions(view.id, withinLimits(view.options, upload));
                 } catch {
                     // One started or went meanwhile: what's left goes on as it is, and the server refuses anything outside its limits.
                 }
             }
-            const encrypt = serverEncrypts();
+            const encrypt = encryptsBy(check);
             if (!encrypt && !(await askUploadAnyway())) {
                 api.uploadFinished({ status: 'error', error: 'Upload cancelled by user (insecure connection).' });
                 return;
             }
-            const waiting = ids.filter((id) => shown.get(id) && startable(shown.get(id).view));
+            const waiting = current().map((view) => view.id);
             if (waiting.length === 0) return;
             try {
                 await api.startTransfers(waiting, encrypt);
@@ -1676,17 +1747,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             return limits.downloads > 0 && (n === 0 || n > limits.downloads);
         }
 
-        /** Whether an upload's options are outside the server's limits, as it last said them. */
-        function outsideLimits(options) {
-            const upload = serverCapabilities?.upload;
+        /** Whether an upload's options are outside its server's limits, as it last said them (its capabilities' upload part). */
+        function outsideLimits(options, upload) {
             if (!options || !upload) return false;
             const limits = limitsOf(upload);
             return lifetimeOutside(options.lifetime, limits) || downloadsOutside(options.maxDownloads, limits);
         }
 
-        /** An upload's options held to the server's limits: each one outside becomes its limit. */
-        function withinLimits(options) {
-            const limits = limitsOf(serverCapabilities.upload);
+        /** An upload's options held to its server's limits: each one outside becomes its limit. */
+        function withinLimits(options, upload) {
+            const limits = limitsOf(upload);
             return {
                 lifetime: lifetimeOutside(options.lifetime, limits) ? { value: limits.hours, unit: 'hours' } : options.lifetime,
                 maxDownloads: downloadsOutside(options.maxDownloads, limits) ? limits.downloads : options.maxDownloads,
@@ -1701,18 +1771,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         /**
-         * The warning before uploads whose options are outside the server's
+         * The warning before uploads whose options are outside their server's
          * limits as it says them now: true to go on with its limits instead.
          * @param {any[]} views - Those outside them.
+         * @param {{ url: string }} server - The saved server they go to.
+         * @param {any} upload - What it allows uploads, from its check.
          */
-        function askServerLimits(views) {
+        function askServerLimits(views, server, upload) {
             const [one] = views;
             const asks = views.length === 1
                 ? `This upload asks for ${lifetimeText(one.options.lifetime)} and ${downloadsText(one.options.maxDownloads)}.`
                 : `${countOf(views.length, 'upload')} here ask for more than that.`;
             return kit.ui.confirm({
                 title: "Outside This Server's Limits",
-                body: `${serverName()} ${limitsSentence(serverCapabilities.upload)}. ${asks}`,
+                body: `${hostName(server.url)} ${limitsSentence(upload)}. ${asks}`,
                 detail: views.length === 1
                     ? 'The server may have lowered its limits since this upload was added.'
                     : 'The server may have lowered its limits since these uploads were added.',
@@ -1725,27 +1797,40 @@ document.addEventListener('DOMContentLoaded', async () => {
         /**
          * Advanced Options, for one upload waiting (its card's) or several
          * (Bulk Edit, for those selected): its file lifetime and download
-         * limit, offering only what the server allows (Apply is off, with the
+         * limit, offering only what its server allows (Apply is off, with the
          * help line saying why, for a value outside); how it will be sent,
          * shown, never switched off; and for one of several files, the files,
-         * each with its own Remove. The server's Allow Fallback comes with
-         * several servers (phase 14 of the plan, beyond this one server).
-         * Apply sets them on main's upload; Cancel leaves it as it was.
+         * each with its own Remove. Several going to different servers are
+         * held to the tightest of their limits, each help line naming the
+         * server that sets it. Each server is checked first unless this run
+         * found it already. Apply sets them on main's upload; Cancel leaves
+         * it as it was. Allow Fallback comes with the fallback itself.
          * @param {any[]} entries
          */
         async function openAdvanced(entries) {
-            const views = entries.map((entry) => entry?.view).filter(editable);
+            let views = entries.map((entry) => entry?.view).filter(editable);
             if (views.length === 0) return;
-            if (!serverCapabilities?.upload) await checkServerCompatibility();
-            const upload = serverCapabilities?.upload;
-            if (!lastServerCheck.compatible || !upload) {
-                kit.ui.toast(lastServerCheck.message || 'Could not connect to the server.', { type: 'warning' });
-                return;
+            for (const id of new Set(views.map((view) => view.server?.id ?? ''))) {
+                const server = savedById(id);
+                if (server && !checkOf(id)?.ok) await testServer(id);
+                const compatible = compatibilityOf(server, checkOf(id));
+                if (!compatible.compatible) {
+                    kit.ui.toast(compatible.message || 'Could not connect to the server.', { type: 'warning' });
+                    return;
+                }
             }
+            // As they are now: one may have moved on while its server was checked.
+            views = views.map((view) => shown.get(view.id)?.view).filter(editable);
+            if (views.length === 0) return;
+            const servers = [...new Map(views.map((view) => [view.server.id, savedById(view.server.id)])).values()];
+            const allowing = servers.map((server) => ({ server, host: hostName(server.url), limits: limitsOf(uploadsOf(checkOf(server.id))) }));
+            /** The server whose limit on this is tightest (0 is none). */
+            const tightest = (of) => allowing.reduce((best, one) => ((one.limits[of] !== 0 && (best.limits[of] === 0 || one.limits[of] < best.limits[of])) ? one : best));
             const [first] = views;
             const many = views.length > 1;
-            const host = serverName();
-            const limits = limitsOf(upload);
+            const lifetimeBy = tightest('hours');
+            const downloadsBy = tightest('downloads');
+            const limits = { hours: lifetimeBy.limits.hours, downloads: downloadsBy.limits.downloads };
 
             // The kit has no form dialog yet: the page's own, drawn on the kit's dialog classes.
             // kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65
@@ -1828,14 +1913,16 @@ document.addEventListener('DOMContentLoaded', async () => {
             downloads.disabled = limits.downloads === 1;
             const downloadsField = formField('Max downloads', downloads, 'options-downloads');
 
-            // How it will be sent: shown, and never switched off here.
+            // How it will be sent: shown, and never switched off here. Going to several servers, the first that won't encrypt is named.
             const encryption = element('div', 'options-encryption');
-            const encrypts = serverEncrypts();
+            const plainOn = allowing.find(({ server }) => !encryptsBy(checkOf(server.id)));
+            const encrypts = !plainOn;
+            const who = servers.length > 1 ? 'Their servers' : allowing[0].host;
             encryption.append(glyph(encrypts ? 'verified' : 'gpp_bad', encrypts ? 'text-success-emphasis' : 'text-danger-emphasis'), element('span', '', encrypts
-                ? `End-to-end encrypted. ${host} can't read your files or their names.`
-                : isPlainHttp(serverBaseUrl ?? '')
-                    ? `Not encrypted: ${host} is plain HTTP, so the server can read your files.`
-                    : `Not encrypted: ${host} doesn't support end-to-end encryption, so the server can read your files.`));
+                ? `End-to-end encrypted. ${who} can't read your files or their names.`
+                : isPlainHttp(checkOf(plainOn.server.id)?.baseUrl ?? plainOn.server.url)
+                    ? `Not encrypted: ${plainOn.host} is plain HTTP, so the server can read your files.`
+                    : `Not encrypted: ${plainOn.host} doesn't support end-to-end encryption, so the server can read your files.`));
             body.append(lifetimeField.wrap, downloadsField.wrap, encryption);
 
             const cancel = element('button', 'btn btn-secondary', 'Cancel');
@@ -1866,7 +1953,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (limits.hours !== 0) lifetimeValue.max = String(most);
                 else lifetimeValue.removeAttribute('max');
 
-                const allows = limits.hours === 0 ? `${host} has no time limit.` : `${host} keeps files up to ${hours(limits.hours)}.`;
+                const host = lifetimeBy.host;
+                const allows = limits.hours === 0 ? (servers.length > 1 ? 'Their servers have no time limit.' : `${host} has no time limit.`) : `${host} keeps files up to ${hours(limits.hours)}.`;
                 const life = readLifetime();
                 let lifeWhy = null;
                 if (!life) lifeWhy = 'Enter a lifetime of more than 0.';
@@ -1878,15 +1966,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                 setHelp(lifetimeField.help, lifeWhy ?? allows, lifeWhy ? 'danger' : undefined);
 
                 const n = readDownloads();
+                const by = downloadsBy.host;
                 let downloadsWhy = null;
                 if (n === null) downloadsWhy = limits.downloads === 0 ? 'Enter a whole number: 0 or more.' : `Enter a whole number from 1 to ${limits.downloads}.`;
                 else if (downloadsOutside(n, limits)) {
                     downloadsWhy = n === 0
-                        ? `${host} doesn't allow unlimited downloads. It allows up to ${countOf(limits.downloads, 'download')}.`
-                        : `Too many for ${host}, which allows up to ${countOf(limits.downloads, 'download')}.`;
+                        ? `${by} doesn't allow unlimited downloads. It allows up to ${countOf(limits.downloads, 'download')}.`
+                        : `Too many for ${by}, which allows up to ${countOf(limits.downloads, 'download')}.`;
                 }
                 const downloadsAllow = limits.downloads === 0 ? '0 means unlimited downloads.'
-                    : limits.downloads === 1 ? `${host} allows 1 download.` : `${host} allows up to ${countOf(limits.downloads, 'download')}.`;
+                    : limits.downloads === 1 ? `${by} allows 1 download.` : `${by} allows up to ${countOf(limits.downloads, 'download')}.`;
                 setHelp(downloadsField.help, downloadsWhy ?? downloadsAllow, downloadsWhy ? 'danger' : undefined);
                 apply.disabled = Boolean(lifeWhy || downloadsWhy);
             };
@@ -1958,40 +2047,31 @@ document.addEventListener('DOMContentLoaded', async () => {
             return at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
         }
 
-        /** The server's name on every upload and the bulk bar, and whether a waiting upload says it won't be encrypted. */
+        /**
+         * The saved servers on the bulk bar's "Upload all to" (what it says
+         * kept, or the default) and every upload's "To", and each upload
+         * drawn again by its server's last check.
+         */
         function refreshServer() {
-            fillServers(bulkTarget);
-            for (const entry of shown.values()) {
-                fillServers(entry.select);
-                draw(entry.view);
-            }
+            fillServers(bulkTarget, bulkTarget.value || null);
+            for (const entry of shown.values()) draw(entry.view);
             drawBars();
         }
 
         /**
-         * Check the default server again, through main (its row says so
-         * while it's checked), and say whether uploads can start on it. With
-         * none saved, nothing is asked of any server.
+         * Check the default server, through main (its row says so while it's
+         * checked), as the window opens: no other is asked anything until
+         * it's used. With none saved, nothing is asked of any server.
          */
-        async function checkServerCompatibility() {
+        async function checkDefaultServer() {
             const server = defaultSaved();
             if (server) await testServer(server.id);
-            else useDefaultCheck();
-            return lastServerCheck;
+            else refreshServer();
         }
 
-        /**
-         * What the default server's last check found, for uploads: its
-         * capabilities, its address as found, and whether uploads can start
-         * there, or why not. Every upload's line is drawn again with it.
-         */
-        function useDefaultCheck() {
-            const server = defaultSaved();
-            const check = server ? saved.checks[server.id] ?? null : null;
-            serverCapabilities = check?.ok ? check.serverInfo?.capabilities ?? null : null;
-            serverBaseUrl = check?.ok ? check.baseUrl : null;
-            lastServerCheck = compatibilityOf(server, check);
-            refreshServer();
+        /** Whether uploads can start on the default server, from its last check, or why not. */
+        function defaultCompatibility() {
+            return compatibilityOf(defaultSaved(), checkOf(defaultSaved()?.id));
         }
 
         /** Whether uploads can start on a server, from its last check, or why not. */

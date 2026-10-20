@@ -6,7 +6,7 @@ const {
     defaultFolderOf, downloadLink, downloadOptionsOf, failureOf, filesToAdd, handleOf, isId, linkOf, newUpload, optionsOf, pathList, saveToOf, savedServerOf, serverAddress,
     serverMoveOf, serverOptionsOf, serverToAdd, transfersOf, uploadOf, uploadsToStart,
 } = require('./core/payloads');
-const { NEW_SERVER, serverOf } = require('./core/servers');
+const { NEW_SERVER, encryptsBy, serverOf, uploadServerOf } = require('./core/servers');
 const { view } = require('./core/transfers');
 
 // The window's channels: what its page asks main, through window.electronAPI.
@@ -97,6 +97,23 @@ function answerWindowChannels(main) {
         const list = servers.list();
         return { ...list, checks: checks.of(list.servers) };
     };
+
+    /** A saved server's settings for new uploads, as an upload takes them: Unlimited is a lifetime of 0, whatever value was kept beside it. */
+    const settingsFor = ({ lifetime, maxDownloads }) => ({ lifetime: { value: lifetime.unit === 'unlimited' ? 0 : lifetime.value, unit: lifetime.unit }, maxDownloads });
+
+    /**
+     * A window's uploads waiting whose server isn't saved any more (removed),
+     * or that were made with none saved, go to the default, with its settings
+     * for new uploads. A share's, and those under way, keep theirs.
+     */
+    const rehome = () => {
+        const fallback = servers.default();
+        if (!fallback) return;
+        for (const card of transfers.list()) {
+            if (card.kind !== 'upload' || card.state !== 'waiting' || card.owner === null || card.ask || saved(card.savedServer?.id)) continue;
+            transfers.setServer(card.id, uploadServerOf(fallback), settingsFor(fallback));
+        }
+    };
     kit.ipc.handle(IPC.SERVER_ADD, async (_event, request) => {
         const url = serverToAdd(request);
         const check = await main.host().check(serverOf(url));
@@ -109,6 +126,8 @@ function answerWindowChannels(main) {
         }
         const server = found ? servers.add(found, check.serverInfo).server : null;
         if (server) checks.set(server.id, check);
+        // The first saved: uploads made with none saved go to it.
+        rehome();
         return { check, ...(server ? { server } : {}), ...listed() };
     });
     // Test, the default server as the window opens, and the default again
@@ -120,10 +139,12 @@ function answerWindowChannels(main) {
         if (saved(id)) checks.set(id, check);
         return { check, ...listed() };
     });
+    // A removed server's uploads waiting go to the default; those under way carry on.
     kit.ipc.handle(IPC.SERVER_REMOVE, (_event, request) => {
         const id = savedServerOf(request, saved);
         servers.remove(id);
         checks.forget(id);
+        rehome();
         return listed();
     });
     kit.ipc.handle(IPC.SERVER_MOVE, (_event, request) => {
@@ -148,17 +169,18 @@ function answerWindowChannels(main) {
         return held.map(({ path: filePath, name, size, mtimeMs }) => ({ path: filePath, name, size, mtimeMs }));
     };
 
-    // An upload of files handed to this window, waiting to start, with the
-    // default server's settings for new uploads: its lifetime and download
-    // limit (a new server's, with none saved). Whether it's encrypted is
-    // decided as it starts.
+    // An upload of files handed to this window, waiting to start, on the
+    // default server or the saved one given, with that server's settings for
+    // new uploads: its lifetime and download limit (a new server's, with none
+    // saved). Whether it's encrypted is decided as it starts.
     kit.ipc.handle(IPC.TRANSFER_ADD_UPLOAD, (event, request) => {
-        const { files } = newUpload(request);
-        const { lifetime, maxDownloads } = servers.default() ?? NEW_SERVER;
+        const { files, server: chosen } = newUpload(request, saved);
+        const target = chosen ? servers.get(chosen) : servers.default();
         const { id } = transfers.add({
             owner: event.sender.id,
             files: heldFiles(event.sender.id, files),
-            options: { lifetime: { value: lifetime.unit === 'unlimited' ? 0 : lifetime.value, unit: lifetime.unit }, maxDownloads },
+            savedServer: target ? uploadServerOf(target) : null,
+            options: settingsFor(target ?? NEW_SERVER),
         });
         return { id };
     });
@@ -171,10 +193,13 @@ function answerWindowChannels(main) {
         return transfers.addFiles(id, heldFiles(event.sender.id, files)) ?? { started: true };
     });
 
-    // Start uploads waiting: this window's own, to the default server,
-    // end-to-end encrypted or not as the window found the server (encrypt), or
-    // a share it was asked about (Upload Anyway), to the share's server, as
-    // the share decided. Each is queued, and runs as soon as it has a place.
+    // Start uploads waiting: this window's own, each to its own saved server
+    // (the default, for one made with none saved), end-to-end encrypted or
+    // not as the window found those servers (encrypt), or a share it was asked
+    // about (Upload Anyway), to the share's server, as the share decided.
+    // Where the window's word on encryption differs from what main holds of a
+    // server's last check, it's refused: never sent plain to a server that
+    // encrypts. Each is queued, and runs as soon as it has a place.
     kit.ipc.handle(IPC.TRANSFER_START, (event, request) => {
         const sender = event.sender.id;
         const startable = (id) => {
@@ -185,10 +210,22 @@ function answerWindowChannels(main) {
         // A download needs no word on encryption: its upload decided that.
         const own = ids.filter((id) => transfers.get(id).owner === sender && transfers.get(id).kind === 'upload');
         if (own.length > 0 && encrypt === undefined) throw new Error('Expected whether to encrypt.');
-        const server = servers.default();
-        if (!server && ids.some((id) => !transfers.get(id).server)) throw new Error('Server URL is not configured.');
-        for (const id of own) transfers.get(id).options.encrypt = encrypt;
-        for (const id of ids) main.start(id, transfers.get(id).server ?? serverOf(server.url));
+        const targets = new Map(own.map((id) => [id, servers.get(transfers.get(id).savedServer?.id) ?? servers.default()]));
+        if ([...targets.values()].some((target) => !target) || ids.some((id) => !targets.has(id) && !transfers.get(id).server)) {
+            throw new Error('Server URL is not configured.');
+        }
+        for (const target of targets.values()) {
+            const check = checks.get(target.id);
+            if (check && encryptsBy(check) !== encrypt) throw new Error(`${target.name} was checked again since: Try again.`);
+        }
+        for (const [id, target] of targets) {
+            const upload = transfers.get(id);
+            upload.options.encrypt = encrypt;
+            upload.savedServer = uploadServerOf(target);
+            // Where it goes, read from its saved server now: never an address from the page.
+            upload.server = serverOf(target.url);
+        }
+        for (const id of ids) main.start(id, transfers.get(id).server);
     });
 
     // A link pasted into Download, as the page holds it until now: main checks
@@ -234,8 +271,10 @@ function answerWindowChannels(main) {
 
     // Advanced Options (and Bulk Edit, one call each) on a transfer of this
     // window's waiting: an upload's lifetime, download limit and the files it
-    // keeps (a share's, or one being asked about, is the share's own); a
-    // download's files it saves and whether as one ZIP.
+    // keeps (a share's, or one being asked about, is the share's own), or its
+    // "To" (and the bulk bar's "Upload all to"): a saved server, by its ID,
+    // whose settings for new uploads it takes; a download's files it saves and
+    // whether as one ZIP.
     kit.ipc.handle(IPC.TRANSFER_SET_OPTIONS, (event, request) => {
         const own = (kind) => (id) => {
             const transfer = transfers.get(id);
@@ -247,8 +286,10 @@ function answerWindowChannels(main) {
             if (!transfers.choose(id, options)) throw new Error('Expected a download of this window\'s waiting to start.');
             return;
         }
-        const { id, options } = optionsOf(request, own('upload'), fileCount);
-        if (!transfers.setOptions(id, options)) throw new Error('Expected an upload of this window\'s waiting to start.');
+        const { id, options } = optionsOf(request, own('upload'), fileCount, saved);
+        const target = options.server ? servers.get(options.server) : null;
+        const done = target ? transfers.setServer(id, uploadServerOf(target), settingsFor(target)) : transfers.setOptions(id, options);
+        if (!done) throw new Error('Expected an upload of this window\'s waiting to start.');
     });
 
     // Remove uploads waiting or ended (Remove, Clear Finished): one going is cancelled first.
@@ -256,9 +297,11 @@ function answerWindowChannels(main) {
         transfers.remove(transfersOf(request, has));
     });
 
-    // Try a failed or cancelled upload again: it waits for this window's Upload once more.
+    // Try a failed or cancelled upload again: it waits for this window's Upload
+    // once more, on its server, or the default if its server was removed since.
     kit.ipc.handle(IPC.TRANSFER_RETRY, (event, request) => {
         if (!transfers.retry(uploadOf(request, has), event.sender.id)) throw new Error('Expected an upload or a download that failed or was cancelled.');
+        rehome();
     });
 
     // Pause Upload and Resume Upload, from any window. The answer is core's reason

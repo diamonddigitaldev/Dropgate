@@ -222,4 +222,10 @@ class ServerChecks {
 /** The server an upload or a check goes to: plain HTTP only for an address typed with http://. */
 const serverOf = (url) => ({ url, allowInsecure: /^http:\/\//i.test(url) });
 
-module.exports = { NEW_SERVER, SERVER_KEYS, ServerChecks, Servers, hostOf, newServer, serverOf, serversFrom };
+/** A saved server as an upload knows it, for the window to name: its ID, its name and its address's host. */
+const uploadServerOf = (server) => ({ id: server.id, name: server.name, host: hostOf(server.url) });
+
+/** Whether uploads go end-to-end encrypted to a server, as a check found it: it has it, and was reached over HTTPS. */
+const encryptsBy = (check) => Boolean(check?.ok && check.serverInfo?.capabilities?.upload?.e2ee) && typeof check.baseUrl === 'string' && check.baseUrl.startsWith('https://');
+
+module.exports = { NEW_SERVER, SERVER_KEYS, ServerChecks, Servers, encryptsBy, hostOf, newServer, serverOf, serversFrom, uploadServerOf };

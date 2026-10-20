@@ -194,7 +194,7 @@ test('the window is sent a transfer\'s names and sizes and how it\'s going, neve
     assert.deepEqual(drawn, {
         id, kind: 'upload', state: 'running', files: [{ name: 'plans.bin', size: 1 }], status: 'uploading',
         step: RUNNING.text, phase: 'chunk', percent: 10, fileIndex: 0, canPause: true, deadline: null,
-        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true }, link: null, message: null, canDelete: false,
+        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true }, link: null, message: null, canDelete: false, server: null,
     });
     assert.doesNotMatch(JSON.stringify(drawn), /secret/);
 });

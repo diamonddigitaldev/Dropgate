@@ -128,10 +128,19 @@ If clients see “Too many requests”:
 - Invite links aren't supported yet. Add the server by its address.
 
 **A server's row says "Can't connect"**
-- Its last check couldn't reach it; hold the pointer over the status for why. Once the server is back, choose **Test**. Uploads go to the default server, so a default that can't be reached stops new uploads until it's back, or until you choose **Set as Default** on another.
+- Its last check couldn't reach it; hold the pointer over the status for why. Once the server is back, choose **Test**. New uploads start on the default server, so while a default can't be reached, move uploads to another with their **To** (or **Upload all to**), or choose **Set as Default** on another.
+
+**An upload's "To" doesn't list a server, or can't be changed**
+- **To** lists the servers saved in **Settings**, under **Servers**: add one there first. Once an upload has started, its server can't be changed; **Retry** on one that failed or was cancelled lets you choose again. An upload waiting on a server you remove moves to the default ([a new upload starts on the default with its settings…](../tests/integration/desktop/upload-servers.spec.mjs), [a removed server's uploads waiting go to the default…](../client/test/channels.test.mjs)).
+
+**An upload moved to another server lost its own lifetime or max downloads**
+- An upload moved to another server takes that server's settings for new uploads, as a new upload there would. Set its own again in its **Advanced Options**, within what that server allows.
+
+**"Upload failed: … was checked again since: Try again."**
+- The server was checked again (by **Test**, say) between the app deciding whether the upload would be end-to-end encrypted and starting it, and the check found otherwise. Choose **Upload** again: the app never sends an upload unencrypted to a server whose last check says it encrypts.
 
 **A server's row says "Not checked yet"**
-- As the app starts it checks only the default server, so the others aren't asked anything until they're used. Choose **Test** to check one: its limits then show, and its settings for new uploads can be changed ([a row looks as the mockup…](../tests/integration/desktop/servers.spec.mjs)).
+- As the app starts it checks only the default server, so the others aren't asked anything until they're used: an upload moved to one, or starting on it, checks it ([at launch only the default server is asked anything…](../tests/integration/desktop/upload-servers.spec.mjs)). Choose **Test** to check one: its limits then show, and its settings for new uploads can be changed ([a row looks as the mockup…](../tests/integration/desktop/servers.spec.mjs)).
 
 **A server's row says "Needs an Update" or "Uploads Off"**
 - **Needs an Update**: the server and the app run different major versions of Dropgate, and can't work together; hold the pointer over the status to see which needs updating.

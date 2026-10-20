@@ -73,13 +73,16 @@ function handleOf(handle) {
 const handleList = (files) => Array.isArray(files) && files.length > 0 && files.length <= MAX_FILES && files.every(isId) && new Set(files).size === files.length;
 
 /**
- * transfer:add-upload: the handles of the files to upload. Its options are
- * the server's settings for new uploads, which main gives it.
- * @returns {{ files: string[] }}
+ * transfer:add-upload: the handles of the files to upload, and the server it
+ * goes to, if not the default: a saved server, by its ID, never an address.
+ * Its options are that server's settings for new uploads, which main gives it.
+ * @param {(id: string) => boolean} saved - Whether main has saved a server by this ID.
+ * @returns {{ files: string[], server?: string }}
  */
-function newUpload(request) {
-    if (!isRecord(request, ['files']) || !handleList(request.files)) throw new Error('Expected files to upload.');
-    return { files: [...request.files] };
+function newUpload(request, saved) {
+    if (!isRecord(request, ['files', 'server'], ['files']) || !handleList(request.files)) throw new Error('Expected files to upload.');
+    if (Object.hasOwn(request, 'server') && !(isId(request.server) && saved(request.server))) throw new Error('Expected a saved server.');
+    return { files: [...request.files], ...(Object.hasOwn(request, 'server') ? { server: request.server } : {}) };
 }
 
 /**
@@ -127,17 +130,24 @@ function uploadOptions(options) {
 /**
  * transfer:set-options: Advanced Options on one of this window's uploads
  * waiting: its lifetime, its download limit, and the files it keeps (their
- * indexes in it, in order, at least one), any of them, at least one. The
+ * indexes in it, in order, at least one), any of them, at least one. Or its
+ * "To", alone: the server it goes to, a saved server by its ID (never an
+ * address), whose settings for new uploads it takes, as main gives them. The
  * server's limits aren't checked here: the window offers only what the server
  * allows, and checks again as the upload starts (the server refuses anything
  * outside them too).
  * @param {(id: string) => boolean} own - Whether it's an upload of this window's, waiting.
  * @param {(id: string) => number} fileCount - How many files it has.
- * @returns {{ id: string, options: { lifetime?: { value: number, unit: string }, maxDownloads?: number, files?: number[] } }}
+ * @param {(id: string) => boolean} saved - Whether main has saved a server by this ID.
+ * @returns {{ id: string, options: { lifetime?: { value: number, unit: string }, maxDownloads?: number, files?: number[], server?: string } }}
  */
-function optionsOf(request, own, fileCount) {
+function optionsOf(request, own, fileCount, saved) {
     if (!isRecord(request, ['id', 'options']) || !isId(request.id) || !own(request.id)) throw new Error('Expected an upload of this window\'s waiting to start.');
     const { options } = request;
+    if (isRecord(options, ['server'])) {
+        if (!isId(options.server) || !saved(options.server)) throw new Error('Expected a saved server.');
+        return { id: request.id, options: { server: options.server } };
+    }
     const keys = ['lifetime', 'maxDownloads', 'files'];
     if (!isRecord(options, keys, []) || Object.keys(options).length === 0) throw new Error('Expected an upload\'s options.');
     if (Object.hasOwn(options, 'lifetime') && !isLifetime(options.lifetime)) throw new Error('Expected a file lifetime.');

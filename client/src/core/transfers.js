@@ -66,7 +66,9 @@ class Transfers {
 
     /**
      * A transfer, waiting to start: an upload, or a download reading its list of files.
-     * @param {{ kind?: 'upload' | 'download', owner: number | null, share?: boolean, server?: object, files: object[], options: object | null, host?: string, saveTo?: object }} fields
+     * An upload names the saved server it goes to (savedServer); where it goes
+     * (server) is read from that as it starts, or a share's is given now.
+     * @param {{ kind?: 'upload' | 'download', owner: number | null, share?: boolean, server?: object, savedServer?: object | null, files: object[], options: object | null, host?: string, saveTo?: object }} fields
      * @returns {any} the transfer, with its new ID
      */
     add(fields) {
@@ -317,6 +319,25 @@ class Transfers {
     }
 
     /**
+     * An upload waiting goes to another saved server (its "To"): it takes
+     * that server's settings for new uploads, and where it goes is read from
+     * the server again as it starts. Returns it, or null when it isn't
+     * waiting any more (it has started: its server is sealed).
+     * @param {string} id
+     * @param {{ id: string, name: string, host: string }} savedServer - The saved server, as the window names it.
+     * @param {{ lifetime: { value: number, unit: string }, maxDownloads: number }} options - Its settings for new uploads.
+     */
+    setServer(id, savedServer, { lifetime, maxDownloads }) {
+        const card = this.#cards.get(id);
+        if (!card || card.kind !== 'upload' || card.state !== 'waiting') return null;
+        card.savedServer = { ...savedServer };
+        card.server = null;
+        card.options = { ...card.options, lifetime: { value: lifetime.value, unit: lifetime.unit }, maxDownloads };
+        this.changed(card);
+        return card;
+    }
+
+    /**
      * A done upload was deleted from its server: its link no longer works,
      * so it's forgotten, and the transfer window has forgotten its token.
      */
@@ -437,6 +458,8 @@ function view(card) {
         link: card.link,
         message: card.message,
         canDelete: card.state === 'done' && card.deletable === true,
+        // An upload's: the saved server it goes to (its ID, name and host), or null with none saved when it was made.
+        ...(card.kind === 'upload' ? { server: card.savedServer ? { ...card.savedServer } : null } : {}),
         // A download's: its server's host, whether it's encrypted (once read), where it's saved, the files it
         // saves (null for all) and whether as one ZIP, whether it's saved in a folder of its own, and whether
         // it can be shown there.

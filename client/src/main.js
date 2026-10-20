@@ -10,7 +10,7 @@ const {
 const { menuItems } = require('./menu');
 const { Handles, describeFile } = require('./core/handles');
 const { endNotice, countsLine } = require('./core/notices');
-const { ServerChecks, Servers, serverOf } = require('./core/servers');
+const { ServerChecks, Servers, serverOf, uploadServerOf } = require('./core/servers');
 const { shareUpload } = require('./core/share');
 const { GOING, Pacer, Transfers, inFolder, view } = require('./core/transfers');
 const { createTransferHost } = require('./transfer-host');
@@ -647,7 +647,7 @@ async function startShare(share, filePaths) {
         return;
     }
 
-    const { id } = transfers.add({ owner: null, share, server, files, options: decided.options });
+    const { id } = transfers.add({ owner: null, share, server, savedServer: uploadServerOf(saved), files, options: decided.options });
     if (decided.options.encrypt) startUpload(id, server);
     else askInsecure(id);
 }

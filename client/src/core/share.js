@@ -2,6 +2,7 @@
 
 const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 const { LIFETIME_UNIT_MS } = require('./payloads');
+const { encryptsBy } = require('./servers');
 
 /**
  * Share with Dropgate's upload: to the default server, with its settings for
@@ -52,7 +53,7 @@ function shareUpload(settings, check) {
         value = 0.5;
     }
 
-    const encrypt = Boolean(upload?.e2ee) && typeof check.baseUrl === 'string' && check.baseUrl.startsWith('https://');
+    const encrypt = encryptsBy(check);
     return { ok: true, options: { lifetime: { value, unit }, maxDownloads, encrypt } };
 }
 
