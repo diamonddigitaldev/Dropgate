@@ -128,7 +128,7 @@ If clients see “Too many requests”:
 - Invite links aren't supported yet. Add the server by its address.
 
 **A server's row says "Can't connect"**
-- Its last check couldn't reach it; hold the pointer over the status for why. Once the server is back, choose **Test**. New uploads start on the default server, so while a default can't be reached, move uploads to another with their **To** (or **Upload all to**), or choose **Set as Default** on another.
+- Its last check couldn't reach it; hold the pointer over the status for why. Once the server is back, choose **Test**. New uploads start on the default server, so while a default can't be reached, move uploads to another with their **To** (or **Upload all to**), or choose **Set as Default** on another; or turn on its **Allow Fallback**, and its uploads go on to the next server below it.
 
 **An upload's "To" doesn't list a server, or can't be changed**
 - **To** lists the servers saved in **Settings**, under **Servers**: add one there first. Once an upload has started, its server can't be changed; **Retry** on one that failed or was cancelled lets you choose again. An upload waiting on a server you remove moves to the default ([a new upload starts on the default with its settings…](../tests/integration/desktop/upload-servers.spec.mjs), [a removed server's uploads waiting go to the default…](../client/test/channels.test.mjs)).
@@ -140,11 +140,23 @@ If clients see “Too many requests”:
 - The server was checked again (by **Test**, say) between the app deciding whether the upload would be end-to-end encrypted and starting it, and the check found otherwise. Choose **Upload** again: the app never sends an upload unencrypted to a server whose last check says it encrypts.
 
 **A server's row says "Not checked yet"**
-- As the app starts it checks only the default server, so the others aren't asked anything until they're used: an upload moved to one, or starting on it, checks it ([at launch only the default server is asked anything…](../tests/integration/desktop/upload-servers.spec.mjs)). Choose **Test** to check one: its limits then show, and its settings for new uploads can be changed ([a row looks as the mockup…](../tests/integration/desktop/servers.spec.mjs)).
+- As the app starts it checks only the default server, so the others aren't asked anything until they're used: an upload moved to one, starting on it, or falling back to it, checks it ([at launch only the default server is asked anything…](../tests/integration/desktop/upload-servers.spec.mjs), [an upload its server refuses before any byte is sent moves to the next server below, checked only then…](../tests/integration/desktop/fallback.spec.mjs)). Choose **Test** to check one: its limits then show, and its settings for new uploads can be changed ([a row looks as the mockup…](../tests/integration/desktop/servers.spec.mjs)).
 
 **A server's row says "Needs an Update" or "Uploads Off"**
 - **Needs an Update**: the server and the app run different major versions of Dropgate, and can't work together; hold the pointer over the status to see which needs updating.
 - **Uploads Off**: the server's operator has turned hosted uploads off (`ENABLE_UPLOAD=false`).
+
+**An upload says "Moved From …", or "Uploaded to …"**
+- It allowed fallback (**Allow Fallback**, its server's for new uploads, or its own in **Advanced Options**), and the server it was going to couldn't take it before any of it was sent, so it went to the next server below in **Settings**, under **Servers**, which could. Its **To** names the server that took it, and its link is that server's ([an upload its server refuses before any byte is sent moves to the next server below…](../tests/integration/desktop/fallback.spec.mjs)). To keep an upload on its own server whatever happens, turn **Allow Fallback** off in its **Advanced Options**, or for every new upload to that server, in its row.
+
+**The app asks "Upload to … Instead?"**
+- An upload that allows fallback couldn't go to its server, and the next server below would be less private, or hold it for less: plain HTTP after HTTPS, no end-to-end encryption, or a shorter file lifetime or fewer downloads than it asks for. The question says which. **Upload There** sends it there, held to that server's limits; **Cancel** stops it, on its own server, with that server's reason, and **Retry** puts it back there ([a step down is never used without asking…](../tests/integration/desktop/fallback.spec.mjs)).
+
+**"Failed: … No server below it in Settings › Servers could take it." or "… No server is saved below it to try."**
+- The upload allowed fallback, but neither its own server nor any below it could take it: what comes first is why its own couldn't. Fix that (or add a server below it, or **Move Up** one that can), and choose **Retry**.
+
+**An upload failed instead of trying another server**
+- Only an upload with **Allow Fallback** on moves, and only before any of it is sent: once a server has taken its start, a failure fails it there, with **Retry**, so no file's contents go to two servers ([once its server has taken its start, a failure fails the upload, with Retry, and nothing moves…](../tests/integration/desktop/fallback.spec.mjs)). It moves on only when its server can't take it (can't be reached, has uploads off, is full, is too small, doesn't allow its lifetime, or needs a newer app), and only to a server below it in **Settings**, under **Servers**: use **Move Up** and **Move Down** to set that order.
 
 **A server's file lifetime or max downloads says "Too long" or "Too many"**
 - It's outside what the server allows, so it isn't saved: the help under the field says the server's limit. Enter a value within it ([Add, Set as Default, Move Up, Move Down and Remove…](../tests/integration/desktop/servers.spec.mjs)).

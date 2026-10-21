@@ -71,7 +71,9 @@ test.describe('on a server that keeps files up to 24 hours and allows up to 5 do
 
         // The encryption is shown, and nothing switches it off.
         await expect(dialog.locator('.options-encryption')).toHaveText(`verifiedEnd-to-end encrypted. ${host} can't read your files or their names.`);
-        await expect(dialog.getByRole('switch'), 'a switch in Advanced Options').toHaveCount(0);
+        // Its one switch is Allow Fallback (phase 14): none is the encryption's.
+        await expect(dialog.getByRole('switch'), 'a switch in Advanced Options').toHaveCount(1);
+        await expect(dialog.getByRole('switch'), 'its one switch').toHaveAccessibleName('Allow Fallback');
         await expect(dialog.getByRole('checkbox'), 'a box in Advanced Options').toHaveCount(0);
 
         // A value outside the server's limits turns Apply off, and its help line says why.

@@ -1,6 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('crypto');
+const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 
 // The saved servers (17 §8, §9): the list uploads go to, in order (the order a
 // fallback tries them in, phase 14's piece 4), and which one is the default,
@@ -228,4 +229,136 @@ const uploadServerOf = (server) => ({ id: server.id, name: server.name, host: ho
 /** Whether uploads go end-to-end encrypted to a server, as a check found it: it has it, and was reached over HTTPS. */
 const encryptsBy = (check) => Boolean(check?.ok && check.serverInfo?.capabilities?.upload?.e2ee) && typeof check.baseUrl === 'string' && check.baseUrl.startsWith('https://');
 
-module.exports = { NEW_SERVER, SERVER_KEYS, ServerChecks, Servers, encryptsBy, hostOf, newServer, serverOf, serversFrom, uploadServerOf };
+// --- The fallback (phase 14) ---
+// An upload that allows it (its Allow Fallback, from its server's) and that
+// its server can't take before any byte is sent moves to the next saved
+// server below, in the saved order, checked only then. A server that would be
+// a step down (plain HTTP after HTTPS, not encrypted where it would have been,
+// a shorter lifetime or fewer downloads than the upload asks for) is never
+// used without the window asking. One too small for the upload can't take it,
+// and is passed over. Main decides each move from its own checks, never from
+// the page.
+
+/** Core's codes for a server that can't take an upload, as it refuses one before any byte is sent: the fallback moves on from these alone. */
+const FALLBACK_CODES = Object.freeze([
+    'SERVER_UNREACHABLE', 'TIMED_OUT', 'CAPABILITY_UNSUPPORTED', 'FILE_TOO_LARGE', 'SERVER_FULL', 'LIFETIME_NOT_ALLOWED', 'VERSION_UNSUPPORTED', 'AUTH_REQUIRED',
+]);
+
+/** A file lifetime's units, in ms: payloads.js' LIFETIME_UNIT_MS (kept here, as servers.js needs nothing else of it). */
+const UNIT_MS = Object.freeze({ minutes: 60_000, hours: 3_600_000, days: 86_400_000 });
+
+/** What a server allows uploads, from a check that reached it: its capabilities' upload part, or null. */
+const uploadsBy = (check) => (check?.ok && check.serverInfo?.version && check.serverInfo?.capabilities?.upload) || null;
+
+/** A server's limits on a lifetime (in hours, 0 for none) and on downloads (0 for none), as its check said them. */
+const limitsBy = (upload) => ({ hours: Number(upload.maxLifetimeHours) || 0, downloads: upload.maxFileDownloads ?? 1 });
+
+/** Whether a lifetime is longer than a server allows: unlimited, or past its limit, in whole ms as the page reckons it. */
+function lifetimeOutside(lifetime, limits) {
+    if (limits.hours === 0) return false;
+    const ms = lifetime.unit !== 'unlimited' && lifetime.value > 0 && UNIT_MS[lifetime.unit] ? Math.round(lifetime.value * UNIT_MS[lifetime.unit]) : 0;
+    return ms === 0 || ms > limits.hours * 3_600_000;
+}
+
+/** Whether a download limit is more than a server allows: unlimited, or past its limit. */
+const downloadsOutside = (n, limits) => limits.downloads > 0 && (n === 0 || n > limits.downloads);
+
+/**
+ * Whether a failed upload moves on: Allow Fallback on, refused before any
+ * byte was sent (`begun` false: its server never took its start), for one of
+ * the reasons a server can't take it.
+ * @param {{ options: { allowFallback?: boolean } }} upload
+ * @param {{ status: string, code?: string, begun?: boolean }} outcome
+ */
+const movesOn = (upload, outcome) => upload?.options?.allowFallback === true && outcome.status === 'error' && outcome.begun === false && FALLBACK_CODES.includes(outcome.code);
+
+/**
+ * Whether a server can take an upload, as its check found it, or why not:
+ * reached, a Dropgate server this version works with, taking uploads, and big
+ * enough for it; and, with `limits` (the server the upload was going to),
+ * allowing its lifetime and download limit. With no check, it's not known:
+ * the upload goes, and the server says.
+ * @param {object | null} check
+ * @param {{ files: { size: number }[], options: { lifetime: { value: number, unit: string }, maxDownloads: number } }} upload
+ * @param {{ limits?: boolean }} [opts]
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+function canTake(check, upload, { limits = false } = {}) {
+    const no = (reason) => ({ ok: false, reason });
+    if (!check) return { ok: true };
+    if (!check.ok) return no(check.message || 'Could not connect to the server.');
+    const info = check.serverInfo;
+    if (!info?.version || !info?.capabilities) return no("Cannot determine the server's version or capabilities.");
+    if (!check.dgup?.compatible) return no(check.dgup?.message || 'Server is not compatible.');
+    const allows = info.capabilities.upload;
+    if (!allows || allows.enabled === false) return no('File uploads are disabled on this server.');
+    const size = upload.files.reduce((sum, file) => sum + file.size, 0);
+    const maxMB = Number(allows.maxSizeMB);
+    if (maxMB > 0 && size > maxMB * 1024 * 1024) return no(`This upload is over the server's limit of ${maxMB} MB.`);
+    if (limits) {
+        const bounds = limitsBy(allows);
+        const hours = Number.isInteger(bounds.hours) ? countOf(bounds.hours, 'hour') : `${bounds.hours} hours`;
+        if (lifetimeOutside(upload.options.lifetime, bounds)) return no(`The server keeps files up to ${hours}.`);
+        if (downloadsOutside(upload.options.maxDownloads, bounds)) return no(`The server allows up to ${countOf(bounds.downloads, 'download')}.`);
+    }
+    return { ok: true };
+}
+
+/**
+ * How moving an upload from its server to another would be a step down, as
+ * each one's check found it: plain HTTP after HTTPS; not end-to-end encrypted,
+ * where it would have been (its encrypt isn't the person's own false, said to
+ * the Upload Security Warning); and the other's limits, where they're less
+ * than the upload asks for. None of them: it moves without asking.
+ * @param {{ url: string }} from - The saved server it was going to.
+ * @param {{ url: string }} to - The one below.
+ * @param {object} check - The one below's check.
+ * @param {{ options: { lifetime: object, maxDownloads: number, encrypt?: boolean } }} upload
+ * @returns {{ plain: boolean, unencrypted: boolean, lifetime: number | null, downloads: number | null }}
+ *   lifetime and downloads: the other's limit, where the upload asks for more.
+ */
+function stepDowns(from, to, check, upload) {
+    // An address with no scheme is HTTPS, as core reads it: only one typed with http:// is plain.
+    const insecure = (url) => /^http:\/\//i.test(url);
+    const plain = !insecure(from.url) && insecure(to.url);
+    const limits = limitsBy(uploadsBy(check) ?? {});
+    return {
+        plain,
+        unencrypted: upload.options.encrypt !== false && !encryptsBy(check),
+        lifetime: lifetimeOutside(upload.options.lifetime, limits) ? limits.hours : null,
+        downloads: downloadsOutside(upload.options.maxDownloads, limits) ? limits.downloads : null,
+    };
+}
+
+/** Whether a step down is any at all. */
+const anyStepDown = (steps) => steps.plain || steps.unencrypted || steps.lifetime !== null || steps.downloads !== null;
+
+/**
+ * An upload's options held to a server's limits: each one outside becomes its limit.
+ * @param {{ lifetime: object, maxDownloads: number }} options
+ * @param {object} check
+ */
+function heldTo(options, check) {
+    const limits = limitsBy(uploadsBy(check) ?? {});
+    return {
+        lifetime: lifetimeOutside(options.lifetime, limits) ? { value: limits.hours, unit: 'hours' } : { ...options.lifetime },
+        maxDownloads: downloadsOutside(options.maxDownloads, limits) ? limits.downloads : options.maxDownloads,
+    };
+}
+
+/**
+ * The saved servers an upload may fall back to from the one it was going to,
+ * in the saved order: every one below it. None when that one isn't saved any
+ * more (removed since), or is the last.
+ * @param {{ id: string }[]} servers - Every saved server, in order.
+ * @param {string} from - The ID of the one it was going to.
+ */
+function serversBelow(servers, from) {
+    const at = servers.findIndex((server) => server.id === from);
+    return at < 0 ? [] : servers.slice(at + 1);
+}
+
+module.exports = {
+    FALLBACK_CODES, NEW_SERVER, SERVER_KEYS, ServerChecks, Servers, anyStepDown, canTake, encryptsBy, heldTo, hostOf, movesOn, newServer, serverOf, serversBelow, serversFrom,
+    stepDowns, uploadServerOf,
+};

@@ -47,6 +47,6 @@ test('the Servers tab mentions Share with Dropgate only on Windows', async ({ de
     const window = await app.window();
     await openServers(window);
     await expect(window.locator('#servers-help')).toHaveText(process.platform === 'win32'
-        ? "A new upload starts on the default server, with that server's settings, and so does Share with Dropgate. Each server is checked only when it's used."
-        : "A new upload starts on the default server, with that server's settings. Each server is checked only when it's used.");
+        ? "A new upload starts on the default server, with that server's settings, and so does Share with Dropgate. Servers are tried in this order when an upload allows fallback. Each server is checked only when it's used."
+        : "A new upload starts on the default server, with that server's settings. Servers are tried in this order when an upload allows fallback. Each server is checked only when it's used.");
 });

@@ -40,7 +40,7 @@ const IPC = Object.freeze({
     TRANSFER_START: 'transfer:start',           // ({ ids, encrypt? }) start them, in the transfer window: the page's own uploads (encrypt, as it found the server) and downloads, or a share's it was asked about (Upload Anyway)
     TRANSFER_REMOVE: 'transfer:remove',         // ({ ids }) remove uploads waiting or ended: Remove, Clear Finished
     TRANSFER_RETRY: 'transfer:retry',           // ({ id }) a failed or cancelled upload waits for the page's Upload once more
-    TRANSFER_SET_OPTIONS: 'transfer:set-options', // ({ id, options }) Advanced Options on the page's own transfer waiting: an upload's { lifetime?, maxDownloads?, files? } (the indexes it keeps), a download's { files?, asZip? } (the indexes it saves, and whether as one ZIP)
+    TRANSFER_SET_OPTIONS: 'transfer:set-options', // ({ id, options }) Advanced Options on the page's own transfer waiting: an upload's { lifetime?, maxDownloads?, allowFallback?, files? } (the indexes it keeps) or { server } (a saved server's ID), a download's { files?, asZip? } (the indexes it saves, and whether as one ZIP)
     TRANSFER_DELETE: 'transfer:delete',         // ({ id }) -> { message? }, a finished upload deleted from its server, with the manage token the transfer window holds
     TRANSFER_ADD_DOWNLOAD: 'transfer:add-download', // ({ link }) -> { id }, a download that reads the link's list of files (no lease, nothing counted), then waits; main passes the link on and keeps none of it
     TRANSFER_SAVE_TO: 'transfer:save-to',       // ({ ids, folder }) where downloads waiting are saved: 'default' (Settings > Transfers') or a folder from folder:choose
@@ -59,9 +59,11 @@ const IPC = Object.freeze({
     FILE_OPENED: 'file:opened',                 // push: { handle, name, size }, a file picked with Open File
     FILE_OPEN_ERROR: 'file:open-error',         // push: the message, when the file picked can't be read
     TRANSFER_ASK_INSECURE: 'transfer:ask-insecure', // push: { id }, a share to a server with no end-to-end encryption: the Upload Security Warning, answered with transfer:start or transfer:cancel
+    TRANSFER_ASK_FALLBACK: 'transfer:ask-fallback', // push: { id, from, to, reason, encrypt, plain, unencrypted, lifetime, downloads, asked }, an upload falling back to a server that would be a step down: answered with transfer:start (encrypt, as given) or transfer:cancel (it stops)
     TRANSFER_CHANGED: 'transfer:changed',       // push: a transfer as it is now, for drawing (core/transfers.js' view()), at most TRANSFERS.UPDATES_PER_SECOND times a second each
     TRANSFER_REMOVED: 'transfer:removed',       // push: [id], transfers gone from main's registry
     UPLOAD_STATUS: 'upload:status',             // push: { type: 'success' | 'cancelled' | 'error', data: { id?, link? | error? } }, an upload's outcome, to the main window
+    SERVERS_CHANGED: 'servers:changed',         // push: the saved servers' list answer ({ servers, defaultServer, checks }), when main checked one itself (a fallback trying it)
 });
 
 /**
@@ -73,7 +75,9 @@ const IPC = Object.freeze({
 const KIT_SETTINGS_SET = 'settings:set';
 
 /** The pushes, which main sends and the page only listens for. */
-const PUSHES = Object.freeze([IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.TRANSFER_CHANGED, IPC.TRANSFER_REMOVED, IPC.UPLOAD_STATUS]);
+const PUSHES = Object.freeze([
+    IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.TRANSFER_ASK_FALLBACK, IPC.TRANSFER_CHANGED, IPC.TRANSFER_REMOVED, IPC.UPLOAD_STATUS, IPC.SERVERS_CHANGED,
+]);
 
 /**
  * The channels between main and the transfer window: a hidden, sandboxed

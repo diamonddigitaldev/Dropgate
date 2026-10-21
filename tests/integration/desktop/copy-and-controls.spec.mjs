@@ -192,5 +192,6 @@ test('every switch\'s help line says what its state does, and changes as it\'s f
             expect(await help(sw), `${name}: its help, flipped back`).toBe(first);
         }
     }
-    expect(switches, 'the switches found').toBe(2);
+    // A server's Allow Fallback (Servers), Keep log on disk (Privacy) and the kit's Download updates automatically (Update).
+    expect(switches, 'the switches found').toBe(3);
 });

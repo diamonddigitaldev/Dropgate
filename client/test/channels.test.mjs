@@ -237,7 +237,7 @@ test('transfer:add-upload takes handles this window holds, and nothing else: its
         owner: page.sender.id,
         files: [{ path: FILE, name: 'Secret plans é.bin', size: 1000, mtimeMs: fs.statSync(FILE).mtimeMs }],
         savedServer: { id: server.id, name: 'dropgate.test', host: 'dropgate.test' },
-        options: { lifetime: { value: 0.5, unit: 'hours' }, maxDownloads: 3 },
+        options: { lifetime: { value: 0.5, unit: 'hours' }, maxDownloads: 3, allowFallback: false },
         state: 'waiting',
         started: false,
         snapshot: null,
@@ -260,7 +260,7 @@ test('transfer:add-upload takes handles this window holds, and nothing else: its
     const nonePage = none.main.windowPage();
     const { files: [alone] } = await none.main.invoke(IPC.FILES_ADD, nonePage, [FILE]);
     const waiting = await none.main.invoke(IPC.TRANSFER_ADD_UPLOAD, nonePage, { files: [alone.handle] });
-    assert.deepEqual(none.transfers.get(waiting.id).options, { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1 });
+    assert.deepEqual(none.transfers.get(waiting.id).options, { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, allowFallback: false });
     assert.equal(none.transfers.get(waiting.id).savedServer, null);
 });
 
@@ -271,7 +271,7 @@ test('transfer:add-upload on a saved server given, by its ID, takes that server\
     const { files: [file] } = await setup.main.invoke(IPC.FILES_ADD, page, [FILE]);
     const { id } = await setup.main.invoke(IPC.TRANSFER_ADD_UPLOAD, page, { files: [file.handle], server: second.id });
     const card = setup.transfers.get(id);
-    assert.deepEqual([card.savedServer, card.options], [{ id: second.id, name: 'Two', host: 'two.test:8080' }, { lifetime: { value: 3, unit: 'days' }, maxDownloads: 0 }]);
+    assert.deepEqual([card.savedServer, card.options], [{ id: second.id, name: 'Two', host: 'two.test:8080' }, { lifetime: { value: 3, unit: 'days' }, maxDownloads: 0, allowFallback: false }]);
     assert.equal(card.server, undefined, 'where it goes is read from its saved server as it starts');
     assert.deepEqual(setup.work.filter(([name]) => name === 'host.check'), [], 'nothing asked of any server');
 });
@@ -465,10 +465,10 @@ test('transfer:set-options takes a lifetime, a download limit and the files kept
     assert.deepEqual(setup.transfers.get(id).options, before, 'nothing refused changed it');
 
     await setup.main.invoke(IPC.TRANSFER_SET_OPTIONS, page, { id, options: { lifetime: { value: 3, unit: 'days' }, maxDownloads: 10, files: [1] } });
-    assert.deepEqual(setup.transfers.get(id).options, { lifetime: { value: 3, unit: 'days' }, maxDownloads: 10 });
+    assert.deepEqual(setup.transfers.get(id).options, { lifetime: { value: 3, unit: 'days' }, maxDownloads: 10, allowFallback: false });
     assert.deepEqual(setup.transfers.get(id).files.map((file) => file.name), ['Second.bin']);
     await setup.main.invoke(IPC.TRANSFER_SET_OPTIONS, page, { id, options: { lifetime: { value: 0, unit: 'unlimited' } } });
-    assert.deepEqual(setup.transfers.get(id).options, { lifetime: { value: 0, unit: 'unlimited' }, maxDownloads: 10 });
+    assert.deepEqual(setup.transfers.get(id).options, { lifetime: { value: 0, unit: 'unlimited' }, maxDownloads: 10, allowFallback: false });
 });
 
 test('an upload\'s "To" is a saved server, by its ID: it takes that server\'s settings, starts there, and main holds the page\'s word on encryption to each server\'s last check', async () => {
@@ -484,7 +484,7 @@ test('an upload\'s "To" is a saved server, by its ID: it takes that server\'s se
     // Picked: it takes that server's settings for new uploads, whatever it had.
     await setup.main.invoke(IPC.TRANSFER_SET_OPTIONS, page, { id: first, options: { server: two.id } });
     assert.deepEqual([setup.transfers.get(first).savedServer, setup.transfers.get(first).options],
-        [{ id: two.id, name: 'Two', host: 'two.test' }, { lifetime: { value: 30, unit: 'minutes' }, maxDownloads: 4 }]);
+        [{ id: two.id, name: 'Two', host: 'two.test' }, { lifetime: { value: 30, unit: 'minutes' }, maxDownloads: 4, allowFallback: false }]);
     assert.deepEqual(view(setup.transfers.get(first)).server, { id: two.id, name: 'Two', host: 'two.test' });
     assert.deepEqual(setup.work.filter(([name]) => name === 'host.check'), [], 'picking it asks no server anything: the page asks for its check');
 
@@ -536,7 +536,7 @@ test('a removed server\'s uploads waiting go to the default, with its settings; 
     const { id } = await none.main.invoke(IPC.TRANSFER_ADD_UPLOAD, nonePage, { files: [alone.handle] });
     const { server } = await none.main.invoke(IPC.SERVER_ADD, nonePage, { url: 'https://dropgate.test' });
     assert.deepEqual(none.transfers.get(id).savedServer, { id: server.id, name: 'Example Drop', host: 'dropgate.test' });
-    assert.deepEqual(none.transfers.get(id).options, { lifetime: { value: 6, unit: 'hours' }, maxDownloads: 1 }, 'the new server\'s settings, within its limits');
+    assert.deepEqual(none.transfers.get(id).options, { lifetime: { value: 6, unit: 'hours' }, maxDownloads: 1, allowFallback: false }, 'the new server\'s settings, within its limits');
 });
 
 test('transfer:delete takes one upload main made, by its ID', async () => {
@@ -625,8 +625,8 @@ test('transfers:list gives every transfer as the window draws it: names and size
     assert.deepEqual(list, [{
         id, kind: 'upload', state: 'running', files: [{ name: 'Secret plans é.bin', size: 1000 }], status: 'uploading',
         step: SNAPSHOT.text, phase: 'chunk', percent: 33.3, fileIndex: 0, canPause: true, deadline: null,
-        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true }, link: null, message: null, canDelete: false,
-        server: { id: SETTINGS.defaultServer, name: 'dropgate.test', host: 'dropgate.test' },
+        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true, allowFallback: false }, link: null, message: null, canDelete: false,
+        server: { id: SETTINGS.defaultServer, name: 'dropgate.test', host: 'dropgate.test' }, movedFrom: null, asking: false,
     }]);
     assert.doesNotMatch(JSON.stringify(list), new RegExp(path.basename(folder)), 'no folder in what the window gets');
 });

@@ -48,9 +48,11 @@ const CH = {
     FILE_OPENED: 'file:opened',
     FILE_OPEN_ERROR: 'file:open-error',
     TRANSFER_ASK_INSECURE: 'transfer:ask-insecure',
+    TRANSFER_ASK_FALLBACK: 'transfer:ask-fallback',
     TRANSFER_CHANGED: 'transfer:changed',
     TRANSFER_REMOVED: 'transfer:removed',
     UPLOAD_STATUS: 'upload:status',
+    SERVERS_CHANGED: 'servers:changed',
 };
 
 /** Listen for a push from main; the callback gets its value, never the IPC event. */
@@ -94,7 +96,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onFileOpened: (callback) => on(CH.FILE_OPENED, callback),
     onFileOpenError: (callback) => on(CH.FILE_OPEN_ERROR, callback),
     onAskInsecure: (callback) => on(CH.TRANSFER_ASK_INSECURE, callback),
+    onAskFallback: (callback) => on(CH.TRANSFER_ASK_FALLBACK, callback),
     onTransferChanged: (callback) => on(CH.TRANSFER_CHANGED, callback),
     onTransfersRemoved: (callback) => on(CH.TRANSFER_REMOVED, callback),
     onUploadStatus: (callback) => on(CH.UPLOAD_STATUS, callback),
+    // A saved server checked by main itself (a fallback trying it): the list, and what each one's last check found.
+    onServersChanged: (callback) => on(CH.SERVERS_CHANGED, callback),
 });

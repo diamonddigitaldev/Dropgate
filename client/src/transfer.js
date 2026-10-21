@@ -258,13 +258,28 @@ const pick = (snapshot) => Object.fromEntries(SNAPSHOT_FIELDS.filter((field) => 
 const stepOf = ({ status, phase, text, canPause, deadline, fileIndex }) => JSON.stringify([status, phase, text, canPause, deadline, fileIndex]);
 
 /**
+ * Why a transfer failed, for main: core's reason, its code, and whether the
+ * server had taken the upload's start when it did (begun: from then on, bytes
+ * are sent). Main moves an upload that allows it to another server only for
+ * one that hadn't begun.
+ */
+const failure = (error, begun) => ({
+    status: 'error', message: error?.message || String(error), ...(DropgateError.is(error) ? { code: error.code } : {}), begun,
+});
+
+/**
  * Follow a transfer that has started in core: main hears each snapshot, and
- * its one outcome, then `done` is given it.
+ * its one outcome, then `done` is given it. Once core says an upload is
+ * uploading, its server has taken its start (core's status after its POST is
+ * answered), and it has begun.
  */
 async function follow(id, operation, done) {
-    const transfer = { operation, sent: null, lastSent: 0, trailing: null, pauseEnding: { timer: null, deadline: null } };
+    const transfer = { operation, sent: null, lastSent: 0, trailing: null, pauseEnding: { timer: null, deadline: null }, begun: false };
     running.set(id, transfer);
-    const report = (snapshot) => send(id, transfer, snapshot);
+    const report = (snapshot) => {
+        if (!['initializing', 'failed', 'cancelled'].includes(snapshot.status)) transfer.begun = true;
+        send(id, transfer, snapshot);
+    };
     report(operation.snapshot);
     operation.subscribe(report);
 
@@ -275,7 +290,7 @@ async function follow(id, operation, done) {
     warnBeforeDeadline(id, transfer, null);
     if (outcome.status === 'completed') done(outcome.value);
     else if (outcome.status === 'cancelled') engine.finished(id, { status: 'cancelled' });
-    else engine.finished(id, { status: 'error', message: outcome.error.message });
+    else engine.finished(id, failure(outcome.error, transfer.begun));
 }
 
 engine.onUpload(async ({ id, server, options, files }) => {
@@ -290,7 +305,7 @@ engine.onUpload(async ({ id, server, options, files }) => {
         });
     } catch (error) {
         // Only an upload that never started gets here.
-        engine.finished(id, { status: 'error', message: error?.message || String(error) });
+        engine.finished(id, failure(error, false));
         return;
     }
     await follow(id, operation, (value) => {

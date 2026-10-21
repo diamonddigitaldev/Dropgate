@@ -10,7 +10,9 @@ const {
 const { menuItems } = require('./menu');
 const { Handles, describeFile } = require('./core/handles');
 const { endNotice, countsLine } = require('./core/notices');
-const { ServerChecks, Servers, serverOf, uploadServerOf } = require('./core/servers');
+const {
+    ServerChecks, Servers, anyStepDown, canTake, encryptsBy, heldTo, movesOn, serverOf, serversBelow, stepDowns, uploadServerOf,
+} = require('./core/servers');
 const { shareUpload } = require('./core/share');
 const { GOING, Pacer, Transfers, inFolder, view } = require('./core/transfers');
 const { createTransferHost } = require('./transfer-host');
@@ -94,6 +96,17 @@ const { answerWindowChannels } = require('./window-channels');
 //   as the page asks (window-channels.js); a server is checked by the
 //   transfer window before it's saved, and what a check found is kept in
 //   memory only, for Settings > Servers to show.
+// - The fallback (fallBack()): an upload that allows it (its Allow Fallback,
+//   from its server's), that its server can't take before any byte is sent
+//   (not reached, uploads off, too big, full, a lifetime it doesn't allow,
+//   needing an update), moves to the next saved server below it, each checked
+//   only then, by main, from its own memory of each check: never an address
+//   or a word from the page. A server that would be a step down (plain HTTP
+//   after HTTPS, not encrypted where it would have been, a shorter lifetime
+//   or fewer downloads) is never used without the window asking; answered
+//   with anything but yes, the upload stops. Once its server has taken its
+//   start, a failure fails it, with Retry. It carries nothing from one server
+//   to the next but its files and options.
 // Share with Dropgate (Windows' context menu) launches the app with a file's
 // path and --upload. Main makes the upload itself, with no window: to the
 // default server, checked by the transfer window, with its settings for new
@@ -317,10 +330,12 @@ function watchWindow(win) {
     return win;
 }
 
-/** A window closing: every share's question it was asked and never answered is declined. */
+/** A window closing: every question it was asked and never answered is declined: a share's, or a fallback's (the upload stops). */
 function declineQuestionsOf(owner) {
     for (const card of transfers.list()) {
-        if (card.ask?.owner === owner && card.state === 'waiting') declineShare(card.id);
+        if (card.ask?.owner !== owner || card.state !== 'waiting') continue;
+        if (card.ask.fallback) declineFallback(card.id);
+        else declineShare(card.id);
     }
 }
 
@@ -370,7 +385,15 @@ if (kit.primary) {
             onTokensLost: tokensLost,
             onSaved: (id, filePath) => transfers.saved(id, filePath),
             partials,
-            onFinished: (id, { status, link, message }) => {
+            onFinished: (id, outcome) => {
+                const { status, link, message } = outcome;
+                // Refused before any byte was sent, an upload that allows it moves on.
+                const upload = transfers.get(id);
+                if (upload?.kind === 'upload' && !quitting && movesOn(upload, outcome)) {
+                    kit.log.info(`An upload's server couldn't take it (${outcome.code}): Trying the next saved server.`);
+                    fallBackOrFail(upload, message);
+                    return;
+                }
                 const result = status === 'error' ? { status, error: message } : { status, ...(link ? { link } : {}) };
                 const card = transfers.ended(id, result);
                 if (card?.kind === 'download') finishDownload(result, card);
@@ -642,23 +665,33 @@ async function startShare(share, filePaths) {
         return;
     }
     const decided = shareUpload(saved, check);
-    if (!decided.ok) {
+    // The default's Allow Fallback: one it can't take moves down the saved order, as any upload does.
+    const allowFallback = saved.allowFallback === true;
+    if (!decided.ok && !allowFallback) {
         finishUpload({ status: 'error', error: decided.message }, { share });
         return;
     }
+    const options = decided.ok
+        ? { ...decided.options, allowFallback }
+        : { lifetime: { value: saved.lifetime.unit === 'unlimited' ? 0 : saved.lifetime.value, unit: saved.lifetime.unit }, maxDownloads: saved.maxDownloads, allowFallback };
 
-    const { id } = transfers.add({ owner: null, share, server, savedServer: uploadServerOf(saved), files, options: decided.options });
-    if (decided.options.encrypt) startUpload(id, server);
-    else askInsecure(id);
+    const { id } = transfers.add({ owner: null, share, server, savedServer: uploadServerOf(saved), files, options });
+    if (!decided.ok) {
+        transfers.get(id).fallFrom = decided.message;
+        startUpload(id, server);
+    } else if (decided.options.encrypt) {
+        startUpload(id, server);
+    } else {
+        askInsecure(id);
+    }
 }
 
 /**
- * A share to a server with no end-to-end encryption: the main window asks
- * the Upload Security Warning, opened for it if it isn't open (and closed
- * again once no share is left, as it would never have been opened otherwise).
- * The page answers with transfer:start (Upload Anyway) or transfer:cancel.
+ * The main window, shown to ask about a transfer: opened for it if it isn't
+ * open (and closed again once no share is left, as it would never have been
+ * opened otherwise). Gives the window asked.
  */
-function askInsecure(id) {
+function windowToAsk() {
     let win = mainWindow();
     if (!win) {
         // Shown once, here: the window opens for the question.
@@ -669,17 +702,134 @@ function askInsecure(id) {
     }
     win.show();
     win.focus();
+    return win;
+}
+
+/**
+ * A share to a server with no end-to-end encryption: the main window asks
+ * the Upload Security Warning. The page answers with transfer:start (Upload
+ * Anyway) or transfer:cancel.
+ */
+function askInsecure(id) {
+    const win = windowToAsk();
     transfers.get(id).ask = { owner: win.webContents.id, sent: false };
     if (readyWindows.has(win.webContents.id)) sendQuestion(id);
 }
 
-/** Send a share's question to the window asked, once. */
+/** Send a question to the window asked, once: a share's Upload Security Warning, or a fallback's step down. */
 function sendQuestion(id) {
     const upload = transfers.get(id);
     const contents = mainWindow()?.webContents;
     if (!upload?.ask || upload.ask.sent || contents?.id !== upload.ask.owner) return;
     upload.ask.sent = true;
-    contents.send(IPC.TRANSFER_ASK_INSECURE, { id });
+    if (upload.ask.fallback) contents.send(IPC.TRANSFER_ASK_FALLBACK, { id, ...upload.ask.fallback });
+    else contents.send(IPC.TRANSFER_ASK_INSECURE, { id });
+}
+
+/** The saved servers, the default and each one's last check, as the window's server channels answer them. */
+const listedServers = () => {
+    const list = servers.list();
+    return { ...list, checks: checks.of(list.servers) };
+};
+
+/**
+ * The fallback, for an upload running that its server couldn't take before
+ * any byte was sent (`reason`, core's or main's check's): each saved server
+ * below the one it was going to, in order, is checked now (its row says what
+ * it found), and the first that can take it gets it, at once where that's no
+ * step down from the server it was going to first, or once the window says
+ * so. None can: it fails, with why. Cancelled, or the app quitting,
+ * meanwhile: it stops there.
+ * @param {any} card
+ * @param {string} reason
+ */
+async function fallBack(card, reason) {
+    const { id } = card;
+    // The server it was going to first, and what it was refused for: kept however often it moves.
+    card.fellFrom ??= { server: card.server, reason };
+    // This fallback, until it ends: cancelled meanwhile, the upload drops it (and may be tried again since).
+    const run = card.fellFrom;
+    const from = card.movedFrom ?? card.savedServer;
+    const below = serversBelow(servers.list().servers, card.savedServer?.id);
+    for (const next of below) {
+        if (!transfers.trying(id, `Trying ${next.name}…`)) return;
+        const check = await host.check(serverOf(next.url)).catch(() => ({ ok: false }));
+        if (servers.get(next.id)) {
+            checks.set(next.id, check);
+            mainWindow()?.webContents.send(IPC.SERVERS_CHANGED, listedServers());
+        }
+        if (quitting || card.fellFrom !== run || transfers.get(id)?.state !== 'running') return;
+        if (!canTake(check, card).ok) continue;
+        const to = {
+            savedServer: uploadServerOf(next),
+            server: serverOf(next.url),
+            options: { ...heldTo(card.options, check), encrypt: encryptsBy(check) },
+            from,
+        };
+        const steps = stepDowns(card.fellFrom.server, next, check, card);
+        if (!anyStepDown(steps)) {
+            kit.log.info('An upload moved to the next saved server.');
+            transfers.moveTo(id, to);
+            return;
+        }
+        askFallback(card, to, steps);
+        return;
+    }
+    const said = /[.!?]$/.test(card.fellFrom.reason) ? card.fellFrom.reason : `${card.fellFrom.reason}.`;
+    const result = { status: 'error', error: `${said} ${below.length > 0 ? 'No server below it in Settings › Servers could take it.' : 'No server is saved below it to try.'}` };
+    delete card.fellFrom;
+    finishUpload(result, transfers.ended(id, result));
+}
+
+/** The fallback, as an upload starts it: should it ever stop on an error of its own, the upload fails with its server's reason, rather than wait. */
+function fallBackOrFail(card, reason) {
+    fallBack(card, reason).catch((error) => {
+        kit.log.error(`The fallback stopped (${error?.name ?? 'error'}).`);
+        delete card.fellFrom;
+        const result = { status: 'error', error: reason };
+        const ended = transfers.ended(card.id, result);
+        if (ended) finishUpload(result, ended);
+    });
+}
+
+/**
+ * The fallback's next server would be a step down: the upload waits there,
+ * its place given up, and the main window asks whether it goes (what the
+ * server it was going to said, and each step down). transfer:start sends it,
+ * with the encryption main found; transfer:cancel, or the window closing,
+ * stops it (declineFallback()).
+ */
+function askFallback(card, to, steps) {
+    const win = windowToAsk();
+    const { fellFrom } = card;
+    const named = (savedServer) => ({ name: savedServer.name, host: savedServer.host });
+    transfers.hold(card.id, {
+        ...to,
+        ask: {
+            owner: win.webContents.id,
+            sent: false,
+            fallback: {
+                from: named(to.from),
+                to: named(to.savedServer),
+                reason: fellFrom.reason,
+                encrypt: to.options.encrypt,
+                ...steps,
+                asked: { lifetime: { ...card.options.lifetime }, maxDownloads: card.options.maxDownloads },
+            },
+        },
+    });
+    if (readyWindows.has(win.webContents.id)) sendQuestion(card.id);
+}
+
+/** A fallback's question answered with anything but yes: the upload stops, as it was before it fell back, with why its server couldn't take it. */
+function declineFallback(id) {
+    const card = transfers.get(id);
+    const { restore, fallback } = card.ask;
+    delete card.ask;
+    delete card.fellFrom;
+    Object.assign(card, { savedServer: restore.savedServer, server: restore.server, options: restore.options, movedFrom: restore.movedFrom });
+    const result = { status: 'error', error: fallback.reason };
+    finishUpload(result, transfers.ended(id, result));
 }
 
 /** A window's page has set itself up: a question waiting for it is sent now. */
@@ -719,11 +869,21 @@ function runDownload(card) {
     }
 }
 
-/** The registry gave an upload its place: it runs in the transfer window now. */
+/**
+ * The registry gave an upload its place: it runs in the transfer window now,
+ * or, where its server can't take it and it allows fallback (fallFrom, as
+ * transfer:start or a share found), it moves down the saved order.
+ */
 function runUpload(card) {
     if (card.share && !watched()) {
         card.share.notice?.close();
         card.share.notice = showNotification('Upload Started', `Uploading ${countOf(card.files.length, 'file')}…`);
+    }
+    if (card.fallFrom) {
+        const reason = card.fallFrom;
+        delete card.fallFrom;
+        fallBackOrFail(card, reason);
+        return;
     }
     host.upload(card.id, card.server, card.options, card.files);
 }
@@ -741,10 +901,16 @@ function declineShare(id) {
     finishUpload({ status: 'error', error: 'Upload cancelled by user (insecure connection).' }, card ?? undefined);
 }
 
-// Cancel, from any window: a running upload, one queued, or a share's question declined.
+// Cancel, from any window: a running upload, one queued, one falling back, or a share's or a fallback's question declined.
 function cancelUpload(id) {
     const upload = transfers.get(id);
-    if (upload.started) {
+    if (upload.state === 'waiting' && upload.ask?.fallback) {
+        declineFallback(id);
+    } else if (upload.state === 'running' && upload.snapshot?.phase === 'fallback') {
+        // Between servers, while the next is checked: nothing runs in the transfer window.
+        delete upload.fellFrom;
+        finishUpload({ status: 'cancelled' }, transfers.ended(id, { status: 'cancelled' }));
+    } else if (upload.started) {
         host.cancel(id);
     } else if (upload.state === 'waiting' && upload.share) {
         declineShare(id);

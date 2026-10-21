@@ -302,17 +302,19 @@ class Transfers {
 
     /**
      * Advanced Options on a waiting transfer: its lifetime and download limit,
-     * and the files it keeps (by their indexes, in order). Returns it, or null
-     * when it isn't waiting any more (it has started: its options are sealed).
+     * its Allow Fallback, and the files it keeps (by their indexes, in order).
+     * Returns it, or null when it isn't waiting any more (it has started: its
+     * options are sealed).
      * @param {string} id
-     * @param {{ lifetime?: { value: number, unit: string }, maxDownloads?: number, files?: number[] }} options
+     * @param {{ lifetime?: { value: number, unit: string }, maxDownloads?: number, allowFallback?: boolean, files?: number[] }} options
      */
-    setOptions(id, { lifetime, maxDownloads, files }) {
+    setOptions(id, { lifetime, maxDownloads, allowFallback, files }) {
         const card = this.#cards.get(id);
         if (!card || card.kind !== 'upload' || card.state !== 'waiting') return null;
         if (files && files.some((index) => index >= card.files.length)) return null;
         if (lifetime) card.options.lifetime = { value: lifetime.value, unit: lifetime.unit };
         if (maxDownloads !== undefined) card.options.maxDownloads = maxDownloads;
+        if (allowFallback !== undefined) card.options.allowFallback = allowFallback;
         if (files) card.files = files.map((index) => card.files[index]);
         this.changed(card);
         return card;
@@ -325,15 +327,72 @@ class Transfers {
      * waiting any more (it has started: its server is sealed).
      * @param {string} id
      * @param {{ id: string, name: string, host: string }} savedServer - The saved server, as the window names it.
-     * @param {{ lifetime: { value: number, unit: string }, maxDownloads: number }} options - Its settings for new uploads.
+     * @param {{ lifetime: { value: number, unit: string }, maxDownloads: number, allowFallback: boolean }} options - Its settings for new uploads.
      */
-    setServer(id, savedServer, { lifetime, maxDownloads }) {
+    setServer(id, savedServer, { lifetime, maxDownloads, allowFallback }) {
         const card = this.#cards.get(id);
         if (!card || card.kind !== 'upload' || card.state !== 'waiting') return null;
         card.savedServer = { ...savedServer };
         card.server = null;
-        card.options = { ...card.options, lifetime: { value: lifetime.value, unit: lifetime.unit }, maxDownloads };
+        card.options = { ...card.options, lifetime: { value: lifetime.value, unit: lifetime.unit }, maxDownloads, allowFallback };
         this.changed(card);
+        return card;
+    }
+
+    /**
+     * An upload running that its server couldn't take, before any byte was
+     * sent, while the next server is checked: it keeps its place, and says so
+     * (`text`) until it moves on, is held for the window's answer, or fails.
+     * Returns it, or null when it isn't running (cancelled meanwhile).
+     * @param {string} id
+     * @param {string} text
+     */
+    trying(id, text) {
+        const card = this.#cards.get(id);
+        if (!card || card.kind !== 'upload' || card.state !== 'running') return null;
+        card.snapshot = { status: 'initializing', phase: 'fallback', text, canPause: false };
+        this.changed(card);
+        return card;
+    }
+
+    /**
+     * The fallback: an upload running goes on at once to another saved server,
+     * in its place, with what it goes there with: where it goes (server), its
+     * options held to that server, and the server it was going to first
+     * (movedFrom), which it keeps however often it moves.
+     * Returns it, or null when it isn't running (cancelled meanwhile).
+     * @param {string} id
+     * @param {{ savedServer: object, server: object, options: object, from: { id: string, name: string, host: string } }} to
+     */
+    moveTo(id, { savedServer, server, options, from }) {
+        const card = this.#cards.get(id);
+        if (!card || card.kind !== 'upload' || card.state !== 'running') return null;
+        Object.assign(card, { savedServer: { ...savedServer }, server: { ...server }, options: { ...card.options, ...options }, snapshot: null });
+        card.movedFrom ??= { ...from };
+        this.changed(card);
+        this.startOne(card);
+        return card;
+    }
+
+    /**
+     * The fallback, where the next server would be a step down: an upload
+     * running waits, its place given up, on that server, until the window
+     * answers its question (ask): transfer:start goes on there, and anything
+     * else stops it, as it was (ask.restore). Returns it, or null when it isn't
+     * running (cancelled meanwhile).
+     * @param {string} id
+     * @param {{ savedServer: object, server: object, options: object, from: { id: string, name: string, host: string }, ask: object }} to
+     */
+    hold(id, { savedServer, server, options, from, ask }) {
+        const card = this.#cards.get(id);
+        if (!card || card.kind !== 'upload' || card.state !== 'running') return null;
+        const restore = { savedServer: card.savedServer, server: card.server, options: { ...card.options }, movedFrom: card.movedFrom ?? null };
+        Object.assign(card, {
+            savedServer: { ...savedServer }, server: { ...server }, options: { ...card.options, ...options }, snapshot: null, started: false, ask: { ...ask, restore },
+        });
+        card.movedFrom ??= { ...from };
+        this.#set(card, 'waiting');
+        this.#pump();
         return card;
     }
 
@@ -388,8 +447,12 @@ class Transfers {
     retry(id, owner) {
         const card = this.#cards.get(id);
         if (!card || !['failed', 'cancelled'].includes(card.state) || (card.kind === 'download' && card.files.length === 0)) return null;
-        Object.assign(card, { owner, started: false, snapshot: null, link: null, message: null, resumeWhenFree: false, resuming: false, deletable: false });
+        // An upload that fell back waits on the server it went to, which it now goes to first.
+        Object.assign(card, { owner, started: false, snapshot: null, link: null, message: null, resumeWhenFree: false, resuming: false, deletable: false, movedFrom: null });
+        // Nothing of a fallback before carries over: main's note of the server it fell from, or one still to make.
         delete card.ask;
+        delete card.fellFrom;
+        delete card.fallFrom;
         this.#set(card, 'waiting');
         return card;
     }
@@ -453,13 +516,20 @@ function view(card) {
         canPause: snapshot?.canPause === true,
         deadline: snapshot?.deadline ?? null,
         options: card.options
-            ? { lifetime: { ...card.options.lifetime }, maxDownloads: card.options.maxDownloads, encrypt: card.options.encrypt ?? null }
+            ? { lifetime: { ...card.options.lifetime }, maxDownloads: card.options.maxDownloads, encrypt: card.options.encrypt ?? null, allowFallback: card.options.allowFallback === true }
             : null,
         link: card.link,
         message: card.message,
         canDelete: card.state === 'done' && card.deletable === true,
         // An upload's: the saved server it goes to (its ID, name and host), or null with none saved when it was made.
-        ...(card.kind === 'upload' ? { server: card.savedServer ? { ...card.savedServer } : null } : {}),
+        // And, once it has fallen back, the saved server it was going to first (movedFrom); and whether the
+        // window is asking about it (a share to a server with no end-to-end encryption, or a step down), so
+        // it isn't started from there meanwhile.
+        ...(card.kind === 'upload' ? {
+            server: card.savedServer ? { ...card.savedServer } : null,
+            movedFrom: card.movedFrom ? { ...card.movedFrom } : null,
+            asking: Boolean(card.ask),
+        } : {}),
         // A download's: its server's host, whether it's encrypted (once read), where it's saved, the files it
         // saves (null for all) and whether as one ZIP, whether it's saved in a folder of its own, and whether
         // it can be shown there.

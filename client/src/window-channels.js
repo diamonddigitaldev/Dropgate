@@ -6,7 +6,7 @@ const {
     defaultFolderOf, downloadLink, downloadOptionsOf, failureOf, filesToAdd, handleOf, isId, linkOf, newUpload, optionsOf, pathList, saveToOf, savedServerOf, serverAddress,
     serverMoveOf, serverOptionsOf, serverToAdd, transfersOf, uploadOf, uploadsToStart,
 } = require('./core/payloads');
-const { NEW_SERVER, encryptsBy, serverOf, uploadServerOf } = require('./core/servers');
+const { NEW_SERVER, canTake, encryptsBy, serverOf, uploadServerOf } = require('./core/servers');
 const { view } = require('./core/transfers');
 
 // The window's channels: what its page asks main, through window.electronAPI.
@@ -99,7 +99,9 @@ function answerWindowChannels(main) {
     };
 
     /** A saved server's settings for new uploads, as an upload takes them: Unlimited is a lifetime of 0, whatever value was kept beside it. */
-    const settingsFor = ({ lifetime, maxDownloads }) => ({ lifetime: { value: lifetime.unit === 'unlimited' ? 0 : lifetime.value, unit: lifetime.unit }, maxDownloads });
+    const settingsFor = ({ lifetime, maxDownloads, allowFallback }) => ({
+        lifetime: { value: lifetime.unit === 'unlimited' ? 0 : lifetime.value, unit: lifetime.unit }, maxDownloads, allowFallback: allowFallback === true,
+    });
 
     /**
      * A window's uploads waiting whose server isn't saved any more (removed),
@@ -171,8 +173,8 @@ function answerWindowChannels(main) {
 
     // An upload of files handed to this window, waiting to start, on the
     // default server or the saved one given, with that server's settings for
-    // new uploads: its lifetime and download limit (a new server's, with none
-    // saved). Whether it's encrypted is decided as it starts.
+    // new uploads: its lifetime, download limit and Allow Fallback (a new
+    // server's, with none saved). Whether it's encrypted is decided as it starts.
     kit.ipc.handle(IPC.TRANSFER_ADD_UPLOAD, (event, request) => {
         const { files, server: chosen } = newUpload(request, saved);
         const target = chosen ? servers.get(chosen) : servers.default();
@@ -199,7 +201,12 @@ function answerWindowChannels(main) {
     // about (Upload Anyway), to the share's server, as the share decided.
     // Where the window's word on encryption differs from what main holds of a
     // server's last check, it's refused: never sent plain to a server that
-    // encrypts. Each is queued, and runs as soon as it has a place.
+    // encrypts. Each is queued, and runs as soon as it has a place. One that
+    // allows fallback, and that its server can't take by main's last check of
+    // it (not reached, uploads off, too small, or outside its limits), moves
+    // down the saved order instead as it gets its place (main.fallBack()),
+    // with no word on encryption of the window's: none was asked for it, so
+    // it goes encrypted, or the window is asked first.
     kit.ipc.handle(IPC.TRANSFER_START, (event, request) => {
         const sender = event.sender.id;
         const startable = (id) => {
@@ -210,7 +217,9 @@ function answerWindowChannels(main) {
         // A download needs no word on encryption: its upload decided that.
         const own = ids.filter((id) => transfers.get(id).owner === sender && transfers.get(id).kind === 'upload');
         if (own.length > 0 && encrypt === undefined) throw new Error('Expected whether to encrypt.');
-        const targets = new Map(own.map((id) => [id, servers.get(transfers.get(id).savedServer?.id) ?? servers.default()]));
+        // One the window was asked about as it fell back goes to the server it was asked about, or nowhere.
+        const targetOf = (upload) => servers.get(upload.savedServer?.id) ?? (upload.ask ? null : servers.default());
+        const targets = new Map(own.map((id) => [id, targetOf(transfers.get(id))]));
         if ([...targets.values()].some((target) => !target) || ids.some((id) => !targets.has(id) && !transfers.get(id).server)) {
             throw new Error('Server URL is not configured.');
         }
@@ -220,10 +229,17 @@ function answerWindowChannels(main) {
         }
         for (const [id, target] of targets) {
             const upload = transfers.get(id);
-            upload.options.encrypt = encrypt;
             upload.savedServer = uploadServerOf(target);
             // Where it goes, read from its saved server now: never an address from the page.
             upload.server = serverOf(target.url);
+            const can = upload.options.allowFallback ? canTake(checks.get(target.id), upload, { limits: true }) : { ok: true };
+            if (can.ok) {
+                upload.options.encrypt = encrypt;
+                delete upload.fallFrom;
+            } else {
+                delete upload.options.encrypt;
+                upload.fallFrom = can.reason;
+            }
         }
         for (const id of ids) main.start(id, transfers.get(id).server);
     });
@@ -270,8 +286,9 @@ function answerWindowChannels(main) {
     });
 
     // Advanced Options (and Bulk Edit, one call each) on a transfer of this
-    // window's waiting: an upload's lifetime, download limit and the files it
-    // keeps (a share's, or one being asked about, is the share's own), or its
+    // window's waiting: an upload's lifetime, download limit, Allow Fallback
+    // and the files it keeps (a share's, or one being asked about, is the
+    // share's own, or the fallback's), or its
     // "To" (and the bulk bar's "Upload all to"): a saved server, by its ID,
     // whose settings for new uploads it takes; a download's files it saves and
     // whether as one ZIP.

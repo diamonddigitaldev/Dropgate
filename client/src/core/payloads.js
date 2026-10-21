@@ -129,8 +129,9 @@ function uploadOptions(options) {
 
 /**
  * transfer:set-options: Advanced Options on one of this window's uploads
- * waiting: its lifetime, its download limit, and the files it keeps (their
- * indexes in it, in order, at least one), any of them, at least one. Or its
+ * waiting: its lifetime, its download limit, its Allow Fallback, and the files
+ * it keeps (their indexes in it, in order, at least one), any of them, at
+ * least one. Or its
  * "To", alone: the server it goes to, a saved server by its ID (never an
  * address), whose settings for new uploads it takes, as main gives them. The
  * server's limits aren't checked here: the window offers only what the server
@@ -139,7 +140,7 @@ function uploadOptions(options) {
  * @param {(id: string) => boolean} own - Whether it's an upload of this window's, waiting.
  * @param {(id: string) => number} fileCount - How many files it has.
  * @param {(id: string) => boolean} saved - Whether main has saved a server by this ID.
- * @returns {{ id: string, options: { lifetime?: { value: number, unit: string }, maxDownloads?: number, files?: number[], server?: string } }}
+ * @returns {{ id: string, options: { lifetime?: { value: number, unit: string }, maxDownloads?: number, allowFallback?: boolean, files?: number[], server?: string } }}
  */
 function optionsOf(request, own, fileCount, saved) {
     if (!isRecord(request, ['id', 'options']) || !isId(request.id) || !own(request.id)) throw new Error('Expected an upload of this window\'s waiting to start.');
@@ -148,14 +149,16 @@ function optionsOf(request, own, fileCount, saved) {
         if (!isId(options.server) || !saved(options.server)) throw new Error('Expected a saved server.');
         return { id: request.id, options: { server: options.server } };
     }
-    const keys = ['lifetime', 'maxDownloads', 'files'];
+    const keys = ['lifetime', 'maxDownloads', 'allowFallback', 'files'];
     if (!isRecord(options, keys, []) || Object.keys(options).length === 0) throw new Error('Expected an upload\'s options.');
     if (Object.hasOwn(options, 'lifetime') && !isLifetime(options.lifetime)) throw new Error('Expected a file lifetime.');
     if (Object.hasOwn(options, 'maxDownloads') && !isCount(options.maxDownloads)) throw new Error('Expected a download limit.');
+    if (Object.hasOwn(options, 'allowFallback') && typeof options.allowFallback !== 'boolean') throw new Error('Expected whether to allow fallback.');
     if (Object.hasOwn(options, 'files') && !indexesOf(options.files, fileCount(request.id))) throw new Error('Expected the files it keeps.');
     const copy = {};
     if (options.lifetime) copy.lifetime = { value: options.lifetime.value, unit: options.lifetime.unit };
     if (Object.hasOwn(options, 'maxDownloads')) copy.maxDownloads = options.maxDownloads;
+    if (Object.hasOwn(options, 'allowFallback')) copy.allowFallback = options.allowFallback;
     if (options.files) copy.files = [...options.files];
     return { id: request.id, options: copy };
 }
@@ -379,10 +382,15 @@ function deadlineOf(deadline) {
     return deadline;
 }
 
+/** One of core's error codes, as it names them: capitals and underscores. */
+const isCode = (value) => typeof value === 'string' && /^[A-Z][A-Z_]{0,63}$/.test(value);
+
 /**
  * engine:finished: a transfer's one outcome: an upload's link, a download's
  * completion (no link: its file is in its folder), cancelled, or core's
- * reason. Which kind may end how is main's to check (transfer-host.js).
+ * reason, with its code if it has one, and for an upload, whether its server
+ * had taken its start (begun) when it failed. Which kind may end how is
+ * main's to check (transfer-host.js).
  */
 function outcomeOf(result) {
     if (isRecord(result, ['status', 'link']) && result.status === 'success' && isWebLink(result.link, MAX_LINK)) {
@@ -390,8 +398,9 @@ function outcomeOf(result) {
     }
     if (isRecord(result, ['status']) && result.status === 'success') return { status: 'success' };
     if (isRecord(result, ['status']) && result.status === 'cancelled') return { status: 'cancelled' };
-    if (isRecord(result, ['status', 'message']) && result.status === 'error' && isText(result.message, MAX_TEXT)) {
-        return { status: 'error', message: result.message };
+    if (isRecord(result, ['status', 'message', 'code', 'begun'], ['status', 'message']) && result.status === 'error' && isText(result.message, MAX_TEXT)
+        && (result.code === undefined || isCode(result.code)) && (result.begun === undefined || typeof result.begun === 'boolean')) {
+        return { status: 'error', message: result.message, ...(result.code === undefined ? {} : { code: result.code }), ...(result.begun === undefined ? {} : { begun: result.begun }) };
     }
     throw new Error('Expected how an upload running finished.');
 }

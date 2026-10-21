@@ -22,8 +22,12 @@
 // Upload, or all waiting with the action bar's Upload All. One waiting can
 // have its own options (its Advanced Options, or Bulk Edit on the bulk bar for
 // those selected): its file lifetime and download limit, bounded by what its
-// server allows, and the files it keeps; its settings line says what differs
-// from its server's settings for new uploads. One whose options get past that
+// server allows, its Allow Fallback, and the files it keeps; its settings line
+// says what differs from its server's settings for new uploads. One that
+// allows fallback and that its server can't take before it starts moves down
+// the saved order, in main, which asks here first before a step down (a less
+// private server, or smaller limits); its To then names the server that took
+// it, its settings line the one it moved from. One whose options get past that
 // (an edited config.json, a server that lowered its limits since) is stopped
 // at its start by a warning, which can go on with the server's limits. Its
 // encryption, the Upload Security Warning and Pause go by its own server's
@@ -83,7 +87,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // Share with Dropgate is Windows' right-click entry: elsewhere, the Servers tab doesn't mention it.
         if (!navigator.userAgent.includes('Windows')) {
-            $('servers-help').textContent = "A new upload starts on the default server, with that server's settings. Each server is checked only when it's used.";
+            $('servers-help').textContent = "A new upload starts on the default server, with that server's settings. Servers are tried in this order when an upload allows fallback. Each server is checked only when it's used.";
         }
 
         /** How many transfers run at once: Settings > Transfers' transfersAtOnce, read with the settings. */
@@ -184,8 +188,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         /** Whether a card can go: waiting, or ended. One going is cancelled first. */
         const removable = (view) => Boolean(view) && (view.state === 'waiting' || ENDED.includes(view.state));
-        /** Whether Upload starts it from here: waiting, and not a share being asked about. */
-        const startable = (view) => view.state === 'waiting' && !asking.has(view.id);
+        /** Whether Upload starts it from here: waiting, and not one being asked about (a share's warning, or a fallback's step down). */
+        const startable = (view) => view.state === 'waiting' && !asking.has(view.id) && !view.asking;
         /** Whether its options can be changed here: the same, as its options are sealed once it starts. */
         const editable = (view) => Boolean(view) && startable(view);
 
@@ -309,7 +313,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                     }
                     return { text: tidy(view.step) || 'Starting…', tone: 'running' };
                 }
-                case 'done': return { text: view.options?.encrypt ? 'Uploaded · End-to-End Encrypted' : 'Uploaded · Not Encrypted', tone: 'success' };
+                case 'done':
+                    // One that fell back says which server took it.
+                    if (view.movedFrom && view.server) {
+                        return { text: `Uploaded to ${view.server.name} · ${view.options?.encrypt ? 'End-to-End Encrypted' : 'Not Encrypted'}`, tone: 'success' };
+                    }
+                    return { text: view.options?.encrypt ? 'Uploaded · End-to-End Encrypted' : 'Uploaded · Not Encrypted', tone: 'success' };
                 case 'failed': return { text: `Failed: ${sentence(view.message ?? 'The upload stopped.')}`, tone: 'danger' };
                 case 'cancelled': return { text: 'Cancelled', tone: 'muted' };
                 case 'deleted': return { text: 'Deleted from the server. Its link no longer works.', tone: 'muted' };
@@ -319,8 +328,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         /**
          * Its settings line, by its own server: that it won't be end-to-end
-         * encrypted, or else what it has that differs from that server's
-         * settings for new uploads ("3 Days · 10 Downloads"), or nothing.
+         * encrypted, or else, once it has fallen back, the server it moved
+         * from, then what it has that differs from its server's settings for
+         * new uploads ("Moved From Share Space · 3 Days · 10 Downloads · Allow
+         * Fallback"), or nothing.
          */
         function settingsOf(view) {
             const server = savedById(view.server?.id);
@@ -329,11 +340,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (plain) {
                 return { text: isPlainHttp(server?.url ?? check?.baseUrl ?? '') ? 'Not encrypted: This server is plain HTTP.' : "Not encrypted: This server doesn't support it.", tone: 'warning' };
             }
+            const differs = view.movedFrom ? [`Moved From ${view.movedFrom.name}`] : [];
             const usual = newUploadOptions(view);
-            if (!view.options || !usual) return undefined;
-            const differs = [];
-            if (!sameLifetime(view.options.lifetime, usual.lifetime)) differs.push(lifetimeTitle(view.options.lifetime));
-            if (view.options.maxDownloads !== usual.maxDownloads) differs.push(downloadsTitle(view.options.maxDownloads));
+            if (view.options && usual) {
+                if (!sameLifetime(view.options.lifetime, usual.lifetime)) differs.push(lifetimeTitle(view.options.lifetime));
+                if (view.options.maxDownloads !== usual.maxDownloads) differs.push(downloadsTitle(view.options.maxDownloads));
+                if (view.options.allowFallback !== usual.allowFallback) differs.push(view.options.allowFallback ? 'Allow Fallback' : 'No Fallback');
+            }
             return differs.length > 0 ? differs.join(' · ') : undefined;
         }
 
@@ -343,9 +356,9 @@ document.addEventListener('DOMContentLoaded', async () => {
          * a server removed since.
          */
         function newUploadOptions(view) {
-            if (!view.server) return { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1 };
+            if (!view.server) return { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, allowFallback: false };
             const server = savedById(view.server.id);
-            return server ? { lifetime: server.lifetime, maxDownloads: server.maxDownloads } : null;
+            return server ? { lifetime: server.lifetime, maxDownloads: server.maxDownloads, allowFallback: server.allowFallback === true } : null;
         }
 
         const sameLifetime = (a, b) => a.unit === b.unit && (a.unit === 'unlimited' || a.value === b.value);
@@ -1031,9 +1044,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         // its tone, and once checked, its limits. Shown, its settings for new
         // uploads: File lifetime and Max downloads, offering only what its
         // last check said it allows (off until it's checked), saved through
-        // main as each becomes a value it allows; and the account's place,
-        // which accounts fill in later. Then Test, Set as Default, Move Up,
-        // Move Down and Remove (which asks first). A row is built once and
+        // main as each becomes a value it allows; its Allow Fallback, saved as
+        // it's flipped; and the account's place, which accounts fill in
+        // later. Then Test, Set as Default, Move Up, Move Down (the order a
+        // fallback tries them in) and Remove (which asks first). A row is built once and
         // drawn again as the list or a check changes, so a field being typed
         // in keeps its focus and what's in it.
 
@@ -1201,12 +1215,23 @@ document.addEventListener('DOMContentLoaded', async () => {
             downloadsColumn.append(downloadsField.wrap);
             fields.append(lifetimeColumn, downloadsColumn);
 
+            // Allow Fallback, for new uploads to it: saved through main as it's flipped.
+            const fallback = kit.ui.switchField({
+                id: `server-${id}-fallback`,
+                label: 'Allow Fallback',
+                help: {
+                    on: "A new upload to this server may move on to the next server below if this one can't take it before it starts. Each upload's Advanced Options can change it.",
+                    off: "A new upload to this server goes here only. Each upload's Advanced Options can change it.",
+                },
+                onChange: async (checked) => takeList(await api.setServerOptions(id, { allowFallback: checked }).catch(() => saved)),
+            });
+
             // The account's place: accounts come later, so only what a server without them says.
             const slot = element('div', 'server-slot');
             slot.append(element('div', 'server-slot-caption', 'Account'), element('div', 'server-slot-text text-body-secondary', "This server doesn't use accounts."));
 
             const body = element('div', 'server-body');
-            body.append(element('div', 'small fw-semibold mt-1', 'New uploads to this server'), fields, slot);
+            body.append(element('div', 'small fw-semibold mt-1', 'New uploads to this server'), fields, fallback.element, slot);
 
             const test = rowButton('Test', 'btn-outline-secondary', () => testServer(id));
             const makeDefault = rowButton('Set as Default', 'btn-outline-secondary', async () => {
@@ -1352,6 +1377,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 toggle.title = open ? 'Hide Settings' : 'Show Settings';
                 toggleIcon.textContent = open ? 'expand_less' : 'expand_more';
                 paintFields(server, upload);
+                if (fallback.input.checked !== (server.allowFallback === true)) fallback.set(server.allowFallback === true);
                 slot.hidden = !upload;
                 makeDefault.hidden = isDefault;
                 up.disabled = index === 0;
@@ -1609,6 +1635,43 @@ document.addEventListener('DOMContentLoaded', async () => {
             else api.cancelTransfer(id).catch(() => {});
         });
 
+        // An upload falling back, to a server that would be a step down from
+        // the one it was going to: main holds it there and asks, with what
+        // that server said and each step down. Yes sends it, with the
+        // encryption main found; anything else stops it, with that server's
+        // reason.
+        api.onAskFallback(async (question) => {
+            const { id } = question;
+            asking.add(id);
+            if (shown.has(id)) draw(shown.get(id).view);
+            const go = await askFallback(question);
+            asking.delete(id);
+            if (go) api.startTransfers([id], question.encrypt).catch(() => api.cancelTransfer(id).catch(() => {}));
+            else api.cancelTransfer(id).catch(() => {});
+        });
+
+        /** The fallback's question: whether an upload goes to the next server, which would be a step down. */
+        function askFallback({ id, from, to, reason, plain, unencrypted, lifetime, downloads, asked }) {
+            const view = shown.get(id)?.view;
+            const steps = [];
+            if (plain) steps.push(`${to.host} is plain HTTP, so the upload won't be end-to-end encrypted, and the server can read your files.`);
+            else if (unencrypted) steps.push(`${to.host} doesn't support end-to-end encryption, so the server can read your files.`);
+            if (lifetime !== null) steps.push(`It keeps files up to ${hours(lifetime)}, and this upload asks for ${lifetimeText(asked.lifetime)}.`);
+            if (downloads !== null) steps.push(`It allows up to ${countOf(downloads, 'download')}, and this upload asks for ${downloadsText(asked.maxDownloads)}.`);
+            if (lifetime !== null || downloads !== null) steps.push("It would go with the server's limits instead.");
+            return kit.ui.confirm({
+                title: `Upload to ${to.host} Instead?`,
+                body: `${from.host} couldn't take ${view ? nameOf(view) : 'this upload'}: ${sentence(reason)}`,
+                detail: steps.join(' '),
+                confirmLabel: 'Upload There',
+                variant: 'warning',
+                icon: 'warning',
+            });
+        }
+
+        // A saved server checked by main itself (a fallback trying it): its row, and the uploads going there, say what it found.
+        api.onServersChanged((list) => takeList(list));
+
         /** The Upload Security Warning, before an upload that won't be end-to-end encrypted. */
         function askUploadAnyway() {
             return kit.ui.confirm({
@@ -1696,17 +1759,32 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         }
 
-        /** Start uploads waiting that go to one saved server (null: none saved, so they can't). */
+        /**
+         * Start uploads waiting that go to one saved server (null: none saved,
+         * so they can't). Those that allow fallback and that it can't take, by
+         * its check now (not reached, uploads off, too small for them, or
+         * outside its limits), go to main as they are, which moves them down
+         * the saved order: no warning about this server is asked for them.
+         */
         async function startOn(server, ids) {
             const check = server ? await testServer(server.id) : null;
             const compatible = compatibilityOf(server, check);
+            const upload = uploadsOf(check);
+            /** Those handed to main to fall back: main's word on them may reach this page a moment later. */
+            const handed = new Set();
+            // Still waiting, on this server: one picked another meanwhile goes with that one's.
+            const current = () => ids.map((id) => shown.get(id)?.view).filter((view) => view && startable(view) && view.server?.id === server?.id && !handed.has(view.id));
+            const tooBig = (view) => upload?.maxSizeMB > 0 && view.files.reduce((sum, file) => sum + file.size, 0) > upload.maxSizeMB * 1024 * 1024;
+            const falling = server ? current().filter((view) => view.options?.allowFallback && (!compatible.compatible || tooBig(view) || outsideLimits(view.options, upload))) : [];
+            for (const view of falling) handed.add(view.id);
+            if (falling.length > 0) {
+                // The word main holds this server to: they don't go there, whatever it is.
+                await api.startTransfers(falling.map((view) => view.id), encryptsBy(check)).catch((error) => api.uploadFinished({ status: 'error', error: error?.message || String(error) }));
+            }
             if (!compatible.compatible) {
-                api.uploadFinished({ status: 'error', error: compatible.message || 'Server is not compatible.' });
+                if (current().length > 0) api.uploadFinished({ status: 'error', error: compatible.message || 'Server is not compatible.' });
                 return;
             }
-            const upload = uploadsOf(check);
-            // Still waiting, on this server: one picked another meanwhile goes with that one's.
-            const current = () => ids.map((id) => shown.get(id)?.view).filter((view) => view && startable(view) && view.server?.id === server.id);
             const outside = current().filter((view) => outsideLimits(view.options, upload));
             if (outside.length > 0) {
                 if (!(await askServerLimits(outside, server, upload))) return;
@@ -1717,6 +1795,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             }
             const encrypt = encryptsBy(check);
+            if (current().length === 0) return;
             if (!encrypt && !(await askUploadAnyway())) {
                 api.uploadFinished({ status: 'error', error: 'Upload cancelled by user (insecure connection).' });
                 return;
@@ -1803,8 +1882,8 @@ document.addEventListener('DOMContentLoaded', async () => {
          * each with its own Remove. Several going to different servers are
          * held to the tightest of their limits, each help line naming the
          * server that sets it. Each server is checked first unless this run
-         * found it already. Apply sets them on main's upload; Cancel leaves
-         * it as it was. Allow Fallback comes with the fallback itself.
+         * found it already. Its Allow Fallback, from its server's. Apply sets
+         * them on main's upload; Cancel leaves it as it was.
          * @param {any[]} entries
          */
         async function openAdvanced(entries) {
@@ -1923,7 +2002,20 @@ document.addEventListener('DOMContentLoaded', async () => {
                 : isPlainHttp(checkOf(plainOn.server.id)?.baseUrl ?? plainOn.server.url)
                     ? `Not encrypted: ${plainOn.host} is plain HTTP, so the server can read your files.`
                     : `Not encrypted: ${plainOn.host} doesn't support end-to-end encryption, so the server can read your files.`));
-            body.append(lifetimeField.wrap, downloadsField.wrap, encryption);
+            // Allow Fallback, for these: its server's to start with. Several start on if every one has it.
+            const fallback = kit.ui.switchField({
+                id: 'options-fallback',
+                label: 'Allow Fallback',
+                checked: views.every((view) => view.options.allowFallback === true),
+                help: servers.length > 1 || many ? {
+                    on: "If an upload's server can't take it before it starts, the next server in Settings › Servers is tried. A less private one, or one with smaller limits, is never tried without asking. Each server tried learns your IP address and the upload's size.",
+                    off: "Each upload goes to its own server only. If that server can't take it, the upload stops and says why.",
+                } : {
+                    on: `If ${allowing[0].host} can't take this upload before it starts, the next server in Settings › Servers is tried. A less private one, or one with smaller limits, is never tried without asking. Each server tried learns your IP address and the upload's size.`,
+                    off: `This upload goes to ${allowing[0].host} only. If it can't take it, the upload stops and says why.`,
+                },
+            });
+            body.append(lifetimeField.wrap, downloadsField.wrap, encryption, fallback.element);
 
             const cancel = element('button', 'btn btn-secondary', 'Cancel');
             cancel.type = 'button';
@@ -1984,7 +2076,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             check();
 
             apply.addEventListener('click', async () => {
-                const options = { lifetime: readLifetime(), maxDownloads: readDownloads() };
+                const options = { lifetime: readLifetime(), maxDownloads: readDownloads(), allowFallback: fallback.input.checked };
                 if (!many && kept.length !== first.files.length) options.files = kept.map((file) => file.index);
                 dialog.close();
                 const refused = [];
