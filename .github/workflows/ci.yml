@@ -250,9 +250,22 @@ jobs:
 
       # The list reporter prints every test's name, browser and result. Every test
       # talks only to its own server on 127.0.0.1. The desktop app's tests run in
-      # their own job, below.
+      # their own job, below. A failed test keeps its trace, which shows each
+      # page's requests, console and snapshots.
       - name: Run tests
-        run: npx playwright test --project=chromium --project=firefox --project=webkit
+        run: npx playwright test --project=chromium --project=firefox --project=webkit --trace=retain-on-failure
+
+      # A failed test's trace and error-context.md, kept for a week. They hold
+      # only the tests' made-up files and this machine's addresses. Open a trace
+      # with npx playwright show-trace <trace.zip>.
+      - name: Keep the failed tests' results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-test-results
+          path: tests/integration/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
 
   desktop:
     name: Desktop app tests (${{ matrix.os }})
