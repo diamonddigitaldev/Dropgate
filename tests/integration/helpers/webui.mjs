@@ -91,20 +91,30 @@ export async function expectGone(page, link) {
 }
 
 /**
- * Open a direct transfer's link as its receiver. The page is waited for only
- * until it has started (Playwright's commit), not until its load event: in
- * Firefox on CI's runner, about one receive page in five never reported its
- * load to Playwright, while the page itself loaded, connected and offered the
- * files, so goto() waited out the test. Then the page's own readyState is
- * asked for up to 5 s; if it's never complete, it's printed to the log with
- * how far the page's load got (its navigation timing), and the test carries
- * on. That says whether Firefox's load was really held (a page bug) or only
- * never reported.
+ * Open a direct transfer's link as its receiver. In Firefox on CI's runner,
+ * now and then Playwright never hears of a receiver's navigation, not even
+ * its commit, while the page itself loads, connects and offers the files
+ * (its trace shows every request answered), so goto() waits out the test.
+ * So goto() is given 15 s to report the page has started (its commit, not its
+ * load event); if it doesn't, the page is asked where it is, and the test
+ * carries on only if it's at the link, the log saying Playwright lost the
+ * navigation. Then the page's own readyState is asked for up to 5 s; if it's
+ * never complete, the log says so with how far its load got (its navigation
+ * timing), and the test carries on.
  * @param {import('@playwright/test').Page} page
  * @param {string} link
  */
 export async function openReceivePage(page, link) {
-    await page.goto(link, { waitUntil: 'commit' });
+    const reported = await page.goto(link, { waitUntil: 'commit', timeout: 15_000 }).then(() => true, (err) => {
+        if (page.isClosed()) throw err;
+        return false;
+    });
+    if (!reported) {
+        const asked = page.evaluate(() => location.href);
+        const at = await Promise.race([asked, new Promise((resolve) => setTimeout(resolve, 10_000, null))]);
+        if (at !== link) throw new Error(`The receive page never opened in 15 s: the page says it's at ${at ?? '(no answer in 10 s)'}.`);
+        console.log(`Playwright never reported the receive page's navigation in 15 s, but the page is at its link.`);
+    }
     const complete = await page.waitForFunction(() => document.readyState === 'complete', null, { polling: 100, timeout: 5_000 })
         .then(() => true, () => false);
     if (complete) return;
