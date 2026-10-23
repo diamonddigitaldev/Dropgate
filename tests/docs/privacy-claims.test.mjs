@@ -75,12 +75,14 @@ test('what isn\'t a claim needs no test: what is logged or stored, and what the 
 const DESKTOP_KEEPS = {
     'docs/PRIVACY.md': {
         section: '## 🖥️ The desktop app',
-        names: ['`config.json`', '`Partial Downloads`', 'transfer window', 'manage token', 'Mark of the Web', 'tray', '`dropgate-bundle-'],
+        names: ['`config.json`', '**Your saved servers**', '**Allow Fallback**', '`Partial Downloads`', 'transfer window', 'manage token', 'Mark of the Web', 'tray',
+            '`dropgate-bundle-'],
     },
     'docs/technical/DATA-PROCESSING.md': {
         section: '### 2.5 Dropgate Client (Electron)',
-        names: ['`settingsSchema`', '`downloadFolder`', '`transfersAtOnce`', '`Partial Downloads`', '**The tray icon**', '**The Mark of the Web**',
-            "**The app's own browser files**", 'transfer window', 'manage token', '`dropgate-bundle-'],
+        names: ['`settingsSchema`', '**Saved servers**', '`servers`', '`defaultServer`', '**The fallback between saved servers**', '`downloadFolder`',
+            '`transfersAtOnce`', '`Partial Downloads`', '**The tray icon**', '**The Mark of the Web**', "**The app's own browser files**", 'transfer window',
+            'manage token', '`dropgate-bundle-'],
     },
 };
 
@@ -94,7 +96,7 @@ function sectionOf(markdown, heading) {
     return lines.slice(start, end === -1 ? undefined : end).join('\n');
 }
 
-test('the privacy docs say what the desktop app keeps: its settings, the partial folder, the tray, the transfer window\'s secrets, the bundle names and the Mark of the Web', () => {
+test('the privacy docs say what the desktop app keeps: its settings and saved servers, the fallback, the partial folder, the tray, the transfer window\'s secrets, the bundle names and the Mark of the Web', () => {
     const missing = Object.entries(DESKTOP_KEEPS).flatMap(([doc, { section, names }]) => {
         const text = sectionOf(read(doc), section);
         if (text === null) return [`${doc}: no "${section}" section`];

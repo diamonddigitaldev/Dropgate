@@ -5,7 +5,11 @@
 // Default, Move Up, Move Down and Remove (which asks first); and Add Server,
 // which checks an address and shows what it found before it's added. The app
 // saves the list in its settings (main alone changes it), and keeps what each
-// check found in memory only.
+// check found in memory only. The list in its settings is the one place in its
+// profile a server's address is written: every request to a server is the
+// transfer window's, in a session kept in memory (transfer-window.spec.mjs), so
+// Chromium's own files hold none, and a server removed or only checked leaves
+// nothing.
 //
 // Two saved servers are the test's one server at two addresses: the TLS
 // proxy's (https://, so uploads are end-to-end encrypted) and the server's own
@@ -14,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { copySlips } from '../../../client/test/helpers/copy.mjs';
 import { madeUpFile } from '../helpers/files.mjs';
+import { heldIn } from '../helpers/profile.mjs';
 import {
     ENCRYPTED, NOT_ENCRYPTED, addServerDialog, defaultServerRow, expect, openServers, securityWarning, serverRow, serverRows, serverStatus, setServerOptions, test,
     uploadsStarted,
@@ -272,4 +277,52 @@ test('a row looks as the mockup: its name with its address under it, its status 
     await expect(serverStatus(plain).locator('.kit-status-text')).toHaveAttribute('title', /^Connection failed\. Check the URL, and that the server is running\./);
     await expect(plain.locator('.server-limits')).toBeHidden();
     await expect(plain.getByLabel('Max downloads')).toBeDisabled();
+});
+
+test('the profile names a saved server in config.json alone, and one only checked, or used and removed, nowhere: the app\'s own browser files hold no server\'s address', async ({ desktop, server }) => {
+    const secureHost = new URL(desktop.serverUrl).host;
+    const plainHost = new URL(server.baseUrl).host;
+    expect(secureHost.startsWith(plainHost) || plainHost.startsWith(secureHost), 'two addresses, neither part of the other').toBe(false);
+    let app = await desktop.launch();
+    let window = await app.window();
+
+    // The plain one, only checked in Add Server, then Cancel.
+    await openServers(window);
+    await window.locator('#add-server-btn').click();
+    const dialog = addServerDialog(window);
+    await dialog.getByLabel('Server address').fill(server.baseUrl);
+    await dialog.getByRole('button', { name: 'Check', exact: true }).click();
+    await expect(dialog.locator('.server-found')).toBeVisible();
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(dialog).toBeHidden();
+
+    // The secure one added, the default, and uploaded to (over HTTPS); the plain one added, tested, made the default and uploaded to.
+    await desktop.setUp(window);
+    await desktop.upload(window, [madeUpFile('To the secure one.bin', 20_000, 511)], { encrypted: true });
+    await desktop.setUp(window, { url: server.baseUrl });
+    await openServers(window);
+    const plain = serverRow(window, server.baseUrl);
+    await plain.getByRole('button', { name: 'Test', exact: true }).click();
+    await expect(serverStatus(plain)).toHaveText(NOT_ENCRYPTED);
+    await plain.getByRole('button', { name: 'Set as Default' }).click();
+    await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
+    await desktop.upload(window, [madeUpFile('To the plain one.bin', 20_000, 512)], { encrypted: false });
+    await app.quit();
+
+    // Restarted, the plain one, the default, is checked as the window opens; then removed, and the secure one tested.
+    app = await desktop.launch();
+    window = await app.window();
+    await openServers(window);
+    await expect(serverStatus(serverRow(window, server.baseUrl))).toHaveText(NOT_ENCRYPTED);
+    await serverRow(window, server.baseUrl).getByRole('button', { name: 'Remove' }).click();
+    await window.getByRole('alertdialog', { name: 'Remove This Server?' }).getByRole('button', { name: 'Remove', exact: true }).click();
+    await expect(serverRows(window)).toHaveCount(1);
+    const secure = serverRow(window, desktop.serverUrl);
+    await secure.getByRole('button', { name: 'Test', exact: true }).click();
+    await expect(serverStatus(secure)).toHaveText(ENCRYPTED);
+    await app.quit();
+
+    // Every file in the profile, each address in each way it could be written: the saved one only in the settings.
+    expect(heldIn(desktop.profile, { texts: [secureHost], bytes: [] }), 'the saved server').toEqual([`config.json: "${secureHost}"`]);
+    expect(heldIn(desktop.profile, { texts: [plainHost], bytes: [] }), 'the server checked, used and removed').toEqual([]);
 });

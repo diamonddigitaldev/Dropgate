@@ -1,8 +1,9 @@
 // What the desktop app leaves in its profile: every file under it, searched
 // for a text in each way the app or Chromium would write it, for any part of
 // a file's bytes, and for a 32-byte secret known only by its hash (an
-// upload's manage token). desktop/profile.spec.mjs, desktop/tray.spec.mjs and
-// desktop/delete-upload.spec.mjs scan the whole profile with it after a run.
+// upload's manage token). desktop/profile.spec.mjs, desktop/tray.spec.mjs,
+// desktop/delete-upload.spec.mjs, desktop/nothing-kept.spec.mjs and
+// desktop/servers.spec.mjs scan the whole profile with it after a run.
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
