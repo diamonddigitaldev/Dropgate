@@ -21,7 +21,7 @@
 import os from 'node:os';
 import { holdsPlaintext, madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, test } from '../helpers/test.mjs';
-import { describePeers, download, peerConnections, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
+import { describePeers, download, openReceivePage, peerConnections, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
 
 test.use({ localStun: true });
 
@@ -168,7 +168,7 @@ test('a file sent by direct transfer arrives intact when the receiver opens the 
     expect(new URL(sent.link).pathname).toBe(`/p2p/${sent.code}`);
 
     const receiver = await otherContext.newPage();
-    await receiver.goto(sent.link);
+    await openReceivePage(receiver, sent.link);
 
     await receiveAndCompare(receiver, page, file);
     await expectOnlyLocalCandidates(stun, browserName, page, receiver);
@@ -186,7 +186,7 @@ test('several files sent together by direct transfer arrive intact as one ZIP, a
     const sent = await sendDirectFromHomePage(page, files);
 
     const receiver = await otherContext.newPage();
-    await receiver.goto(sent.link);
+    await openReceivePage(receiver, sent.link);
     await expectConnected(receiver, page);
     await expect(receiver.locator('#file-name')).toHaveText(String(files.length));
 

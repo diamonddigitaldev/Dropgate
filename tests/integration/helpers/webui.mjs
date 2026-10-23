@@ -91,6 +91,38 @@ export async function expectGone(page, link) {
 }
 
 /**
+ * Open a direct transfer's link as its receiver. The page is waited for only
+ * until it has started (Playwright's commit), not until its load event: in
+ * Firefox on CI's runner, about one receive page in five never reported its
+ * load to Playwright, while the page itself loaded, connected and offered the
+ * files, so goto() waited out the test. Then the page's own readyState is
+ * asked for up to 5 s; if it's never complete, it's printed to the log with
+ * how far the page's load got (its navigation timing), and the test carries
+ * on. That says whether Firefox's load was really held (a page bug) or only
+ * never reported.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} link
+ */
+export async function openReceivePage(page, link) {
+    await page.goto(link, { waitUntil: 'commit' });
+    const complete = await page.waitForFunction(() => document.readyState === 'complete', null, { polling: 100, timeout: 5_000 })
+        .then(() => true, () => false);
+    if (complete) return;
+    const seen = await page.evaluate(() => {
+        const nav = performance.getEntriesByType('navigation')[0];
+        const ms = (t) => Math.round(t);
+        return {
+            readyState: document.readyState,
+            domContentLoaded: nav && ms(nav.domContentLoadedEventEnd),
+            domComplete: nav && ms(nav.domComplete),
+            loadEventStart: nav && ms(nav.loadEventStart),
+            resourcesDone: performance.getEntriesByType('resource').length,
+        };
+    }).catch((err) => ({ error: String(err) }));
+    console.log(`The receive page's load hadn't completed 5 s after it started: ${JSON.stringify(seen)}`);
+}
+
+/**
  * Drop files and folders from disk onto a part of the page, as a person drags
  * them from a folder. In Chromium it's the browser's own drag, through the
  * DevTools protocol, so each item has the entry a real drop gives it, a

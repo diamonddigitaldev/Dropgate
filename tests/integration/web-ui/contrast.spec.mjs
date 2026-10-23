@@ -10,7 +10,7 @@ import { expectContrast, expectFocusRings } from '../helpers/contrast.mjs';
 import { madeUpFile } from '../helpers/files.mjs';
 import { secretsOf } from '../helpers/privacy.mjs';
 import { expect, test } from '../helpers/test.mjs';
-import { download, openLink, sendDirectFromHomePage, uploadFromHomePage } from '../helpers/webui.mjs';
+import { download, openLink, openReceivePage, sendDirectFromHomePage, uploadFromHomePage } from '../helpers/webui.mjs';
 
 /** Open the home page, once it has the server's settings. */
 async function openHome(page) {
@@ -145,7 +145,7 @@ test.describe('direct transfer', () => {
         await expectContrast(page, "the sender's card");
 
         const receiver = await otherContext.newPage();
-        await receiver.goto(link);
+        await openReceivePage(receiver, link);
         await expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 });
         await receiver.locator('#p2p-toggle-file-list').click();
         await expect(receiver.locator('#p2p-file-list')).toBeVisible();

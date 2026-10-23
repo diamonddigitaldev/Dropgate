@@ -7,7 +7,7 @@
 import { madeUpFile } from '../helpers/files.mjs';
 import { secretsOf } from '../helpers/privacy.mjs';
 import { expect, test } from '../helpers/test.mjs';
-import { openLink, sendDirectFromHomePage, uploadFromHomePage } from '../helpers/webui.mjs';
+import { openLink, openReceivePage, sendDirectFromHomePage, uploadFromHomePage } from '../helpers/webui.mjs';
 
 const MiB = 1024 * 1024;
 
@@ -53,7 +53,7 @@ test.describe('direct transfer', () => {
     test('the receive page gives the files offered in 1024s', async ({ page, otherContext }) => {
         const { link } = await sendDirectFromHomePage(page, [madeUpFile('Offered first é.bin', 1.5 * MiB, 106), madeUpFile('Offered second é.bin', 12 * 1024, 107)]);
         const receiver = await otherContext.newPage();
-        await receiver.goto(link);
+        await openReceivePage(receiver, link);
         await expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 });
         await expect(receiver.locator('#file-size')).toHaveText('1.5 MB');
         await receiver.locator('#p2p-toggle-file-list').click();
