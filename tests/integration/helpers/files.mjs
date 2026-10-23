@@ -1,5 +1,9 @@
 // Made-up test files, and ways to compare and unpack what comes back.
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import zlib from 'node:zlib';
 
 /** Deterministic pseudo-random bytes (xorshift32), so every file is made up but repeatable. */
@@ -17,6 +21,35 @@ export function madeUpBytes(size, seed) {
 
 /** A file for setInputFiles(). */
 export const madeUpFile = (name, size, seed) => ({ name, mimeType: 'application/octet-stream', buffer: madeUpBytes(size, seed) });
+
+/**
+ * A file on disk of `size` bytes, all zeros, that takes next to no space: a
+ * sparse file, so a test can hand over several GB with nothing written. It's
+ * made in a new folder of its own in the system's temp folder, not in
+ * test-results/, which CI keeps when a test fails; remove() deletes the folder.
+ * Windows makes a file sparse only when asked (fsutil, which needs no
+ * administrator for it); Linux makes one sparse when it's extended past its
+ * end, and that's checked, so a test never fills the disk.
+ * @param {string} name
+ * @param {number} size
+ * @returns {{ dir: string, path: string, remove: () => void }}
+ */
+export function sparseFile(name, size) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-sparse-'));
+    const remove = () => fs.rmSync(dir, { recursive: true, force: true });
+    const file = path.join(dir, name);
+    try {
+        fs.writeFileSync(file, '');
+        if (process.platform === 'win32') execFileSync('fsutil', ['sparse', 'setflag', file], { stdio: 'ignore' });
+        fs.truncateSync(file, size);
+        const { blocks } = fs.statSync(file);
+        if (process.platform !== 'win32' && blocks * 512 > 1024 * 1024) throw new Error(`${file} isn't sparse: ${blocks} blocks on disk.`);
+    } catch (err) {
+        remove();
+        throw err;
+    }
+    return { dir, path: file, remove };
+}
 
 /** Size and SHA-256, so a mismatch reads well in a test failure. */
 export const summary = (bytes) => ({ size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });

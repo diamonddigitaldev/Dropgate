@@ -91,6 +91,53 @@ export async function expectGone(page, link) {
 }
 
 /**
+ * Drop files and folders from disk onto a part of the page, as a person drags
+ * them from a folder. In Chromium it's the browser's own drag, through the
+ * DevTools protocol, so each item has the entry a real drop gives it, a
+ * folder's included. Playwright can't drag from disk in Firefox or WebKit, so
+ * there the files are picked with a file input of the test's own, which goes
+ * once they're dropped, and dropped by script: each still has the browser's
+ * own file entry, but a folder can't be dropped that way.
+ * @param {import('@playwright/test').Page} page
+ * @param {import('@playwright/test').Locator} target
+ * @param {string[]} paths
+ */
+export async function dropFromDisk(page, target, paths) {
+    const browserName = page.context().browser().browserType().name();
+    if (browserName === 'chromium') {
+        await target.scrollIntoViewIfNeeded();
+        const box = await target.boundingBox();
+        const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+        const data = { items: [], files: paths, dragOperationsMask: 1 };
+        const cdp = await page.context().newCDPSession(page);
+        try {
+            for (const type of ['dragEnter', 'dragOver', 'drop']) await cdp.send('Input.dispatchDragEvent', { type, ...at, data });
+        } finally {
+            await cdp.detach();
+        }
+        return;
+    }
+    const folder = paths.find((p) => fs.statSync(p).isDirectory());
+    if (folder) throw new Error(`A test can't drop a folder in ${browserName}: ${folder}`);
+    const input = await page.evaluateHandle(() => {
+        const picker = document.createElement('input');
+        picker.type = 'file';
+        picker.multiple = true;
+        picker.hidden = true;
+        document.body.append(picker);
+        return picker;
+    });
+    await input.asElement().setInputFiles(paths);
+    const dataTransfer = await page.evaluateHandle((picker) => {
+        const dt = new DataTransfer();
+        for (const file of picker.files) dt.items.add(file);
+        picker.remove();
+        return dt;
+    }, input);
+    for (const type of ['dragenter', 'dragover', 'drop']) await target.dispatchEvent(type, { dataTransfer });
+}
+
+/**
  * Start a direct transfer from the home page, and return the code and link it
  * gives. The page has to stay open until the receiver has everything.
  * @param {import('@playwright/test').Page} page

@@ -11,7 +11,7 @@
 //
 // The server is reached through the TLS proxy, so every upload is end-to-end
 // encrypted and nothing asks the Upload Security Warning.
-import { madeUpFile } from '../helpers/files.mjs';
+import { madeUpFile, sparseFile } from '../helpers/files.mjs';
 import {
     actionLine, cardButton, dropFiles, expect, holdChunks, test, transfersIn, uploadCard, uploadCards, uploadsStarted,
 } from '../helpers/desktop.mjs';
@@ -205,4 +205,30 @@ test('uploads started together from their cards, ending while the window is out 
     for (const { title, body } of app.eventsOf('notification')) {
         for (const file of [...files, another]) expect(`${title}\n${body}`, 'a notification').not.toContain(file.name);
     }
+});
+
+test.describe('on a server with no size limit', () => {
+    test.use({ serverEnv: { UPLOAD_MAX_FILE_SIZE_MB: '0' } });
+
+    // Dropgate 3 read a dropped file with no type whole to tell it from a
+    // folder, so a large one, an ISO say, was refused as a folder. The app asks
+    // the file system instead. The file is sparse: nothing of its 5 GB is
+    // written to disk.
+    test('a 5 GB file with no type, dropped from disk, is taken as a file, not a folder', async ({ desktop }) => {
+        const disc = sparseFile('Disc image é', 5 * 1024 ** 3);
+        try {
+            desktop.secrets.addFiles([{ name: 'Disc image é' }]);
+            const app = await desktop.launch();
+            const window = await app.window();
+            await desktop.setUp(window);
+
+            await dropFiles(window, window.locator('#upload-area'), [disc.path]);
+            await expect(names(window)).toHaveText(['Disc image é']);
+            await expect(uploadCard(window).locator('.kit-card-status')).toHaveText('Ready');
+            await expect(uploadCard(window).locator('.kit-card-meta')).toHaveText('5.0 GB');
+            await expect(window.locator('#toast-host .toast-note')).toHaveCount(0);
+        } finally {
+            disc.remove();
+        }
+    });
 });

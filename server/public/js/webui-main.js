@@ -1,5 +1,5 @@
 import { DropgateError, hosts, lifetime, sizes } from './dropgate-core.js';
-import { formatBytes, pageClient } from './page-common.js';
+import { countOf, formatBytes, pageClient } from './page-common.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -136,13 +136,30 @@ document.addEventListener('visibilitychange', () => {
 
 const coreClient = pageClient();
 
-function isFile(file) {
-  return new Promise((resolve) => {
-    if (file.type !== '') return resolve(true);
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(!reader.error);
-    reader.readAsArrayBuffer(file);
-  });
+/**
+ * A drop's files, and how many folders it held, which aren't uploaded. A
+ * folder is told by its entry, which the browser gives with the drop, so
+ * nothing of any file is read: a large file with no type, such as an ISO, is
+ * a file like any other. An item with no entry (Chromium gives none to a drop
+ * made by script) is taken as the file it holds. Called while the drop event
+ * runs, since its items are gone once it returns.
+ * @param {DataTransfer | null} dataTransfer
+ * @returns {{ files: File[], folders: number }}
+ */
+function droppedFiles(dataTransfer) {
+  const items = Array.from(dataTransfer?.items || []).filter((item) => item.kind === 'file');
+  if (!items.length) return { files: Array.from(dataTransfer?.files || []), folders: 0 };
+  const files = [];
+  let folders = 0;
+  for (const item of items) {
+    if (item.webkitGetAsEntry?.()?.isDirectory) {
+      folders++;
+      continue;
+    }
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return { files, folders };
 }
 
 /** Each toast type's glyph, as electron-kit's. */
@@ -338,7 +355,7 @@ function handleFileSelection(files) {
     const valid = incoming.filter(f => f.size > 0);
     const skipped = incoming.length - valid.length;
     if (skipped > 0) {
-      showToast(`Skipped ${skipped} empty (0 byte) file${skipped > 1 ? 's' : ''}.`, 'warning');
+      showToast(`Skipped ${countOf(skipped, 'empty file')}.`, 'warning');
     }
     if (valid.length === 0) return;
 
@@ -1257,22 +1274,10 @@ function wireUI() {
       els.dropzone.classList.remove('dragover');
     });
   });
-  els.dropzone?.addEventListener('drop', async (e) => {
-    const fileList = e.dataTransfer?.files;
-    if (!fileList || !fileList.length) return;
-
-    // Filter out directories
-    const validFiles = [];
-    for (const f of Array.from(fileList)) {
-      if (await isFile(f)) validFiles.push(f);
-    }
-
-    if (validFiles.length === 0) {
-      showToast('Folders cannot be uploaded.', 'warning');
-      return;
-    }
-
-    handleFileSelection(validFiles);
+  els.dropzone?.addEventListener('drop', (e) => {
+    const { files, folders } = droppedFiles(e.dataTransfer);
+    if (folders > 0) showToast(`Skipped ${countOf(folders, 'folder')}: Folders can't be uploaded.`, 'warning');
+    if (files.length) handleFileSelection(files);
   });
 
   // Mode toggles

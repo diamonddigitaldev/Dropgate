@@ -58,6 +58,15 @@ export function formatBytes(bytes) {
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
 }
 
+/**
+ * A count with its word, as the desktop app says it (electron-kit's countOf):
+ * "1 folder", "3 folders", "18,000 files".
+ */
+export function countOf(n, one) {
+  const digits = String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return `${digits} ${n === 1 ? one : `${one}s`}`;
+}
+
 (async () => {
   try {
     const client = pageClient();

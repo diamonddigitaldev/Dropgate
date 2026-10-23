@@ -50,7 +50,7 @@ test.describe('on a server with a 1 MB limit and no direct transfer', () => {
         await page.locator('#fileInput').setInputFiles([madeUpFile('Too big é.bin', 2_000_000, 91)]);
         const toasts = host.locator('.toast-note');
         await expect(toasts).toHaveCount(2);
-        await expectToast(toasts.nth(0), 'warning', 'Skipped 1 empty (0 byte) file.');
+        await expectToast(toasts.nth(0), 'warning', 'Skipped 1 empty file.');
         await expectToast(toasts.nth(1), 'danger', /cannot be uploaded/i);
 
         // Centred across the window, at its top.
