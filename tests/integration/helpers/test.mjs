@@ -25,6 +25,22 @@ export const NO_ICE_SERVERS = ',';
 /** Whether the test body passed, as it was meant to. */
 export const passed = (testInfo) => testInfo.status === 'passed' && testInfo.expectedStatus === 'passed';
 
+// Before each action and expect(), Playwright waits until no page it drives is
+// in the middle of a navigation, as it knows them. It reads this variable at
+// every step, in this worker's process.
+const SKIP_NAVIGATION_CHECK = 'PLAYWRIGHT_SKIP_NAVIGATION_CHECK';
+
+/**
+ * Turn off Playwright's wait for a navigation to finish before each step, for
+ * every page in the rest of this test. The steps still wait for what they
+ * check. Only for a page whose navigation Playwright will never hear the end
+ * of (helpers/webui.mjs' openReceivePage()); the navigationCheck fixture turns
+ * it back on once the test is over.
+ */
+export function skipNavigationCheckForThisTest() {
+    process.env[SKIP_NAVIGATION_CHECK] = '1';
+}
+
 /**
  * Record every http(s) and ws(s) request a browser context makes to anywhere but
  * the server's own origin, and every WebSocket message its pages send.
@@ -71,6 +87,18 @@ export const test = base.extend({
             await stun.stop();
         }
     },
+
+    // Playwright's navigation check back as it was after every test, so one
+    // test's skipNavigationCheckForThisTest() never reaches the next.
+    navigationCheck: [async ({}, use) => {
+        const before = process.env[SKIP_NAVIGATION_CHECK];
+        try {
+            await use();
+        } finally {
+            if (before === undefined) delete process.env[SKIP_NAVIGATION_CHECK];
+            else process.env[SKIP_NAVIGATION_CHECK] = before;
+        }
+    }, { auto: true }],
 
     // The file names and keys this test's flows handle. The web UI helpers add to it.
     secrets: async ({}, use) => {

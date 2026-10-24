@@ -4,7 +4,7 @@
 // copy edit doesn't break a test about behaviour.
 import fs from 'node:fs';
 import { secretsOf } from './privacy.mjs';
-import { expect } from './test.mjs';
+import { expect, skipNavigationCheckForThisTest } from './test.mjs';
 
 /**
  * Upload files from the home page and return the share link.
@@ -101,35 +101,76 @@ export async function expectGone(page, link) {
  * navigation. Then the page's own readyState is asked for up to 5 s; if it's
  * never complete, the log says so with how far its load got (its navigation
  * timing), and the test carries on.
+ *
+ * Playwright's frame can still think the navigation is under way, since it
+ * never heard it finish, and then every later step on any page waits for it
+ * first ("waiting for … navigation to finish...") until the test runs out,
+ * however ready the page is. So the page is last checked through a step that
+ * waits like that, for 2 s: if it's still waiting, and the page is at its link,
+ * that wait is turned off for the rest of the test, the log saying so. Each
+ * step still waits for what it checks.
+ *
+ * With loseNavigation (or DROPGATE_TEST_LOSE_NAVIGATION=1, for every receiver),
+ * in Firefox, Playwright loses the navigation on purpose, as on CI's runner:
+ * see loseNavigations().
  * @param {import('@playwright/test').Page} page
  * @param {string} link
+ * @param {{ loseNavigation?: boolean }} [opts]
  */
-export async function openReceivePage(page, link) {
+export async function openReceivePage(page, link, { loseNavigation = process.env.DROPGATE_TEST_LOSE_NAVIGATION === '1' } = {}) {
+    if (loseNavigation) loseNavigations(page);
     const reported = await page.goto(link, { waitUntil: 'commit', timeout: 15_000 }).then(() => true, (err) => {
         if (page.isClosed()) throw err;
         return false;
     });
     if (!reported) {
-        const asked = page.evaluate(() => location.href);
-        const at = await Promise.race([asked, new Promise((resolve) => setTimeout(resolve, 10_000, null))]);
+        const at = await askWhere(page);
         if (at !== link) throw new Error(`The receive page never opened in 15 s: the page says it's at ${at ?? '(no answer in 10 s)'}.`);
         console.log(`Playwright never reported the receive page's navigation in 15 s, but the page is at its link.`);
     }
     const complete = await page.waitForFunction(() => document.readyState === 'complete', null, { polling: 100, timeout: 5_000 })
         .then(() => true, () => false);
-    if (complete) return;
-    const seen = await page.evaluate(() => {
-        const nav = performance.getEntriesByType('navigation')[0];
-        const ms = (t) => Math.round(t);
-        return {
-            readyState: document.readyState,
-            domContentLoaded: nav && ms(nav.domContentLoadedEventEnd),
-            domComplete: nav && ms(nav.domComplete),
-            loadEventStart: nav && ms(nav.loadEventStart),
-            resourcesDone: performance.getEntriesByType('resource').length,
-        };
-    }).catch((err) => ({ error: String(err) }));
-    console.log(`The receive page's load hadn't completed 5 s after it started: ${JSON.stringify(seen)}`);
+    if (!complete) {
+        const seen = await page.evaluate(() => {
+            const nav = performance.getEntriesByType('navigation')[0];
+            const ms = (t) => Math.round(t);
+            return {
+                readyState: document.readyState,
+                domContentLoaded: nav && ms(nav.domContentLoadedEventEnd),
+                domComplete: nav && ms(nav.domComplete),
+                loadEventStart: nav && ms(nav.loadEventStart),
+                resourcesDone: performance.getEntriesByType('resource').length,
+            };
+        }).catch((err) => ({ error: String(err) }));
+        console.log(`The receive page's load hadn't completed 5 s after it started: ${JSON.stringify(seen)}`);
+    }
+    const settled = await page.locator(':root').waitFor({ state: 'attached', timeout: 2_000 }).then(() => true, () => false);
+    if (settled) return;
+    const at = await askWhere(page);
+    if (at !== link) throw new Error(`Playwright is still waiting for the receive page's navigation, and the page says it's at ${at ?? '(no answer in 10 s)'}.`);
+    skipNavigationCheckForThisTest();
+    console.log(`Playwright is still waiting for the receive page's navigation to finish, but the page is at its link: its wait before each step is off for the rest of this test.`);
+}
+
+/** The page's own location, asked of the page, or null if it doesn't answer in 10 s. */
+function askWhere(page) {
+    return Promise.race([page.evaluate(() => location.href), new Promise((resolve) => setTimeout(resolve, 10_000, null))]);
+}
+
+/**
+ * From now on, Playwright never hears that this page's navigations committed or
+ * loaded, as now and then on CI's runner, while Firefox and the page go on as
+ * ever. Playwright hears that a navigation starts, and its requests, so its
+ * frame waits for the navigation for good. Firefox only, for openReceivePage()'s
+ * loseNavigation: it reaches into Playwright's own objects in this process (as
+ * of Playwright 1.63), and says so if they've changed.
+ * @param {import('@playwright/test').Page} page
+ */
+function loseNavigations(page) {
+    const lost = ['Page.navigationCommitted', 'Page.eventFired'];
+    const listeners = page._connection.toImpl?.(page)?.delegate?._eventListeners?.filter((l) => lost.includes(l.eventName));
+    if (listeners?.length !== lost.length) throw new Error("Can't reach Playwright's own Firefox page to lose its navigation: has Playwright changed?");
+    for (const { emitter, eventName, handler } of listeners) emitter.removeListener(eventName, handler);
 }
 
 /**

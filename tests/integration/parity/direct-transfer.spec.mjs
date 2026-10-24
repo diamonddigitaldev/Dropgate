@@ -175,6 +175,23 @@ test('a file sent by direct transfer arrives intact when the receiver opens the 
     expect(bytesSent(server, secrets, [file]), "the file's bytes the server got").toEqual([]);
 });
 
+// Now and then on CI's runner, Playwright's Firefox never hears that a
+// receiver's navigation committed or loaded, while the page works on. This
+// loses it on purpose, so openReceivePage() is shown to carry the receiver's
+// checks through it. Run every receiver this way with DROPGATE_TEST_LOSE_NAVIGATION=1.
+test("a file sent by direct transfer arrives intact when the receiver opens the link and Playwright never hears the page's navigation finish", async ({ page, otherContext, browserName }) => {
+    test.skip(browserName !== 'firefox', 'Only Firefox is seen to lose it, and only its page can be made to');
+    const file = madeUpFile('Sketches (lost) é.bin', SIZE, 35);
+
+    const sent = await sendDirectFromHomePage(page, [file]);
+
+    const receiver = await otherContext.newPage();
+    await openReceivePage(receiver, sent.link, { loseNavigation: true });
+    expect(receiver.url(), "where Playwright's frame thinks the receiver is").toBe('about:blank');
+
+    await receiveAndCompare(receiver, page, file);
+});
+
 test('several files sent together by direct transfer arrive intact as one ZIP, and none of them passes through the server', async ({ page, otherContext, stun, browserName, server, secrets }) => {
     await recordBoth(browserName, page.context(), otherContext);
     const files = [
