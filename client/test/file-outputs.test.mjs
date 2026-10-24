@@ -185,8 +185,9 @@ test('an output revoked, or the service stopping, deletes the file still being w
     assert.deepEqual(listing(partials), []);
 });
 
-test('only an output main granted is written, by its ID: never a path, and one file per output', () => {
-    assert.ok(refused(ask({ op: 'open', output: randomUUID(), name: 'x.bin', size: 1, index: 0 })), 'an output never granted');
+test('only an output main granted is written, by its ID: never a path, and one file per output', async () => {
+    const waitingBriefly = new FileService({ partials, grantWaitMs: 20 });
+    assert.ok(refused(await waitingBriefly.answer({ id: 0, op: 'open', output: randomUUID(), name: 'x.bin', size: 1, index: 0 })), 'an output never granted, once it has been waited for');
     assert.ok(refused(ask({ op: 'open', output: folder, name: 'x.bin', size: 1, index: 0 })), 'a folder\'s path, in place of an output');
     const output = grantOutput();
     assert.ok(refused(ask({ op: 'open', output, name: 'x.bin', size: 1, index: 0, folder })), 'a request carrying a folder');
@@ -205,6 +206,25 @@ test('only an output main granted is written, by its ID: never a path, and one f
     assert.throws(() => service.grantOutput({ output: randomUUID(), folder, shape: 'file', count: 2 }), /how many files/);
     assert.throws(() => service.grantOutput({ output: randomUUID(), folder, shape: 'zip', count: 2 }), /how many files/);
     assert.throws(() => new FileService().grantOutput({ output: randomUUID(), folder, shape: 'file' }), /partial folder/);
+});
+
+test('an open that arrives before its output waits for it, as the two come by different channels, and one for an output revoked is refused at once', async () => {
+    // Main grants the output before it tells the transfer window of the download, but over another channel.
+    const output = randomUUID();
+    const opening = ask({ op: 'open', output, name: 'Early é.bin', size: 3, index: 0 });
+    service.grantOutput({ output, folder, shape: 'file' });
+    const { sink, name } = await opening;
+    assert.equal(name, 'Early é.bin');
+    ask({ op: 'write', sink, bytes: new Uint8Array([1, 2, 3]) });
+    await ask({ op: 'close', sink });
+    assert.deepEqual([...fs.readFileSync(path.join(folder, 'Early é.bin'))], [1, 2, 3]);
+
+    service.revokeOutput(output);
+    assert.ok(refused(ask({ op: 'open', output, name: 'Late.bin', size: 1, index: 0 })), 'an output revoked, at once');
+    const never = randomUUID();
+    const waiting = ask({ op: 'open', output: never, name: 'Never.bin', size: 1, index: 0 });
+    service.revokeAll();
+    assert.ok(refused(await waiting), 'one still waiting as the service stops');
 });
 
 test('a folder gone fails with the reason, naming no folder, and leaves nothing', async () => {

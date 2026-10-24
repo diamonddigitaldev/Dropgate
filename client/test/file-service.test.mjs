@@ -59,9 +59,10 @@ test('a granted file reads by range, as it was handed over, each answer naming i
     assert.equal(read(handle, 500, 500).bytes.length, 0);
 });
 
-test('a read is refused for an unknown handle, any path, and a grant revoked', () => {
+test('a read is refused for an unknown handle, any path, and a grant revoked', async () => {
     const file = fileOf('Never granted.bin', 100);
-    assert.ok(refused(read(randomUUID(), 0, 10)), 'a handle never granted');
+    const waitingBriefly = new FileService({ grantWaitMs: 20 });
+    assert.ok(refused(await waitingBriefly.answer({ id: 0, op: 'read', handle: randomUUID(), start: 0, end: 10 })), 'a handle never granted, once it has been waited for');
     assert.ok(refused(read(file, 0, 10)), 'the file\'s path, in place of a handle');
     assert.ok(refused(service.answer({ id: 1, op: 'read', handle: grant(file), path: file, start: 0, end: 10 })), 'a request carrying a path');
     assert.ok(refused(read({ path: file }, 0, 10)), 'a path in an object');
@@ -70,6 +71,33 @@ test('a read is refused for an unknown handle, any path, and a grant revoked', (
     assert.ok(refused(read(handle, 0, 10)), 'a grant revoked');
     assert.throws(() => service.grantRead({ handle: 'not-a-uuid', path: file, size: 100, mtimeMs: 0 }), /grant/);
     assert.throws(() => service.grantRead({ handle: randomUUID(), path: 'relative.bin', size: 100, mtimeMs: 0 }), /file/);
+});
+
+test('a read that arrives before its grant waits for it, as the two come by different channels, and reads the file once it\'s there', async () => {
+    // Main grants each file before it tells the transfer window of the upload, but over another channel: just
+    // after the file service starts (Share with Dropgate's upload), the transfer window's first read can come first.
+    const file = fileOf('Shared at once é.bin', 100);
+    const handle = randomUUID();
+    const reading = read(handle, 10, 14);
+    const { size, mtimeMs } = fs.statSync(file);
+    service.grantRead({ handle, path: file, size, mtimeMs });
+    const answer = await reading;
+    assert.equal(answer.id, nextId - 1);
+    assert.deepEqual([...answer.bytes], [10, 11, 12, 13]);
+
+    // Two waiting for one grant, each answered; one waiting as its grant is revoked, or the service stops, is refused.
+    const other = fileOf('Second é.bin', 50);
+    const later = randomUUID();
+    const both = [read(later, 0, 2), read(later, 2, 4)];
+    service.grantRead({ handle: later, path: other, size: 50, mtimeMs: fs.statSync(other).mtimeMs });
+    assert.deepEqual((await Promise.all(both)).map((a) => [...a.bytes]), [[0, 1], [2, 3]]);
+    const revokedFirst = randomUUID();
+    const waiting = read(revokedFirst, 0, 1);
+    service.revoke(revokedFirst);
+    assert.ok(refused(await waiting), 'revoked while it waited');
+    const stopping = read(randomUUID(), 0, 1);
+    service.revokeAll();
+    assert.ok(refused(await stopping), 'still waiting as the service stops');
 });
 
 test('a read is refused for a range outside the file, not whole numbers, or bigger than a piece', () => {

@@ -301,12 +301,23 @@ app.on('web-contents-created', (_event, contents) => {
         return postMessage.call(this, channel, message, transfer);
     };
 });
+// With DROPGATE_TEST_GRANT_DELAY_MS, main's grants to the file service (and
+// the revokes after them, in order) reach it that long after main sends them:
+// the transfer window's first read, or a download's first open, which comes
+// over its own port, then arrives before its grant, as it can by itself just
+// after the file service starts (desktop/share.spec.mjs).
+const GRANT_DELAY_MS = Number(process.env.DROPGATE_TEST_GRANT_DELAY_MS ?? 0);
+const DELAYED = new Set(['grant-read', 'grant-output', 'revoke']);
 const fork = utilityProcess.fork;
 utilityProcess.fork = function (...args) {
     const child = fork.apply(this, args);
     const postMessage = child.postMessage;
     child.postMessage = function (message, transfer) {
         measure(`main → utility ${message?.type}`, message);
+        if (GRANT_DELAY_MS > 0 && DELAYED.has(message?.type)) {
+            setTimeout(() => postMessage.call(this, message, transfer), GRANT_DELAY_MS);
+            return undefined;
+        }
         return postMessage.call(this, message, transfer);
     };
     child.on('message', (message) => measure('utility → main', message));

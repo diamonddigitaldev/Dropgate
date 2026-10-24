@@ -204,6 +204,8 @@ class Desktop {
     netLogs = [];
     /** Where the app's spell checker downloads its dictionaries from, for the next launch. */
     dictionaryUrl = NO_DICTIONARIES;
+    /** How late main's grants reach the file service in the next launch, in ms (desktop-preload.cjs): none by default. */
+    grantDelayMs = 0;
 
     /**
      * @param {object} opts
@@ -260,6 +262,7 @@ class Desktop {
                 DROPGATE_TEST_REAL_CLIPBOARD: this.real ? '1' : '0',
                 DROPGATE_TEST_DICTIONARY_URL: this.dictionaryUrl,
                 DROPGATE_TEST_DOWNLOADS: this.downloads,
+                DROPGATE_TEST_GRANT_DELAY_MS: String(this.grantDelayMs),
             }),
             // The TLS proxy's certificate is made up for the test, so the app is told to accept it.
             ignoreHTTPSErrors: Boolean(this.proxy),

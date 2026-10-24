@@ -34,6 +34,18 @@ const MOST_FILES = 10_000;
 const MAX_NAME = 255;
 
 /**
+ * How long a read or an open waits for its grant to arrive, at most. Main
+ * makes each grant before it tells the transfer window of the transfer, but
+ * the grant comes from main and the request over the transfer window's port,
+ * and nothing orders the two: a request can come first, most of all just
+ * after the file service starts, with both waiting for it (Share with
+ * Dropgate's upload starts it a moment before). So a request for a grant
+ * that isn't here yet waits for it, then is refused; one for a grant revoked
+ * is refused at once.
+ */
+const GRANT_WAIT_MS = 5_000;
+
+/**
  * Windows' Mark of the Web, as a saved file's Zone.Identifier stream: the
  * Internet zone, and nothing else (no HostUrl or ReferrerUrl, so nothing
  * says where it came from), so SmartScreen checks a program before it runs
@@ -112,10 +124,18 @@ function savedName(at) {
  * On Windows, each file saved, a ZIP and every file of a bundle, gets the
  * Mark of the Web (ZONE_IDENTIFIER) as it's put in place, and no other
  * stream; elsewhere, nothing.
+ *
+ * A read or an open can arrive before its grant (GRANT_WAIT_MS): it waits
+ * for it, and is answered once it's here.
  */
 class FileService {
     /** @type {Map<string, { path: string, size: number, mtimeMs: number, fd: number | null }>} */
     #grants = new Map();
+    /** The grants and outputs revoked: a request for one is refused at once, never waited on. */
+    #ended = new Set();
+    /** The requests waiting for their grant or output to arrive, by its ID: each one's way of being told whether it came. */
+    #waiting = new Map();
+    #grantWaitMs;
     /** @type {Map<string, { folder: string, shape: string, count: number, opened: number, sinks: Set<string>, staged: string[] }>} */
     #outputs = new Map();
     /**
@@ -138,12 +158,42 @@ class FileService {
      * @param {(saved: { output: string, path: string }) => void} [options.onSaved] - A download is in place (a bundle's: its folder).
      * @param {boolean} [options.markOfTheWeb] - Whether each file saved gets Windows' Mark of the Web: on Windows only.
      * @param {() => Date} [options.now] - The time, for a bundle's or a ZIP's name.
+     * @param {number} [options.grantWaitMs] - How long a request waits for its grant to arrive (GRANT_WAIT_MS).
      */
-    constructor({ partials, onSaved = () => {}, markOfTheWeb = process.platform === 'win32', now = () => new Date() } = {}) {
+    constructor({ partials, onSaved = () => {}, markOfTheWeb = process.platform === 'win32', now = () => new Date(), grantWaitMs = GRANT_WAIT_MS } = {}) {
         this.#partials = partials;
         this.#onSaved = onSaved;
         this.#markOfTheWeb = markOfTheWeb;
         this.#now = now;
+        this.#grantWaitMs = grantWaitMs;
+    }
+
+    /**
+     * A request for a grant or an output that isn't here: a promise of whether
+     * it came in time, or null (refused at once) for one revoked, or an ID that
+     * isn't one.
+     * @param {unknown} id
+     * @returns {Promise<boolean> | null}
+     */
+    #whenGranted(id) {
+        if (typeof id !== 'string' || !GRANT_ID.test(id) || this.#ended.has(id)) return null;
+        return new Promise((resolve) => {
+            const waiters = this.#waiting.get(id) ?? new Set();
+            this.#waiting.set(id, waiters);
+            const told = (granted) => {
+                clearTimeout(timer);
+                waiters.delete(told);
+                if (waiters.size === 0) this.#waiting.delete(id);
+                resolve(granted);
+            };
+            const timer = setTimeout(() => told(false), this.#grantWaitMs);
+            waiters.add(told);
+        });
+    }
+
+    /** Tell the requests waiting for a grant or an output whether it came. */
+    #tell(id, granted) {
+        for (const told of [...(this.#waiting.get(id) ?? [])]) told(granted);
     }
 
     /**
@@ -155,8 +205,10 @@ class FileService {
         if (typeof handle !== 'string' || !GRANT_ID.test(handle)) throw new Error('Expected a grant.');
         if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('Expected a file.');
         if (!Number.isSafeInteger(size) || size < 0 || !Number.isFinite(mtimeMs)) throw new Error('Expected the file as it was handed over.');
-        this.revoke(handle);
+        this.#closeGrant(handle);
+        this.#ended.delete(handle);
         this.#grants.set(handle, { path: filePath, size, mtimeMs, fd: null });
+        this.#tell(handle, true);
     }
 
     /**
@@ -171,29 +223,46 @@ class FileService {
         const counted = shape === 'files' ? Number.isSafeInteger(count) && count >= 2 && count <= MOST_FILES : count === undefined;
         if (!counted) throw new Error('Expected how many files the bundle saves.');
         if (typeof this.#partials !== 'string' || !path.isAbsolute(this.#partials)) throw new Error('Expected the partial folder.');
-        this.revokeOutput(output);
+        this.#closeOutput(output);
+        this.#ended.delete(output);
         this.#outputs.set(output, { folder, shape, count: count ?? 1, opened: 0, sinks: new Set(), staged: [] });
+        this.#tell(output, true);
     }
 
     /** The upload is done with a file: its descriptor is closed, and it can't be read again. */
     revoke(handle) {
+        this.#closeGrant(handle);
+        if (typeof handle === 'string' && GRANT_ID.test(handle)) this.#ended.add(handle);
+        this.#tell(handle, false);
+    }
+
+    /** The download is done with its output: a file still being written there is deleted, so are a bundle's kept so far, and nothing more can be. */
+    revokeOutput(output) {
+        this.#closeOutput(output);
+        if (typeof output === 'string' && GRANT_ID.test(output)) this.#ended.add(output);
+        this.#tell(output, false);
+    }
+
+    /** Every grant and output revoked, as the service stops: nothing partial is left, and nothing waits. */
+    revokeAll() {
+        for (const handle of [...this.#grants.keys()]) this.revoke(handle);
+        for (const output of [...this.#outputs.keys()]) this.revokeOutput(output);
+        for (const id of [...this.#waiting.keys()]) this.#tell(id, false);
+    }
+
+    /** A grant gone: its descriptor closed. */
+    #closeGrant(handle) {
         const grant = this.#grants.get(handle);
         if (!grant) return;
         this.#grants.delete(handle);
         if (grant.fd !== null) fs.closeSync(grant.fd);
     }
 
-    /** The download is done with its output: a file still being written there is deleted, so are a bundle's kept so far, and nothing more can be. */
-    revokeOutput(output) {
+    /** An output gone: whatever was being written there deleted. */
+    #closeOutput(output) {
         if (!this.#outputs.has(output)) return;
         this.#discardAll(output);
         this.#outputs.delete(output);
-    }
-
-    /** Every grant and output revoked, as the service stops: nothing partial is left. */
-    revokeAll() {
-        for (const handle of [...this.#grants.keys()]) this.revoke(handle);
-        for (const output of [...this.#outputs.keys()]) this.revokeOutput(output);
     }
 
     /**
@@ -214,7 +283,9 @@ class FileService {
      *   written or put in place (and then nothing of it is left);
      * - `{ error }` for a request refused: one of the wrong shape, an unknown
      *   grant, output or sink (a path is never one), a revoked one, or a
-     *   range or size that isn't whole numbers inside the file.
+     *   range or size that isn't whole numbers inside the file. A read or an
+     *   open for a grant or output not here yet is answered once it is, or
+     *   refused if it hasn't come in GRANT_WAIT_MS.
      * @param {unknown} request
      */
     answer(request) {
@@ -231,9 +302,14 @@ class FileService {
         }
     }
 
-    #read({ id, handle, start, end }, refuse) {
+    #read(request, refuse) {
+        const { id, handle, start, end } = request;
         const grant = typeof handle === 'string' ? this.#grants.get(handle) : undefined;
-        if (!grant) return refuse('not a file this upload may read.');
+        if (!grant) {
+            const why = 'not a file this upload may read.';
+            const coming = this.#whenGranted(handle);
+            return coming ? coming.then((granted) => (granted ? this.#read(request, refuse) : refuse(why))) : refuse(why);
+        }
         if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > grant.size || end - start > READ_PIECE_BYTES) {
             return refuse('not a range of the file.');
         }
@@ -259,9 +335,14 @@ class FileService {
         return { id, bytes };
     }
 
-    #open({ id, output, name, size, index }, refuse) {
+    #open(request, refuse) {
+        const { id, output, name, size, index } = request;
         const granted = typeof output === 'string' ? this.#outputs.get(output) : undefined;
-        if (!granted) return refuse('not an output this download may write.');
+        if (!granted) {
+            const why = 'not an output this download may write.';
+            const coming = this.#whenGranted(output);
+            return coming ? coming.then((came) => (came ? this.#open(request, refuse) : refuse(why))) : refuse(why);
+        }
         // A ZIP's name is the file service's own: core gives it none.
         const named = typeof name === 'string' && name.length <= MAX_NAME && (name.length > 0 || granted.shape === 'zip');
         if (!named || !Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(index) || index < 0) {

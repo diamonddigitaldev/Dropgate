@@ -72,6 +72,21 @@ test('a pasted link reads its list of files with no lease and waits; Download sa
     }
 });
 
+// The transfer window opens a download's file over its own port, not main's: the open could reach the file
+// service before main's grant of the folder. The grants are held back here (desktop-preload.cjs), so it always does.
+test('a download saves its file even when its first open reaches the file service before the folder\'s grant', async ({ desktop, server }) => {
+    const { file, link } = await uploaded(desktop, server, 'Granted late é.bin', 300_000, 66);
+    desktop.grantDelayMs = 1_000;
+    const app = await desktop.launch();
+    const window = await app.window();
+    await addLink(window, link);
+    await expect(downloadStatus(window)).toHaveText('Ready');
+    await cardButton(downloadCard(window), 'Download').click();
+    await expect(downloadStatus(window)).toHaveText('Saved to Downloads', { timeout: 30_000 });
+    expect(app.eventsOf('download-finished').map(({ status, error }) => ({ status, error })), 'how the download finished').toEqual([{ status: 'success' }]);
+    expect(summary(fs.readFileSync(path.join(desktop.downloads, file.name)))).toEqual(summary(file.buffer));
+});
+
 test('a code or a direct transfer\'s link says direct transfers come later; a link that isn\'t Dropgate\'s is refused; neither makes a download', async ({ desktop, server }) => {
     const app = await desktop.launch();
     const window = await app.window();

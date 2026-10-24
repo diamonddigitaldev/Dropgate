@@ -165,6 +165,28 @@ test.describe('on a server with HTTPS', () => {
         await receiveBundle(page, desktop, link, files);
     });
 
+    // A share's launch starts the file service a moment before its upload, and the transfer window's first
+    // read comes over its own port, not main's: it could arrive before main's grant for the file, and was
+    // refused, so the upload failed ("A file couldn't be read.") and the app quit with no link. The grants
+    // are held back here (desktop-preload.cjs), so the read always comes first.
+    test('Share with Dropgate on several files uploads them even when the first read reaches the file service before their grants', async ({ desktop, server, secrets, page }) => {
+        const files = [madeUpFile('Early one.bin', 40_000, 28), madeUpFile('ünïcode early two.bin', 6_000_000, 29)];
+        secrets.addFiles(files);
+        await setUpAndQuit(desktop);
+
+        const shared = files.map((file) => desktop.addFile(file));
+        desktop.grantDelayMs = 1_000;
+        const app = await desktop.launch(...shared, '--upload');
+        expect(await app.exited(), "the app's exit code").toBe(0);
+
+        expect(app.eventsOf('upload-finished').map(({ status, error }) => ({ status, error })), 'how the upload finished').toEqual([{ status: 'success' }]);
+        const { link } = expectLinkCopied(app, shared);
+        secrets.addLink(link);
+        expect(uploadsStarted(server), 'the uploads the server was asked to start').toHaveLength(1);
+
+        await receiveBundle(page, desktop, link, files);
+    });
+
     test('Share with Dropgate on several files while the app is open hands them all to it as one bundle', async ({ desktop, server, secrets, page }) => {
         const files = [madeUpFile('first.bin', 30_000, 26), madeUpFile('second.bin', 31_000, 27)];
         secrets.addFiles(files);
