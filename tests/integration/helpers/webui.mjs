@@ -22,7 +22,7 @@ export async function uploadFromHomePage(page, files, { encrypted, lifetime, max
     // Without encryption, the server stores the names; with it, it must never see them.
     secretsOf(page).addFiles(files, { storedByServer: !encrypted });
     await page.goto('/');
-    await expect(page.locator('#securityText')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
+    await expect(page.locator('#securityText')).toHaveText(encrypted ? /^End-to-end encrypted\./ : /^Not encrypted: /);
 
     await page.locator('#fileInput').setInputFiles(files);
     if (lifetime) {

@@ -57,7 +57,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - If it keeps happening behind a reverse proxy, check the proxy's timeouts and body size limit, and that it passes `Range` and `If-Range` through to the server.
 
 **"The server dropped this paused upload."**
-- The upload was paused for longer than the server keeps a paused upload: `UPLOAD_MAX_PAUSE_MINUTES` (60 by default) from the pause, the time the Web UI showed ("The server keeps this upload until …"), and the Dropgate Client ("Kept until …", with a notification 5 minutes before). Nothing resumes by itself, so the server deleted what it had. Upload the files again; to allow longer pauses, raise `UPLOAD_MAX_PAUSE_MINUTES` (at most `1440`, a day).
+- The upload was paused for longer than the server keeps a paused upload: `UPLOAD_MAX_PAUSE_MINUTES` (60 by default) from the pause, the time the Web UI and the Dropgate Client showed ("Kept until …"; the Dropgate Client also notifies 5 minutes before). Nothing resumes by itself, so the server deleted what it had. Upload the files again; to allow longer pauses, raise `UPLOAD_MAX_PAUSE_MINUTES` (at most `1440`, a day).
 - A restart drops every upload in progress, paused ones too.
 - **"The server dropped this paused download."** in the Dropgate Client is the same for a download: the server let its lease go once the pause ran out, and it counts as one download, since it got part of the file. Nothing of it is left on your disk. Choose **Retry** to download it again from the start, if the upload is still there.
 - No **Pause** on an upload or a download in the Dropgate Client: the server has pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`).

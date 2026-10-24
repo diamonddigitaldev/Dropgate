@@ -75,7 +75,7 @@ async function receiveBundle(page, desktop, link, files) {
 async function receive(page, desktop, link, file, { encrypted }) {
     await page.goto(desktop.receivingUrl(link));
     await expect(page.locator('#file-name')).toHaveText(file.name);
-    await expect(page.locator('#file-encryption')).toHaveText(encrypted ? /end-to-end encrypted/i : /^none$/i);
+    await expect(page.locator('#file-encryption')).toHaveText(encrypted ? /end-to-end encrypted/i : /^not encrypted$/i);
     const got = await download(page, page.locator('#download-button'));
     await expect(page.locator('#status-title')).toHaveText(/download complete/i);
     expect(got.name).toBe(file.name);

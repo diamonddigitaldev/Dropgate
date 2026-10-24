@@ -1,5 +1,5 @@
 import { filenames } from './dropgate-core.js';
-import { bundleZipName, saveStream } from './page-common.js';
+import { bundleZipName, countOf, saveStream } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard } from './status-card.js';
 
 // The download page's half for an upload of several files. Every download it
@@ -183,7 +183,7 @@ async function downloadSingleFile(index, dlBtn) {
   if (dlBtn) dlBtn.disabled = true;
   if (fileProgressEl) fileProgressEl.style.display = 'block';
   if (fileProgressBar) fileProgressBar.style.width = '0%';
-  if (fileProgressText) fileProgressText.textContent = 'Starting...';
+  if (fileProgressText) fileProgressText.textContent = 'Starting…';
 
   // With no secure context, an unencrypted file goes to the browser itself.
   if (!canStream()) {
@@ -231,7 +231,7 @@ async function downloadAllAsZip() {
   downloadAllButton.style.display = 'none';
   progressContainer.style.display = 'block';
   progressBar.style.width = '0%';
-  progressText.textContent = 'Starting...';
+  progressText.textContent = 'Starting…';
 
   updateStatusCard({
     card,
@@ -243,7 +243,7 @@ async function downloadAllAsZip() {
   // With no secure context, each file goes to the browser itself, one after another, under the page's lease.
   if (!canStream()) {
     progressContainer.style.display = 'none';
-    statusTitle.textContent = 'Downloading Files...';
+    statusTitle.textContent = 'Downloading Files…';
     statusMessage.textContent = 'Your browser will download each file individually.';
     try {
       const lease = await pageLease();
@@ -264,7 +264,7 @@ async function downloadAllAsZip() {
       titleEl: statusTitle,
       messageEl: statusMessage,
       title: 'Downloads Started',
-      message: `${bundleState.files.length} files should be downloading. Check your browser's download bar.`,
+      message: `${countOf(bundleState.files.length, 'file')} should be downloading. Check your browser's download bar.`,
     });
     return;
   }
@@ -299,8 +299,8 @@ async function downloadAllAsZip() {
       messageEl: statusMessage,
       title: 'Download Complete!',
       message: bundleState.isEncrypted
-        ? `All ${bundleState.files.length} files have been decrypted and saved as "${zipName}".`
-        : `All ${bundleState.files.length} files have been saved as "${zipName}".`,
+        ? `All ${countOf(bundleState.files.length, 'file')} have been decrypted and saved as "${zipName}".`
+        : `All ${countOf(bundleState.files.length, 'file')} have been saved as "${zipName}".`,
     });
   } catch (error) {
     if (error) console.error(error);
@@ -308,7 +308,7 @@ async function downloadAllAsZip() {
     progressFileName.textContent = '';
     downloadActions.style.display = 'block';
     downloadAllButton.style.display = 'inline-block';
-    downloadAllButton.textContent = 'Retry Download';
+    downloadAllButton.textContent = 'Retry';
 
     setStatusError({
       card,
@@ -356,7 +356,7 @@ export function showBundle({ id, opened, format, takeLease: take }) {
 
   bundleFileCount.textContent = `${meta.files.length}`;
   bundleTotalSize.textContent = formatBytes(meta.totalSize);
-  bundleEncryption.textContent = meta.encrypted ? 'End-to-End Encrypted' : 'None';
+  bundleEncryption.textContent = meta.encrypted ? 'End-to-End Encrypted' : 'Not Encrypted';
 
   if (meta.encrypted) {
     encryptionStatement.style.display = 'block';
@@ -376,5 +376,5 @@ export function showBundle({ id, opened, format, takeLease: take }) {
   downloadAllButton.addEventListener('click', downloadAllAsZip);
 
   statusTitle.textContent = 'Ready to Download';
-  statusMessage.textContent = `${meta.files.length} files available. Click "${downloadAllButton.textContent}" or expand the list to download individually.`;
+  statusMessage.textContent = `${countOf(meta.files.length, 'file')} available. Click "${downloadAllButton.textContent}" or expand the list to download individually.`;
 }

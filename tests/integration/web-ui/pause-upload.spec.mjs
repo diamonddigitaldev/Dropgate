@@ -36,7 +36,7 @@ async function holdChunks(page) {
 async function startUpload(page, file, { encrypted }) {
     secretsOf(page).addFiles([file], { storedByServer: !encrypted });
     await page.goto('/');
-    await expect(page.locator('#securityText')).toHaveText(encrypted ? /will be end-to-end encrypted/i : /will not be encrypted/i);
+    await expect(page.locator('#securityText')).toHaveText(encrypted ? /^End-to-end encrypted\./ : /^Not encrypted: /);
     await page.locator('#fileInput').setInputFiles([file]);
     await page.locator('#startBtn').click();
     if (!encrypted) await page.locator('#confirmInsecureUpload').click();
@@ -64,7 +64,7 @@ for (const encrypted of [false, true]) {
             await pause.click();
 
             await expect(page.locator('#progressTitle')).toHaveText(/upload paused/i);
-            await expect(page.locator('#progressSub')).toHaveText(/^Paused\. The server keeps this upload until .+\.$/);
+            await expect(page.locator('#progressSub')).toHaveText(/^Paused\. Kept until .+\.$/);
             const sub = await page.locator('#progressSub').innerText();
             expect([shortly, aMinuteLater].some((time) => sub.includes(`until ${time}.`)), `"${sub}" gives the server's 30 minutes as a local time`).toBe(true);
             await expect(resume).toBeEnabled();

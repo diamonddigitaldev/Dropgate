@@ -21,7 +21,7 @@ test('cancelling an upload part-way says it was cancelled, goes back to the star
     });
 
     await page.goto('/');
-    await expect(page.locator('#securityText')).toHaveText(/will be end-to-end encrypted/i);
+    await expect(page.locator('#securityText')).toHaveText(/^End-to-end encrypted\./);
     await page.locator('#fileInput').setInputFiles([file]);
     await page.locator('#startBtn').click();
 

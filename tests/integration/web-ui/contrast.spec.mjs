@@ -31,7 +31,7 @@ test.describe('the home page, on a server without end-to-end encryption', () => 
         await page.locator('#lifetimeValue').fill('48');
         await page.locator('#maxDownloadsValue').fill('9');
         await expect(page.locator('#lifetimeHelp')).toHaveText(/too long/i);
-        await expect(page.locator('#maxDownloadsHelp')).toHaveText(/exceeds/i);
+        await expect(page.locator('#maxDownloadsHelp')).toHaveText(/too many/i);
         await expectContrast(page, 'the home page, with files chosen and its fields in error');
         await expectFocusRings(page, 'the home page, with files chosen');
 
@@ -96,7 +96,7 @@ test.describe('the toasts', () => {
         await uploadFromHomePage(page, [madeUpFile('Contrast toast é.bin', 3_000, 65)], { encrypted: true });
         await expectContrast(page, 'a success toast', async () => {
             await page.locator('#copyShare').click();
-            await expect(page.locator('#toast-host .toast-success').last()).toHaveText(/copied link/i);
+            await expect(page.locator('#toast-host .toast-success').last()).toHaveText(/link copied/i);
         });
 
         await page.locator('#newUpload').click();

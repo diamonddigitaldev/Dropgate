@@ -90,8 +90,8 @@ export function setStatusLoading({
   titleEl,
   messageEl,
   icon = Icons.DOWNLOAD,
-  title = 'Loading...',
-  message = 'Please wait...',
+  title = 'Loading…',
+  message = 'Please wait…',
 }) {
   updateStatusCard({
     card,

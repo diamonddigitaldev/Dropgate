@@ -72,7 +72,7 @@ test.describe('a bundle, unencrypted', () => {
         const from = server.requests().length;
         await page.goto(link);
         await expect(page.locator('#bundle-file-count')).toHaveText(String(files.length));
-        await expect(page.locator('#bundle-encryption')).toHaveText(/^none$/i);
+        await expect(page.locator('#bundle-encryption')).toHaveText(/^not encrypted$/i);
         await downloadEachThenZip(page, files);
         await expectOneLease(page, server, pathname.slice(1), from);
     });

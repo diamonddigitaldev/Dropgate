@@ -1,5 +1,5 @@
 import { hosts, zip, filenames } from './dropgate-core.js';
-import { bundleZipName, formatBytes, pageClient, saveStream } from './page-common.js';
+import { bundleZipName, countOf, formatBytes, pageClient, saveStream } from './page-common.js';
 import { setStatusError, setStatusSuccess, StatusType, Icons, updateStatusCard, clearStatusBorder } from './status-card.js';
 
 const elTitle = document.getElementById('title');
@@ -154,7 +154,7 @@ function startDownload() {
     messageEl: elMsg,
     status: StatusType.PRIMARY,
     icon: Icons.SYNC,
-    title: 'Receiving...',
+    title: 'Receiving…',
     message: 'Keep this tab open until the transfer completes.',
   });
 
@@ -187,17 +187,17 @@ function startDownload() {
 
 async function start() {
   if (!code) {
-    showError('Invalid link', 'No sharing code was provided.');
+    showError('Invalid Link', 'No sharing code was provided.');
     return;
   }
 
   if (!hosts.isSecureForDirect(location.hostname, window.isSecureContext)) {
-    showError('Secure connection required', 'P2P transfers require HTTPS in most browsers.');
+    showError('Secure Connection Required', 'P2P transfers require HTTPS in most browsers.');
     return;
   }
 
-  elTitle.textContent = 'Connecting...';
-  elMsg.textContent = `Connecting to ${code}...`;
+  elTitle.textContent = 'Connecting…';
+  elMsg.textContent = `Connecting to ${code}…`;
 
   // Load PeerJS
   let Peer;
@@ -205,7 +205,7 @@ async function start() {
     Peer = await loadPeerJS();
   } catch (err) {
     console.error(err);
-    showError('Failed to load', 'Could not load the P2P library.');
+    showError('Failed to Load', 'Could not load the P2P library.');
     return;
   }
 
@@ -216,7 +216,7 @@ async function start() {
       autoReady: false, // We want to show preview before starting transfer
       onStatus: () => {
         elTitle.textContent = 'Connected';
-        elMsg.textContent = 'Waiting for file details...';
+        elMsg.textContent = 'Waiting for file details…';
       },
       onMeta: ({ name, total: nextTotal, sendReady, fileCount: metaFileCount, files, totalSize }) => {
         total = totalSize || nextTotal;
@@ -313,7 +313,7 @@ async function start() {
           title: 'Transfer Complete',
           message: 'Success!',
         });
-        elMeta.textContent = `The ${isMultiFile ? `${fileCount} files have` : 'file has'} been saved to your downloads.`;
+        elMeta.textContent = isMultiFile ? `The ${countOf(fileCount, 'file')} have been saved to your downloads.` : 'The file has been saved to your downloads.';
         elMeta.hidden = false;
         elFileDetails.style.display = 'none';
         elCancelBtn.style.display = 'none';

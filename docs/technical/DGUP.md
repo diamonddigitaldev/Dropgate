@@ -181,7 +181,7 @@ The client makes 32 more random bytes for each upload. Only their SHA-256 goes w
 
 ### 4.10 Secure Context Requirement
 
-Encrypting and decrypting need the Web Crypto API, which a browser only gives a secure context (HTTPS, or `localhost`). A client that can't get one can't encrypt: the Web UI then says "This connection is not secure. Your upload will not be encrypted.", and asks before it sends anything (the Upload Security Warning); its download page says an encrypted upload can't be downloaded there ([§9.2](#92-the-download-page)).
+Encrypting and decrypting need the Web Crypto API, which a browser only gives a secure context (HTTPS, or `localhost`). A client that can't get one can't encrypt: the Web UI then says so, with its server's address ("Not encrypted: drop.example.com is plain HTTP, so the server can read your files."), and asks before it sends anything (the Upload Security Warning); its download page says an encrypted upload can't be downloaded there ([§9.2](#92-the-download-page)).
 
 ---
 
@@ -532,10 +532,10 @@ The Web UI's result screen, after an upload of one file or several, has **Delete
 
 ### 9.4 Pausing an Upload From the Home Page
 
-The Web UI's upload, of one file or several, has **Pause Upload** beside **Cancel Upload** while it runs, through the core library's `pause()` and `resume()` ([§5.4](#54-pause-and-resume)).
+The Web UI's upload, of one file or several, has **Pause** beside **Cancel** while it runs, through the core library's `pause()` and `resume()` ([§5.4](#54-pause-and-resume)).
 
 - **Pause is there only where the server allows it,** and can only be pressed once the server has taken the upload (the snapshot's `canPause`). With pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`, `maxPauseMinutes` `0`), there's no Pause at all.
-- **Paused,** the card says "Paused. The server keeps this upload until 14:32.", the server's deadline as a local time (and "tomorrow" if it is), with **Resume Upload** and **Cancel Upload**. Resumed, the upload carries on from what the server holds.
+- **Paused,** the card says "Paused. Kept until 14:32.", the server's deadline as a local time (and "tomorrow" if it is), as the desktop app's does, with **Resume** and **Cancel**. Resumed, the upload carries on from what the server holds.
 - **Nothing resumes by itself.** Still paused at the deadline, the upload ends, and the card says "The server dropped this paused upload."
 - **What a pause holds is in the page's memory only,** as an upload's state always is: nothing in storage or a URL. Closing or reloading the page ends the upload; the server drops it at its deadline.
 

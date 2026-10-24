@@ -52,7 +52,7 @@ test.describe('the Upload Security Warning', () => {
         const file = madeUpFile('Not sent é.bin', 2_000, 81);
         secretsOf(page).addFiles([file], { storedByServer: true });
         await page.goto('/');
-        await expect(page.locator('#securityText')).toHaveText(/will not be encrypted/i);
+        await expect(page.locator('#securityText')).toHaveText(/^Not encrypted: /);
         await page.locator('#fileInput').setInputFiles([file]);
 
         const modal = page.locator('#insecureUploadModal');

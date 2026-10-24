@@ -21,7 +21,7 @@ test.describe('a single file, unencrypted', () => {
 
         await page.goto(link);
         await expect(page.locator('#file-name')).toHaveText(file.name);
-        await expect(page.locator('#file-encryption')).toHaveText(/^none$/i);
+        await expect(page.locator('#file-encryption')).toHaveText(/^not encrypted$/i);
         const got = await download(page, page.locator('#download-button'));
         await expect(page.locator('#status-title')).toHaveText(/download complete/i);
 

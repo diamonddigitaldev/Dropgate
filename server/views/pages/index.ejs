@@ -43,7 +43,7 @@
                       <button class="btn btn-sm btn-outline-secondary" id="btnClearAll" type="button">Clear All</button>
                     </div>
                   </div>
-                  <div class="mt-4 small text-body-secondary" id="maxUploadHint">Loading server limits...</div>
+                  <div class="mt-4 small text-body-secondary" id="maxUploadHint">Loading server limits…</div>
                 </div>
 
                 <div id="fileListSection" class="d-none mt-3">
@@ -67,7 +67,7 @@
 
                 <div class="mb-3" id="optUploadMode">
                   <div class="d-flex align-items-center justify-content-between">
-                    <div class="form-label fw-semibold mb-1">Upload Mode</div>
+                    <div class="form-label fw-semibold mb-1">Upload mode</div>
                     <button type="button" class="help-btn"
                       style="background: none; border: none; cursor: help; color: var(--bs-secondary-color);"
                       data-tooltip='"Standard" will return a link to share your file. "Direct Transfer" uses peer-to-peer; you must keep this page open while sending.'
@@ -82,7 +82,7 @@
                 </div>
 
                 <div id="optLifetime" class="mb-3">
-                  <div class="form-label fw-semibold mb-1">File Lifetime</div>
+                  <div class="form-label fw-semibold mb-1">File lifetime</div>
                   <div class="input-group">
                     <input id="lifetimeValue" class="form-control" type="number" min="0" step="0.5" value="24" />
                     <select id="lifetimeUnit" class="form-select" aria-label="Lifetime unit" style="max-width: 9rem;">
@@ -92,22 +92,22 @@
                       <option value="unlimited">Unlimited</option>
                     </select>
                   </div>
-                  <div class="form-text" id="lifetimeHelp">Loading...</div>
+                  <div class="form-text" id="lifetimeHelp">Loading…</div>
                 </div>
 
                 <div id="optMaxDownloads" class="mb-3">
-                  <div class="form-label fw-semibold mb-1">Max Downloads</div>
+                  <div class="form-label fw-semibold mb-1">Max downloads</div>
                   <div class="input-group">
                     <input id="maxDownloadsValue" class="form-control" type="number" min="0" step="1" value="1" />
                     <span class="input-group-text">downloads</span>
                   </div>
-                  <div class="form-text" id="maxDownloadsHelp">Loading...</div>
+                  <div class="form-text" id="maxDownloadsHelp">Loading…</div>
                 </div>
 
                 <div id="securityStatus" class="security-status-card mb-3">
                   <div class="d-flex align-items-center gap-2">
                     <span class="material-icons-round" id="securityIcon">https</span>
-                    <span id="securityText">Checking security...</span>
+                    <span id="securityText">Checking security…</span>
                   </div>
                 </div>
 
@@ -127,24 +127,22 @@
           <div class="card-body p-4 text-center">
             <div id="progressIcon" class="text-primary mb-2"><span class="material-icons-round">upload</span></div>
             <h5 class="mb-1" id="progressTitle">Uploading</h5>
-            <div class="text-body-secondary" id="progressSub">Preparing...</div>
+            <div class="text-body-secondary" id="progressSub">Starting…</div>
             <div class="progress mt-3" role="progressbar" style="height: 6px;">
               <div id="progressFill" class="progress-bar" style="width: 0%"></div>
             </div>
-            <div class="small text-body-secondary mt-2" id="progressBytes">Starting upload...</div>
-            <button class="btn btn-outline-primary mt-3" id="pauseStandardUpload" type="button" hidden>Pause Upload</button>
-            <button class="btn btn-primary mt-3" id="resumeStandardUpload" type="button" hidden>Resume Upload</button>
-            <button class="btn btn-secondary mt-3" id="cancelStandardUpload" type="button" style="display: none;">Cancel
-              Upload</button>
-            <button class="btn btn-secondary mt-3" id="cancelP2PSend" type="button" style="display: none;">Cancel
-              Transfer</button>
+            <div class="small text-body-secondary mt-2" id="progressBytes">Starting…</div>
+            <button class="btn btn-outline-primary mt-3" id="pauseStandardUpload" type="button" hidden>Pause</button>
+            <button class="btn btn-primary mt-3" id="resumeStandardUpload" type="button" hidden>Resume</button>
+            <button class="btn btn-secondary mt-3" id="cancelStandardUpload" type="button" style="display: none;">Cancel</button>
+            <button class="btn btn-secondary mt-3" id="cancelP2PSend" type="button" style="display: none;">Cancel</button>
           </div>
         </div>
 
         <div id="p2pWaitCard" class="card shadow-sm mt-4 border border-primary" hidden>
           <div class="card-body p-4 text-center">
             <div class="text-primary mb-2"><span class="material-icons-round">wifi_tethering</span></div>
-            <h5 class="mb-2">Awaiting connection...</h5>
+            <h5 class="mb-2">Awaiting connection…</h5>
             <div class="text-body-secondary">Provide your recipient with the code below:</div>
 
             <div class="code-box my-3" id="p2pCode">ABCD-1234</div>
@@ -152,10 +150,10 @@
             <div class="small text-body-secondary mb-2" id="p2pLinkLabel">or share this link:</div>
             <div class="input-group">
               <input class="form-control" id="p2pLink" readonly value="" />
-              <button class="btn btn-outline-secondary" id="copyP2PLink" type="button" aria-label="Copy link">
+              <button class="btn btn-outline-secondary" id="copyP2PLink" type="button" aria-label="Copy Link">
                 <span class="material-icons-round">content_copy</span>
               </button>
-              <button class="btn btn-outline-secondary" id="qrP2PLink" type="button" aria-label="Show QR code">
+              <button class="btn btn-outline-secondary" id="qrP2PLink" type="button" aria-label="Show QR Code">
                 <span class="material-icons-round">qr_code_2</span>
               </button>
             </div>
@@ -172,10 +170,10 @@
 
             <div class="input-group mt-3" id="shareLinkGroup">
               <input class="form-control" id="shareLink" readonly value="" />
-              <button class="btn btn-outline-secondary" id="copyShare" type="button" aria-label="Copy link">
+              <button class="btn btn-outline-secondary" id="copyShare" type="button" aria-label="Copy Link">
                 <span class="material-icons-round">content_copy</span>
               </button>
-              <button class="btn btn-outline-secondary" id="qrShare" type="button" aria-label="Show QR code">
+              <button class="btn btn-outline-secondary" id="qrShare" type="button" aria-label="Show QR Code">
                 <span class="material-icons-round">qr_code_2</span>
               </button>
             </div>
@@ -258,7 +256,8 @@
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <p class="mb-0">It's removed from the server now, and its link stops working for everyone. This can't be undone.</p>
+          <%# The server's address, put in as it opens (webui-main.js). %>
+          <p class="mb-0" id="deleteUploadText"></p>
         </div>
         <div class="modal-footer border-0">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>

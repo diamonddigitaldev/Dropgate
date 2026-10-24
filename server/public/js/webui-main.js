@@ -73,6 +73,7 @@ const els = {
   newUpload: $('newUpload'),
   deleteUpload: $('deleteUpload'),
   deleteUploadModal: $('deleteUploadModal'),
+  deleteUploadText: $('deleteUploadText'),
   confirmDeleteUpload: $('confirmDeleteUpload'),
 
   qrModal: $('qrModal'),
@@ -135,6 +136,18 @@ document.addEventListener('visibilitychange', () => {
 });
 
 const coreClient = pageClient();
+
+// The desktop app's words, wherever the two say the same thing, and its copy
+// rules (client/test/webui-wording.test.mjs checks both).
+
+/** The text core gives with the one-character ellipsis, as the desktop app writes it. */
+const tidy = (text) => String(text ?? '').replace(/\.\.\.$/, '…');
+/** A reason after a colon starts with a capital. */
+const sentence = (text) => (text ? text[0].toUpperCase() + text.slice(1) : text);
+/** A number of hours: a server's limit can be part of one, which countOf() would round. */
+const hours = (n) => (Number.isInteger(n) ? countOf(n, 'hour') : `${n} hours`);
+/** An upload's name, as the desktop app's card gives it: its file's, or how many files. */
+const nameOf = (files) => (files.length === 1 ? files[0].name : countOf(files.length, 'file'));
 
 /**
  * A drop's files, and how many folders it held, which aren't uploaded. A
@@ -274,7 +287,7 @@ function updateFileUI() {
 
   if (isEmpty) return;
 
-  if (els.dzFileCount) els.dzFileCount.textContent = count === 1 ? '1 File Selected' : `${count} Files Selected`;
+  if (els.dzFileCount) els.dzFileCount.textContent = `${countOf(count, 'File')} Selected`;
 
   els.fileListContainer.innerHTML = '';
   for (let i = 0; i < state.files.length; i++) {
@@ -299,7 +312,8 @@ function updateFileUI() {
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'file-remove-btn';
-    removeBtn.title = 'Remove file';
+    removeBtn.title = 'Remove';
+    removeBtn.setAttribute('aria-label', `Remove ${f.name}`);
     removeBtn.innerHTML = '<span class="material-icons-round">close</span>';
     removeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -430,23 +444,24 @@ function updateSecurityStatus() {
   const isHttps = location.protocol === 'https:';
   const hasE2EE = state.uploadEnabled && state.e2ee && window.isSecureContext;
 
+  // In the desktop app's words (its Advanced Options), with this server's address.
   if (hasE2EE) {
     // Green: Full E2EE
     icon.textContent = 'verified';
     icon.className = 'material-icons-round text-success';
-    text.textContent = 'Your upload will be end-to-end encrypted.';
+    text.textContent = `End-to-end encrypted. ${location.host} can't read your files or their names.`;
     card.className = 'security-status-card security-green mb-3';
   } else if (isHttps) {
     // Yellow: HTTPS but no E2EE
     icon.textContent = 'warning';
     icon.className = 'material-icons-round text-warning';
-    text.textContent = "This server doesn't support encryption. Your upload is protected in transit via HTTPS.";
+    text.textContent = `Not encrypted: ${location.host} doesn't support end-to-end encryption, so the server can read your files.`;
     card.className = 'security-status-card security-yellow mb-3';
   } else {
     // Red: HTTP, no encryption at all
     icon.textContent = 'gpp_bad';
     icon.className = 'material-icons-round text-danger';
-    text.textContent = 'This connection is not secure. Your upload will not be encrypted.';
+    text.textContent = `Not encrypted: ${location.host} is plain HTTP, so the server can read your files.`;
     card.className = 'security-status-card security-red mb-3';
   }
 }
@@ -549,7 +564,7 @@ function updateCapabilitiesUI() {
     const p2pAvailable = state.p2pEnabled && state.p2pSecureOk;
     els.maxUploadHint.textContent = p2pAvailable
       ? 'Standard uploads are disabled on this server. Direct transfer (P2P) is available.'
-      : 'Uploads are disabled on this server.';
+      : 'File uploads are disabled on this server.';
   }
 
   // Lifetime
@@ -558,7 +573,7 @@ function updateCapabilitiesUI() {
     if (state.maxLifetimeHours > 0) {
       if (unlimitedOption) {
         unlimitedOption.disabled = true;
-        unlimitedOption.textContent = 'Unlimited (Disabled by Server)';
+        unlimitedOption.textContent = 'Unlimited (not allowed by the server)';
       }
     } else if (unlimitedOption) {
       unlimitedOption.disabled = false;
@@ -592,19 +607,19 @@ function updateCapabilitiesUI() {
       setDisabled(els.maxDownloadsValue, true);
       els.maxDownloadsValue.value = '1';
       els.maxDownloadsValue.min = '1';
-      els.maxDownloadsHelp.textContent = 'Server enforces single-use download links.';
+      els.maxDownloadsHelp.textContent = 'This server allows 1 download.';
       setHidden(els.optMaxDownloads, false);
     } else if (state.maxFileDownloads === 0) {
       // Server allows unlimited
       setDisabled(els.maxDownloadsValue, false);
       els.maxDownloadsValue.min = '0';
-      els.maxDownloadsHelp.textContent = '0 = unlimited downloads';
+      els.maxDownloadsHelp.textContent = '0 means unlimited downloads.';
       setHidden(els.optMaxDownloads, false);
     } else {
       // Server has a limit > 1 (0 is not allowed)
       setDisabled(els.maxDownloadsValue, false);
       els.maxDownloadsValue.min = '1';
-      els.maxDownloadsHelp.textContent = `Max: ${state.maxFileDownloads} downloads`;
+      els.maxDownloadsHelp.textContent = `Up to ${countOf(state.maxFileDownloads, 'download')}.`;
       setHidden(els.optMaxDownloads, false);
     }
   } else {
@@ -654,13 +669,16 @@ function lifetimeMsFromUI() {
   return lifetime.toMs(value, unit);
 }
 
+/** Why a lifetime is outside the server's limit of `maxH` hours. */
+const lifetimeTooLong = (maxH) => `Too long: This server keeps files up to ${hours(maxH)}.`;
+
 function validateLifetimeInput() {
   if (!state.uploadEnabled) return true;
   const maxH = state.maxLifetimeHours;
   const unit = els.lifetimeUnit.value;
 
   if (maxH === 0 && unit === 'unlimited') {
-    els.lifetimeHelp.textContent = 'No lifetime limit enforced by the server.';
+    els.lifetimeHelp.textContent = 'No time limit on this server.';
     els.lifetimeHelp.className = 'form-text text-body-secondary';
     return true;
   }
@@ -675,15 +693,15 @@ function validateLifetimeInput() {
   const ms = lifetimeMsFromUI();
   const maxMs = Number.isFinite(maxH) && maxH > 0 ? maxH * 60 * 60 * 1000 : null;
   if (maxMs && ms > maxMs) {
-    els.lifetimeHelp.textContent = `File lifetime too long. Server limit: ${maxH} hours.`;
+    els.lifetimeHelp.textContent = lifetimeTooLong(maxH);
     els.lifetimeHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
   if (maxH === 0) {
-    els.lifetimeHelp.textContent = 'No lifetime limit enforced by the server.';
+    els.lifetimeHelp.textContent = 'No time limit on this server.';
   } else if (maxH > 0) {
-    els.lifetimeHelp.textContent = `Max: ${maxH} hours`;
+    els.lifetimeHelp.textContent = `Up to ${hours(maxH)}.`;
   }
   els.lifetimeHelp.className = 'form-text text-body-secondary';
   return true;
@@ -697,39 +715,39 @@ function validateMaxDownloadsInput() {
 
   // Handle invalid input
   if (isNaN(value) || value < 0) {
-    els.maxDownloadsHelp.textContent = 'Must be a non-negative number.';
+    els.maxDownloadsHelp.textContent = max === 0 ? 'Enter a whole number: 0 or more.' : `Enter a whole number from 1 to ${max}.`;
     els.maxDownloadsHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
   // Server allows unlimited (0) - any value is valid
   if (max === 0) {
-    els.maxDownloadsHelp.textContent = '0 = unlimited downloads';
+    els.maxDownloadsHelp.textContent = '0 means unlimited downloads.';
     els.maxDownloadsHelp.className = 'form-text text-body-secondary';
     return true;
   }
 
   // Server has limit of 1 - input should be disabled anyway
   if (max === 1) {
-    els.maxDownloadsHelp.textContent = 'Server enforces single-use download links.';
+    els.maxDownloadsHelp.textContent = 'This server allows 1 download.';
     els.maxDownloadsHelp.className = 'form-text text-body-secondary';
     return true;
   }
 
   // Server has limit > 1
   if (value === 0) {
-    els.maxDownloadsHelp.textContent = `0 (unlimited) not allowed. Server limit: ${max} downloads.`;
+    els.maxDownloadsHelp.textContent = `This server doesn't allow unlimited downloads. It allows up to ${countOf(max, 'download')}.`;
     els.maxDownloadsHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
   if (value > max) {
-    els.maxDownloadsHelp.textContent = `Exceeds server limit of ${max} downloads.`;
+    els.maxDownloadsHelp.textContent = `Too many: This server allows up to ${countOf(max, 'download')}.`;
     els.maxDownloadsHelp.className = 'form-text text-danger-emphasis';
     return false;
   }
 
-  els.maxDownloadsHelp.textContent = `Max: ${max} downloads`;
+  els.maxDownloadsHelp.textContent = `Up to ${countOf(max, 'download')}.`;
   els.maxDownloadsHelp.className = 'form-text text-body-secondary';
   return true;
 }
@@ -784,6 +802,7 @@ function setShareIcon(icon, color) {
 async function deleteUploaded() {
   const uploaded = state.uploaded;
   if (!uploaded) return;
+  els.deleteUploadText.textContent = `${location.host} removes it at once, and its link stops working.`;
   const confirmed = await confirmWithModal(els.deleteUploadModal, els.confirmDeleteUpload, false, els.deleteUpload);
   if (!confirmed || state.uploaded !== uploaded) return;
 
@@ -795,7 +814,7 @@ async function deleteUploaded() {
     // An upload that has expired, or been downloaded as many times as it allows, is already gone.
     if (err?.code !== 'NOT_FOUND') {
       setDisabled(els.deleteUpload, false);
-      showToast(err?.message || "The upload couldn't be deleted.", 'danger');
+      showToast(`Couldn't delete ${uploaded.name}: ${sentence(err?.message || "The upload couldn't be deleted.")}`, 'danger');
       return;
     }
     alreadyGone = true;
@@ -809,7 +828,7 @@ async function deleteUploaded() {
   els.shareCard.classList.remove('border-success');
   els.shareCard.classList.add('border-secondary');
   if (els.shareTitle) els.shareTitle.textContent = 'Upload Deleted';
-  if (els.shareSub) els.shareSub.textContent = alreadyGone ? 'It was already gone from the server.' : 'It has been removed from the server, and its link no longer works.';
+  if (els.shareSub) els.shareSub.textContent = alreadyGone ? 'It was already gone from the server.' : 'Deleted from the server. Its link no longer works.';
   showToast(alreadyGone ? 'The upload was already gone.' : 'Upload deleted.', 'success');
 }
 
@@ -885,7 +904,7 @@ function copyToClipboardFallback(value) {
 
 async function startStandardUpload() {
   if (!state.uploadEnabled) {
-    showToast('Standard uploads are disabled on this server.', 'warning');
+    showToast('File uploads are disabled on this server.', 'warning');
     return;
   }
 
@@ -926,14 +945,14 @@ async function startStandardUpload() {
   const totalSize = files.reduce((sum, f) => sum + f.size, 0);
 
   if (!validateLifetimeInput()) {
-    showToast('File lifetime exceeds server limits.', 'danger');
+    showToast(lifetimeTooLong(state.maxLifetimeHours), 'danger');
     return;
   }
 
   const lifetimeMs = lifetimeMsFromUI();
   els.tagline.textContent = 'Standard Upload';
 
-  showProgress({ title: 'Uploading', sub: 'Preparing...', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'cloud_upload', iconColor: 'text-primary' });
+  showProgress({ title: 'Uploading', sub: 'Starting…', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'cloud_upload', iconColor: 'text-primary' });
 
   try {
     const upload = coreClient.hosted.upload({
@@ -946,17 +965,19 @@ async function startStandardUpload() {
       })(),
     });
 
-    // Where the upload is. Core's snapshots never name a file, so the name of
-    // the one an upload of several is on comes from this page's own list.
+    // Where the upload is, as the desktop app's card says it: while its chunks
+    // go, how far, and with several files, which of how many; otherwise core's step.
     upload.subscribe((snapshot) => {
       const { phase, text, percent, fileIndex, status, deadline } = snapshot;
       const p = (typeof percent === 'number') ? percent : 0;
       const paused = status === 'paused';
-      const onFile = files.length > 1 && phase === 'chunk';
-      const currentFileName = onFile ? files[fileIndex]?.name : null;
-      let sub = currentFileName ? `${text || phase} — ${currentFileName}` : (text || phase);
+      let sub = tidy(text || phase) || 'Starting…';
+      if (phase === 'chunk' && typeof percent === 'number') {
+        const of = files.length > 1 && Number.isInteger(fileIndex) ? ` · File ${fileIndex + 1} of ${files.length}` : '';
+        sub = `Uploading ${Math.floor(percent)}%${of}`;
+      }
       // Paused, the server holds the upload until its deadline, and nothing resumes it but Resume.
-      if (paused && text === 'Paused.' && deadline) sub = `Paused. The server keeps this upload until ${formatDeadline(deadline)}.`;
+      if (paused && text === 'Paused.' && deadline) sub = `Paused. Kept until ${formatDeadline(deadline)}.`;
       const view = paused
         ? { title: 'Upload Paused', icon: 'pause_circle', iconColor: 'text-secondary' }
         : { title: 'Uploading', icon: 'cloud_upload', iconColor: 'text-primary' };
@@ -1001,10 +1022,10 @@ async function startStandardUpload() {
     resetTitleProgress();
 
     if (outcome.status === 'completed') {
-      showProgress({ title: 'Uploading', sub: 'Upload successful!', percent: 100, doneBytes: totalSize, totalBytes: totalSize, icon: 'cloud_upload' });
+      showProgress({ title: 'Uploading', sub: encrypt ? 'Uploaded · End-to-End Encrypted' : 'Uploaded · Not Encrypted', percent: 100, doneBytes: totalSize, totalBytes: totalSize, icon: 'cloud_upload' });
       // The manage token, for this page's Delete: in its memory only.
       const { id, manageToken } = outcome.value;
-      state.uploaded = { id, manageToken };
+      state.uploaded = { id, manageToken, name: nameOf(files) };
       showShare({ link: outcome.value.downloadUrl });
     } else if (outcome.status === 'cancelled') {
       showToast('Upload cancelled.', 'warning');
@@ -1077,8 +1098,9 @@ function formatDeadline(ms) {
 
 function showUploadFailed(err, totalSize) {
   console.error(err);
-  showProgress({ title: 'Upload Failed', sub: err?.message || 'An error occurred during upload.', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'error', iconColor: 'text-danger' });
-  showToast(err?.message || 'Upload failed.', 'danger');
+  const reason = sentence(err?.message || 'The upload stopped.');
+  showProgress({ title: 'Upload Failed', sub: reason, percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'error', iconColor: 'text-danger' });
+  showToast(`Upload failed: ${reason}`, 'danger');
 }
 
 async function loadPeerJS() {
@@ -1128,7 +1150,7 @@ async function startP2PSendFlow() {
   els.tagline.textContent = 'Direct Transfer (P2P)';
   // Copy and the QR code read the link as it's shown, so they work as soon as
   // the code shows, which is before the send below resolves.
-  els.copyP2PLink.onclick = () => copyToClipboard(els.p2pLink.value).then(() => showToast('Copied link.', 'success'));
+  els.copyP2PLink.onclick = () => copyToClipboard(els.p2pLink.value).then(() => showToast('Link copied.', 'success'));
   els.qrP2PLink.onclick = () => showQRModal(els.p2pLink.value, els.qrP2PLink);
   state.p2pSession = await coreClient.direct.send({
     file,
@@ -1144,7 +1166,7 @@ async function startP2PSendFlow() {
       // Reset title/subtitle
       const waitTitle = els.p2pWaitCard?.querySelector('h5');
       const waitSub = els.p2pWaitCard?.querySelector('.text-body-secondary');
-      if (waitTitle) waitTitle.textContent = 'Awaiting connection...';
+      if (waitTitle) waitTitle.textContent = 'Awaiting connection…';
       if (waitSub) waitSub.textContent = 'Provide your recipient with the code below:';
       els.p2pCode.textContent = id;
       const link = `${location.origin}/p2p/${encodeURIComponent(id)}`;
@@ -1156,7 +1178,7 @@ async function startP2PSendFlow() {
         const waitTitle = els.p2pWaitCard?.querySelector('h5');
         const waitSub = els.p2pWaitCard?.querySelector('.text-body-secondary');
         if (waitTitle) waitTitle.textContent = 'Connected!';
-        if (waitSub) waitSub.textContent = message;
+        if (waitSub) waitSub.textContent = tidy(message);
         setHidden(els.p2pCode, true);
         setHidden(els.p2pLinkLabel, true);
         setHidden(els.p2pLink, true);
@@ -1164,13 +1186,13 @@ async function startP2PSendFlow() {
         setHidden(els.qrP2PLink, true);
       } else if (phase === 'transferring') {
         // Switch to progress card when transfer actually starts
-        showProgress({ title: 'Sending...', sub: message, percent: 0, doneBytes: 0, totalBytes: p2pTotalSize, icon: 'sync_alt', iconColor: 'text-primary' });
+        showProgress({ title: 'Sending…', sub: tidy(message), percent: 0, doneBytes: 0, totalBytes: p2pTotalSize, icon: 'sync_alt', iconColor: 'text-primary' });
         // Show P2P cancel button
         els.cancelP2PSend.style.display = 'inline-block';
         els.cancelStandardUpload.style.display = 'none';
       } else {
         // Default behaviour for other statuses
-        showProgress({ title: 'Sending...', sub: message, percent: 0, doneBytes: 0, totalBytes: p2pTotalSize, icon: 'sync_alt', iconColor: 'text-primary' });
+        showProgress({ title: 'Sending…', sub: tidy(message), percent: 0, doneBytes: 0, totalBytes: p2pTotalSize, icon: 'sync_alt', iconColor: 'text-primary' });
       }
     },
     onProgress: ({ processedBytes, totalBytes, percent }) => {
@@ -1181,11 +1203,11 @@ async function startP2PSendFlow() {
         doneBytes: processedBytes,
         totalBytes,
         showProgress: (pct, done, total) => {
-          showProgress({ title: 'Sending...', sub: 'Keep this tab open until the transfer completes.', percent: pct, doneBytes: done, totalBytes: total, icon: 'sync_alt', iconColor: 'text-primary' });
+          showProgress({ title: 'Sending…', sub: 'Keep this tab open until the transfer completes.', percent: pct, doneBytes: done, totalBytes: total, icon: 'sync_alt', iconColor: 'text-primary' });
         }
       };
 
-      showProgress({ title: 'Sending...', sub: 'Keep this tab open until the transfer completes.', percent, doneBytes: processedBytes, totalBytes, icon: 'sync_alt', iconColor: 'text-primary' });
+      showProgress({ title: 'Sending…', sub: 'Keep this tab open until the transfer completes.', percent, doneBytes: processedBytes, totalBytes, icon: 'sync_alt', iconColor: 'text-primary' });
     },
     onComplete: () => {
       resetTitleProgress();
@@ -1194,7 +1216,7 @@ async function startP2PSendFlow() {
       state.uploaded = null;
       showShare({
         title: 'Transfer Complete',
-        sub: `Your recipient has received the file${Array.isArray(file) ? 's' : ''}.`,
+        sub: Array.isArray(file) ? `Your recipient has received the ${countOf(file.length, 'file')}.` : 'Your recipient has received the file.',
         showLinkGroup: false,
       });
     },
@@ -1344,7 +1366,7 @@ function wireUI() {
   });
 
   // Share actions
-  els.copyShare?.addEventListener('click', () => copyToClipboard(els.shareLink.value).then(() => showToast('Copied link.', 'success')));
+  els.copyShare?.addEventListener('click', () => copyToClipboard(els.shareLink.value).then(() => showToast('Link copied.', 'success')));
   els.qrShare?.addEventListener('click', () => showQRModal(els.shareLink.value, els.qrShare));
   els.newUpload?.addEventListener('click', resetToMain);
   els.deleteUpload?.addEventListener('click', deleteUploaded);
@@ -1409,8 +1431,8 @@ async function init() {
     await loadServerInfo();
   } catch (err) {
     console.error(err);
-    els.maxUploadHint.textContent = 'Could not load server info.';
-    showToast('Could not load server info.', 'warning');
+    els.maxUploadHint.textContent = 'Could not connect to the server.';
+    showToast('Could not connect to the server.', 'warning');
   }
 
   // Defaults

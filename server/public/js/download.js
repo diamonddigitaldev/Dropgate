@@ -61,7 +61,7 @@ async function startDownload() {
   downloadButton.style.display = 'none';
   progressContainer.style.display = 'block';
   progressBar.style.width = '0%';
-  progressText.textContent = 'Starting...';
+  progressText.textContent = 'Starting…';
   downloadButton.disabled = true;
 
   updateStatusCard({
@@ -105,11 +105,11 @@ async function startDownload() {
   }
 
   try {
-    statusTitle.textContent = 'Starting Download...';
+    statusTitle.textContent = 'Starting Download…';
     statusMessage.textContent = `Your browser will now ask you where to save "${downloadState.fileName}".`;
 
     statusTitle.textContent = downloadState.isEncrypted ? 'Downloading & Decrypting' : 'Downloading';
-    statusMessage.textContent = 'Streaming directly to file...';
+    statusMessage.textContent = 'Streaming directly to file…';
 
     // The file's writer is the download's sink: core writes each piece to it,
     // closes it once the whole file is in, and aborts it if the download fails.
@@ -124,8 +124,8 @@ async function startDownload() {
       progressBar.style.width = `${percent}%`;
       progressText.textContent = `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}`;
       statusMessage.textContent = totalBytes
-        ? `Streaming directly to file... (${Math.round(percent)}%)`
-        : `Streaming directly to file... (${formatBytes(processedBytes)})`;
+        ? `Streaming directly to file… (${Math.round(percent)}%)`
+        : `Streaming directly to file… (${formatBytes(processedBytes)})`;
     });
     const outcome = await download.result;
     if (outcome.status !== 'completed') throw outcome.error ?? new Error('Download cancelled.');
@@ -146,7 +146,7 @@ async function startDownload() {
     if (error) console.error(error);
     resetTitleProgress();
     progressContainer.style.display = 'none';
-    downloadButton.textContent = 'Retry Download';
+    downloadButton.textContent = 'Retry';
     downloadButton.style.display = 'inline-block';
     downloadButton.disabled = false;
 
@@ -236,7 +236,7 @@ async function loadMetadata() {
     downloadState.secret = metadata.encrypted ? secret : null;
     // Shown and saved under its safe name: the one file name rule.
     downloadState.fileName = filenames.sanitize(file.name);
-    fileEncryptionEl.textContent = metadata.encrypted ? 'End-to-End Encrypted' : 'None';
+    fileEncryptionEl.textContent = metadata.encrypted ? 'End-to-End Encrypted' : 'Not Encrypted';
     fileSizeEl.textContent = formatBytes(file.size);
 
     trustStatement.style.display = 'block';

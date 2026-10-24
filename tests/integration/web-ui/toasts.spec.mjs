@@ -115,6 +115,6 @@ test.describe('on a server with a 1 MB limit', () => {
 
         await uploadFromHomePage(page, [madeUpFile('Copied é.bin', 3_000, 93)], { encrypted: true });
         await page.locator('#copyShare').click();
-        await expectToast(page.locator('#toast-host .toast-note').last(), 'success', 'Copied link.');
+        await expectToast(page.locator('#toast-host .toast-note').last(), 'success', 'Link copied.');
     });
 });
