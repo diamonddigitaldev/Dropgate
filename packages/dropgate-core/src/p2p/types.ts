@@ -1,4 +1,15 @@
-import type { FileSource, ServerInfo, CryptoAdapter, BaseProgressEvent } from '../types.js';
+import type { ServerInfo, BaseProgressEvent } from '../types.js';
+import type { BlobLike } from '../source.js';
+import type { Transport } from '../transport.js';
+
+/** What `client.direct` adds to its sessions and to every event it gives a listener. */
+export interface ViaClient {
+  /** How the client reaches its server. Set by `client.direct`; a session started without a client has none. */
+  transport?: Transport;
+}
+
+/** A file a direct transfer sends: a browser `File`, or anything shaped like one. */
+export type P2PFile = BlobLike & { readonly name: string };
 
 // ============================================================================
 // Session State Machine Types
@@ -137,19 +148,19 @@ export interface P2PServerConfig {
 // ============================================================================
 
 /** Status event for P2P operations. */
-export interface P2PStatusEvent {
+export interface P2PStatusEvent extends ViaClient {
   phase: string;
   message: string;
 }
 
 /** Progress event for P2P send operations. */
-export interface P2PSendProgressEvent extends BaseProgressEvent { }
+export interface P2PSendProgressEvent extends BaseProgressEvent, ViaClient { }
 
 /** Progress event for P2P receive operations. */
-export interface P2PReceiveProgressEvent extends BaseProgressEvent { }
+export interface P2PReceiveProgressEvent extends BaseProgressEvent, ViaClient { }
 
 /** Metadata event when receiving a file. */
-export interface P2PMetadataEvent {
+export interface P2PMetadataEvent extends ViaClient {
   name: string;
   total: number;
   /** Call this to signal the sender to begin transfer (when autoReady is false). */
@@ -163,21 +174,19 @@ export interface P2PMetadataEvent {
 }
 
 /** Completion event for P2P receive operations. */
-export interface P2PReceiveCompleteEvent {
+export interface P2PReceiveCompleteEvent extends ViaClient {
   received: number;
   total: number;
 }
 
 /** Cancellation event for P2P operations. */
-export interface P2PCancellationEvent {
-  /** Who cancelled the transfer ('sender' or 'receiver'). */
+export interface P2PCancellationEvent extends ViaClient {
+  /** Who cancelled the transfer ('sender' or 'receiver'). What the other device said, if anything, isn't passed on. */
   cancelledBy: 'sender' | 'receiver';
-  /** Optional cancellation message. */
-  message?: string;
 }
 
 /** Connection health event for monitoring. */
-export interface P2PConnectionHealthEvent {
+export interface P2PConnectionHealthEvent extends ViaClient {
   /** ICE connection state. */
   iceConnectionState: 'connected' | 'disconnected' | 'failed' | 'checking' | 'new' | 'closed';
   /** Estimated round-trip time in milliseconds. */
@@ -189,7 +198,7 @@ export interface P2PConnectionHealthEvent {
 }
 
 /** Resumable transfer info. */
-export interface P2PResumeInfo {
+export interface P2PResumeInfo extends ViaClient {
   /** Session ID to resume. */
   sessionId: string;
   /** Bytes already received in previous session. */
@@ -209,15 +218,13 @@ export interface P2PResumeInfo {
  */
 export interface P2PSendOptions extends P2PServerConfig {
   /** File(s) to send. A single file or an array for multi-file transfers. */
-  file: FileSource | FileSource[];
+  file: P2PFile | P2PFile[];
   /** PeerJS Peer constructor - REQUIRED. */
   Peer: PeerConstructor;
   /** Server info (optional, for capability checking). */
   serverInfo?: ServerInfo;
   /** Custom code generator function. */
-  codeGenerator?: (cryptoObj?: CryptoAdapter) => string;
-  /** Crypto object for secure code generation. */
-  cryptoObj?: CryptoAdapter;
+  codeGenerator?: () => string;
   /** Max attempts to register a peer ID. */
   maxAttempts?: number;
   /** Chunk size for data transfer. */
@@ -259,7 +266,7 @@ export interface P2PSendOptions extends P2PServerConfig {
 /**
  * Return value from startP2PSend containing session control.
  */
-export interface P2PSendSession {
+export interface P2PSendSession extends ViaClient {
   /** The PeerJS peer instance. */
   peer: PeerInstance;
   /** The generated sharing code. */
@@ -331,7 +338,7 @@ export interface P2PReceiveOptions extends P2PServerConfig {
 /**
  * Return value from startP2PReceive containing session control.
  */
-export interface P2PReceiveSession {
+export interface P2PReceiveSession extends ViaClient {
   /** The PeerJS peer instance. */
   peer: PeerInstance;
   /** Stop the session and clean up resources. */
@@ -347,22 +354,22 @@ export interface P2PReceiveSession {
 }
 
 // ============================================================================
-// Client P2P Options (used by DropgateClient.p2pSend / p2pReceive)
+// Client P2P Options (used by client.direct.send() / receive())
 // Server config and serverInfo are provided by the client internally.
 // ============================================================================
 
 /**
- * Options for DropgateClient.p2pSend().
- * Server connection, serverInfo, peerjsPath, iceServers, and cryptoObj
+ * Options for client.direct.send().
+ * Server connection, serverInfo, peerjsPath and iceServers
  * are all provided internally by the client.
  */
 export interface P2PSendFileOptions {
   /** File(s) to send. A single file or an array for multi-file transfers. */
-  file: FileSource | FileSource[];
+  file: P2PFile | P2PFile[];
   /** PeerJS Peer constructor - REQUIRED. */
   Peer: PeerConstructor;
   /** Custom code generator function. */
-  codeGenerator?: (cryptoObj?: CryptoAdapter) => string;
+  codeGenerator?: () => string;
   /** Max attempts to register a peer ID. */
   maxAttempts?: number;
   /** Chunk size for data transfer. */
@@ -402,7 +409,7 @@ export interface P2PSendFileOptions {
 }
 
 /**
- * Options for DropgateClient.p2pReceive().
+ * Options for client.direct.receive().
  * Server connection, serverInfo, peerjsPath, and iceServers
  * are all provided internally by the client.
  */

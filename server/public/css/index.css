@@ -24,11 +24,6 @@
   justify-content: center;
 }
 
-.dropzone:focus {
-  outline: none;
-  box-shadow: 0 0 0 .25rem rgba(var(--bs-primary-rgb), .25);
-}
-
 .dropzone:hover:not(:has(button:hover)) {
   border-color: rgba(var(--bs-primary-rgb), 0.5);
   background-color: rgba(var(--bs-primary-rgb), .04);
@@ -68,34 +63,105 @@
   font-size: 32px;
 }
 
-/* Toast notification styling */
-.toast-notification {
+/* -- Toasts ---------------------------------------------------------------------
+   electron-kit's toasts (kit.ui.toast(), its css/kit.css "Toasts"), copied:
+   centred at the top, one above another, newest last. Each is filled with its
+   semantic colour and a darker 4px left edge, with black text on info and
+   warning and white on success and danger, and slides in 8px as it shows and
+   out as it goes (.leaving); under reduced motion it doesn't move. */
+:root {
+  --toast-duration: 0.2s;
+  --toast-ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.toast-host {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  z-index: 1080;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(720px, calc(100% - 2rem));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.7rem 1rem;
   border-left: 4px solid;
-  color: var(--bs-body-color);
+  border-radius: 6px;
+  box-shadow: var(--bs-box-shadow);
+  font-size: 0.875rem;
+  pointer-events: auto;
+  animation: toast-in var(--toast-duration) var(--toast-ease);
 }
 
-.toast-notification.toast-info {
-  border-left-color: var(--bs-info);
-  background-color: var(--bs-info);
-  color: #fff;
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: none; }
 }
 
-.toast-notification.toast-warning {
-  border-left-color: var(--bs-warning);
-  background-color: var(--bs-warning);
-  color: #000;
+.toast-note.leaving {
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity var(--toast-duration) var(--toast-ease),
+              transform var(--toast-duration) var(--toast-ease);
 }
 
-.toast-notification.toast-danger {
-  border-left-color: var(--bs-danger);
-  background-color: var(--bs-danger);
-  color: #fff;
+.toast-info    { background-color: #0dcaf0; border-color: #0aa2c0; color: #000; }
+.toast-warning { background-color: #ffc107; border-color: #cc9a06; color: #000; }
+.toast-success { background-color: #198754; border-color: #146c43; color: #fff; }
+.toast-danger  { background-color: #dc3545; border-color: #b02a37; color: #fff; }
+
+/* The glyph sits on the body's first line. */
+.toast-note .toast-icon {
+  flex-shrink: 0;
+  font-size: 18px;
+  line-height: 1.3125rem;
 }
 
-.toast-notification.toast-success {
-  border-left-color: var(--bs-success);
-  background-color: var(--bs-success);
-  color: #fff;
+.toast-body {
+  flex: 1 1 auto;
+  line-height: 1.3125rem;
+}
+
+.toast-close {
+  display: flex;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  opacity: 0.7;
+  transition: opacity 120ms ease;
+}
+
+.toast-close:hover,
+.toast-close:focus-visible {
+  opacity: 1;
+}
+
+.toast-close .material-icons-round {
+  font-size: 18px;
+  line-height: 1.3125rem;
+}
+
+/* The ring in the toast's own text colour: the accent's text shade isn't made
+   to hold on a semantic fill. */
+.toast-close:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --toast-duration: 0.01ms;
+  }
 }
 
 .form-control:disabled,
@@ -112,28 +178,20 @@ select:disabled {
   cursor: not-allowed;
 }
 
-#statusAlert {
-  position: fixed;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 1080;
-  width: min(720px, calc(100% - 2rem));
-  margin: 0;
-}
-
+/* Hovered or pressed, the unselected mode keeps its text in the accent's text
+   shade (AA on the wash in both themes), not the fill's blue. */
 .btn-group .btn-outline-primary:not(.active):not(:disabled):hover,
 .btn-group .btn-outline-primary:not(.active):not(.disabled):hover {
   background-color: rgba(var(--bs-primary-rgb), 0.12);
   border-color: rgba(var(--bs-primary-rgb), 0.35);
-  color: var(--bs-primary);
+  color: var(--accent-text);
 }
 
 .btn-group .btn-outline-primary:not(.active):not(:disabled):active,
 .btn-group .btn-outline-primary:not(.active):not(.disabled):active {
   background-color: rgba(var(--bs-primary-rgb), 0.2);
   border-color: rgba(var(--bs-primary-rgb), 0.45);
-  color: var(--bs-primary);
+  color: var(--accent-text);
 }
 
 .btn-group .btn:disabled,
@@ -167,14 +225,14 @@ select:disabled {
   }
 }
 
-/* Security status card */
+/* Security status card. While it's checking, its icon pulses; its text stays
+   whole, since faded it's under AA. Under reduced motion nothing pulses. */
 .security-status-card {
   padding: 0.75rem 1rem;
   border-radius: 0.5rem;
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  animation: security-pulse 2s infinite ease-in-out;
   border: 1px solid var(--bs-border-color);
 }
 
@@ -182,10 +240,14 @@ select:disabled {
   font-size: 24px;
 }
 
-.security-status-card.security-green,
-.security-status-card.security-yellow,
-.security-status-card.security-red {
-  animation: none;
+.security-status-card:not(.security-green, .security-yellow, .security-red) .material-icons-round {
+  animation: security-pulse 2s infinite ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .security-status-card .material-icons-round {
+    animation: none !important;
+  }
 }
 
 .security-status-card.security-green {
