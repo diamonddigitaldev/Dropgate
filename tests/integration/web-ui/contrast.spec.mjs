@@ -6,7 +6,7 @@
 // axe-core's color-contrast checks each (helpers/contrast.mjs), as electron-kit
 // checks the desktop app's. Where the keyboard's focus goes, the ring it shows is
 // solid, at least 2px, and 3:1 against the page in both themes.
-import { expectContrast, expectFocusRings } from '../helpers/contrast.mjs';
+import { expectContrast, expectFocusRings, settled } from '../helpers/contrast.mjs';
 import { madeUpFile } from '../helpers/files.mjs';
 import { secretsOf } from '../helpers/privacy.mjs';
 import { expect, test } from '../helpers/test.mjs';
@@ -17,6 +17,28 @@ async function openHome(page) {
     await page.goto('/');
     await expect(page.locator('#securityText')).not.toHaveText(/checking/i);
 }
+
+// WebKit twice said nothing was animating while the page's fade-in still had it at 97%, and axe read the
+// buttons below AA. A fade the browser reports nothing of, stepped from script, stands in for it here: the
+// check waits until what the page shows stops changing (helpers/contrast.mjs).
+test('the check waits for what the page shows to stop changing, even while the browser reports no animation', async ({ page }) => {
+    await openHome(page);
+    // From a page at rest: its own fade-in over.
+    await settled(page);
+    await page.evaluate(() => {
+        const main = document.querySelector('main');
+        const from = performance.now();
+        const step = (now) => {
+            const t = Math.min(1, (now - from) / 800);
+            main.style.opacity = t < 1 ? String(0.9 + 0.1 * t) : '';
+            if (t < 1) requestAnimationFrame(step);
+        };
+        main.style.opacity = '0.9';
+        requestAnimationFrame(step);
+    });
+    expect(await page.evaluate(() => document.getAnimations().length), 'animations the browser reports').toBe(0);
+    await expectContrast(page, 'the home page, as it fades in');
+});
 
 test.describe('the home page, on a server without end-to-end encryption', () => {
     test.use({ serverEnv: { UPLOAD_ENABLE_E2EE: 'false', UPLOAD_MAX_FILE_DOWNLOADS: '5', UPLOAD_MAX_PAUSE_MINUTES: '30' } });

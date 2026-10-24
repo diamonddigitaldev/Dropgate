@@ -7,16 +7,47 @@
 // page.emulateMedia(). Every page fades in, and a toast slides in, so the check
 // waits for the page's animations to finish first: a colour part-way through a
 // fade isn't the one a person reads.
+//
+// WebKit doesn't always say so: twice in CI (2026-10-17 and -23) it said nothing
+// was animating, and axe then read the home page's buttons at about 97% of the
+// page's fade-in, below AA (#selectFileBtn 4.43:1, #modeStandard 4.32:1, on
+// #1372fd). So the check also waits until what the page shows has stopped
+// changing: every element's opacity, colours and transform the same for
+// STILL_MS, longer than any of its transitions.
 import AxeBuilder from '@axe-core/playwright';
 import { expect } from './test.mjs';
 
 export const THEMES = ['light', 'dark'];
 
-/** Wait until nothing on the page is animating or transitioning, but what repeats for ever (a pulse). */
+/** How long what the page shows must stay the same to count as settled: longer than its transitions (120 ms) and a few frames. */
+export const STILL_MS = 250;
+
+/**
+ * Wait until nothing on the page is animating or transitioning, but what
+ * repeats for ever (a pulse), and what it shows has stayed the same for
+ * STILL_MS.
+ */
 export async function settled(page) {
     await page.waitForFunction(() => document.getAnimations()
         .filter((a) => a.effect?.getTiming().iterations !== Infinity)
         .every((a) => a.playState !== 'running' && a.playState !== 'pending'));
+    await page.evaluate(() => { delete window.__dropgateLook; });
+    await page.waitForFunction((stillMs) => {
+        // An element with a pulse never stops changing: it's left out.
+        const pulsing = new Set(document.getAnimations().filter((a) => a.effect?.getTiming().iterations === Infinity).map((a) => a.effect?.target));
+        const look = Array.from(document.querySelectorAll('body, body *'), (el) => {
+            if (pulsing.has(el)) return '';
+            const s = getComputedStyle(el);
+            return `${s.opacity} ${s.color} ${s.backgroundColor} ${s.borderTopColor} ${s.borderBottomColor} ${s.outlineColor} ${s.transform}`;
+        }).join('|');
+        const now = performance.now();
+        const seen = window.__dropgateLook;
+        if (seen?.look !== look) {
+            window.__dropgateLook = { look, since: now };
+            return false;
+        }
+        return now - seen.since >= stillMs;
+    }, STILL_MS);
 }
 
 /** Show the page in `theme` ('light' or 'dark'), and wait for it to apply. */
