@@ -123,6 +123,22 @@ const FILE_SERVICE = Object.freeze({
 });
 
 /**
+ * The messages between main and the network service (network-service.js), a
+ * utility process holding the SOCKS5 proxy that binds every connection to the
+ * chosen adapter, over its parentPort.
+ */
+const NETWORK_SERVICE = Object.freeze({
+    // Main to the service.
+    SET_INTERFACE: 'set-interface',             // { name: string | null }: the adapter chosen, by name; null for none, and every connection is refused
+    STOP: 'stop',                               // (): close everything, and exit
+    // The service to main.
+    LISTENING: 'listening',                     // { port }: the proxy, on 127.0.0.1
+    ADAPTERS: 'adapters',                       // { list: [{ name, addresses }] }: the adapters up with an address, whenever the list changes
+    STATE: 'state',                             // { name, present, addresses: { v4, v6 } }: the chosen adapter, as it is now, whenever that changes
+    GONE: 'gone',                               // { name }: the chosen adapter has gone, and every connection through it is closed
+});
+
+/**
  * Where a download is written while it runs: a folder in the app's profile
  * (userData), each file under a random name holding nothing of its own, moved
  * into place once it's whole. Main empties it at every start and at quit.
@@ -233,6 +249,6 @@ const TRANSFERS = Object.freeze({
 });
 
 module.exports = {
-    APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, PARTIAL_FOLDER, READ_PIECE_BYTES,
+    APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, NETWORK_SERVICE, PARTIAL_FOLDER, READ_PIECE_BYTES,
     SETTINGS_DEFAULTS, MAIN_ONLY_SETTINGS, AT_ONCE_RANGE, SETTINGS_CHECKS, SETTINGS_SCHEMA_VERSION, migrateSettings, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS,
 };

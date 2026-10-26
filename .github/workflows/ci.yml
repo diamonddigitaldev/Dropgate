@@ -117,9 +117,18 @@ jobs:
           npm --version
           npm ci
 
+      # The network service's Linux route check is tested against the kernel's own
+      # routes: two adapters, each a veth pair to a network namespace of its own,
+      # where the test's servers run (through sudo). Nothing leaves the runner.
+      - name: Set up the route check's adapters
+        if: runner.os == 'Linux'
+        run: sudo bash test/helpers/route-netns.sh
+
       # The same run as `npm test`, with the TAP reporter so each expected failure's
       # label shows in the log.
       - name: Run tests
+        env:
+          DROPGATE_ROUTE_NETNS: ${{ runner.os == 'Linux' && '1' || '' }}
         run: node --test --test-reporter=tap "test/*.test.mjs"
 
   # The desktop app, built and checked on each platform, in client-build.yml,
