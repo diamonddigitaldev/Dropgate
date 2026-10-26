@@ -104,12 +104,12 @@ test.describe('on a server allowing 5 downloads', () => {
 
         // Only main's folder picker chooses where downloads land, only main changes the saved servers, and the slider's range holds.
         const refusal = (changes) => window.evaluate((c) => window.kitAPI.setSettings(c).then(() => 'set', (error) => error.message), changes);
-        expect(await refusal({ downloadFolder: desktop.root })).toMatch(/downloadFolder can't be changed from the page\./);
-        expect(await refusal({ downloadFolder: null, transfersAtOnce: 2 })).toMatch(/downloadFolder can't be changed from the page\./);
-        expect(await refusal({ servers: [{ ...saved, url: 'https://elsewhere.example' }] })).toMatch(/servers can't be changed from the page\./);
-        expect(await refusal({ defaultServer: null })).toMatch(/defaultServer can't be changed from the page\./);
-        expect(await refusal({ transfersAtOnce: 9 })).toMatch(/Expected transfers at once from 1 to 6\./);
-        expect(await refusal({ transfersAtOnce: 2.5 })).toMatch(/Expected transfers at once from 1 to 6\./);
+        expect(await refusal({ downloadFolder: desktop.root })).toMatch(/The setting "downloadFolder" can't be changed from the page\./);
+        expect(await refusal({ downloadFolder: null, transfersAtOnce: 2 })).toMatch(/The setting "downloadFolder" can't be changed from the page\./);
+        expect(await refusal({ servers: [{ ...saved, url: 'https://elsewhere.example' }] })).toMatch(/The setting "servers" can't be changed from the page\./);
+        expect(await refusal({ defaultServer: null })).toMatch(/The setting "defaultServer" can't be changed from the page\./);
+        expect(await refusal({ transfersAtOnce: 9 })).toMatch(/The setting "transfersAtOnce" doesn't take that value\./);
+        expect(await refusal({ transfersAtOnce: 2.5 })).toMatch(/The setting "transfersAtOnce" doesn't take that value\./);
         expect(stored(desktop).settings, 'nothing refused was kept').toMatchObject({ downloadFolder: null, transfersAtOnce: 3, servers: [saved], defaultServer: saved.id });
         // The kit's own settings still change from the page.
         expect(await refusal({ navCollapsed: false })).toBe('set');

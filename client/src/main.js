@@ -5,7 +5,8 @@ const path = require('path');
 const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 
 const {
-    APP_NAME, AT_ONCE_RANGE, IPC, PARTIAL_FOLDER, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS, migrateSettings,
+    APP_NAME, AT_ONCE_RANGE, IPC, MAIN_ONLY_SETTINGS, PARTIAL_FOLDER, SETTINGS_CHECKS, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS,
+    TRANSFERS, migrateSettings,
 } = require('./constants');
 const { menuItems } = require('./menu');
 const { Handles, describeFile } = require('./core/handles');
@@ -17,7 +18,6 @@ const { shareUpload } = require('./core/share');
 const { GOING, Pacer, Transfers, inFolder, view } = require('./core/transfers');
 const { createTransferHost } = require('./transfer-host');
 const { createTray } = require('./tray');
-const { guardSettings } = require('./settings-guard');
 const { answerWindowChannels } = require('./window-channels');
 
 // The house frame (electron-kit): one instance, the shared preload
@@ -87,9 +87,10 @@ const { answerWindowChannels } = require('./window-channels');
 //   one ZIP. Main empties the partial folder at every start and at quit, and
 //   shows a saved file in its folder when asked (Show in Folder), or opens a
 //   bundle's own folder (Open Folder), never opening anything received.
-// - The page changes its settings through main (settings-guard.js), which
-//   refuses the downloads folder and the saved servers from it, and tells
-//   the registry when transfers at once changes.
+// - The page changes its settings through the kit, which refuses it the
+//   downloads folder and the saved servers (MAIN_ONLY_SETTINGS) and holds
+//   transfers at once to its range (SETTINGS_CHECKS); main hears each change,
+//   and tells the registry when transfers at once changes.
 // - The saved servers (core/servers.js) are kept in the settings, in order,
 //   each with its settings for new uploads, and one of them the default: a
 //   new upload and Share with Dropgate start on it. Main alone changes them,
@@ -128,6 +129,8 @@ const kit = require('@diamonddigitaldev/electron-kit/main').start({
         version: SETTINGS_SCHEMA_VERSION,
         migrate: migrateSettings,
         obsoleteKeys: V3_STORE_KEYS,
+        mainOnly: [...MAIN_ONLY_SETTINGS],
+        checks: SETTINGS_CHECKS,
     },
     log: 'memory',
     // A Share with Dropgate launch's files are main's to upload (handleArgs()), not Upload's to add.
@@ -154,13 +157,9 @@ function atOnceSetting() {
     return Number.isSafeInteger(n) ? Math.min(AT_ONCE_RANGE.MAX, Math.max(AT_ONCE_RANGE.MIN, n)) : TRANSFERS.AT_ONCE;
 }
 
-// The page's settings changes come through main: never the downloads folder,
-// and transfers at once reaches the registry as it changes.
-guardSettings({
-    kit,
-    onChange: (changes) => {
-        if (Object.hasOwn(changes, 'transfersAtOnce')) transfers.setAtOnce(atOnceSetting());
-    },
+// Transfers at once reaches the registry as it changes.
+kit.settings.onChange((changes) => {
+    if (Object.hasOwn(changes, 'transfersAtOnce')) transfers.setAtOnce(atOnceSetting());
 });
 
 // The saved servers, and the default, in the settings: main's alone. What

@@ -924,35 +924,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (waiting.length === 0) return;
             const bundles = waiting.filter(choosable);
             const many = waiting.length > 1;
-            // kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65
-            const dialog = element('dialog', 'kit-dialog options-dialog');
-            dialog.setAttribute('aria-labelledby', 'download-options-title');
-            const header = element('div', 'kit-dialog-header');
-            const title = element('h2', 'kit-dialog-title');
-            const titleText = element('span', '', 'Advanced Options');
-            titleText.id = 'download-options-title';
-            title.append(glyph('tune', 'kit-dialog-icon'), titleText);
-            const close = element('button', 'btn-close');
-            close.type = 'button';
-            close.setAttribute('aria-label', 'Close');
-            close.addEventListener('click', () => dialog.close());
-            header.append(title, close);
-            const body = element('div', 'kit-dialog-body options-body');
-            const footer = element('div', 'kit-dialog-footer');
-            body.append(element('p', 'kit-dialog-text', many ? `For the ${countOf(waiting.length, 'download')} selected.` : downloadName(waiting[0])));
-            dialog.append(header, body, footer);
-            dialog.addEventListener('close', () => dialog.remove());
-            document.body.append(dialog);
+            const body = [element('p', 'kit-dialog-text', many ? `For the ${countOf(waiting.length, 'download')} selected.` : downloadName(waiting[0]))];
 
             if (bundles.length === 0) {
-                body.append(element('p', 'kit-dialog-detail', many
+                body.push(element('p', 'kit-dialog-detail', many
                     ? 'None of these is a link to several files, so there is nothing more to choose: Where each is saved is chosen beside Save to.'
                     : "A single file has nothing more to choose: Where it's saved is chosen beside Save to."));
-                const done = element('button', 'btn btn-secondary', 'Close');
-                done.type = 'button';
-                done.addEventListener('click', () => dialog.close());
-                footer.append(done);
-                dialog.showModal();
+                kit.ui.dialog({ title: 'Advanced Options', icon: 'tune', body, actions: [{ label: 'Close', value: false, cancel: true }] });
                 return;
             }
 
@@ -961,11 +939,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             const chosen = new Set(first.chosen ?? first.files.map((_, index) => index));
             const filesHelp = element('div', 'form-text reserved');
             filesHelp.id = 'options-download-files-help';
-            const apply = element('button', 'btn btn-primary', 'Apply');
-            apply.type = 'button';
+            let apply = null;
             const check = () => {
                 filesHelp.textContent = !many && chosen.size === 0 ? 'Choose at least one file to download.' : '';
-                apply.disabled = !many && chosen.size === 0;
+                if (apply) apply.disabled = !many && chosen.size === 0;
             };
             if (!many) {
                 const list = element('div', 'options-files');
@@ -985,7 +962,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     row.append(box, element('span', 'options-file-name', file.name), element('span', 'options-file-size', formatBytes(file.size)));
                     list.append(row);
                 });
-                body.append(element('div', 'form-label mb-0', 'Files to download'), list, filesHelp);
+                body.push(element('div', 'form-label mb-0', 'Files to download'), list, filesHelp);
             }
             const zip = kit.ui.switchField({
                 id: 'options-zip',
@@ -996,11 +973,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                     off: 'Each file is saved on its own, together in a new folder.',
                 },
             });
-            body.append(zip.element);
+            body.push(zip.element);
 
-            const cancel = element('button', 'btn btn-secondary', 'Cancel');
-            cancel.type = 'button';
-            cancel.addEventListener('click', () => dialog.close());
+            // Apply closes it once main has the options, so a card never shows the old ones after it's gone.
+            const dialog = kit.ui.dialog({
+                title: 'Advanced Options',
+                icon: 'tune',
+                body,
+                actions: [{ label: 'Cancel', value: false, cancel: true }, { label: 'Apply', value: true, variant: 'primary', close: false }],
+            });
+            apply = dialog.action(true);
             apply.addEventListener('click', async () => {
                 const asZip = zip.input.checked;
                 const files = [...chosen].sort((a, b) => a - b);
@@ -1011,11 +993,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (refused > 0) {
                     kit.ui.toast(many ? 'Some of those downloads have started, so their options stay as they were.' : 'That download has started, so its options stay as they were.', { type: 'warning' });
                 }
-                dialog.close();
+                dialog.close(true);
             });
-            footer.append(cancel, apply);
             check();
-            dialog.showModal();
         }
 
         // --- The server ---
@@ -1179,11 +1159,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const head = element('div', 'server-head');
             head.append(icon, name, pill, toggle);
             const address = element('div', 'server-address selectable');
-            // The kit makes a status line only inside a card: the row's is drawn on its classes, as a card's is.
-            // kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/67
-            const statusText = element('span', 'kit-status-text');
-            const status = element('div', 'kit-card-status server-status');
-            status.append(element('span', 'kit-status-dot'), statusText);
+            const status = kit.ui.statusLine({ text: 'Not checked yet', tone: 'muted' });
             const limitsLine = element('div', 'server-limits');
 
             // Its settings for new uploads: no unit allows more than it does, and Unlimited only where it has no limit.
@@ -1253,7 +1229,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
             const actions = element('div', 'server-actions');
             actions.append(test, makeDefault, up, down, remove);
-            row.append(head, address, status, limitsLine, body, actions);
+            row.append(head, address, status.element, limitsLine, body, actions);
 
             /** Test's busy state, while the server is checked from anywhere: as the window opens, before an upload, or Test itself. */
             let restoreTest = null;
@@ -1364,9 +1340,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 address.textContent = server.url;
                 address.title = server.url;
                 const state = busy ? { items: ['Checking…'], tone: 'running' } : serverState(server, check);
-                status.className = `kit-card-status server-status kit-tone-${state.tone}`;
-                statusText.textContent = state.items.join(' · ');
-                statusText.title = state.detail ?? statusText.textContent;
+                status.set({ text: state.items.join(' · '), tone: state.tone, ...(state.detail ? { title: state.detail } : {}) });
                 const upload = uploadsOf(check);
                 limitsLine.hidden = !upload || busy;
                 limitsLine.textContent = upload ? limitsTitle(upload) : '';
@@ -1398,27 +1372,10 @@ document.addEventListener('DOMContentLoaded', async () => {
          * its limits) before it's added; Add Server then asks main, which
          * checks it again and saves it, as the default if it's the first.
          * Nothing is saved until then. An invite link isn't taken yet: it
-         * comes with accounts. The kit has no form dialog yet: the page's own,
-         * drawn on the kit's dialog classes, as Advanced Options is.
-         * kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65
+         * comes with accounts. Check leaves the form open (close: false), and
+         * Enter in the address presses it, as the kit's form does.
          */
         function openAddServer() {
-            const dialog = element('dialog', 'kit-dialog options-dialog');
-            dialog.setAttribute('aria-labelledby', 'add-server-title');
-            const title = element('h2', 'kit-dialog-title');
-            const titleText = element('span', '', 'Add Server');
-            titleText.id = 'add-server-title';
-            title.append(glyph('dns', 'kit-dialog-icon'), titleText);
-            const close = element('button', 'btn-close');
-            close.type = 'button';
-            close.setAttribute('aria-label', 'Close');
-            close.addEventListener('click', () => dialog.close());
-            const header = element('div', 'kit-dialog-header');
-            header.append(title, close);
-            const body = element('div', 'kit-dialog-body options-body');
-            const footer = element('div', 'kit-dialog-footer');
-            dialog.append(header, body, footer);
-
             const input = element('input', 'form-control selectable');
             input.type = 'text';
             input.id = 'add-server-address';
@@ -1431,14 +1388,18 @@ document.addEventListener('DOMContentLoaded', async () => {
             const found = element('div', 'server-found');
             found.hidden = true;
             found.setAttribute('aria-live', 'polite');
-            body.append(field.wrap, found);
 
-            const cancel = element('button', 'btn btn-secondary', 'Cancel');
-            cancel.type = 'button';
-            cancel.addEventListener('click', () => dialog.close());
-            const go = element('button', 'btn btn-primary', 'Check');
-            go.type = 'button';
-            footer.append(cancel, go);
+            const dialog = kit.ui.dialog({
+                title: 'Add Server',
+                icon: 'dns',
+                body: [field.wrap, found],
+                actions: [{ label: 'Cancel', value: false, cancel: true }, { label: 'Check', value: 'check', variant: 'primary', close: false }],
+            });
+            const go = dialog.action('check');
+            let open = true;
+            dialog.closed.then(() => {
+                open = false;
+            });
 
             /** The address its check found a Dropgate server at, as typed: Add Server adds it. */
             let checked = null;
@@ -1449,9 +1410,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                 setHelp(field.help, usual);
             };
             input.addEventListener('input', reset);
-            input.addEventListener('keydown', (event) => {
-                if (event.key === 'Enter' && !go.disabled) go.click();
-            });
 
             /** What a check found: its name and version, how uploads go there, its limits, and the address it was found at. */
             function showFound(check) {
@@ -1477,7 +1435,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const restore = kit.ui.busy(go, 'Checking…');
                     const check = await api.checkServer(value).catch(() => null);
                     restore();
-                    if (!dialog.open || input.value.trim() !== value) return;
+                    if (!open || input.value.trim() !== value) return;
                     if (!check) setHelp(field.help, "That isn't a server's address: Enter one such as https://drop.example.com.", 'danger');
                     else if (!check.ok) setHelp(field.help, connectionFailedText(value, check), 'danger');
                     else if (!check.serverInfo?.version || !check.serverInfo?.capabilities) setHelp(field.help, 'That address answered, but not as a Dropgate server.', 'danger');
@@ -1495,7 +1453,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const answer = await api.addServer(value).catch(() => null);
                 restore();
                 if (!answer?.server) {
-                    if (dialog.open) {
+                    if (open) {
                         reset();
                         setHelp(field.help, answer && !answer.check?.ok ? connectionFailedText(value, answer.check) : 'That address no longer answers as a Dropgate server.', 'danger');
                     }
@@ -1504,14 +1462,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
                 openRows.add(answer.server.id);
                 takeList(answer);
-                dialog.close();
+                dialog.close(answer.server.id);
                 if (before.has(answer.server.id)) kit.ui.toast(`${answer.server.name} is saved already.`, { type: 'info' });
             });
-
-            dialog.addEventListener('close', () => dialog.remove());
-            document.body.append(dialog);
-            dialog.showModal();
-            input.focus();
         }
 
         /** An address's host, as the client reads it (one with no scheme is HTTPS): a server's name until it gives its own. */
@@ -1911,24 +1864,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const downloadsBy = tightest('downloads');
             const limits = { hours: lifetimeBy.limits.hours, downloads: downloadsBy.limits.downloads };
 
-            // The kit has no form dialog yet: the page's own, drawn on the kit's dialog classes.
-            // kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65
-            const dialog = element('dialog', 'kit-dialog options-dialog');
-            dialog.setAttribute('aria-labelledby', 'options-title');
-            const title = element('h2', 'kit-dialog-title');
-            const titleText = element('span', '', 'Advanced Options');
-            titleText.id = 'options-title';
-            title.append(glyph('tune', 'kit-dialog-icon'), titleText);
-            const close = element('button', 'btn-close');
-            close.type = 'button';
-            close.setAttribute('aria-label', 'Close');
-            close.addEventListener('click', () => dialog.close());
-            const body = element('div', 'kit-dialog-body options-body');
-            const footer = element('div', 'kit-dialog-footer');
-            const header = element('div', 'kit-dialog-header');
-            header.append(title, close);
-            dialog.append(header, body, footer);
-            body.append(element('p', 'kit-dialog-text', many ? `For the ${countOf(views.length, 'upload')} selected.` : nameOf(first)));
+            const body = [element('p', 'kit-dialog-text', many ? `For the ${countOf(views.length, 'upload')} selected.` : nameOf(first))];
 
             // The files of one upload of several: each can be taken out, but the last.
             let kept = first.files.map((file, index) => ({ ...file, index }));
@@ -1953,7 +1889,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }));
             if (!many && first.files.length > 1) {
                 drawFiles();
-                body.append(element('div', 'form-label mb-0', 'Files'), fileList);
+                body.push(element('div', 'form-label mb-0', 'Files'), fileList);
             }
 
             // File lifetime: no unit allows more than the server does, and Unlimited only where it has no limit.
@@ -2015,14 +1951,15 @@ document.addEventListener('DOMContentLoaded', async () => {
                     off: `This upload goes to ${allowing[0].host} only. If it can't take it, the upload stops and says why.`,
                 },
             });
-            body.append(lifetimeField.wrap, downloadsField.wrap, encryption, fallback.element);
+            body.push(lifetimeField.wrap, downloadsField.wrap, encryption, fallback.element);
 
-            const cancel = element('button', 'btn btn-secondary', 'Cancel');
-            cancel.type = 'button';
-            cancel.addEventListener('click', () => dialog.close());
-            const apply = element('button', 'btn btn-primary', 'Apply');
-            apply.type = 'button';
-            footer.append(cancel, apply);
+            const dialog = kit.ui.dialog({
+                title: 'Advanced Options',
+                icon: 'tune',
+                body,
+                actions: [{ label: 'Cancel', value: false, cancel: true }, { label: 'Apply', value: true, variant: 'primary' }],
+            });
+            const apply = dialog.action(true);
 
             /** The lifetime as the fields say it, or null when it isn't one. */
             const readLifetime = () => {
@@ -2075,10 +2012,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             lifetimeUnit.addEventListener('change', check);
             check();
 
+            // Apply closes it (the kit's own listener, first), and the options go to main as it fades.
             apply.addEventListener('click', async () => {
                 const options = { lifetime: readLifetime(), maxDownloads: readDownloads(), allowFallback: fallback.input.checked };
                 if (!many && kept.length !== first.files.length) options.files = kept.map((file) => file.index);
-                dialog.close();
                 const refused = [];
                 for (const view of views) {
                     await api.setTransferOptions(view.id, options).catch(() => refused.push(view));
@@ -2088,10 +2025,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                         : `${countOf(refused.length, 'upload')} had already started, so their options stay as they were.`, { type: 'warning' });
                 }
             });
-
-            dialog.addEventListener('close', () => dialog.remove());
-            document.body.append(dialog);
-            dialog.showModal();
         }
 
         /** An element of the page's own, with its class and its text: never markup. */

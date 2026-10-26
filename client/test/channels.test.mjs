@@ -920,27 +920,34 @@ test('where a download landed is taken from the file service for an output main 
     assert.deepEqual(savedOf({ type: 'saved', output, path: where }, granted), { output, path: where });
 });
 
-test('the page\'s settings changes go through main: never the downloads folder, transfers at once from 1 to 6, and the rest to the kit', async () => {
-    const main = fakeMain();
-    const changes = [];
-    const kit = { settings: { set: (c) => { changes.push(c); return { ...c }; } } };
-    const heard = [];
-    main.electron.ipcMain.handle('settings:set', () => 'the kit\'s own');
-    const { guardSettings } = main.load('../src/settings-guard.js');
-    guardSettings({ kit, onChange: (c) => heard.push(c) });
-    const handler = main.handlers.get('settings:set');
-    const page = main.windowPage();
-    // The app's own page in the UI session, as the kit checks it; never the transfer window's.
-    await assert.rejects(async () => handler(main.transferPage(), { navCollapsed: true }), /for the app's own page only/);
-    await assert.rejects(async () => handler({ sender: page.sender, senderFrame: { url: 'https://dropgate.test/' } }, { navCollapsed: true }), /for the app's own page only/);
+test('the page\'s settings changes go through the kit: never the saved servers or the downloads folder, transfers at once from 1 to 6, and main hears each', () => {
+    const { MAIN_ONLY_SETTINGS, SETTINGS_CHECKS, SETTINGS_DEFAULTS } = require('../src/constants.js');
+    // main.js gives the kit both, and hears each change; the kit's own store, run with them here, does the refusing.
+    const source = fs.readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+    assert.match(source, /mainOnly: \[\.\.\.MAIN_ONLY_SETTINGS\],\s+checks: SETTINGS_CHECKS,/);
+    assert.match(source, /kit\.settings\.onChange\(\(changes\) => \{\s+if \(Object\.hasOwn\(changes, 'transfersAtOnce'\)\) transfers\.setAtOnce\(atOnceSetting\(\)\);/);
+    const kitStore = require(path.join(path.dirname(require.resolve('@diamonddigitaldev/electron-kit/package.json')), 'main', 'store.js'));
+    const file = new Map();
+    const settings = kitStore.createSettings({
+        defaults: SETTINGS_DEFAULTS, mainOnly: [...MAIN_ONLY_SETTINGS], checks: SETTINGS_CHECKS,
+        open: () => ({ get: (key) => structuredClone(file.get(key)), set: (key, value) => file.set(key, structuredClone(value)), delete: (key) => file.delete(key) }),
+    });
+    const stored = () => structuredClone(file.get(kitStore.STORE_KEY));
     for (const [bad, message] of [
-        [{ downloadFolder: folder }, /downloadFolder can't be changed from the page\./], [{ downloadFolder: null }, /downloadFolder can't be changed from the page\./],
-        [{ transfersAtOnce: 0 }, /from 1 to 6/], [{ transfersAtOnce: 7 }, /from 1 to 6/], [{ transfersAtOnce: 2.5 }, /from 1 to 6/], [{ transfersAtOnce: '3' }, /from 1 to 6/],
-        [null, /Expected settings to change\./], [[], /Expected settings to change\./],
+        [{ downloadFolder: folder }, /"downloadFolder" can't be changed from the page\./], [{ downloadFolder: null }, /"downloadFolder" can't be changed from the page\./],
+        [{ servers: [] }, /"servers" can't be changed from the page\./], [{ defaultServer: randomUUID() }, /"defaultServer" can't be changed from the page\./],
+        [{ navCollapsed: true, downloadFolder: folder }, /"downloadFolder" can't be changed from the page\./],
+        [{ transfersAtOnce: 0 }, /"transfersAtOnce" doesn't take that value\./], [{ transfersAtOnce: 7 }, /"transfersAtOnce" doesn't take that value\./],
+        [{ transfersAtOnce: 2.5 }, /"transfersAtOnce" doesn't take that value\./], [{ transfersAtOnce: '3' }, /"transfersAtOnce" takes a number\./],
+        [null, /an object of settings/], [[], /an object of settings/],
     ]) {
-        await assert.rejects(async () => handler(page, bad), message, JSON.stringify(bad));
+        assert.throws(() => settings.set(bad, { from: 'page' }), message, JSON.stringify(bad));
     }
-    assert.deepEqual(changes, [], 'nothing refused reached the kit');
-    assert.deepEqual(await handler(page, { transfersAtOnce: 5, navCollapsed: true }), { transfersAtOnce: 5, navCollapsed: true });
-    assert.deepEqual([changes, heard], [[{ transfersAtOnce: 5, navCollapsed: true }], [{ transfersAtOnce: 5, navCollapsed: true }]]);
+    assert.equal(stored(), undefined, 'nothing refused was stored');
+    assert.equal(settings.set({ transfersAtOnce: 5, navCollapsed: true }, { from: 'page' }).transfersAtOnce, 5);
+    // Main changes its own; the range holds for main too.
+    assert.equal(settings.set({ downloadFolder: folder }).downloadFolder, folder);
+    assert.throws(() => settings.set({ transfersAtOnce: 9 }), /doesn't take that value/);
+    assert.deepEqual([stored().transfersAtOnce, stored().navCollapsed, stored().downloadFolder], [5, true, folder]);
+    for (const n of [1, 6]) assert.equal(SETTINGS_CHECKS.transfersAtOnce(n), true);
 });

@@ -15,15 +15,6 @@ textarea,
     user-select: text;
 }
 
-/* A help line keeps its height, so nothing under it jumps as its text comes and goes. */
-.form-text.reserved {
-    min-height: 1.5em;
-}
-
-.settings-column {
-    max-width: 40rem;
-}
-
 /* An icon beside a small button's label (Add Files), at the label's size: the page's CSP allows no inline style. */
 .button-icon {
     font-size: 16px;
@@ -65,11 +56,6 @@ textarea,
     background-color: rgba(var(--accent-rgb), var(--wash-active-fill));
 }
 
-.upload-area::-webkit-scrollbar { width: var(--scrollbar-width); }
-.upload-area::-webkit-scrollbar-track { background: transparent; }
-.upload-area::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
-.upload-area::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
-
 /* The drop zone while there are no uploads, and Download's line while there are no downloads: in the middle of the area, as Diamond File Converter's drop zone is. */
 .upload-area:has(> .empty-state:not([hidden])) {
     display: flex;
@@ -110,20 +96,6 @@ textarea,
 }
 
 /* ── Advanced Options ────────────────────────────────────────────────────── */
-
-/* The page's own form dialog (Advanced Options, and Add Server), drawn as the
-   kit's prompts are (its dialog classes): the kit has no form dialog. A little
-   narrower, its rows apart.
-   kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/65 */
-.options-dialog {
-    width: min(30rem, calc(100vw - 32px));
-}
-
-.options-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-}
 
 /* The files of an upload of several, each with its Remove. */
 .options-files {

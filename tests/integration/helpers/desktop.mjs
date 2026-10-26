@@ -533,7 +533,7 @@ export const serverRow = (window, url) => serverRows(window).filter({ has: windo
 export const defaultServerRow = (window) => serverRows(window).filter({ has: window.locator('.pill-default:not([hidden])') });
 
 /** A server row's status line: what its last check found ("Online · Dropgate 4.0.0 · End-to-End Encrypted"), or "Not checked yet". */
-export const serverStatus = (row) => row.locator('.server-status');
+export const serverStatus = (row) => row.locator('.kit-card-status');
 
 /** How a server's status line ends when uploads there are end-to-end encrypted, and when they aren't. */
 export const ENCRYPTED = /^Online · Dropgate \S+ · End-to-End Encrypted$/;

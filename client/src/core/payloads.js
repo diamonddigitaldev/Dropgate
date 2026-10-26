@@ -332,24 +332,6 @@ function defaultFolderOf(request, chosen) {
     return folder;
 }
 
-/**
- * The kit's settings:set, as main answers it: a plain object of changes,
- * none to a setting only main changes, and transfers at once a whole number
- * in its range. The kit checks the rest (each a known setting, of its kind).
- * @param {readonly string[]} mainOnly
- * @param {{ MIN: number, MAX: number }} atOnce
- */
-function settingsChangesOf(changes, mainOnly, atOnce) {
-    if (typeof changes !== 'object' || changes === null || Array.isArray(changes)) throw new Error('Expected settings to change.');
-    const named = mainOnly.filter((key) => Object.hasOwn(changes, key));
-    if (named.length > 0) throw new Error(`${named.join(', ')} can't be changed from the page.`);
-    if (Object.hasOwn(changes, 'transfersAtOnce')) {
-        const n = changes.transfersAtOnce;
-        if (!Number.isSafeInteger(n) || n < atOnce.MIN || n > atOnce.MAX) throw new Error(`Expected transfers at once from ${atOnce.MIN} to ${atOnce.MAX}.`);
-    }
-    return { ...changes };
-}
-
 /** upload:finished: why an upload the page made never started. */
 function failureOf(result) {
     if (!isRecord(result, ['status', 'error']) || result.status !== 'error' || !isText(result.error, MAX_TEXT)) {
@@ -470,7 +452,6 @@ module.exports = {
     downloadLink,
     saveToOf,
     defaultFolderOf,
-    settingsChangesOf,
     failureOf,
     snapshotOf,
     deadlineOf,

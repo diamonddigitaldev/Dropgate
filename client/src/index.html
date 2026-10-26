@@ -72,7 +72,7 @@
          order, a row each (renderer.js), with its status, its limits once
          checked, its settings for new uploads, and its buttons; Add Server opens
          the page's own dialog. Main alone changes the list. -->
-    <div id="servers-settings" class="settings-column">
+    <div id="servers-settings">
         <div class="d-flex align-items-center gap-2 mb-1">
             <span id="servers-count" class="fw-semibold"></span>
             <button id="add-server-btn" class="btn btn-sm btn-secondary d-inline-flex align-items-center gap-1 ms-auto" type="button">
@@ -88,7 +88,7 @@
     <!-- Settings > Transfers, moved into its tab by renderer.js: where new downloads
          are saved (shown; Browse is the system's folder picker, in main), and how
          many transfers run at once (the kit's stepped slider, added by renderer.js). -->
-    <div id="transfers-settings" class="settings-column d-flex flex-column gap-3">
+    <div id="transfers-settings" class="d-flex flex-column gap-3">
         <div>
             <label for="downloads-folder" class="form-label">Save downloads to</label>
             <div class="input-group input-group-sm">
@@ -104,7 +104,7 @@
 
     <!-- Settings > Privacy, moved into its tab by renderer.js: the kit's keepLogOnDisk, off by default,
          as the kit's switch (kit.ui.switchField()), whose help line says what each state does. -->
-    <div id="privacy-settings" class="settings-column"></div>
+    <div id="privacy-settings"></div>
 
     <!-- Add Files' and the drop zone's picker: the files picked together make one upload. -->
     <input type="file" id="file-input" hidden multiple>

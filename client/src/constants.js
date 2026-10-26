@@ -66,14 +66,6 @@ const IPC = Object.freeze({
     SERVERS_CHANGED: 'servers:changed',         // push: the saved servers' list answer ({ servers, defaultServer, checks }), when main checked one itself (a fallback trying it)
 });
 
-/**
- * The kit's own channel for the page's settings changes, which main answers
- * itself, with the kit's sender check, so the page can't change the settings
- * only main changes (MAIN_ONLY_SETTINGS).
- * kit-gap: https://github.com/diamonddigitaldev/electron-kit/issues/66
- */
-const KIT_SETTINGS_SET = 'settings:set';
-
 /** The pushes, which main sends and the page only listens for. */
 const PUSHES = Object.freeze([
     IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.TRANSFER_ASK_FALLBACK, IPC.TRANSFER_CHANGED, IPC.TRANSFER_REMOVED, IPC.UPLOAD_STATUS, IPC.SERVERS_CHANGED,
@@ -164,11 +156,23 @@ const SETTINGS_DEFAULTS = Object.freeze({
     transfersAtOnce: 3,
 });
 
-/** The settings only main changes: the page may read them, and is refused a change to one. */
+/**
+ * The settings only main changes (the kit's settings.mainOnly): the page may
+ * read them, and a change from it naming one is refused whole. A page that
+ * could set the downloads folder could choose where every download lands.
+ */
 const MAIN_ONLY_SETTINGS = Object.freeze(['servers', 'defaultServer', 'downloadFolder']);
 
 /** Transfers at once, as Settings > Transfers' stepped slider offers it. */
 const AT_ONCE_RANGE = Object.freeze({ MIN: 1, MAX: 6 });
+
+/**
+ * The values each setting takes beyond its kind (the kit's settings.checks),
+ * from the page or main: transfers at once is held to the slider's range.
+ */
+const SETTINGS_CHECKS = Object.freeze({
+    transfersAtOnce: (n) => Number.isSafeInteger(n) && n >= AT_ONCE_RANGE.MIN && n <= AT_ONCE_RANGE.MAX,
+});
 
 /**
  * The settings' version. 1: v4's first, under the kit's "settings" key. v3
@@ -229,6 +233,6 @@ const TRANSFERS = Object.freeze({
 });
 
 module.exports = {
-    APP_NAME, IPC, PUSHES, KIT_SETTINGS_SET, ENGINE, ENGINE_PUSHES, FILE_SERVICE, PARTIAL_FOLDER, READ_PIECE_BYTES,
-    SETTINGS_DEFAULTS, MAIN_ONLY_SETTINGS, AT_ONCE_RANGE, SETTINGS_SCHEMA_VERSION, migrateSettings, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS,
+    APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, PARTIAL_FOLDER, READ_PIECE_BYTES,
+    SETTINGS_DEFAULTS, MAIN_ONLY_SETTINGS, AT_ONCE_RANGE, SETTINGS_CHECKS, SETTINGS_SCHEMA_VERSION, migrateSettings, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS,
 };

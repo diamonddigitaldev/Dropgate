@@ -233,6 +233,8 @@ test.describe('on a server with no time limit and any number of downloads', () =
         await expect(named(window, 'Left as it was.bin').locator('.kit-card-settings')).toBeHidden();
         expect((await transfersIn(window)).map(({ options: { lifetime, maxDownloads } }) => [lifetime.unit, maxDownloads])).toEqual([['unlimited', 0], ['hours', 1], ['unlimited', 0]]);
 
+        // The kit's form fades out as its prompts do; until it's gone, Escape is its, not the selection's.
+        await expect(dialog).toHaveCount(0);
         await window.keyboard.press('Escape');
         await window.locator('#action-bar').getByRole('button', { name: 'Upload All', exact: true }).click();
         for (const file of files) {

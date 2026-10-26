@@ -219,7 +219,7 @@ test('the main window\'s page has a CSP: its own scripts, styles, fonts and imag
 
 test('the shell and the shared parts are the kit\'s: no modal, drop zone, progress bar or theme script of the client\'s own', () => {
     for (const call of ['kit.ui.mountShell(', 'kit.ui.dropZone(', 'kit.ui.actionBar(', 'kit.ui.card(', 'kit.ui.cardGrid(', 'kit.ui.bulkBar(', 'kit.ui.busy(',
-        'kit.ui.confirm(', 'kit.ui.toast(', 'kit.ui.switchField(', 'kit.format']) {
+        'kit.ui.confirm(', 'kit.ui.dialog(', 'kit.ui.statusLine(', 'kit.ui.toast(', 'kit.ui.switchField(', 'kit.format']) {
         assert.ok(renderer.includes(call), `renderer.js uses ${call}`);
     }
     assert.match(renderer, /busy: async \(\) =>/, 'Restart Now asks first while an upload runs');
@@ -230,17 +230,20 @@ test('the shell and the shared parts are the kit\'s: no modal, drop zone, progre
     // The files the app is opened with wait in one list until the page is set up: a second name like it inside would
     // hide it from the setup's end, and files arriving while the page sets itself up would be lost (CI's timing).
     assert.equal(renderer.match(/\b(?:const|let|var) opened\b/g)?.length, 1, 'renderer.js declares opened once');
-    // No status line of the page's own: a server's row draws the kit's, on its classes, until the kit makes one alone.
-    assert.doesNotMatch(renderer, /(?<!kit-)card-status/, 'renderer.js has a card-status of its own');
-    assert.match(fs.readFileSync(new URL('../src/renderer.js', import.meta.url), 'utf8'),
-        /kit-gap: https:\/\/github\.com\/diamonddigitaldev\/electron-kit\/issues\/67\r?\n\s+const statusText = element\('span', 'kit-status-text'\);/,
-        "a server row's status line is the kit's, marked as its gap");
+    // No form dialog or status line of the page's own: Advanced Options, Add Server and a server's row are the kit's.
+    assert.doesNotMatch(renderer, /card-status|kit-status-(?:dot|text)|kit-tone-/, 'renderer.js draws a status line of its own');
+    assert.doesNotMatch(renderer, /element\('dialog'|createElement\('dialog'|showModal\(|kit-dialog-(?:header|footer|title)/, 'renderer.js draws a dialog of its own');
     for (const markup of ['insecure-upload-modal', 'progress-bar', 'drop-zone', 'prefers-color-scheme', 'data-bs-theme']) {
         assert.ok(!html.includes(markup), `index.html has ${markup}`);
     }
     for (const selector of ['.nav-rail', '.nav-item', '.app-frame', '.app-header', '.kit-', '.toast', '.modal', '.progress']) {
         assert.ok(!css.includes(selector), `styles.css must not restyle ${selector}`);
     }
+    // Every scroller's bar is the kit's thin one, which Chromium drops wherever scrollbar-width or -color is set; and
+    // a Settings tab's cards fill the pane, as the kit's own tabs do.
+    assert.doesNotMatch(css, /scrollbar/, 'styles.css has scrollbar CSS of its own');
+    for (const pane of ['servers-settings', 'transfers-settings', 'privacy-settings']) assert.match(html, new RegExp(`id="${pane}"`), pane);
+    assert.doesNotMatch(css, /settings-column|max-width:\s*\d+rem/, 'styles.css holds a Settings tab to a column');
 });
 
 test('every icon is hidden from screen readers, and every icon-only button has a name', () => {
