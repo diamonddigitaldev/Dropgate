@@ -13,6 +13,7 @@
 // request is held (until it's paused) and its clock moved.
 import fs from 'node:fs';
 import path from 'node:path';
+import { deadlineTimes, installClock } from '../helpers/clock.mjs';
 import { madeUpFile, summary } from '../helpers/files.mjs';
 import { addLink, cardButton, downloadCard, downloadStatus, expect, pickFolder, test } from '../helpers/desktop.mjs';
 import { uploadWithCore } from '../helpers/hosted.mjs';
@@ -25,10 +26,6 @@ const routes = (server) => server.requests().map((r) => `${r.method} ${new URL(r
 const partialsOf = (desktop) => path.join(desktop.profile, 'Partial Downloads');
 const listing = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir).sort() : []);
 const pauseNotifications = (app) => app.eventsOf('notification').filter(({ title }) => title === 'Download Still Paused');
-
-/** The local time a deadline `minutes` from now is, and a minute after it, as the window writes it. */
-const shownTimes = (window, minutes) => window.evaluate(({ ms, minute }) => [ms, ms + minute].map((after) => new Date(Date.now() + after)
-    .toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })), { ms: minutes * MINUTE, minute: MINUTE });
 
 /**
  * Upload a made-up file with core, launch the app, paste its link and start
@@ -46,7 +43,7 @@ async function startDownload(desktop, server, name, seed, { clock = false, folde
     await expect(downloadStatus(window)).toHaveText('Ready');
     // Started for reading its list of files.
     const downloader = await app.transferWindow();
-    if (clock) await downloader.clock.install();
+    await installClock(downloader, { moved: clock });
     const held = [];
     await downloader.route('**/api/v4/objects/*/content', (route) => {
         held.push(route);
@@ -69,7 +66,7 @@ test.describe('on a server keeping a paused download 30 minutes', () => {
 
     test('paused, its file is held open in the partial folder under a random name; it waits, resumes, and lands byte for byte, counted once', async ({ desktop, server }) => {
         const { app, window, downloader, file, id } = await startDownload(desktop, server, 'Paused download é.bin', 91);
-        const [shortly, aMinuteLater] = await shownTimes(window, 30);
+        const [shortly, aMinuteLater] = await deadlineTimes(window, 30);
         await expect(pauseButton(window)).toBeEnabled();
         await pauseButton(window).click();
         await expect(downloadStatus(window)).toHaveText(/^Paused\. Kept until .+\.$/);
@@ -126,7 +123,7 @@ test.describe('on a server keeping a paused download 6 minutes', () => {
 
     test('a notification comes 5 minutes before the deadline, naming no file, and the download stays paused', async ({ desktop, server }) => {
         const { app, window, downloader, held } = await startDownload(desktop, server, 'Warned about é.bin', 93, { clock: true });
-        const [deadline] = await shownTimes(window, 6);
+        const [deadline] = await deadlineTimes(window, 6, { timeOnly: true });
         await pauseButton(window).click();
         await expect(downloadStatus(window)).toHaveText(/^Paused\. Kept until .+\.$/);
 

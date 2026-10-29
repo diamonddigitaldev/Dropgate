@@ -12,6 +12,7 @@
 // does every file on disk. The upload runs in the app's transfer window, so
 // that's where its chunks are held, and its clock moved.
 import fs from 'node:fs';
+import { deadlineTimes, installClock } from '../helpers/clock.mjs';
 import { madeUpFile, summary } from '../helpers/files.mjs';
 import { ENCRYPTED, NOT_ENCRYPTED, cardButton, defaultServerRow, expect, securityWarning, serverStatus, test, uploadButton, uploadCard, uploadLink, uploadStatus } from '../helpers/desktop.mjs';
 import { download } from '../helpers/webui.mjs';
@@ -55,8 +56,9 @@ async function startUpload(desktop, name, seed, { encrypted, clock = false }) {
     const window = await app.window();
     await desktop.setUp(window);
     // The upload's clock, where core and the paused upload's notification run, is moved forward rather than waited on.
+    // Playwright's clock is the whole app's, so it's the window's too.
     const uploader = await app.transferWindow();
-    if (clock) await uploader.clock.install();
+    await installClock(uploader, { moved: clock });
     await expect(uploadCard(window).locator('.kit-card-name')).toHaveText([name]);
     await expect(serverStatus(defaultServerRow(window))).toHaveText(encrypted ? ENCRYPTED : NOT_ENCRYPTED);
     const chunks = await holdChunks(uploader);
@@ -70,10 +72,6 @@ const pauseButton = (window) => cardButton(uploadCard(window), 'Pause');
 const resumeButton = (window) => cardButton(uploadCard(window), 'Resume');
 const cancelButton = (window) => cardButton(uploadCard(window), 'Cancel');
 
-/** The local time a deadline `minutes` from now is, and a minute after it, as the window writes it. */
-const shownTimes = (window, minutes) => window.evaluate(({ ms, minute }) => [ms, ms + minute].map((after) => new Date(Date.now() + after)
-    .toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })), { ms: minutes * MINUTE, minute: MINUTE });
-
 /** The app's notifications that a paused upload's server will drop it. */
 const pauseNotifications = (app) => app.eventsOf('notification').filter(({ title }) => title === 'Upload Still Paused');
 
@@ -85,7 +83,7 @@ test.describe('on a server with HTTPS, keeping a paused upload 30 minutes', () =
 
         await expect(pauseButton(window)).toBeEnabled();
         await expect(resumeButton(window)).toBeHidden();
-        const [shortly, aMinuteLater] = await shownTimes(window, 30);
+        const [shortly, aMinuteLater] = await deadlineTimes(window, 30);
         await pauseButton(window).click();
 
         await expect(uploadStatus(window)).toHaveText(/^Paused\. Kept until .+\.$/);
@@ -134,7 +132,7 @@ test.describe('on a server keeping a paused upload 6 minutes', () => {
 
     test('a notification comes 5 minutes before the deadline, naming no file, and the upload stays paused', async ({ desktop, server }) => {
         const { app, window, uploader, chunks } = await startUpload(desktop, 'Warned about é.bin', 42, { encrypted: false, clock: true });
-        const [deadline] = await shownTimes(window, 6);
+        const [deadline] = await deadlineTimes(window, 6, { timeOnly: true });
         await pauseButton(window).click();
         await expect(uploadStatus(window)).toHaveText(/^Paused\. Kept until .+\.$/);
 

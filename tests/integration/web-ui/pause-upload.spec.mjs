@@ -4,6 +4,7 @@
 // server's deadline, the upload ends. Pause isn't there on a server with
 // pausing turned off, and the download pages have none: a browser's own
 // download manager does that.
+import { deadlineTimes, installClock } from '../helpers/clock.mjs';
 import { madeUpFile, summary } from '../helpers/files.mjs';
 import { secretsOf } from '../helpers/privacy.mjs';
 import { expect, test } from '../helpers/test.mjs';
@@ -42,16 +43,13 @@ async function startUpload(page, file, { encrypted }) {
     if (!encrypted) await page.locator('#confirmInsecureUpload').click();
 }
 
-/** The local time a deadline `minutes` from now is, and a minute after it, in the page's own format. */
-const shownTimes = (page, minutes) => page.evaluate(({ ms, minute }) => [ms, ms + minute].map((after) => new Date(Date.now() + after)
-    .toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })), { ms: minutes * MINUTE, minute: MINUTE });
-
 for (const encrypted of [false, true]) {
     test.describe(encrypted ? 'end-to-end encrypted' : 'unencrypted', () => {
         test.use({ serverEnv: { UPLOAD_MAX_PAUSE_MINUTES: '30', ...(encrypted ? {} : { UPLOAD_ENABLE_E2EE: 'false' }) } });
 
         test("an upload paused part-way shows until when the server keeps it, resumes, and its link downloads byte for byte", async ({ page, server }) => {
             const file = madeUpFile(`Paused ${encrypted ? 'sealed' : 'plain'} é.bin`, SIZE, encrypted ? 31 : 32);
+            await installClock(page);
             const chunks = await holdChunks(page);
             await startUpload(page, file, { encrypted });
 
@@ -60,7 +58,7 @@ for (const encrypted of [false, true]) {
             await expect.poll(() => chunks.sent.length, { message: 'the second chunk should be on its way' }).toBe(2);
             await expect(pause).toBeEnabled();
             await expect(resume).toBeHidden();
-            const [shortly, aMinuteLater] = await shownTimes(page, 30);
+            const [shortly, aMinuteLater] = await deadlineTimes(page, 30);
             await pause.click();
 
             await expect(page.locator('#progressTitle')).toHaveText(/upload paused/i);
