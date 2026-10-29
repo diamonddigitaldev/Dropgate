@@ -113,11 +113,14 @@ export async function expectGone(page, link) {
  * With loseNavigation (or DROPGATE_TEST_LOSE_NAVIGATION=1, for every receiver),
  * in Firefox, Playwright loses the navigation on purpose, as on CI's runner:
  * see loseNavigations().
+ *
+ * A receiver who types the code opens the home page this way too (`what` says
+ * which page it is, for the log), then waits for its Go with receiverReaches().
  * @param {import('@playwright/test').Page} page
  * @param {string} link
- * @param {{ loseNavigation?: boolean }} [opts]
+ * @param {{ loseNavigation?: boolean, what?: string }} [opts]
  */
-export async function openReceivePage(page, link, { loseNavigation = process.env.DROPGATE_TEST_LOSE_NAVIGATION === '1' } = {}) {
+export async function openReceivePage(page, link, { loseNavigation = process.env.DROPGATE_TEST_LOSE_NAVIGATION === '1', what = 'the receive page' } = {}) {
     if (loseNavigation) loseNavigations(page);
     const reported = await page.goto(link, { waitUntil: 'commit', timeout: 15_000 }).then(() => true, (err) => {
         if (page.isClosed()) throw err;
@@ -125,9 +128,35 @@ export async function openReceivePage(page, link, { loseNavigation = process.env
     });
     if (!reported) {
         const at = await askWhere(page);
-        if (at !== link) throw new Error(`The receive page never opened in 15 s: the page says it's at ${at ?? '(no answer in 10 s)'}.`);
-        console.log(`Playwright never reported the receive page's navigation in 15 s, but the page is at its link.`);
+        if (at !== link) throw new Error(`${capitalised(what)} never opened in 15 s: the page says it's at ${at ?? '(no answer in 10 s)'}.`);
+        console.log(`Playwright never reported ${what}'s navigation in 15 s, but the page is at its link.`);
     }
+    await carryOn(page, link, what);
+}
+
+/**
+ * Wait for a receiver's page to go to `link` by itself (the home page to a
+ * code's receive page, once Go is clicked), and carry the test on as
+ * openReceivePage() does if Playwright loses that navigation: where the page
+ * is, is asked of the page itself, never of Playwright's frame, which may
+ * still be at the page before, or at about:blank.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} link
+ */
+export async function receiverReaches(page, link) {
+    const what = 'the receive page';
+    const there = await page.waitForFunction((to) => location.href === to, link, { polling: 100, timeout: 15_000 })
+        .then(() => true, () => false);
+    if (!there) throw new Error(`${capitalised(what)} never opened in 15 s: the page says it's at ${(await askWhere(page)) ?? '(no answer in 10 s)'}.`);
+    await carryOn(page, link, what);
+}
+
+/**
+ * Once a receiver's page is at its link: give its load up to 5 s, and if
+ * Playwright's frame is still waiting for the navigation, turn that wait off
+ * for the rest of the test (see openReceivePage()).
+ */
+async function carryOn(page, link, what) {
     const complete = await page.waitForFunction(() => document.readyState === 'complete', null, { polling: 100, timeout: 5_000 })
         .then(() => true, () => false);
     if (!complete) {
@@ -142,20 +171,22 @@ export async function openReceivePage(page, link, { loseNavigation = process.env
                 resourcesDone: performance.getEntriesByType('resource').length,
             };
         }).catch((err) => ({ error: String(err) }));
-        console.log(`The receive page's load hadn't completed 5 s after it started: ${JSON.stringify(seen)}`);
+        console.log(`${capitalised(what)}'s load hadn't completed 5 s after it started: ${JSON.stringify(seen)}`);
     }
     const settled = await page.locator(':root').waitFor({ state: 'attached', timeout: 2_000 }).then(() => true, () => false);
     if (settled) return;
     const at = await askWhere(page);
-    if (at !== link) throw new Error(`Playwright is still waiting for the receive page's navigation, and the page says it's at ${at ?? '(no answer in 10 s)'}.`);
+    if (at !== link) throw new Error(`Playwright is still waiting for ${what}'s navigation, and the page says it's at ${at ?? '(no answer in 10 s)'}.`);
     skipNavigationCheckForThisTest();
-    console.log(`Playwright is still waiting for the receive page's navigation to finish, but the page is at its link: its wait before each step is off for the rest of this test.`);
+    console.log(`Playwright is still waiting for ${what}'s navigation to finish, but the page is at its link: its wait before each step is off for the rest of this test.`);
 }
 
 /** The page's own location, asked of the page, or null if it doesn't answer in 10 s. */
 function askWhere(page) {
     return Promise.race([page.evaluate(() => location.href), new Promise((resolve) => setTimeout(resolve, 10_000, null))]);
 }
+
+const capitalised = (text) => text[0].toUpperCase() + text.slice(1);
 
 /**
  * From now on, Playwright never hears that this page's navigations committed or

@@ -21,7 +21,7 @@
 import os from 'node:os';
 import { holdsPlaintext, madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, test } from '../helpers/test.mjs';
-import { describePeers, download, openReceivePage, peerConnections, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
+import { describePeers, download, openReceivePage, peerConnections, receiverReaches, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
 
 test.use({ localStun: true });
 
@@ -131,6 +131,20 @@ const takeDownload = (receiver, sender) => explained('What the peers did', recei
     return got;
 });
 
+/**
+ * As the receiver, open the home page, type the code and press Go, and wait
+ * until the page is at the code's receive page, whether or not Playwright
+ * hears either navigation (openReceivePage(), receiverReaches()). Go's click
+ * doesn't wait for the navigation it starts, as a click otherwise does: one
+ * Playwright never hears commit would hold it until the test runs out.
+ */
+async function typeTheCode(receiver, server, code, { loseNavigation } = {}) {
+    await openReceivePage(receiver, new URL('/', server.baseUrl).href, { loseNavigation, what: 'the home page' });
+    await receiver.locator('#codeInput').fill(code);
+    await receiver.locator('#codeGo').click({ noWaitAfter: true });
+    await receiverReaches(receiver, new URL(`/p2p/${code}`, server.baseUrl).href);
+}
+
 /** On the receive page: check what's offered, take it, and compare it with what was sent. */
 async function receiveAndCompare(receiver, sender, file) {
     await expectConnected(receiver, sender);
@@ -149,10 +163,7 @@ test('a file sent by direct transfer arrives intact when the receiver types the 
     const sent = await sendDirectFromHomePage(page, [file]);
 
     const receiver = await otherContext.newPage();
-    await receiver.goto('/');
-    await receiver.locator('#codeInput').fill(sent.code);
-    await receiver.locator('#codeGo').click();
-    await expect(receiver).toHaveURL(new RegExp(`/p2p/${sent.code}$`));
+    await typeTheCode(receiver, server, sent.code);
 
     await receiveAndCompare(receiver, page, file);
     await expectOnlyLocalCandidates(stun, browserName, page, receiver);
@@ -187,6 +198,21 @@ test("a file sent by direct transfer arrives intact when the receiver opens the 
 
     const receiver = await otherContext.newPage();
     await openReceivePage(receiver, sent.link, { loseNavigation: true });
+    expect(receiver.url(), "where Playwright's frame thinks the receiver is").toBe('about:blank');
+
+    await receiveAndCompare(receiver, page, file);
+});
+
+// The same for a receiver who types the code: Playwright loses the home page's
+// navigation, and then the receive page's, once Go is clicked.
+test("a file sent by direct transfer arrives intact when the receiver types the code and Playwright never hears either page's navigation finish", async ({ page, otherContext, browserName, server }) => {
+    test.skip(browserName !== 'firefox', 'Only Firefox is seen to lose it, and only its page can be made to');
+    const file = madeUpFile('Sketches (lost, typed) é.bin', SIZE, 36);
+
+    const sent = await sendDirectFromHomePage(page, [file]);
+
+    const receiver = await otherContext.newPage();
+    await typeTheCode(receiver, server, sent.code, { loseNavigation: true });
     expect(receiver.url(), "where Playwright's frame thinks the receiver is").toBe('about:blank');
 
     await receiveAndCompare(receiver, page, file);
