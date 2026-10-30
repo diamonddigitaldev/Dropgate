@@ -1,0 +1,645 @@
+name: Release
+
+# One workflow releases everything. Core, the server and the desktop client share
+# a version, and each release is built from its tag.
+#
+# Publishing a GitHub release runs it. It checks the release against the
+# versions, its branch and npm, then runs every test and builds the desktop app,
+# as CI does. Then it builds each platform's desktop packages, the server's and
+# core's source archives, and the server's image for each platform, checks each
+# one, attaches the files to the release and pushes the image. The desktop
+# app's update files go up after all of that. Core's npm package comes last of
+# all, and is only staged: nothing is on npm until it's approved there, with
+# two-factor authentication. Nothing is uploaded as a workflow artifact.
+#
+# Its dry run does all of that but attach, push and publish: it lists every
+# file the release would attach, and runs npm's dry run of core's package. It
+# runs by hand (gh workflow run release.yml --ref 4.0.0), optionally pretending
+# a tag and pre-release flag, and by itself on a push that changes this file.
+#
+# A job's permissions can't depend on what ran it. So each job that attaches,
+# pushes or publishes has a copy that only a release runs, with the permissions
+# it needs: it runs the dry run's steps (the YAML aliases below), then its own.
+# The dry run's jobs keep a read-only token, and never get an ID token. The
+# image and npm jobs run in the "release" environment, which holds the Docker
+# Hub secrets and which npm's trusted publisher names.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release's tag, to pretend. Leave it empty for the packages' version."
+        required: false
+        default: ''
+      prerelease:
+        description: 'Whether the release is a pre-release, to pretend. "From the version" means when it has a pre-release part, such as 4.0.0-alpha.1.'
+        type: choice
+        options: ['from the version', 'yes', 'no']
+        default: 'from the version'
+  push:
+    branches: ['4.0.0']
+    paths: ['.github/workflows/release.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    name: Versions and branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      on-npm: ${{ steps.npm.outputs.on-npm }}
+    steps:
+      - &checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # Releases come from the main branch, or from 4.0.0 until it's merged.
+      - name: Check the branch
+        if: github.event_name != 'release'
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          case "$BRANCH" in
+            master|4.0.0) echo "Releasing from $BRANCH." ;;
+            *) echo "Releases are made from master or 4.0.0, not from $BRANCH."; exit 1 ;;
+          esac
+
+      # A published release names its branch as its target. GitHub only uses
+      # that when it makes the tag, and it can be a commit, so the tag's commit
+      # must be on the branch too.
+      - name: Check the release's branch
+        if: github.event_name == 'release'
+        env:
+          BRANCH: ${{ github.event.release.target_commitish }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$BRANCH" in
+            master|4.0.0) ;;
+            *) echo "Releases are made from master or 4.0.0, but this release's target is $BRANCH."; exit 1 ;;
+          esac
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$BRANCH" --jq .status)
+          case "$status" in
+            identical|ahead) echo "Releasing from $BRANCH, which has the tag's commit, $GITHUB_SHA." ;;
+            *) echo "The tag's commit, $GITHUB_SHA, isn't on $BRANCH: GitHub compares them as $status."; exit 1 ;;
+          esac
+
+      # The tag must be the version itself, and the release a pre-release exactly
+      # when the version has a pre-release part, so a pre-release can never become
+      # the latest release. A published release gives its own tag and flag. With
+      # nothing given, the dry run checks the release the packages' version would
+      # make.
+      - name: Check the versions against the release
+        id: release
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+          PRERELEASE: ${{ github.event_name == 'release' && (github.event.release.prerelease && 'yes' || 'no') || inputs.prerelease }}
+        run: |
+          version=$(node -p "require('./server/package.json').version")
+          tag=${TAG:-$version}
+          case "$PRERELEASE" in
+            yes) prerelease=true ;;
+            no) prerelease=false ;;
+            *) case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac ;;
+          esac
+          if [ "$GITHUB_EVENT_NAME" = release ]; then
+            echo "The release: tag $tag, pre-release: $prerelease."
+          else
+            echo "The release: tag $tag, pre-release: $prerelease. This is a dry run, so nothing is published."
+          fi
+          node .github/scripts/check-versions.mjs --tag "$tag" --prerelease "$prerelease"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+      # npm never takes a version twice, so a version it already has can't be
+      # released. Read with no credentials. A release stops here, before anything
+      # is attached, pushed or published. The dry run warns and goes on.
+      - name: Look the version up on npm
+        id: npm
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          name=$(node -p "require('./packages/dropgate-core/package.json').name")
+          status=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${name/\//%2f}/$TAG")
+          case "$status" in
+            200)
+              if [ "$GITHUB_EVENT_NAME" = release ]; then
+                echo "::error title=Already on npm::$name $TAG is already on npm, so it can't be released. Nothing was attached, pushed or published."
+                exit 1
+              fi
+              echo "::warning title=Already on npm::$name $TAG is already on npm, so a real release of it would stop here. The dry run goes on."
+              echo "on-npm=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "$name $TAG isn't on npm yet."
+              echo "on-npm=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "npm answered $status for $name $TAG."
+              exit 1
+              ;;
+          esac
+
+  # Every test, and the desktop builds, exactly as CI runs them.
+  tests:
+    name: Tests and builds
+    needs: versions
+    uses: ./.github/workflows/ci.yml
+
+  # Each platform's desktop packages, built after the tests as CI builds them
+  # (client-build.yml). Each lists the files the release would attach from it,
+  # and hands its update file on to update-files. Nothing is attached.
+  desktop-windows:
+    name: Desktop build, Windows (not attached)
+    if: github.event_name != 'release'
+    needs: [versions, tests]
+    uses: ./.github/workflows/client-build.yml
+    with:
+      os: windows-latest
+      release: true
+      prerelease: ${{ needs.versions.outputs.prerelease }}
+
+  desktop-linux:
+    name: Desktop build, Linux (not attached)
+    if: github.event_name != 'release'
+    needs: [versions, tests]
+    uses: ./.github/workflows/client-build.yml
+    with:
+      os: ubuntu-latest
+      release: true
+      prerelease: ${{ needs.versions.outputs.prerelease }}
+
+  # The server's and core's source, as the release would attach it: each folder
+  # at the release's commit, from git archive, with its line endings as
+  # committed and every file dated at that commit, so the same commit gives the
+  # same archive on any machine. Each is unpacked on its own and tested, so each
+  # stands alone. Nothing is attached.
+  archives:
+    name: Source archives (not attached)
+    if: github.event_name != 'release'
+    needs: [versions, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env: &archives-env
+      TAG: ${{ needs.versions.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - &archives-node
+        uses: actions/setup-node@v7
+        with:
+          # The server's expected-failure tests use node:test's expectFailure, added in 24.14.
+          node-version: '^24.14'
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            packages/dropgate-core/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - &archives-npm
+        name: Install npm 12
+        run: npm install -g npm@12
+
+      # Each must hold exactly its folder's files at the commit.
+      - &make-archives
+        name: Make the archives
+        run: |
+          mkdir -p "$RUNNER_TEMP/archives"
+          date=$(git log -1 --format=%cI HEAD)
+          echo "From $(git rev-parse HEAD), every file dated $date. The release would attach:"
+          for part in server:server core:packages/dropgate-core; do
+            name=dropgate-${part%%:*}-$TAG
+            folder=${part#*:}
+            file=$RUNNER_TEMP/archives/$name.tar.gz
+            git -c core.autocrlf=false archive --format=tar.gz --prefix="$name/" --mtime="$date" -o "$file" "HEAD:$folder"
+            if ! diff <(git -c core.quotePath=false ls-tree -r --name-only "HEAD:$folder" | sort) \
+                      <(tar -tzf "$file" | grep -v '/$' | sed "s|^$name/||" | sort); then
+              echo "$name.tar.gz doesn't hold exactly $folder/ at the commit."
+              exit 1
+            fi
+            printf '  %-30s %9d bytes  %4d files  sha256 %s\n' "$name.tar.gz" "$(wc -c < "$file")" \
+              "$(tar -tzf "$file" | grep -vc '/$')" "$(sha256sum "$file" | cut -d' ' -f1)"
+          done
+          echo "Nothing was attached or uploaded."
+
+      # Unpacked away from the repository, it installs and passes its tests.
+      - &check-server-archive
+        name: Check the server's archive stands alone
+        run: |
+          cd "$RUNNER_TEMP"
+          tar -xzf "archives/dropgate-server-$TAG.tar.gz"
+          cd "dropgate-server-$TAG"
+          npm --version
+          npm ci
+          node --test --test-reporter=tap "test/*.test.mjs"
+
+      # Unpacked away from the repository, it installs, typechecks, builds and
+      # passes its tests. Its build and tests skip the copies in the server and
+      # the client, which aren't there.
+      - &check-core-archive
+        name: Check core's archive stands alone
+        run: |
+          cd "$RUNNER_TEMP"
+          tar -xzf "archives/dropgate-core-$TAG.tar.gz"
+          cd "dropgate-core-$TAG"
+          npm ci
+          npm run typecheck
+          npm run build
+          npx vitest run --reporter=verbose
+
+  # The server's image, built for each platform the release publishes, with the
+  # tags it would push. Nothing is pushed, and nothing is uploaded.
+  server-image:
+    name: Server image (not pushed)
+    if: github.event_name != 'release'
+    needs: [versions, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env: &image-env
+      IMAGE: willtda/dropgate-server
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Stable releases get their version, its major and minor, its major, and
+      # latest. Pre-releases get only their version and next, never latest. The
+      # license label is the Dockerfile's: without it here, the action would put
+      # GitHub's reading of the repository's license, AGPL-3.0, over it.
+      - &image-tags
+        name: Work out the tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.versions.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.versions.outputs.tag }},enable=${{ needs.versions.outputs.prerelease == 'false' }}
+            type=semver,pattern={{major}},value=${{ needs.versions.outputs.tag }},enable=${{ needs.versions.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.versions.outputs.prerelease == 'false' }}
+            type=raw,value=next,enable=${{ needs.versions.outputs.prerelease == 'true' }}
+          labels: |
+            org.opencontainers.image.licenses=AGPL-3.0-only
+
+      # The same tags, worked out another way, so a mistake in either shows, and
+      # the license label, which must be the license server/package.json gives.
+      - &image-check-tags
+        name: Check the tags and the license label
+        env:
+          TAG: ${{ needs.versions.outputs.tag }}
+          PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          if [ "$PRERELEASE" = true ]; then
+            expected="$IMAGE:$TAG $IMAGE:next"
+          else
+            IFS=. read -r major minor _ <<< "$TAG"
+            expected="$IMAGE:$TAG $IMAGE:$major.$minor $IMAGE:$major $IMAGE:latest"
+          fi
+          echo "The release would push these tags:"
+          printf '  %s\n' $TAGS
+          if [ "$(printf '%s\n' $TAGS | sort)" != "$(printf '%s\n' $expected | sort)" ]; then
+            echo "They should be:"
+            printf '  %s\n' $expected
+            exit 1
+          fi
+          license=$(node -p "require('./server/package.json').license")
+          if ! printf '%s\n' "$LABELS" | grep -qxF "org.opencontainers.image.licenses=$license"; then
+            echo "The image's labels don't give the license server/package.json gives, $license:"
+            printf '%s\n' "$LABELS" | sed 's/^/  /'
+            exit 1
+          fi
+          echo "Its license label is $license, as server/package.json gives it."
+
+      - &image-qemu
+        uses: docker/setup-qemu-action@v4
+
+      - &image-buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Both platforms, with the release's tags and labels, kept in the build
+      # cache only.
+      - &image-build
+        name: Build for linux/amd64 and linux/arm64
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: server
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=cacheonly
+
+      # Each platform's image, loaded from that build's cache, gets CI's checks.
+      # linux/arm64 runs under emulation.
+      - &image-check
+        name: Check each platform's image
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            docker buildx build --platform "$platform" --load -t "dropgate-server:${platform#linux/}" server/
+            bash .github/scripts/check-server-image.sh "dropgate-server:${platform#linux/}" "$platform"
+          done
+
+  # The desktop app's update files go up after every other file and the image,
+  # so the app never finds one before everything it names is there. Every
+  # release has them, pre-releases too: the app's Beta and Alpha channels read a
+  # pre-release's, and its updater never offers one on Stable. Nothing is
+  # attached.
+  update-files:
+    name: Update files (not attached)
+    if: github.event_name != 'release'
+    needs: [versions, desktop-windows, desktop-linux, archives, server-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+      WINDOWS_NAME: ${{ needs.desktop-windows.outputs.update-file-name }}
+      WINDOWS_FILE: ${{ needs.desktop-windows.outputs.update-file }}
+      LINUX_NAME: ${{ needs.desktop-linux.outputs.update-file-name }}
+      LINUX_FILE: ${{ needs.desktop-linux.outputs.update-file }}
+    steps:
+      - &list-update-files
+        name: List the update files
+        run: |
+          dir=$RUNNER_TEMP/update-files
+          mkdir -p "$dir"
+          show() {
+            if [ "$2" != "$1" ] || [ -z "$3" ]; then
+              echo "Expected $1 from the desktop build, but it handed on ${2:-nothing}."
+              exit 1
+            fi
+            printf '%s' "$3" | base64 -d > "$dir/$1"
+            printf '  %-17s %5d bytes  sha256 %s\n' "$1" "$(wc -c < "$dir/$1")" "$(sha256sum "$dir/$1" | cut -d' ' -f1)"
+            sed 's/^/      /' "$dir/$1"
+          }
+          kind="stable release"; if [ "$PRERELEASE" = true ]; then kind=pre-release; fi
+          echo "A $kind would attach these last, each checked against its build's files:"
+          show latest.yml "$WINDOWS_NAME" "$WINDOWS_FILE"
+          show latest-linux.yml "$LINUX_NAME" "$LINUX_FILE"
+          echo "Nothing was attached or uploaded."
+
+  # Core's npm package, last of all, since npm never takes a version twice.
+  # A stable release is tagged latest, and a pre-release next. npm's dry run
+  # lists what it would publish, and publishes nothing. The job asks for no ID
+  # token: given one, npm swaps it for a publish token, even in a dry run.
+  npm:
+    name: npm package (not published)
+    if: github.event_name != 'release'
+    needs: [versions, update-files]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults: &npm-defaults
+      run:
+        working-directory: packages/dropgate-core
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - &npm-node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/dropgate-core/package-lock.json
+
+      # npm 12 is what applies the allowScripts approvals in package.json.
+      - &npm-npm
+        name: Install npm 12
+        run: npm install -g npm@12
+
+      - &npm-install
+        name: Install dependencies
+        run: |
+          npm --version
+          npm ci
+
+      # npm's dry run skips provenance, so this checks what it needs, as far as
+      # it can without a token.
+      - &npm-provenance
+        name: Check what provenance needs
+        run: node ../../.github/scripts/check-npm-provenance.mjs
+
+      # A version npm already has would have stopped a real release at the
+      # start. The dry run goes on with --force, which skips only npm's own
+      # checks against the registry, so the package is still listed.
+      - name: Publish, as a dry run
+        env:
+          PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+          ON_NPM: ${{ needs.versions.outputs.on-npm }}
+        run: |
+          tag=latest
+          if [ "$PRERELEASE" = true ]; then tag=next; fi
+          force=()
+          if [ "$ON_NPM" = true ]; then force=(--force); fi
+          npm publish --dry-run --provenance --access public --tag "$tag" "${force[@]}"
+
+      # npm builds core first (prepublishOnly), which writes the server's and
+      # the client's copies too. They must be as committed.
+      - &npm-copies
+        name: Check the copies are as committed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            echo "Building core for npm changed the files above."
+            exit 1
+          fi
+          echo "The server's and client's copies are as committed."
+
+  # From here on, only a published release runs these jobs: the dry run's
+  # jobs above, with the permissions to attach, push and publish.
+
+  # Each platform's desktop packages, attached to the release by the build that
+  # made them. The update files go up later.
+  release-desktop-windows:
+    name: Desktop build, Windows
+    if: github.event_name == 'release'
+    needs: [versions, tests]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/client-build.yml
+    with:
+      os: windows-latest
+      release: true
+      prerelease: ${{ needs.versions.outputs.prerelease }}
+      attach-to: ${{ needs.versions.outputs.tag }}
+
+  release-desktop-linux:
+    name: Desktop build, Linux
+    if: github.event_name == 'release'
+    needs: [versions, tests]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/client-build.yml
+    with:
+      os: ubuntu-latest
+      release: true
+      prerelease: ${{ needs.versions.outputs.prerelease }}
+      attach-to: ${{ needs.versions.outputs.tag }}
+
+  # The source archives, made and checked as in the dry run, then attached.
+  release-archives:
+    name: Source archives
+    if: github.event_name == 'release'
+    needs: [versions, tests]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env: *archives-env
+    steps:
+      - *checkout
+      - *archives-node
+      - *archives-npm
+      - *make-archives
+      - *check-server-archive
+      - *check-core-archive
+
+      - name: Attach the archives to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash .github/scripts/attach-release-files.sh "$TAG" \
+            "$RUNNER_TEMP/archives/dropgate-server-$TAG.tar.gz" "$RUNNER_TEMP/archives/dropgate-core-$TAG.tar.gz"
+
+  # The image, built and checked as in the dry run, then pushed with the
+  # release's tags. Only this job, in the release environment, has the Docker
+  # Hub secrets.
+  release-server-image:
+    name: Server image
+    if: github.event_name == 'release'
+    needs: [versions, tests]
+    environment: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env: *image-env
+    steps:
+      - *checkout
+      - *image-tags
+      - *image-check-tags
+      - *image-qemu
+      - *image-buildx
+      - *image-build
+      - *image-check
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      # The images just checked, from the build cache, pushed with every tag.
+      - name: Push the image
+        id: push
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: server
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: true
+
+      # Every tag must now name what was just pushed, with both platforms. Each
+      # platform's image, pulled back from Docker Hub, gets the checks again.
+      - name: Check what was pushed
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          echo "Pushed $IMAGE@$DIGEST as:"
+          for tag in $TAGS; do
+            index=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}')
+            digest=$(jq -r .digest <<< "$index")
+            platforms=$(jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' <<< "$index" | sort | tr '\n' ' ')
+            echo "  $tag  $digest  $platforms"
+            if [ "$digest" != "$DIGEST" ]; then echo "$tag doesn't name the image just pushed."; exit 1; fi
+            for platform in linux/amd64 linux/arm64; do
+              case " $platforms" in *" $platform "*) ;; *) echo "$tag has no $platform image."; exit 1 ;; esac
+            done
+          done
+          for platform in linux/amd64 linux/arm64; do
+            docker pull -q --platform "$platform" "$IMAGE@$DIGEST"
+            bash .github/scripts/check-server-image.sh "$IMAGE@$DIGEST" "$platform"
+          done
+
+  # The update files, attached after every other file and the image, on every
+  # release, pre-releases too.
+  release-update-files:
+    name: Update files
+    if: github.event_name == 'release'
+    needs: [versions, release-desktop-windows, release-desktop-linux, release-archives, release-server-image]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+      WINDOWS_NAME: ${{ needs.release-desktop-windows.outputs.update-file-name }}
+      WINDOWS_FILE: ${{ needs.release-desktop-windows.outputs.update-file }}
+      LINUX_NAME: ${{ needs.release-desktop-linux.outputs.update-file-name }}
+      LINUX_FILE: ${{ needs.release-desktop-linux.outputs.update-file }}
+    steps:
+      - *checkout
+      - *list-update-files
+
+      - name: Attach the update files to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.versions.outputs.tag }}
+        run: |
+          bash .github/scripts/attach-release-files.sh "$TAG" \
+            "$RUNNER_TEMP/update-files/latest.yml" "$RUNNER_TEMP/update-files/latest-linux.yml"
+
+  # Core's npm package, last of all, staged with provenance through npm's
+  # trusted publishing: npm swaps this job's ID token for a token that can only
+  # stage core. Nothing is on npm until it's approved there, with two-factor
+  # authentication. Only this job, in the release environment, has an ID token.
+  release-npm:
+    name: npm package (staged)
+    if: github.event_name == 'release'
+    needs: [versions, release-update-files]
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults: *npm-defaults
+    steps:
+      - *checkout
+      - *npm-node
+      - *npm-npm
+      - *npm-install
+      - *npm-provenance
+
+      - name: Stage the package
+        env:
+          TAG: ${{ needs.versions.outputs.tag }}
+          PRERELEASE: ${{ needs.versions.outputs.prerelease }}
+        run: |
+          dist_tag=latest
+          if [ "$PRERELEASE" = true ]; then dist_tag=next; fi
+          npm stage publish --provenance --access public --tag "$dist_tag"
+          {
+            echo "@dropgate/core $TAG is staged on npm, to be tagged $dist_tag, and isn't published yet."
+            echo "Approve it with two-factor authentication on npmjs.com (the package's Staged Packages tab), or with npm stage approve."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - *npm-copies

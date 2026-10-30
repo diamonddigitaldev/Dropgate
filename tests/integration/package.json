@@ -1,0 +1,23 @@
+{
+  "name": "dropgate-integration-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "End-to-end tests for Dropgate's web UI, run in real browsers against a local server.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/diamonddigitaldev/Dropgate"
+  },
+  "author": "Diamond Digital Development <https://diamonddigital.dev>",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.63.0"
+  }
+}
