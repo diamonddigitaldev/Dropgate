@@ -167,6 +167,7 @@ const LOCAL_HOST = /^(?:127(?:\.\d+){3}|localhost|\[?::1\]?)$/i;
 export function outsideLookups(file) {
     if (!fs.existsSync(file)) return [`no net log at ${file}, so there's nothing to tell from`];
     return lookups(file)
+        .filter(({ estimator }) => !estimator)
         .filter(({ host }) => !LOCAL_HOST.test(/^(?:[a-z][a-z0-9+.-]*:\/\/)?(\[[^\]]*\]|[^:/]*)/i.exec(host)?.[1] ?? host))
         .map(({ at, host }) => `+${at} ms  a DNS lookup of ${host}`);
 }
@@ -180,11 +181,11 @@ export function outsideLookups(file) {
 export const hostLookups = (file) => (fs.existsSync(file) ? lookups(file).map(({ host }) => host) : []);
 
 /**
- * Each lookup, with its time in ms from the log's first event. The network
- * quality estimator isn't one: it asks the resolver about each host it sees,
- * through a SOCKS5 proxy too, but only its cache and the hosts file, so it
- * starts no job and sends no query (`18` §5).
- * @returns {{ at: number, host: string }[]}
+ * Each thing the resolver was asked, with its time in ms from the log's first
+ * event. The network quality estimator's aren't lookups that can leave: it asks
+ * about each host it sees, through a SOCKS5 proxy too, but only its cache and
+ * the hosts file, so it starts no job and sends no query.
+ * @returns {{ at: number, host: string, estimator: boolean }[]}
  */
 function lookups(file) {
     const read = readNetLog(file);
@@ -192,8 +193,8 @@ function lookups(file) {
     const log = netLog(read);
     const start = read.events.length ? log.timeOf(read.events[0]) : 0;
     return read.events
-        .filter((e) => log.type(e) === 'HOST_RESOLVER_MANAGER_REQUEST' && e.phase === log.begin && log.sources.get(e.source.id).kind !== 'NETWORK_QUALITY_ESTIMATOR')
-        .map((e) => ({ at: Math.round(log.timeOf(e) - start), host: String(e.params?.host ?? '') }));
+        .filter((e) => log.type(e) === 'HOST_RESOLVER_MANAGER_REQUEST' && e.phase === log.begin)
+        .map((e) => ({ at: Math.round(log.timeOf(e) - start), host: String(e.params?.host ?? ''), estimator: log.sources.get(e.source.id).kind === 'NETWORK_QUALITY_ESTIMATOR' }));
 }
 
 /**

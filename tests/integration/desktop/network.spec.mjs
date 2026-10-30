@@ -14,7 +14,7 @@ import path from 'node:path';
 import { startDns } from '../../../client/test/helpers/network.mjs';
 import { madeUpFile } from '../helpers/files.mjs';
 import { uploadWithCore } from '../helpers/hosted.mjs';
-import { hostLookups, proxySettings, resolverJobs } from '../helpers/netlog.mjs';
+import { outsideLookups, proxySettings, resolverJobs } from '../helpers/netlog.mjs';
 import {
     STAND_IN, STAND_IN_ADDRESS, addLink, cardButton, downloadCard, downloadStatus, expect, holdChunks, openServers, saved, securityWarning, serverRow, serverStatus, test, transfersIn,
     uploadCard, uploadCards, uploadLink, uploadStatus,
@@ -149,7 +149,7 @@ test.describe('with an adapter chosen', () => {
             await app.quit();
             // Past the proxy, nothing: no job at all (the server's name, wpad, the NAT64 probe's ipv4only.arpa), and no lookup asked for.
             expect(resolverJobs(app.netLog), "the host resolver's jobs").toEqual([]);
-            expect(hostLookups(app.netLog), 'what Chromium was asked to look up').toEqual([]);
+            expect(outsideLookups(app.netLog), 'what Chromium looked up').toEqual([]);
             // Never an IPv4 address, for itself or the proxy's: one is what makes its NAT64 probe look up ipv4only.arpa.
             const proxies = proxySettings(app.netLog).flatMap(({ single_proxy: single }) => single ?? []);
             expect(proxies.length, 'the proxy settings it had').toBeGreaterThan(0);
