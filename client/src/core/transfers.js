@@ -263,13 +263,14 @@ class Transfers {
      * It stays, done (with its link), failed (with its reason) or cancelled,
      * and its place goes to the next queued.
      * @param {string} id
-     * @param {{ status: 'success', link: string } | { status: 'cancelled' } | { status: 'error', error: string }} outcome
+     * @param {{ status: 'success', link: string } | { status: 'cancelled' } | { status: 'error', error: string, code?: string }} outcome
      */
     ended(id, outcome) {
         const card = this.#cards.get(id);
         if (!card || ENDED.includes(card.state)) return null;
         card.link = outcome.status === 'success' ? outcome.link ?? null : null;
         card.message = outcome.status === 'error' ? outcome.error : null;
+        card.code = outcome.status === 'error' ? outcome.code ?? null : null;
         // A finished upload's manage token stays in the transfer window, for its Delete.
         card.deletable = outcome.status === 'success' && card.kind === 'upload';
         card.resumeWhenFree = false;
@@ -448,7 +449,7 @@ class Transfers {
         const card = this.#cards.get(id);
         if (!card || !['failed', 'cancelled'].includes(card.state) || (card.kind === 'download' && card.files.length === 0)) return null;
         // An upload that fell back waits on the server it went to, which it now goes to first.
-        Object.assign(card, { owner, started: false, snapshot: null, link: null, message: null, resumeWhenFree: false, resuming: false, deletable: false, movedFrom: null });
+        Object.assign(card, { owner, started: false, snapshot: null, link: null, message: null, code: null, resumeWhenFree: false, resuming: false, deletable: false, movedFrom: null });
         // Nothing of a fallback before carries over: main's note of the server it fell from, or one still to make.
         delete card.ask;
         delete card.fellFrom;
@@ -520,6 +521,7 @@ function view(card) {
             : null,
         link: card.link,
         message: card.message,
+        code: card.code ?? null,
         canDelete: card.state === 'done' && card.deletable === true,
         // An upload's: the saved server it goes to (its ID, name and host), or null with none saved when it was made.
         // And, once it has fallen back, the saved server it was going to first (movedFrom); and whether the

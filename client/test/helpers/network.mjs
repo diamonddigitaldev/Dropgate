@@ -24,7 +24,8 @@ export const ATYP = Object.freeze({ IPV4: 1, NAME: 3, IPV6: 4 });
  * @param {number} [type] - how host is sent: by default a name, as Chromium sends even an IP address
  */
 export async function socks(proxyPort, host, port, type = ATYP.NAME) {
-    const socket = net.connect({ host: '127.0.0.1', port: proxyPort });
+    // Wherever the proxy listens on this machine: ::1, else 127.0.0.1.
+    const socket = net.connect({ host: 'localhost', port: proxyPort });
     await once(socket, 'connect');
     let address;
     if (type === ATYP.IPV4) address = Buffer.from(host.split('.').map(Number));

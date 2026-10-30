@@ -106,6 +106,23 @@
          as the kit's switch (kit.ui.switchField()), whose help line says what each state does. -->
     <div id="privacy-settings"></div>
 
+    <!-- Settings > Network, moved into its tab by renderer.js: the Update tab's cards, filling the pane.
+         Network interface is the adapter every connection is held to, chosen through main; the options,
+         the help line and the note are drawn by renderer.js, naming the OS it runs on. -->
+    <div id="network-settings" class="network-tab">
+        <section class="card update-card">
+            <div class="card-body">
+                <h3 class="update-card-title">Adapter</h3>
+                <div>
+                    <label for="network-interface" class="form-label mb-1">Network interface</label>
+                    <select id="network-interface" class="form-select form-select-sm network-select" aria-describedby="network-interface-help"></select>
+                    <div class="form-text reserved" id="network-interface-help"></div>
+                </div>
+                <p class="form-text mb-0" id="network-interface-note"></p>
+            </div>
+        </section>
+    </div>
+
     <!-- Add Files' and the drop zone's picker: the files picked together make one upload. -->
     <input type="file" id="file-input" hidden multiple>
 

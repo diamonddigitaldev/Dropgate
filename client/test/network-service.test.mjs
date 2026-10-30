@@ -292,7 +292,7 @@ test('the proxy refuses what isn\'t SOCKS5\'s CONNECT with no authentication', a
     await startService();
     service.setInterface(STAND_IN);
     const talk = async (...writes) => {
-        const socket = net.connect({ host: '127.0.0.1', port });
+        const socket = net.connect({ host: 'localhost', port });
         await once(socket, 'connect');
         for (const bytes of writes) socket.write(Buffer.from(bytes));
         const chunks = [];
@@ -357,4 +357,31 @@ nodeTest('on Linux, a destination or a DNS server whose route from the adapter\'
         chosen.stop();
         other.stop();
     }
+});
+
+test('the proxy listens on IPv6 loopback, else IPv4\'s, and nowhere but loopback; main is told where', async () => {
+    const { LOOPBACKS, NetworkService: Service } = require('../src/core/network-service.js');
+    assert.deepEqual([...LOOPBACKS], ['::1', '127.0.0.1']);
+
+    // A machine that hasn't got the first (a documentation address stands for it): the next is used.
+    const told_ = [];
+    const fallback = new Service({ loopbacks: ['2001:db8::1', '127.0.0.1'], ownServers: async () => [], systemServers: () => [], tell: (message) => told_.push(message) });
+    const at = await fallback.listen();
+    assert.deepEqual(told_.find(({ type }) => type === NETWORK_SERVICE.LISTENING), { type: NETWORK_SERVICE.LISTENING, port: at, host: '127.0.0.1' });
+    assert.equal(fallback.server.address().address, '127.0.0.1');
+    await fallback.stop();
+
+    // None at all: it says so, and main's session stays pointing at nothing.
+    const none = new Service({ loopbacks: ['2001:db8::1'], ownServers: async () => [], systemServers: () => [] });
+    await assert.rejects(none.listen(), /no loopback/);
+    none.watch.stop();
+
+    // As it runs, wherever this machine lets it.
+    const told2 = [];
+    const real = new Service({ ownServers: async () => [], systemServers: () => [], tell: (message) => told2.push(message) });
+    await real.listen();
+    const { host } = told2.find(({ type }) => type === NETWORK_SERVICE.LISTENING);
+    assert.ok(LOOPBACKS.includes(host));
+    assert.equal(real.server.address().address, host);
+    await real.stop();
 });

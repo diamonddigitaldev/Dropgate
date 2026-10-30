@@ -5,7 +5,7 @@ const path = require('path');
 const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 
 const {
-    APP_NAME, AT_ONCE_RANGE, IPC, MAIN_ONLY_SETTINGS, PARTIAL_FOLDER, SETTINGS_CHECKS, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS,
+    APP_NAME, AT_ONCE_RANGE, INTERFACE_CHANGED, INTERFACE_UNAVAILABLE, IPC, MAIN_ONLY_SETTINGS, PARTIAL_FOLDER, SETTINGS_CHECKS, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS,
     TRANSFERS, migrateSettings,
 } = require('./constants');
 const { menuItems } = require('./menu');
@@ -16,6 +16,7 @@ const {
 } = require('./core/servers');
 const { shareUpload } = require('./core/share');
 const { GOING, Pacer, Transfers, inFolder, view } = require('./core/transfers');
+const { createNetworkHost } = require('./network-host');
 const { createTransferHost } = require('./transfer-host');
 const { createTray } = require('./tray');
 const { answerWindowChannels } = require('./window-channels');
@@ -108,6 +109,14 @@ const { answerWindowChannels } = require('./window-channels');
 //   with anything but yes, the upload stops. Once its server has taken its
 //   start, a failure fails it, with Retry. It carries nothing from one server
 //   to the next but its files and options.
+// - A chosen adapter (Settings > Network, network-host.js) holds every request
+//   the transfer window makes to it, through the network service, and it fails
+//   closed. As it goes (or the service exits), everything running is stopped
+//   and fails, saying so, with Retry (stopRunning()); one queued fails at its
+//   turn, a paused one stays paused and its Resume is refused, and a server
+//   check says why, asking nothing. The code is the client's own, so no
+//   fallback moves an upload for it: every server would fail the same way.
+//   Nothing restarts by itself.
 // Share with Dropgate (Windows' context menu) launches the app with a file's
 // path and --upload. Main makes the upload itself, with no window: to the
 // default server, checked by the transfer window, with its settings for new
@@ -194,6 +203,12 @@ const handles = new Handles();
 
 // The transfer window and the file service (transfer-host.js), once the app is ready.
 let host = null;
+
+// The chosen adapter's side of main (network-host.js), once the app is ready.
+let network = null;
+
+// The transfers stopped in the transfer window because of the adapter, by ID, with why, until their outcome comes.
+const stopped = new Map();
 
 // The registry of transfers: a window's own keep that window (owner); a
 // share's has none, keeps the window asked about it while it waits for the
@@ -312,6 +327,8 @@ function watchWindow(win) {
     win.on('show', () => tray.hide());
     win.webContents.once('destroyed', () => {
         readyWindows.delete(owner);
+        // Its Settings > Network went with it.
+        network?.watch(false);
         handles.dropOwner(owner);
         declineQuestionsOf(owner);
         for (const card of transfers.list()) {
@@ -376,16 +393,30 @@ if (kit.primary) {
     kit.ready.then(() => {
         // Anything a run before left part-written (a crash's) goes before anything runs.
         emptyPartials();
+        // Before anything can make a request: a saved adapter holds the session from here on.
+        network = createNetworkHost({
+            kit,
+            session: kit.sessions.isolated('transfer'),
+            onUnavailable: (reason) => stopRunning(reason, INTERFACE_UNAVAILABLE),
+            onChanging: () => stopRunning('The network interface changed.', INTERFACE_CHANGED),
+            onChanged: (state) => mainWindow()?.webContents.send(IPC.NETWORK_CHANGED, state),
+        });
+        app.on('will-quit', () => network.close());
         host = createTransferHost({
             kit,
+            network,
             appInfo: { name: APP_NAME, version: app.getVersion() },
             onUpdate: (id, snapshot) => transfers.updated(id, snapshot),
             onPauseEnding: pauseEnding,
             onTokensLost: tokensLost,
             onSaved: (id, filePath) => transfers.saved(id, filePath),
             partials,
-            onFinished: (id, outcome) => {
-                const { status, link, message } = outcome;
+            onFinished: (id, finished) => {
+                // Stopped for the adapter, or failed with it gone: that's why, whatever the transfer window saw.
+                const why = stopped.get(id) ?? (finished.status === 'error' && network.refusal() ? { message: network.refusal(), code: INTERFACE_UNAVAILABLE } : null);
+                stopped.delete(id);
+                const outcome = why && finished.status !== 'success' ? { status: 'error', message: why.message, code: why.code } : finished;
+                const { status, link, message, code } = outcome;
                 // Refused before any byte was sent, an upload that allows it moves on.
                 const upload = transfers.get(id);
                 if (upload?.kind === 'upload' && !quitting && movesOn(upload, outcome)) {
@@ -393,7 +424,7 @@ if (kit.primary) {
                     fallBackOrFail(upload, message);
                     return;
                 }
-                const result = status === 'error' ? { status, error: message } : { status, ...(link ? { link } : {}) };
+                const result = status === 'error' ? { status, error: message, ...(code ? { code } : {}) } : { status, ...(link ? { link } : {}) };
                 const card = transfers.ended(id, result);
                 if (card?.kind === 'download') finishDownload(result, card);
                 else finishUpload(result, card);
@@ -415,10 +446,16 @@ answerWindowChannels({
     servers,
     checks,
     host: () => host,
+    network: () => network,
     windowReady,
     start: startUpload,
     pause: (id) => (transfers.pause(id) ? host.pause(id) : Promise.resolve({})),
-    resume: (id) => (transfers.resume(id) ? host.resume(id).finally(() => transfers.resumed(id)) : Promise.resolve({})),
+    resume: (id) => {
+        // Refused while the adapter's gone: it stays paused, and the server's deadline still applies.
+        const refused = network?.refusal();
+        if (refused) return Promise.resolve({ message: refused });
+        return transfers.resume(id) ? host.resume(id).finally(() => transfers.resumed(id)) : Promise.resolve({});
+    },
     cancel: cancelUpload,
     delete: deleteUpload,
     busy: going,
@@ -758,6 +795,13 @@ async function fallBack(card, reason) {
             mainWindow()?.webContents.send(IPC.SERVERS_CHANGED, listedServers());
         }
         if (quitting || card.fellFrom !== run || transfers.get(id)?.state !== 'running') return;
+        // The chosen adapter went: no server can be reached, so nothing is tried.
+        if (check.code === INTERFACE_UNAVAILABLE) {
+            delete card.fellFrom;
+            const result = { status: 'error', error: check.message, code: INTERFACE_UNAVAILABLE };
+            finishUpload(result, transfers.ended(id, result));
+            return;
+        }
         if (!canTake(check, card).ok) continue;
         const to = {
             savedServer: uploadServerOf(next),
@@ -846,10 +890,35 @@ function startUpload(id, server) {
     transfers.start(id, server);
 }
 
-/** The registry gave a transfer its place: it runs in the transfer window now. */
+/** The registry gave a transfer its place: it runs in the transfer window now, unless the chosen adapter's gone: then it fails, at its turn. */
 function runTransfer(card) {
-    if (card.kind === 'download') runDownload(card);
-    else runUpload(card);
+    const refused = network?.refusal();
+    if (refused) {
+        // Once the registry has finished starting what it's starting.
+        const result = { status: 'error', error: refused, code: INTERFACE_UNAVAILABLE };
+        setImmediate(() => (card.kind === 'download' ? finishDownload : finishUpload)(result, transfers.ended(card.id, result)));
+    } else if (card.kind === 'download') {
+        runDownload(card);
+    } else {
+        runUpload(card);
+    }
+}
+
+/**
+ * Stop what's running in the transfer window, because of the adapter: each
+ * ends as a failure, with this reason, as its outcome comes back, and its
+ * place goes to the next queued, which meets the same at its turn. One between
+ * servers in a fallback has nothing running: its next check says why. Paused
+ * ones hold no connection, and stay as they are.
+ * @param {string} message
+ * @param {string} code
+ */
+function stopRunning(message, code) {
+    for (const card of transfers.list()) {
+        if (card.state !== 'running' || card.snapshot?.phase === 'fallback') continue;
+        stopped.set(card.id, { message, code });
+        host?.cancel(card.id);
+    }
 }
 
 /**
@@ -889,6 +958,11 @@ function runUpload(card) {
 
 /** A paused upload asked to resume while every place was taken has one now. */
 function resumeQueued(card) {
+    if (network?.refusal()) {
+        // Its turn came with the adapter gone: it stays paused.
+        setImmediate(() => transfers.resumed(card.id));
+        return;
+    }
     host.resume(card.id).then(({ message }) => {
         if (message) kit.log.info('A queued upload couldn\'t be resumed: It stays paused.');
     }, () => {}).finally(() => transfers.resumed(card.id));

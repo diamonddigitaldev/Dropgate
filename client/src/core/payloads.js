@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const { MAX_INTERFACE_NAME } = require('../constants');
 
 // What each channel takes, checked before main does anything with it: the
 // window's, from its page (window.electronAPI), and the transfer window's
@@ -429,6 +430,21 @@ function savedOf(message, granted) {
     return { output: message.output, path: message.path };
 }
 
+// --- Settings > Network ---
+
+/** network:set-interface: an adapter's name, or null for any. Whether it's one the network service lists now is main's to check (network-host.js). */
+function interfaceOf(request) {
+    const { name } = isRecord(request, ['name']) ? request : {};
+    if (name !== null && !(isText(name, MAX_INTERFACE_NAME) && name.length > 0)) throw new Error('Expected a network adapter\'s name, or none.');
+    return name;
+}
+
+/** network:watch: whether Settings > Network is shown. */
+function watchingOf(request) {
+    if (!isRecord(request, ['on']) || typeof request.on !== 'boolean') throw new Error('Expected whether Settings > Network is shown.');
+    return request.on;
+}
+
 module.exports = {
     UUID,
     LIFETIME_UNIT_MS,
@@ -458,4 +474,6 @@ module.exports = {
     outcomeOf,
     answerOf,
     savedOf,
+    interfaceOf,
+    watchingOf,
 };

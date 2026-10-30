@@ -179,15 +179,37 @@ export function outsideLookups(file) {
  */
 export const hostLookups = (file) => (fs.existsSync(file) ? lookups(file).map(({ host }) => host) : []);
 
-/** @returns {{ at: number, host: string }[]} Each lookup, with its time in ms from the log's first event. */
+/**
+ * Each lookup, with its time in ms from the log's first event. The network
+ * quality estimator isn't one: it asks the resolver about each host it sees,
+ * through a SOCKS5 proxy too, but only its cache and the hosts file, so it
+ * starts no job and sends no query (`18` §5).
+ * @returns {{ at: number, host: string }[]}
+ */
 function lookups(file) {
     const read = readNetLog(file);
     if (!read) return [];
     const log = netLog(read);
     const start = read.events.length ? log.timeOf(read.events[0]) : 0;
     return read.events
-        .filter((e) => log.type(e) === 'HOST_RESOLVER_MANAGER_REQUEST' && e.phase === log.begin)
+        .filter((e) => log.type(e) === 'HOST_RESOLVER_MANAGER_REQUEST' && e.phase === log.begin && log.sources.get(e.source.id).kind !== 'NETWORK_QUALITY_ESTIMATOR')
         .map((e) => ({ at: Math.round(log.timeOf(e) - start), host: String(e.params?.host ?? '') }));
+}
+
+/**
+ * Every job the network stack's host resolver ran, by host: a job is what asks
+ * a DNS server (or the OS, which does). An IP address never makes one, so with
+ * every request through a SOCKS5 proxy there are none, whatever else it asks.
+ * @param {string} file - The net log.
+ * @returns {string[]}
+ */
+export function resolverJobs(file) {
+    const read = fs.existsSync(file) && readNetLog(file);
+    if (!read) return [];
+    const log = netLog(read);
+    return read.events
+        .filter((e) => log.type(e) === 'HOST_RESOLVER_MANAGER_JOB' && e.phase === log.begin)
+        .map((e) => String(e.params?.host ?? ''));
 }
 
 /**

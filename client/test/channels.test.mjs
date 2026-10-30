@@ -625,7 +625,7 @@ test('transfers:list gives every transfer as the window draws it: names and size
     assert.deepEqual(list, [{
         id, kind: 'upload', state: 'running', files: [{ name: 'Secret plans é.bin', size: 1000 }], status: 'uploading',
         step: SNAPSHOT.text, phase: 'chunk', percent: 33.3, fileIndex: 0, canPause: true, deadline: null,
-        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true, allowFallback: false }, link: null, message: null, canDelete: false,
+        options: { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true, allowFallback: false }, link: null, message: null, code: null, canDelete: false,
         server: { id: SETTINGS.defaultServer, name: 'dropgate.test', host: 'dropgate.test' }, movedFrom: null, asking: false,
     }]);
     assert.doesNotMatch(JSON.stringify(list), new RegExp(path.basename(folder)), 'no folder in what the window gets');

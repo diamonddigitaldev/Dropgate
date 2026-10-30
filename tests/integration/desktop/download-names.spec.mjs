@@ -56,7 +56,7 @@ test('every awkward name, received through a real download, lands inside the fol
     expect(listing(desktop.downloads)).toContain('_CON.txt');
     expect(listing(desktop.downloads)).toContain('a_b');
     expect(listing(desktop.downloads)).toContain('photo[U+202E]gnp.exe');
-    expect(listing(desktop.root).filter((entry) => !['profile', 'Secret Folder', 'Downloads'].includes(entry) && !/^(events|netlog)-/.test(entry)), 'beside the folder').toEqual([]);
+    expect(listing(desktop.root).filter((entry) => !['profile', 'Secret Folder', 'Downloads', 'adapters.json'].includes(entry) && !/^(events|netlog)-/.test(entry)), 'beside the folder').toEqual([]);
     expect(listing(partialsOf(desktop)), 'the partial folder, once they\'re saved').toEqual([]);
     if (process.platform === 'win32') {
         for (const entry of listing(desktop.downloads)) expect(streamsOf(path.join(desktop.downloads, entry)), entry).toEqual(['Zone.Identifier']);

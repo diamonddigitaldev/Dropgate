@@ -22,6 +22,12 @@
 // never looked, and never looked up any name beyond this machine. The app's
 // spell checker is pointed at this machine for its dictionaries too.
 //
+// The network service, once the app starts one, runs with the test's own
+// adapters (network-stand-in.cjs), and never your real ones: a stand-in adapter
+// is a loopback address (127.0.0.3), so the server's record of where each
+// connection came from tells a bound one from any other, and nothing leaves the
+// machine.
+//
 // When a desktop test doesn't go as expected, its failure says what the test saw
 // (Desktop.report()): what the TLS proxy saw, what reached the server, the app's
 // requests that failed or never finished, what each run's network stack did (its
@@ -47,6 +53,14 @@ const PRELOAD = fileURLToPath(new URL('./desktop-preload.cjs', import.meta.url))
 
 /** The client's own Electron build. The electron package downloads it the first time it's asked for. */
 const electronPath = () => createRequire(path.join(CLIENT_DIR, 'package.json'))('electron');
+
+/**
+ * The test's stand-in adapter: its name, and its address, another loopback one
+ * than the server's. On Linux it's the kernel's own name for loopback, so
+ * Linux's route check, which is real here, finds the route goes through it.
+ */
+export const STAND_IN = process.platform === 'linux' ? 'lo' : 'Test Adapter';
+export const STAND_IN_ADDRESS = '127.0.0.3';
 
 /** Don't look for a proxy: connect directly (see the top of this file). */
 const NO_PROXY = '--no-proxy-server';
@@ -206,6 +220,12 @@ class Desktop {
     dictionaryUrl = NO_DICTIONARIES;
     /** How late main's grants reach the file service in the next launch, in ms (desktop-preload.cjs): none by default. */
     grantDelayMs = 0;
+    /** The next launch's system DNS server for the network service ("127.0.0.2:5353"): none by default. */
+    dnsServer = null;
+    /** Whether the next launch's network service stays silent, never saying it's there (network-stand-in.cjs). */
+    silentNetwork = false;
+    /** Other addresses the app may ask in this test, each as an origin: by default, only the test's server's and its TLS proxy's. */
+    alsoAllowed = [];
 
     /**
      * @param {object} opts
@@ -229,6 +249,24 @@ class Desktop {
         // The system's Downloads folder, as the app sees it (desktop-preload.cjs): the test's own.
         this.downloads = path.join(root, 'Downloads');
         fs.mkdirSync(this.downloads);
+        // The adapters the network service sees (network-stand-in.cjs).
+        this.adaptersFile = path.join(root, 'adapters.json');
+        this.setAdapters({ [STAND_IN]: STAND_IN_ADDRESS });
+    }
+
+    /**
+     * The adapters the app's network service lists from now on: read each
+     * second, so one taken away here is gone by its next read.
+     * @param {Record<string, string | string[]>} adapters - Each one's name, and its address or addresses.
+     */
+    setAdapters(adapters) {
+        const entries = Object.fromEntries(Object.entries(adapters).map(([name, addresses]) => [name, [addresses].flat().map((address) => ({
+            address, netmask: '255.255.255.255', family: address.includes(':') ? 'IPv6' : 'IPv4', mac: '00:00:00:00:00:00', internal: false, cidr: `${address}/32`,
+        }))]));
+        // Whole or not at all: the service reads it each second.
+        const next = `${this.adaptersFile}.next`;
+        fs.writeFileSync(next, JSON.stringify(entries));
+        fs.renameSync(next, this.adaptersFile);
     }
 
     /** The address the app is given for the server: the TLS proxy's when there is one. */
@@ -263,11 +301,14 @@ class Desktop {
                 DROPGATE_TEST_DICTIONARY_URL: this.dictionaryUrl,
                 DROPGATE_TEST_DOWNLOADS: this.downloads,
                 DROPGATE_TEST_GRANT_DELAY_MS: String(this.grantDelayMs),
+                DROPGATE_TEST_ADAPTERS: this.adaptersFile,
+                ...(this.dnsServer ? { DROPGATE_TEST_DNS: this.dnsServer } : {}),
+                ...(this.silentNetwork ? { DROPGATE_TEST_NETWORK_SILENT: '1' } : {}),
             }),
             // The TLS proxy's certificate is made up for the test, so the app is told to accept it.
             ignoreHTTPSErrors: Boolean(this.proxy),
         });
-        const allowed = new Set([new URL(this.server.baseUrl).origin, ...(this.proxy ? [this.proxy.url] : [])]);
+        const allowed = new Set([new URL(this.server.baseUrl).origin, ...(this.proxy ? [this.proxy.url] : []), ...this.alsoAllowed]);
         app.context().on('request', (request) => {
             if (toServer(request.url()) && !allowed.has(new URL(request.url()).origin)) this.elsewhere.push(request.url());
         });

@@ -50,21 +50,21 @@ test('settings version 3: a version 2 profile\'s server and its settings for new
     assert.equal(read.defaultServer, server.id);
     assert.deepEqual([read.downloadFolder, read.transfersAtOnce, read.navCollapsed], ['D:\\Saved', 4, true], 'version 2\'s own settings are kept as they were');
     assert.deepEqual(Object.keys(file).sort(), ['settings', 'settingsSchema', 'windowBounds']);
-    assert.equal(file.settingsSchema, 3);
+    assert.equal(file.settingsSchema, SETTINGS_SCHEMA_VERSION);
     for (const key of ['serverURL', 'lifetimeValue', 'lifetimeUnit', 'maxDownloads']) assert.ok(!Object.hasOwn(file.settings, key), `${key} is gone from config.json`);
-    assert.deepEqual(said, ['Settings version 3: removing serverURL, lifetimeValue, lifetimeUnit, maxDownloads.']);
+    assert.deepEqual(said, [`Settings version ${SETTINGS_SCHEMA_VERSION}: removing serverURL, lifetimeValue, lifetimeUnit, maxDownloads.`]);
 
     // Once: the next start reads it as it was written, the same server by the same ID.
     assert.deepEqual(kitSettings(memoryFile(file).store).get().servers, [server]);
 });
 
-test('a version 1 profile goes to version 3 at once; one with no server has none saved; a lifetime of Unlimited is kept as 0', () => {
+test('a version 1 profile goes to the newest version at once; one with no server has none saved; a lifetime of Unlimited is kept as 0', () => {
     const v1 = memoryFile({ settings: { serverURL: 'http://192.168.1.20:52443', lifetimeValue: 7, lifetimeUnit: 'unlimited', maxDownloads: 0 }, settingsSchema: 1 });
     const one = kitSettings(v1.store).get();
     assert.deepEqual([one.downloadFolder, one.transfersAtOnce], [null, 3]);
     assert.deepEqual(one.servers.map(({ url, name, lifetime, maxDownloads }) => ({ url, name, lifetime, maxDownloads })),
         [{ url: 'http://192.168.1.20:52443', name: '192.168.1.20:52443', lifetime: { value: 0, unit: 'unlimited' }, maxDownloads: 0 }]);
-    assert.equal(v1.file.settingsSchema, 3);
+    assert.equal(v1.file.settingsSchema, SETTINGS_SCHEMA_VERSION);
 
     for (const serverURL of ['', '   ', undefined]) {
         const empty = memoryFile({ settings: { serverURL, lifetimeValue: 24, lifetimeUnit: 'hours', maxDownloads: 1 }, settingsSchema: 2 });

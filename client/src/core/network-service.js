@@ -7,9 +7,9 @@ const { BoundResolver, adapterServers, serverAddress, serversFor, systemServers 
 const { RouteCheck } = require('./routes');
 const { REPLY, readRequest, reply } = require('./socks5');
 
-// The network service's work, with no Electron: a SOCKS5 proxy on
-// 127.0.0.1 that holds every connection through it to one adapter, chosen by
-// its name, and fails closed. While an adapter is chosen, the transfer
+// The network service's work, with no Electron: a SOCKS5 proxy on the
+// machine's loopback that holds every connection through it to one adapter,
+// chosen by its name, and fails closed. While an adapter is chosen, the transfer
 // session (and the updater's) send every request through it.
 //
 // - Each connection is opened from the adapter's address, of the family its
@@ -31,6 +31,15 @@ const { REPLY, readRequest, reply } = require('./socks5');
 //   tests' stand-in adapter), and unbound otherwise.
 // - With no adapter chosen, nothing connects.
 // It sends nothing of its own, keeps nothing on disk and logs nothing.
+
+/**
+ * Where the proxy listens: IPv6 loopback, else IPv4's. Chromium looks up
+ * ipv4only.arpa through the OS, past any proxy, when it's handed an IPv4
+ * address and its check of IPv4 has just failed (its NAT64 probe). While an
+ * adapter is chosen, the proxy's is the only address it's handed, so an IPv6
+ * one means it never can; and a machine with no IPv6 never asks.
+ */
+const LOOPBACKS = Object.freeze(['::1', '127.0.0.1']);
 
 /** How long a connection is given to open. */
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -61,13 +70,15 @@ class NetworkService {
      * @param {(name: string) => Promise<string[]>} [options.ownServers] - the adapter's own DNS servers
      * @param {() => string[]} [options.systemServers] - the system's
      * @param {BoundResolver} [options.resolver]
+     * @param {readonly string[]} [options.loopbacks] - where the proxy may listen, in order
      * @param {(message: object) => void} [options.tell] - to main
      */
     constructor({
         list, watchMs, platform = process.platform, routes = platform === 'linux' ? new RouteCheck() : null,
         ownServers = (name) => adapterServers(name, platform), systemServers: system = () => systemServers(platform),
-        resolver = new BoundResolver(), tell = () => {},
+        resolver = new BoundResolver(), loopbacks = LOOPBACKS, tell = () => {},
     } = {}) {
+        this.loopbacks = loopbacks;
         this.routes = routes;
         this.ownServers = ownServers;
         this.system = system;
@@ -97,14 +108,29 @@ class NetworkService {
         this.server = net.createServer((socket) => this.serve(socket));
     }
 
-    /** Start the proxy, on 127.0.0.1 at a port of the system's choosing; main is told it. */
+    /** Start the proxy, on the first loopback the machine has, at a port of the system's choosing; main is told both. */
     async listen() {
-        await new Promise((resolve, reject) => {
-            this.server.once('error', reject);
-            this.server.listen({ host: '127.0.0.1', port: 0 }, resolve);
-        });
+        let host = null;
+        for (const candidate of this.loopbacks) {
+            try {
+                await new Promise((resolve, reject) => {
+                    this.server.once('error', reject);
+                    this.server.listen({ host: candidate, port: 0 }, () => {
+                        this.server.off('error', reject);
+                        resolve();
+                    });
+                });
+                host = candidate;
+                break;
+            } catch (error) {
+                if (error?.code !== 'EADDRNOTAVAIL' && error?.code !== 'EAFNOSUPPORT') throw error;
+            }
+        }
+        if (host === null) throw new Error('The machine has no loopback to listen on.');
         const { port } = /** @type {net.AddressInfo} */ (this.server.address());
-        this.tell({ type: NETWORK_SERVICE.LISTENING, port });
+        this.tell({ type: NETWORK_SERVICE.LISTENING, port, host });
+        // The adapters there are, with none chosen yet: main takes only a name it's told of here.
+        this.watch.watch(this.name);
         return port;
     }
 
@@ -245,8 +271,10 @@ class NetworkService {
             upstream.pipe(client);
         });
         upstream.on('error', (error) => {
-            if (!open) refuse(replyFor(error));
-            else client.destroy();
+            if (open) return client.destroy();
+            // The adapter may have gone since the last read: main hears that first, so it never reads this as the server's own failure.
+            if (error?.code === 'EADDRNOTAVAIL' || error?.code === 'ENETUNREACH') this.watch.read();
+            refuse(replyFor(error));
         });
         upstream.on('close', (hadError) => {
             if (hadError) client.destroy();
@@ -262,4 +290,4 @@ class NetworkService {
     }
 }
 
-module.exports = { NetworkService, CONNECT_TIMEOUT_MS };
+module.exports = { NetworkService, CONNECT_TIMEOUT_MS, LOOPBACKS };

@@ -11,6 +11,9 @@ import { balancedBlock, constructorOptions, readSource } from './helpers/source.
 const require = createRequire(import.meta.url);
 const { assertAccentContrast, assertNoBareAccelerators, assertBuildExtendsKit } = require('@diamonddigitaldev/electron-kit/testing');
 const { MAIN_ONLY_SETTINGS, SETTINGS_DEFAULTS, SETTINGS_SCHEMA_VERSION, V3_STORE_KEYS, migrateSettings } = require('../src/constants.js');
+
+/** Settings > Network's, as version 4 adds them: the adapter none (any interface), and every switch off but which addresses a bar turned on would show. */
+const NETWORK_SETTINGS = { networkInterface: null, networkBar: false, externalIpCheck: false, barShowsIpv4: true, barShowsIpv6: true, locationRefresh: false };
 const { menuItems } = require('../src/menu.js');
 const pkg = require('../package.json');
 // The electron-builder config, from the kit's config(), as electron-builder reads it.
@@ -85,7 +88,7 @@ test('the client keeps no log of its own, and has no updater, update boxes or li
 });
 
 test('v3\'s settings are dropped, once, and the client\'s defaults are ones the kit takes', () => {
-    assert.equal(SETTINGS_SCHEMA_VERSION, 3);
+    assert.equal(SETTINGS_SCHEMA_VERSION, 4);
     assert.deepEqual([...V3_STORE_KEYS].sort(), ['lifetimeUnit', 'lifetimeValue', 'maxDownloads', 'serverURL']);
     assert.ok(!V3_STORE_KEYS.includes('windowBounds'), 'the window\'s bounds are the kit\'s key too, so they carry over');
     // kit.start() throws at launch on either; this says so before then.
@@ -96,7 +99,7 @@ test('v3\'s settings are dropped, once, and the client\'s defaults are ones the 
     assert.deepEqual([SETTINGS_DEFAULTS.servers, SETTINGS_DEFAULTS.defaultServer], [[], null], 'no server saved until one is added');
 });
 
-test('settings version 3: a version 1 profile gains the downloads folder (the system\'s) and 3 at once, and its server, with its settings for new uploads, becomes the first saved server', () => {
+test('settings version 4: a version 1 profile gains the downloads folder (the system\'s) and 3 at once, its server, with its settings for new uploads, becomes the first saved server, and it gains Settings > Network\'s', () => {
     const v1 = { serverURL: 'https://dropgate.test', lifetimeValue: 3, lifetimeUnit: 'days', maxDownloads: 5, navCollapsed: true, keepLogOnDisk: false };
     const migrated = migrateSettings(structuredClone(v1), 1);
     const [server] = migrated.servers;
@@ -107,13 +110,21 @@ test('settings version 3: a version 1 profile gains the downloads folder (the sy
         transfersAtOnce: 3,
         servers: [{ id: server.id, url: 'https://dropgate.test', name: 'dropgate.test', lifetime: { value: 3, unit: 'days' }, maxDownloads: 5, allowFallback: false }],
         defaultServer: server.id,
+        ...NETWORK_SETTINGS,
     });
     // v3's were never under the kit's key: nothing of them is kept.
     assert.deepEqual(migrateSettings({ serverURL: 'https://old.test' }, 0), {});
     assert.equal(SETTINGS_DEFAULTS.downloadFolder, null, 'null until a folder is chosen: the system\'s Downloads');
     assert.equal(SETTINGS_DEFAULTS.transfersAtOnce, 3);
-    // The page can't choose where downloads land, or change a saved server: only main does.
-    assert.deepEqual([...MAIN_ONLY_SETTINGS], ['servers', 'defaultServer', 'downloadFolder']);
+    // The page can't choose where downloads land, change a saved server or choose the adapter: only main does.
+    assert.deepEqual([...MAIN_ONLY_SETTINGS], ['servers', 'defaultServer', 'downloadFolder', 'networkInterface']);
+});
+
+test('settings version 4: a version 3 profile keeps everything it had, its servers above all, and gains Settings > Network\'s defaults, each as private as it can be', () => {
+    const servers = [{ id: '11111111-1111-4111-8111-111111111111', url: 'https://dropgate.test', name: 'Kept', lifetime: { value: 3, unit: 'days' }, maxDownloads: 5, allowFallback: true }];
+    const v3 = { servers, defaultServer: servers[0].id, downloadFolder: 'C:\\Saved', transfersAtOnce: 5, keepLogOnDisk: true };
+    assert.deepEqual(migrateSettings(structuredClone(v3), 3), { ...v3, ...NETWORK_SETTINGS });
+    for (const [key, value] of Object.entries(NETWORK_SETTINGS)) assert.equal(SETTINGS_DEFAULTS[key], value, `${key} is the default a new profile has`);
 });
 
 test('every window the client makes keeps the house\'s security settings: the main window is the kit\'s, and the only other is the transfer window', () => {

@@ -114,7 +114,18 @@ export function fakeMain({ settings = {} } = {}) {
         },
         utilityProcess: {
             fork() {
-                const child = { messages: [], killed: false, postMessage: (message) => child.messages.push(message), kill() { child.killed = true; }, on() {} };
+                const listeners = new Map();
+                const child = {
+                    messages: [],
+                    killed: false,
+                    postMessage: (message) => child.messages.push(message),
+                    kill() { child.killed = true; },
+                    on(event, listener) {
+                        listeners.set(event, [...(listeners.get(event) ?? []), listener]);
+                    },
+                    /** What the process does, as a test has it do it. */
+                    emit: (event, ...args) => (listeners.get(event) ?? []).forEach((listener) => listener(...args)),
+                };
                 processes.push(child);
                 return child;
             },

@@ -81,6 +81,7 @@ const DESKTOP_KEEPS = {
     'docs/technical/DATA-PROCESSING.md': {
         section: '### 2.5 Dropgate Client (Electron)',
         names: ['`settingsSchema`', '**Saved servers**', '`servers`', '`defaultServer`', '**The fallback between saved servers**', '`downloadFolder`',
+            '**The network adapter**', '`networkInterface`', '`networkBar`', '`externalIpCheck`', '`barShowsIpv4`', '`barShowsIpv6`', '`locationRefresh`',
             '`transfersAtOnce`', '`Partial Downloads`', '**The tray icon**', '**The Mark of the Web**', "**The app's own browser files**", 'transfer window',
             'manage token', '`dropgate-bundle-'],
     },

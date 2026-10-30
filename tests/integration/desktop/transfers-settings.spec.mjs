@@ -76,7 +76,7 @@ test.describe('on a server allowing 5 downloads', () => {
     // The page holds Max downloads to the server's limit, so the server allows the profile's 5.
     test.use({ serverEnv: { UPLOAD_MAX_FILE_DOWNLOADS: '5' } });
 
-    test('a version 1 profile is brought to version 3 once, its server the first saved and the default, with its settings; the page can\'t set the downloads folder or the saved servers', async ({ desktop, server }) => {
+    test('a version 1 profile is brought to version 4 once, its server the first saved and the default, with its settings; the page can\'t set the downloads folder or the saved servers', async ({ desktop, server }) => {
         fs.mkdirSync(desktop.profile, { recursive: true });
         // Within the server's limits (24 hours, 5 downloads), so the upload below goes as it was set.
         const v1 = { serverURL: desktop.serverUrl, lifetimeValue: 12, lifetimeUnit: 'hours', maxDownloads: 5, navCollapsed: true };
@@ -87,8 +87,8 @@ test.describe('on a server allowing 5 downloads', () => {
         const [saved] = settings.servers;
         expect(settings).toMatchObject({ navCollapsed: true, downloadFolder: null, transfersAtOnce: 3, defaultServer: saved.id });
         expect(settings.servers).toEqual([{ id: saved.id, url: desktop.serverUrl, name: new URL(desktop.serverUrl).host, lifetime: { value: 12, unit: 'hours' }, maxDownloads: 5, allowFallback: false }]);
-        await expect.poll(() => stored(desktop).settingsSchema).toBe(3);
-        for (const key of ['serverURL', 'lifetimeValue', 'lifetimeUnit', 'maxDownloads']) expect(Object.keys(stored(desktop).settings), `${key} after version 3`).not.toContain(key);
+        await expect.poll(() => stored(desktop).settingsSchema).toBe(4);
+        for (const key of ['serverURL', 'lifetimeValue', 'lifetimeUnit', 'maxDownloads']) expect(Object.keys(stored(desktop).settings), `${key} after version 4`).not.toContain(key);
 
         // Settings > Servers shows it, the default, and a new upload takes its settings.
         await openServers(window);

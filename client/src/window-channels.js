@@ -3,8 +3,8 @@
 const fs = require('fs');
 const { IPC } = require('./constants');
 const {
-    defaultFolderOf, downloadLink, downloadOptionsOf, failureOf, filesToAdd, handleOf, isId, linkOf, newUpload, optionsOf, pathList, saveToOf, savedServerOf, serverAddress,
-    serverMoveOf, serverOptionsOf, serverToAdd, transfersOf, uploadOf, uploadsToStart,
+    defaultFolderOf, downloadLink, downloadOptionsOf, failureOf, filesToAdd, handleOf, interfaceOf, isId, linkOf, newUpload, optionsOf, pathList, saveToOf, savedServerOf, serverAddress,
+    serverMoveOf, serverOptionsOf, serverToAdd, transfersOf, uploadOf, uploadsToStart, watchingOf,
 } = require('./core/payloads');
 const { NEW_SERVER, canTake, encryptsBy, serverOf, uploadServerOf } = require('./core/servers');
 const { view } = require('./core/transfers');
@@ -31,6 +31,7 @@ const { view } = require('./core/transfers');
  * @param {import('./core/transfers').Transfers} main.transfers
  *   Main's registry of transfers, by the ID it made: a window's own (owner), or a share's (no owner), which may be waiting on a window's answer (ask).
  * @param {() => any} main.host - The transfer host (transfer-host.js), once the app is ready.
+ * @param {() => any} main.network - The chosen adapter's host (network-host.js), once the app is ready.
  * @param {(contents: Electron.WebContents) => void} main.windowReady - A window's page has set itself up.
  * @param {(id: string, server: { url: string, allowInsecure: boolean }) => void} main.start - Start an upload: it's queued, and runs as soon as it has a place.
  * @param {(id: string) => Promise<{ message?: string }>} main.pause - Pause an upload, in the transfer window.
@@ -348,6 +349,14 @@ function answerWindowChannels(main) {
 
     // The page's Copy button: the same copy as an upload's.
     kit.ipc.handle(IPC.LINK_COPY, (_event, link) => main.copyLink(linkOf(link)));
+
+    // Settings > Network, shown or not: while it is, the network service runs,
+    // and its adapters reach the page.
+    kit.ipc.handle(IPC.NETWORK_WATCH, (_event, request) => main.network().watch(watchingOf(request)));
+
+    // The adapter every connection is held to: main's alone, a name the network
+    // service lists now, or none. A page can't choose one that isn't there.
+    kit.ipc.handle(IPC.NETWORK_SET_INTERFACE, (_event, request) => main.network().setInterface(interfaceOf(request)));
 }
 
 module.exports = { answerWindowChannels };

@@ -305,6 +305,25 @@ textarea,
     font-size: 16px;
 }
 
+/* ── Settings > Network ──────────────────────────────────────────────────── */
+
+/* The Update tab's cards, one under another, filling the pane. */
+.network-tab {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+/* Its help lines run to two lines: this keeps their height. */
+.network-tab .form-text.reserved {
+    min-height: 3em;
+}
+
+/* An adapter's name and address need no more than this. */
+.network-select {
+    width: min(100%, 26rem);
+}
+
 /* Add Server's: what the address's check found, before it's added. */
 .server-found {
     border: 1px solid var(--bs-border-color);

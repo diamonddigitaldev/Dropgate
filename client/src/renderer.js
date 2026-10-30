@@ -1,4 +1,4 @@
-// The page: Dropgate's Upload and Download sections and its Servers, Transfers and Privacy tabs, in the
+// The page: Dropgate's Upload and Download sections and its Servers, Transfers, Privacy and Network tabs, in the
 // kit's frame (kit.ui.mountShell()): the nav rail, the header (with Add
 // Files), and the Settings view, with Update and Credits after Dropgate's own
 // tabs. The drop zone, the cards, their grid and bulk bar, the action bar, the
@@ -50,6 +50,10 @@
 // (bounded by its limits), Test, Set as Default, Move Up, Move Down and
 // Remove; Add Server checks an address before it's added. The page changes
 // none of it itself: main does, as it asks.
+//
+// Settings > Network (below, "--- Settings > Network ---") is the Adapter card:
+// the adapter every connection is held to, or any. Main holds it, as it holds
+// the servers, and the network service lists the adapters while the tab shows.
 
 const api = window.electronAPI;
 const kitApi = window.kitAPI;
@@ -65,6 +69,9 @@ const lifetimeToMs = (value, unit) => (Number.isFinite(value) && value > 0 && LI
 /** The states a transfer has once it has ended, and those going. */
 const ENDED = ['done', 'failed', 'cancelled', 'deleted'];
 const GOING = ['queued', 'running', 'paused'];
+
+/** The code a transfer and a server check have while the chosen adapter isn't there: constants.js' INTERFACE_UNAVAILABLE. Its reason starts with the adapter's name, which is never recased. */
+const INTERFACE_UNAVAILABLE = 'INTERFACE_UNAVAILABLE';
 
 document.addEventListener('DOMContentLoaded', async () => {
     // The files the app is opened with (#93): "Open with", files dropped on its
@@ -127,6 +134,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 { id: 'servers', label: 'Servers', render: (pane) => pane.append($('servers-settings')) },
                 { id: 'transfers', label: 'Transfers', render: (pane) => pane.append($('transfers-settings')) },
                 { id: 'privacy', label: 'Privacy', render: (pane) => pane.append($('privacy-settings')) },
+                { id: 'network', label: 'Network', render: (pane) => pane.append($('network-settings')) },
             ],
             credits: { logo: 'img/dropgate.png' },
             // Restart Now asks first while main has an upload running, paused, or waiting to (Share with Dropgate's too).
@@ -319,7 +327,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                         return { text: `Uploaded to ${view.server.name} · ${view.options?.encrypt ? 'End-to-End Encrypted' : 'Not Encrypted'}`, tone: 'success' };
                     }
                     return { text: view.options?.encrypt ? 'Uploaded · End-to-End Encrypted' : 'Uploaded · Not Encrypted', tone: 'success' };
-                case 'failed': return { text: `Failed: ${sentence(view.message ?? 'The upload stopped.')}`, tone: 'danger' };
+                case 'failed': return { text: `Failed: ${view.code === INTERFACE_UNAVAILABLE ? view.message : sentence(view.message ?? 'The upload stopped.')}`, tone: 'danger' };
                 case 'cancelled': return { text: 'Cancelled', tone: 'muted' };
                 case 'deleted': return { text: 'Deleted from the server. Its link no longer works.', tone: 'muted' };
                 default: return { text: view.state, tone: 'muted' };
@@ -797,7 +805,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const where = `Saved to ${view.saveTo?.label ?? defaultFolder.label}`;
                     return { text: view.inFolder ? `${where} · In a Folder of Its Own` : where, tone: 'success' };
                 }
-                case 'failed': return { text: `Failed: ${sentence(tidy(view.message) || 'The download stopped.')}`, tone: 'danger' };
+                case 'failed': return { text: `Failed: ${view.code === INTERFACE_UNAVAILABLE ? view.message : sentence(tidy(view.message) || 'The download stopped.')}`, tone: 'danger' };
                 case 'cancelled': return { text: 'Cancelled', tone: 'muted' };
                 default: return { text: view.state, tone: 'muted' };
             }
@@ -1012,7 +1020,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         /** Why a check couldn't connect, and what to try. */
         function connectionFailedText(serverUrl, error) {
-            if (error?.code === 'REDIRECT_NOT_FOLLOWED') return error.message;
+            if (error?.code === 'REDIRECT_NOT_FOLLOWED' || error?.code === INTERFACE_UNAVAILABLE) return error.message;
             const text = 'Connection failed. Check the URL, and that the server is running.';
             return isPlainHttp(serverUrl) ? text : `${text} If the server only serves plain HTTP, enter its address starting with http://.`;
         }
@@ -1495,6 +1503,74 @@ document.addEventListener('DOMContentLoaded', async () => {
             onChange: (checked) => kitApi.setSettings({ keepLogOnDisk: checked }),
         });
         $('privacy-settings').append(keepLog.element);
+
+        // --- Settings > Network ---
+        // The Adapter card: Network interface, Any interface or one adapter by
+        // name, with its address; a chosen one that's gone stays chosen, marked
+        // not connected, until the person changes it. Nothing here changes it:
+        // main does, as it's asked, and only to one the network service lists now.
+        const OS = navigator.userAgent.includes('Windows') ? 'Windows' : 'Linux';
+        const interfaceSelect = $('network-interface');
+        /** The network as main last said: the adapter chosen, whether it's there, and the adapters listed while the tab shows. */
+        let network = { name: null, present: null, adapters: null };
+
+        /** An adapter's address to show: its IPv4 one, else one with no scope. */
+        const addressOf = ({ addresses }) => addresses.find((address) => !address.includes(':')) ?? addresses.find((address) => !/^fe[89ab]/i.test(address)) ?? addresses[0] ?? '';
+
+        function drawNetwork(state) {
+            network = state;
+            const { name, adapters } = network;
+            const gone = name !== null && network.present === false;
+            const options = [new Option(`Any interface (as ${OS} chooses)`, '')];
+            for (const adapter of adapters ?? []) {
+                if (gone && adapter.name === name) continue;
+                options.push(new Option(`${adapter.name} · ${addressOf(adapter)}`, adapter.name));
+            }
+            if (gone) options.push(new Option(`${name} (not connected)`, name));
+            else if (name !== null && !adapters?.some((adapter) => adapter.name === name)) options.push(new Option(name, name));
+            interfaceSelect.replaceChildren(...options);
+            interfaceSelect.value = name ?? '';
+            interfaceSelect.classList.toggle('is-invalid', gone);
+            let help = `Dropgate connects through whichever adapter ${OS} chooses for each connection.`;
+            if (gone) help = `${name} isn't connected, so Dropgate connects through nothing. Connect it again, or choose another adapter.`;
+            else if (name !== null) help = `Dropgate connects only through ${name}, and looks names up through it too. If it disconnects, every transfer stops at once and nothing connects until it's back: Dropgate never uses another adapter.`;
+            $('network-interface-help').textContent = help;
+        }
+        $('network-interface-note').textContent = `Update checks go through the chosen adapter too. Direct transfers can't be held to one adapter, so they're off while one is chosen. Choosing one also sets aside ${OS === 'Windows' ? "Windows'" : "Linux's"} proxy settings for Dropgate.`;
+
+        interfaceSelect.addEventListener('change', async () => {
+            const name = interfaceSelect.value || null;
+            // What's running can't carry on on its old route, so it stops, and the person says so first.
+            const running = [...shown.values(), ...downloadsShown.values()].filter(({ view }) => view.state === 'running').length;
+            if (running > 0) {
+                const ok = await kit.ui.confirm({
+                    title: 'Change the Network Interface?',
+                    body: `${countOf(running, 'transfer')} ${running === 1 ? 'is' : 'are'} running, and changing the network interface stops ${running === 1 ? 'it' : 'them'}. Retry starts ${running === 1 ? 'it' : 'them'} again.`,
+                    confirmLabel: 'Change and Stop',
+                    variant: 'warning',
+                    icon: 'lan',
+                });
+                if (!ok) {
+                    drawNetwork(network);
+                    return;
+                }
+            }
+            interfaceSelect.disabled = true;
+            try {
+                drawNetwork(await api.setNetworkInterface(name));
+            } catch {
+                kit.ui.toast(`${name ?? 'That adapter'} isn't connected.`, { type: 'warning' });
+                drawNetwork(network);
+            } finally {
+                interfaceSelect.disabled = false;
+            }
+        });
+
+        // The network service lists the adapters only while this tab shows: with none chosen, it isn't started before then.
+        api.onNetworkChanged(drawNetwork);
+        new IntersectionObserver(([entry]) => {
+            api.watchNetwork(entry.isIntersecting).then(drawNetwork, () => {});
+        }).observe($('network-settings'));
 
         // Settings > Transfers: where new downloads are saved, shown whole
         // (Browse is the system's folder picker, in main; Reset goes back to
@@ -2104,7 +2180,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         function compatibilityOf(server, check) {
             if (!server) return { compatible: false, message: 'No server URL. Add one in Settings, under Servers.' };
             if (!check) return { compatible: false, message: '' };
-            if (!check.ok) return { compatible: false, message: 'Could not connect to the server.' };
+            if (!check.ok) return { compatible: false, message: check.code === INTERFACE_UNAVAILABLE ? check.message : 'Could not connect to the server.' };
             const { serverInfo } = check;
             if (!serverInfo?.version || !serverInfo?.capabilities) return { compatible: false, message: "Cannot determine the server's version or capabilities." };
             if (serverInfo.capabilities.upload?.enabled === false) return { compatible: false, message: 'File uploads are disabled on this server.' };

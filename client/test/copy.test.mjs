@@ -26,7 +26,7 @@ const slipsOf = (rule) => everything.flatMap(({ where, text }) => copySlips(text
 test('the checks read every script and page of the client\'s own, with their words and none of their comments', () => {
     assert.deepEqual(scripts.map(({ name }) => name).sort(), ['constants.js', 'core/adapters.js', 'core/bound-dns.js', 'core/file-service.js', 'core/handles.js',
         'core/network-service.js', 'core/notices.js', 'core/payloads.js', 'core/routes.js', 'core/servers.js', 'core/share.js', 'core/socks5.js', 'core/transfers.js',
-        'file-service.js', 'main.js', 'menu.js', 'network-service.js', 'preload.js', 'renderer.js', 'transfer-host.js', 'transfer-preload.js', 'transfer.js', 'tray.js',
+        'file-service.js', 'main.js', 'menu.js', 'network-host.js', 'network-service.js', 'preload.js', 'renderer.js', 'transfer-host.js', 'transfer-preload.js', 'transfer.js', 'tray.js',
         'window-channels.js']);
     assert.deepEqual(pages.map(({ name }) => name).sort(), ['index.html', 'transfer.html']);
     const texts = new Set(everything.map(({ text }) => text));
@@ -80,7 +80,7 @@ test('a file\'s name or a server\'s address is never recased: nothing the page s
     assert.equal(recasing.length, 1, 'the page recases text');
     assert.match(renderer, /const sentence = \(text\) => \(text \? text\[0\]\.toUpperCase\(\) \+ text\.slice\(1\) : text\);/,
         'the one is the capital after a colon in core\'s reason, which never names a file');
-    assert.match(renderer, /`Failed: \$\{sentence\(view\.message/);
+    assert.match(renderer, /`Failed: \$\{view\.code === INTERFACE_UNAVAILABLE \? view\.message : sentence\(view\.message/, 'and it leaves alone a reason that starts with an adapter\'s name');
 });
 
 test('a button that says it\'s doing something is the kit\'s busy button: disabled, with its spinner', () => {

@@ -3,7 +3,7 @@
 const { randomUUID } = require('crypto');
 const path = require('path');
 const { BrowserWindow, MessageChannelMain, utilityProcess } = require('electron');
-const { ENGINE, FILE_SERVICE, TRANSFERS } = require('./constants');
+const { ENGINE, FILE_SERVICE, INTERFACE_UNAVAILABLE, TRANSFERS } = require('./constants');
 const { answerOf, deadlineOf, isId, outcomeOf, savedOf, snapshotOf } = require('./core/payloads');
 
 // The transfer host: the hidden transfer window, which runs core and makes
@@ -42,6 +42,11 @@ const { answerOf, deadlineOf, isId, outcomeOf, savedOf, snapshotOf } = require('
 //   link, from the moment main hands it over to read its list of files.
 //   Main knows only which transfers it holds one for: neither leaves the
 //   transfer window, and main never keeps the link it passed on.
+// - While an adapter is chosen, the transfer session's every request goes
+//   through the network service (network-host.js). A launch's work waits to
+//   hear whether the adapter's there; with it gone, a check, a list of files
+//   and a delete are answered with why, asking nothing, and one that fails as
+//   it goes says why too, rather than blaming the server.
 
 /**
  * Start answering the transfer window's channels. Call once the app is ready
@@ -55,8 +60,11 @@ const { answerOf, deadlineOf, isId, outcomeOf, savedOf, snapshotOf } = require('
  * @param {(ids: string[]) => void} [options.onTokensLost] - The transfer window stopped holding these finished uploads' manage tokens, or these downloads' links.
  * @param {(id: string, filePath: string) => void} [options.onSaved] - A download's file is in place, here.
  * @param {string} [options.partials] - The partial folder, where the file service writes a download until it's whole.
+ * @param {{ refusal: () => string | null, whenSettled: () => Promise<void> }} [options.network] - The chosen adapter (network-host.js): why nothing can connect now, and when that's known.
  */
-function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished, onTokensLost = () => {}, onSaved = () => {}, partials = '' }) {
+function createTransferHost({
+    kit, appInfo, onUpdate, onPauseEnding, onFinished, onTokensLost = () => {}, onSaved = () => {}, partials = '', network = { refusal: () => null, whenSettled: () => Promise.resolve() },
+}) {
     const session = kit.sessions.isolated('transfer');
 
     /** @type {BrowserWindow | null} */
@@ -90,7 +98,10 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
         if (!win || win.isDestroyed() || event.sender !== win.webContents) throw new Error('Not the transfer window.');
     };
 
-    kit.ipc.handle(ENGINE.READY, (event) => {
+    kit.ipc.handle(ENGINE.READY, async (event) => {
+        fromTransferWindow(event);
+        // Nothing goes out until the session's proxy is what the chosen adapter needs.
+        await network.whenSettled();
         fromTransferWindow(event);
         ready = true;
         handPort();
@@ -297,10 +308,17 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
 
     return {
         /**
-         * Ask a server whether it's there, and what it allows.
+         * Ask a server whether it's there, and what it allows. With the chosen
+         * adapter gone, nothing is asked, and it says why.
          * @param {{ url: string, allowInsecure: boolean }} server
          */
-        check: (server) => call(ENGINE.CHECK, { server }),
+        async check(server) {
+            const refused = network.refusal();
+            if (refused) return { ok: false, code: INTERFACE_UNAVAILABLE, message: refused };
+            const answer = await call(ENGINE.CHECK, { server });
+            const since = answer.ok ? null : network.refusal();
+            return since ? { ok: false, code: INTERFACE_UNAVAILABLE, message: since } : answer;
+        },
 
         /**
          * Start an upload. Each file is granted to the file service, and the
@@ -331,11 +349,13 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
          */
         async metadata(id, link) {
             if (!isId(id) || running.has(id) || kept.has(id)) throw new Error('Expected a new download.');
+            const refused = network.refusal();
+            if (refused) return { message: refused };
             kept.add(id);
             const answer = await call(ENGINE.METADATA, { id, link }).catch((error) => ({ message: error.message }));
             if (answer.message) kept.delete(id);
             idleSoon();
-            return answer;
+            return answer.message ? { message: network.refusal() ?? answer.message } : answer;
         },
 
         /**
@@ -381,10 +401,12 @@ function createTransferHost({ kit, appInfo, onUpdate, onPauseEnding, onFinished,
          */
         async delete(id) {
             if (!kept.has(id)) return { message: "This upload can't be deleted from here any more." };
+            const refused = network.refusal();
+            if (refused) return { message: refused };
             const answer = await call(ENGINE.DELETE, { id });
             if (!answer.message) kept.delete(id);
             idleSoon();
-            return answer;
+            return answer.message ? { message: network.refusal() ?? answer.message } : answer;
         },
 
         /** A finished upload's card is gone: the transfer window forgets its manage token. Nothing is started for it. */

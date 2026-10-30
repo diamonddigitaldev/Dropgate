@@ -33,6 +33,7 @@
 //   { at, pid, event: 'tray-gone' }                    the tray icon was taken away
 //   { at, pid, event: 'power-save', action, type, id } the power-save blocker started or stopped
 //   { at, pid, event: 'csp', message }                 a page's console said its Content Security Policy refused something
+//   { at, pid, event: 'utility', name, pid: child }    a utility process was started: its file's name
 //   { at, pid, event: 'exit', code }
 //
 // The tray icon is kept in globalThis.__dropgateTray, with its menu, so a test
@@ -308,9 +309,18 @@ app.on('web-contents-created', (_event, contents) => {
 // after the file service starts (desktop/share.spec.mjs).
 const GRANT_DELAY_MS = Number(process.env.DROPGATE_TEST_GRANT_DELAY_MS ?? 0);
 const DELAYED = new Set(['grant-read', 'grant-output', 'revoke']);
+// The network service runs with the test's adapters (network-stand-in.cjs), so
+// a test never binds to a real one, or lists yours. It's kept in
+// globalThis.__dropgateNetworkService, so a test can kill it (app.evaluate()).
+const NETWORK_STAND_IN = path.join(__dirname, 'network-stand-in.cjs');
 const fork = utilityProcess.fork;
-utilityProcess.fork = function (...args) {
-    const child = fork.apply(this, args);
+utilityProcess.fork = function (modulePath, forkArgs = [], options = {}) {
+    const name = path.basename(modulePath);
+    const child = name === 'network-service.js'
+        ? fork.call(this, NETWORK_STAND_IN, [modulePath], options)
+        : fork.call(this, modulePath, forkArgs, options);
+    record({ event: 'utility', name });
+    if (name === 'network-service.js') globalThis.__dropgateNetworkService = child;
     const postMessage = child.postMessage;
     child.postMessage = function (message, transfer) {
         measure(`main → utility ${message?.type}`, message);

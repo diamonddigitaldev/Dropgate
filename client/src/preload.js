@@ -45,6 +45,8 @@ const CH = {
     TRANSFERS_LIST: 'transfers:list',
     UPLOAD_FINISHED: 'upload:finished',
     LINK_COPY: 'link:copy',
+    NETWORK_WATCH: 'network:watch',
+    NETWORK_SET_INTERFACE: 'network:set-interface',
     FILE_OPENED: 'file:opened',
     FILE_OPEN_ERROR: 'file:open-error',
     TRANSFER_ASK_INSECURE: 'transfer:ask-insecure',
@@ -53,6 +55,7 @@ const CH = {
     TRANSFER_REMOVED: 'transfer:removed',
     UPLOAD_STATUS: 'upload:status',
     SERVERS_CHANGED: 'servers:changed',
+    NETWORK_CHANGED: 'network:changed',
 };
 
 /** Listen for a push from main; the callback gets its value, never the IPC event. */
@@ -102,4 +105,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onUploadStatus: (callback) => on(CH.UPLOAD_STATUS, callback),
     // A saved server checked by main itself (a fallback trying it): the list, and what each one's last check found.
     onServersChanged: (callback) => on(CH.SERVERS_CHANGED, callback),
+    // Settings > Network: main holds the adapter, and asks the network service which there are. The page holds neither.
+    watchNetwork: (on) => ipcRenderer.invoke(CH.NETWORK_WATCH, { on }),
+    setNetworkInterface: (name) => ipcRenderer.invoke(CH.NETWORK_SET_INTERFACE, { name }),
+    onNetworkChanged: (callback) => on(CH.NETWORK_CHANGED, callback),
 });

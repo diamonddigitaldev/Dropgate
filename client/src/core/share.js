@@ -1,6 +1,7 @@
 'use strict';
 
 const { countOf } = require('@diamonddigitaldev/electron-kit/format');
+const { INTERFACE_UNAVAILABLE } = require('../constants');
 const { LIFETIME_UNIT_MS } = require('./payloads');
 const { encryptsBy } = require('./servers');
 
@@ -23,7 +24,8 @@ const { encryptsBy } = require('./servers');
  */
 function shareUpload(settings, check) {
     const stop = (message) => ({ ok: false, message });
-    if (!check?.ok) return stop('Could not connect to the server.');
+    // The chosen adapter's gone: the server was never asked, so the reason's that.
+    if (!check?.ok) return stop(check?.code === INTERFACE_UNAVAILABLE ? check.message : 'Could not connect to the server.');
     const { serverInfo } = check;
     if (!serverInfo?.version || !serverInfo?.capabilities) return stop('Cannot determine the server\'s version or capabilities.');
     const upload = serverInfo.capabilities.upload;

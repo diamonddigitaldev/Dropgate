@@ -18,13 +18,13 @@ import { mock, test } from 'node:test';
 import { fakeMain } from './helpers/main-process.mjs';
 
 const require = createRequire(import.meta.url);
-const { ENGINE, TRANSFERS } = require('../src/constants.js');
+const { ENGINE, INTERFACE_UNAVAILABLE, TRANSFERS } = require('../src/constants.js');
 
 const SERVER = { url: 'https://dropgate.test', allowInsecure: false };
 const OPTIONS = { lifetime: { value: 24, unit: 'hours' }, maxDownloads: 1, encrypt: true };
 const FILES = [{ path: '/secret/plans.bin', name: 'plans.bin', size: 1, mtimeMs: 1 }];
 
-function setUp() {
+function setUp(network) {
     const main = fakeMain();
     const finished = [];
     const { createTransferHost } = main.load('../src/transfer-host.js');
@@ -34,6 +34,7 @@ function setUp() {
         onUpdate: () => {},
         onPauseEnding: () => {},
         onFinished: (id, outcome) => finished.push([id, outcome]),
+        ...(network ? { network } : {}),
     });
     /** The transfer window's page, ready: main hands it the port and its work. */
     const ready = async (win) => main.invoke(ENGINE.READY, main.transferPage(win.webContents));
@@ -235,4 +236,43 @@ test('quitting with a finished upload\'s token held asks the transfer window to 
     next.win.destroy();
     assert.deepEqual(lost, [again]);
     assert.equal(host.keeping, false);
+});
+
+test('with the chosen adapter gone, a check, a list of files and a delete say why, asking nothing of the transfer window', async () => {
+    const reason = "wg-amsterdam isn't connected.";
+    const { main, host } = setUp({ refusal: () => reason, whenSettled: () => Promise.resolve() });
+    assert.deepEqual(await host.check(SERVER), { ok: false, code: INTERFACE_UNAVAILABLE, message: reason });
+    assert.deepEqual(await host.metadata(randomUUID(), LINK), { message: reason });
+    assert.deepEqual(main.windows, [], 'nothing was started for them');
+});
+
+test('one that fails as the adapter goes says why, rather than blaming the server; one that answers isn\'t touched', async () => {
+    const reason = "wg-amsterdam isn't connected.";
+    let refusal = null;
+    const { main, host, ready, answer } = setUp({ refusal: () => refusal, whenSettled: () => Promise.resolve() });
+    const ok = host.check(SERVER);
+    const [win] = main.windows;
+    await ready(win);
+    await answer(win, ENGINE.CHECK, { ok: true });
+    assert.deepEqual(await ok, { ok: true });
+
+    const failing = host.check(SERVER);
+    await Promise.resolve();
+    refusal = reason;
+    await answer(win, ENGINE.CHECK, { ok: false, code: 'SERVER_UNREACHABLE', message: 'Could not reach the server.' });
+    assert.deepEqual(await failing, { ok: false, code: INTERFACE_UNAVAILABLE, message: reason });
+});
+
+test('the transfer window\'s work waits until it\'s known whether the chosen adapter is there, with the session\'s proxy set', async () => {
+    let settle;
+    const { main, host, ready } = setUp({ refusal: () => null, whenSettled: () => new Promise((resolve) => { settle = resolve; }) });
+    host.check(SERVER).catch(() => {});
+    const [win] = main.windows;
+    const answered = ready(win);
+    await Promise.resolve();
+    assert.deepEqual(win.webContents.sent.filter(([channel]) => channel === ENGINE.CHECK), [], 'nothing sent yet');
+    settle();
+    await answered;
+    assert.equal(win.webContents.sent.filter(([channel]) => channel === ENGINE.CHECK).length, 1);
+    win.destroy();
 });

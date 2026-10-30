@@ -6,7 +6,8 @@
 // them. WebSocket upgrades are written the same way. Once the server is done with
 // a request, what it answered is written too. Everything goes to requests.jsonl
 // in the working directory, one JSON object per line:
-//   { n, at, method, url, headers }   when request n arrives;
+//   { n, at, method, url, headers, source }   when request n arrives, with the
+//                                     address its connection came from;
 //   { n, body }                       for each piece of its body, in base64;
 //   { n, at, status, finished }       when its response closes: the status sent
 //                                     (null if the server never began answering),
@@ -29,7 +30,7 @@ const realEmit = http.Server.prototype.emit;
 http.Server.prototype.emit = function emit(event, req, ...rest) {
     if (event === 'request' || event === 'upgrade') {
         const n = ++count;
-        write({ n, at: now(), method: req.method, url: req.url, headers: req.headers });
+        write({ n, at: now(), method: req.method, url: req.url, headers: req.headers, source: req.socket?.remoteAddress ?? null });
         // The body arrives after this event, and push() is how it reaches the request stream.
         const realPush = req.push;
         req.push = function push(chunk, encoding) {

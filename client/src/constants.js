@@ -55,6 +55,8 @@ const IPC = Object.freeze({
     TRANSFERS_LIST: 'transfers:list',           // () -> every transfer in main's registry, as transfer:changed draws it, as the page sets itself up
     UPLOAD_FINISHED: 'upload:finished',         // ({ status: 'error', error }) an upload the page stopped before it started (no server, the warning declined)
     LINK_COPY: 'link:copy',                     // (link) copy it, kept out of the clipboard's history and sync
+    NETWORK_WATCH: 'network:watch',             // ({ on }) -> the network's state: Settings > Network is shown or not; while it is, the network service runs, and the adapters it lists reach the page
+    NETWORK_SET_INTERFACE: 'network:set-interface', // ({ name }) -> the network's state: the adapter to hold every connection to, a name the network service lists now, or null for any; anything else is refused
     // Main to page.
     FILE_OPENED: 'file:opened',                 // push: { handle, name, size }, a file picked with Open File
     FILE_OPEN_ERROR: 'file:open-error',         // push: the message, when the file picked can't be read
@@ -64,11 +66,12 @@ const IPC = Object.freeze({
     TRANSFER_REMOVED: 'transfer:removed',       // push: [id], transfers gone from main's registry
     UPLOAD_STATUS: 'upload:status',             // push: { type: 'success' | 'cancelled' | 'error', data: { id?, link? | error? } }, an upload's outcome, to the main window
     SERVERS_CHANGED: 'servers:changed',         // push: the saved servers' list answer ({ servers, defaultServer, checks }), when main checked one itself (a fallback trying it)
+    NETWORK_CHANGED: 'network:changed',         // push: the network's state ({ name, present, adapters }), when the chosen adapter or the list of adapters changed
 });
 
 /** The pushes, which main sends and the page only listens for. */
 const PUSHES = Object.freeze([
-    IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.TRANSFER_ASK_FALLBACK, IPC.TRANSFER_CHANGED, IPC.TRANSFER_REMOVED, IPC.UPLOAD_STATUS, IPC.SERVERS_CHANGED,
+    IPC.FILE_OPENED, IPC.FILE_OPEN_ERROR, IPC.TRANSFER_ASK_INSECURE, IPC.TRANSFER_ASK_FALLBACK, IPC.TRANSFER_CHANGED, IPC.TRANSFER_REMOVED, IPC.UPLOAD_STATUS, IPC.SERVERS_CHANGED, IPC.NETWORK_CHANGED,
 ]);
 
 /**
@@ -132,11 +135,32 @@ const NETWORK_SERVICE = Object.freeze({
     SET_INTERFACE: 'set-interface',             // { name: string | null }: the adapter chosen, by name; null for none, and every connection is refused
     STOP: 'stop',                               // (): close everything, and exit
     // The service to main.
-    LISTENING: 'listening',                     // { port }: the proxy, on 127.0.0.1
+    LISTENING: 'listening',                     // { port, host }: the proxy, on the machine's loopback: ::1, else 127.0.0.1
     ADAPTERS: 'adapters',                       // { list: [{ name, addresses }] }: the adapters up with an address, whenever the list changes
     STATE: 'state',                             // { name, present, addresses: { v4, v6 } }: the chosen adapter, as it is now, whenever that changes
     GONE: 'gone',                               // { name }: the chosen adapter has gone, and every connection through it is closed
 });
+
+/**
+ * The code a transfer fails with, and a server check answers, while the chosen
+ * adapter isn't there: the client's own, not core's, and not one of the fallback's
+ * (core/servers.js' FALLBACK_CODES), as every server would fail the same way.
+ */
+const INTERFACE_UNAVAILABLE = 'INTERFACE_UNAVAILABLE';
+
+/** The code a transfer running fails with as the person changes the adapter: it can't carry on on its old route, and nothing restarts by itself. */
+const INTERFACE_CHANGED = 'INTERFACE_CHANGED';
+
+/**
+ * How main runs the network service (network-host.js):
+ * - SETTLE_MS: how long a launch with an adapter chosen waits to hear of it,
+ *   holding the transfer window's work, before it's taken as gone;
+ * - RESTART_MS: how soon the service is started again after it exits;
+ * - IDLE_MS: how long it runs on with no adapter chosen, once Settings >
+ *   Network isn't shown;
+ * - STOP_MS: how long it's given to stop by itself.
+ */
+const NETWORK = Object.freeze({ SETTLE_MS: 5_000, RESTART_MS: 1_000, IDLE_MS: 30_000, STOP_MS: 1_000 });
 
 /**
  * Where a download is written while it runs: a folder in the app's profile
@@ -170,24 +194,41 @@ const SETTINGS_DEFAULTS = Object.freeze({
     // transfers run at once, uploads and downloads together.
     downloadFolder: null,
     transfersAtOnce: 3,
+    // Settings > Network: the adapter every connection is held to, by the
+    // name the OS gives it, null for any (the OS chooses): main's alone
+    // (MAIN_ONLY_SETTINGS), as the page asks it to (network:set-interface);
+    // and the bottom bar, the External IP check, which addresses the bar shows
+    // and the location data's refresh, each off until the person turns it on.
+    networkInterface: null,
+    networkBar: false,
+    externalIpCheck: false,
+    barShowsIpv4: true,
+    barShowsIpv6: true,
+    locationRefresh: false,
 });
 
 /**
  * The settings only main changes (the kit's settings.mainOnly): the page may
  * read them, and a change from it naming one is refused whole. A page that
- * could set the downloads folder could choose where every download lands.
+ * could set the downloads folder could choose where every download lands, and
+ * one that could set the adapter could choose one that isn't there.
  */
-const MAIN_ONLY_SETTINGS = Object.freeze(['servers', 'defaultServer', 'downloadFolder']);
+const MAIN_ONLY_SETTINGS = Object.freeze(['servers', 'defaultServer', 'downloadFolder', 'networkInterface']);
 
 /** Transfers at once, as Settings > Transfers' stepped slider offers it. */
 const AT_ONCE_RANGE = Object.freeze({ MIN: 1, MAX: 6 });
 
+/** The longest adapter name kept: Windows' allow 256 characters. */
+const MAX_INTERFACE_NAME = 256;
+
 /**
  * The values each setting takes beyond its kind (the kit's settings.checks),
- * from the page or main: transfers at once is held to the slider's range.
+ * from the page or main: transfers at once is held to the slider's range, and
+ * the adapter is a name or null.
  */
 const SETTINGS_CHECKS = Object.freeze({
     transfersAtOnce: (n) => Number.isSafeInteger(n) && n >= AT_ONCE_RANGE.MIN && n <= AT_ONCE_RANGE.MAX,
+    networkInterface: (name) => name === null || (typeof name === 'string' && name.length > 0 && name.length <= MAX_INTERFACE_NAME),
 });
 
 /**
@@ -195,26 +236,32 @@ const SETTINGS_CHECKS = Object.freeze({
  * kept its settings as top-level keys of config.json, which v4 doesn't carry
  * over (Will, 2026-10-03): the person enters their server once more. 2: the
  * downloads folder and transfers at once. 3: the saved servers, in place of
- * the one server and its settings for new uploads (migrateSettings()).
+ * the one server and its settings for new uploads. 4: Settings > Network's
+ * (migrateSettings()).
  */
-const SETTINGS_SCHEMA_VERSION = 3;
+const SETTINGS_SCHEMA_VERSION = 4;
 
 /**
  * Bring stored settings up to SETTINGS_SCHEMA_VERSION, once: the kit calls it
  * as its store opens, with the version they were written at. Version 1's
  * gain version 2's at their defaults (the system's Downloads folder, 3 at
  * once); version 1's and 2's one server, with its settings for new uploads,
- * becomes the first saved server, and the default (none, if none was given).
- * Nothing older was ever under the kit's key (v3's, version 0, are deleted by
- * V3_STORE_KEYS), so nothing of it is kept.
+ * becomes the first saved server, and the default (none, if none was given);
+ * and all of them gain version 4's at their defaults. Nothing older was ever
+ * under the kit's key (v3's, version 0, are deleted by V3_STORE_KEYS), so
+ * nothing of it is kept.
  * @param {object} settings
  * @param {number} from
  */
 function migrateSettings(settings, from) {
     if (from < 1) return {};
+    const four = {
+        networkInterface: null, networkBar: false, externalIpCheck: false, barShowsIpv4: true, barShowsIpv6: true, locationRefresh: false,
+    };
+    if (from >= 3) return { ...settings, ...four };
     const { serverURL, lifetimeValue, lifetimeUnit, maxDownloads, ...rest } = settings;
     const two = from < 2 ? { downloadFolder: null, transfersAtOnce: 3 } : {};
-    return { ...rest, ...two, ...serversFrom({ serverURL, lifetimeValue, lifetimeUnit, maxDownloads }) };
+    return { ...rest, ...two, ...serversFrom({ serverURL, lifetimeValue, lifetimeUnit, maxDownloads }), ...four };
 }
 
 /** v3's top-level keys in config.json, deleted once by the kit's migration. windowBounds is the kit's key too, so it carries over. */
@@ -249,6 +296,6 @@ const TRANSFERS = Object.freeze({
 });
 
 module.exports = {
-    APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, NETWORK_SERVICE, PARTIAL_FOLDER, READ_PIECE_BYTES,
-    SETTINGS_DEFAULTS, MAIN_ONLY_SETTINGS, AT_ONCE_RANGE, SETTINGS_CHECKS, SETTINGS_SCHEMA_VERSION, migrateSettings, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS,
+    APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, NETWORK_SERVICE, NETWORK, INTERFACE_UNAVAILABLE, INTERFACE_CHANGED, PARTIAL_FOLDER, READ_PIECE_BYTES,
+    SETTINGS_DEFAULTS, MAIN_ONLY_SETTINGS, AT_ONCE_RANGE, MAX_INTERFACE_NAME, SETTINGS_CHECKS, SETTINGS_SCHEMA_VERSION, migrateSettings, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS,
 };
