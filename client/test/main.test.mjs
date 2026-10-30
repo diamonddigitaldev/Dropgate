@@ -223,6 +223,7 @@ test('the shell and the shared parts are the kit\'s: no modal, drop zone, progre
         assert.ok(renderer.includes(call), `renderer.js uses ${call}`);
     }
     assert.match(renderer, /busy: async \(\) =>/, 'Restart Now asks first while an upload runs');
+    assert.doesNotMatch(renderer, /btn-link/, 'a button that goes nowhere never looks like a link');
     // Drops are the kit's: the page lights the card files are over, and never reads what's dropped itself.
     for (const own of ['bootstrap.Modal', 'bootstrap.Tooltip', 'innerHTML', 'alert(', 'dataTransfer', 'xfer-card']) {
         assert.ok(!renderer.includes(own), `renderer.js has ${own}`);

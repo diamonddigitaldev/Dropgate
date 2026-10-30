@@ -1147,7 +1147,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             const icon = glyph('dns', 'kind-icon');
             const name = element('span', 'server-name');
             const pill = element('span', 'pill-default', 'Default');
-            const toggle = element('button', 'btn btn-sm btn-link ms-auto p-0 icon-btn');
+            // Plain, in the secondary text's colour: it opens the row, and goes nowhere, so it doesn't look like a link.
+            const toggle = element('button', 'btn btn-sm border-0 ms-auto p-0 icon-btn text-body-secondary');
             toggle.type = 'button';
             const toggleIcon = glyph('expand_more');
             toggle.append(toggleIcon);
