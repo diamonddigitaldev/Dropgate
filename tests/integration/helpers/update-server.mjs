@@ -6,7 +6,8 @@
 // It answers the channel files electron-builder writes: latest.yml, beta.yml
 // and alpha.yml, with "-linux" on Linux. It never has the installer they name,
 // so an update found is never downloaded or installed: the app can't run
-// anything from here. It records every request, with its headers.
+// anything from here. It records every request, with its headers and the
+// address it came from.
 import crypto from 'node:crypto';
 import http from 'node:http';
 
@@ -38,11 +39,11 @@ function channelFile(version) {
  *   A channel left out is a 404, as a release without that file would be.
  */
 export async function startUpdateServer(channels) {
-    /** @type {{ at: number, file: string, headers: Record<string, string | string[] | undefined> }[]} */
+    /** @type {{ at: number, file: string, source: string | undefined, headers: Record<string, string | string[] | undefined> }[]} */
     const requests = [];
     const server = http.createServer((req, res) => {
         const file = decodeURIComponent(new URL(req.url, 'http://localhost').pathname.slice(1));
-        requests.push({ at: Date.now(), file, headers: { ...req.headers } });
+        requests.push({ at: Date.now(), file, source: req.socket.remoteAddress, headers: { ...req.headers } });
         const channel = /^(\w+?)(-linux)?\.yml$/.exec(file)?.[1];
         if (channel && channels[channel]) {
             res.writeHead(200, { 'content-type': 'text/yaml' });

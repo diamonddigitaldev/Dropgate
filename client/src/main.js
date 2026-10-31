@@ -110,8 +110,8 @@ const { answerWindowChannels } = require('./window-channels');
 //   start, a failure fails it, with Retry. It carries nothing from one server
 //   to the next but its files and options.
 // - A chosen adapter (Settings > Network, network-host.js) holds every request
-//   the transfer window makes to it, through the network service, and it fails
-//   closed. As it goes (or the service exits), everything running is stopped
+//   the transfer window makes, and every update check and download, to it,
+//   through the network service, and it fails closed. As it goes (or the service exits), everything running is stopped
 //   and fails, saying so, with Retry (stopRunning()); one queued fails at its
 //   turn, a paused one stays paused and its Resume is refused, and a server
 //   check says why, asking nothing. The code is the client's own, so no

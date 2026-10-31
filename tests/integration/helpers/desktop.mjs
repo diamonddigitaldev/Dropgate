@@ -62,6 +62,21 @@ const electronPath = () => createRequire(path.join(CLIENT_DIR, 'package.json'))(
 export const STAND_IN = process.platform === 'linux' ? 'lo' : 'Test Adapter';
 export const STAND_IN_ADDRESS = '127.0.0.3';
 
+/**
+ * Write the stand-in adapters' file (network-stand-in.cjs), as os.networkInterfaces() lists them.
+ * @param {string} file
+ * @param {Record<string, string | string[]>} adapters - Each one's name, and its address or addresses.
+ */
+export function writeAdapters(file, adapters) {
+    const entries = Object.fromEntries(Object.entries(adapters).map(([name, addresses]) => [name, [addresses].flat().map((address) => ({
+        address, netmask: '255.255.255.255', family: address.includes(':') ? 'IPv6' : 'IPv4', mac: '00:00:00:00:00:00', internal: false, cidr: `${address}/32`,
+    }))]));
+    // Whole or not at all: the service reads it each second.
+    const next = `${file}.next`;
+    fs.writeFileSync(next, JSON.stringify(entries));
+    fs.renameSync(next, file);
+}
+
 /** Don't look for a proxy: connect directly (see the top of this file). */
 const NO_PROXY = '--no-proxy-server';
 
@@ -260,13 +275,7 @@ class Desktop {
      * @param {Record<string, string | string[]>} adapters - Each one's name, and its address or addresses.
      */
     setAdapters(adapters) {
-        const entries = Object.fromEntries(Object.entries(adapters).map(([name, addresses]) => [name, [addresses].flat().map((address) => ({
-            address, netmask: '255.255.255.255', family: address.includes(':') ? 'IPv6' : 'IPv4', mac: '00:00:00:00:00:00', internal: false, cidr: `${address}/32`,
-        }))]));
-        // Whole or not at all: the service reads it each second.
-        const next = `${this.adaptersFile}.next`;
-        fs.writeFileSync(next, JSON.stringify(entries));
-        fs.renameSync(next, this.adaptersFile);
+        writeAdapters(this.adaptersFile, adapters);
     }
 
     /** The address the app is given for the server: the TLS proxy's when there is one. */

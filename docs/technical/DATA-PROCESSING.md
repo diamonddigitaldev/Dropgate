@@ -405,6 +405,8 @@ Each check sends requests to GitHub (`github.com`, and GitHub's release-asset ho
 
 When a check finds an update, the client downloads it from GitHub straight away, unless **Download updates automatically** is off in **Settings**, under **Update**, and installs it when you close the app. Those downloads send the same headers.
 
+With a network adapter chosen in **Settings**, under **Network**, every check and download goes through that adapter, from a launch's first check on, so GitHub sees the address it connects from; with the adapter gone, a check fails and reaches nothing, and none goes out another way (tests: [with an adapter chosen, every request of a check and a download comes from its address; with it gone, none reaches the server; with Any, as ever](../../tests/integration/desktop/updates.spec.mjs); [a saved adapter that is not there: the check at launch reaches nothing, and says it could not check](../../tests/integration/desktop/updates.spec.mjs)).
+
 Dropgate itself receives none of this.
 
 ---

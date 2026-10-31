@@ -24,12 +24,14 @@ const settled = async () => {
     for (let i = 0; i < 20; i += 1) await Promise.resolve();
 };
 
-function setUp({ name = null, commandLine = {} } = {}) {
+function setUp({ name = null, commandLine = {}, updaterRefuses = false } = {}) {
     const main = fakeMain({ settings: { networkInterface: name } });
     main.electron.app.commandLine = { hasSwitch: (which) => commandLine[which] === true };
     const set = [];
     main.kit.settings.set = (changes) => set.push(changes);
     main.kit.log = { warn: () => {} };
+    const updater = [];
+    main.kit.updater = { setProxy: updaterRefuses ? () => Promise.reject(new Error('Refused.')) : async (config) => { updater.push(config); } };
     const proxies = [];
     const session = {
         setProxy: async (config) => proxies.push(config),
@@ -58,7 +60,7 @@ function setUp({ name = null, commandLine = {} } = {}) {
     };
     const there = (addresses = { v4: '10.64.12.7', v6: null }) => tell({ type: NETWORK_SERVICE.STATE, name: ADAPTER, present: true, addresses });
     const gone = () => tell({ type: NETWORK_SERVICE.STATE, name: ADAPTER, present: false, addresses: { v4: null, v6: null } });
-    return { main, network, proxies, set, unavailable, changing, changes, tell, listening, there, gone, NOWHERE };
+    return { main, network, proxies, updater, set, unavailable, changing, changes, tell, listening, there, gone, NOWHERE };
 }
 
 const toService = (child) => child.messages.filter(({ type }) => type === NETWORK_SERVICE.SET_INTERFACE).map(({ name }) => name);
@@ -79,6 +81,78 @@ test('with no adapter chosen, the service is never started and the session is le
     assert.deepEqual(network.state(), { name: null, present: null, adapters: null });
     await network.whenSettled();
     assert.deepEqual(unavailable, []);
+});
+
+test('with no adapter chosen, the kit\'s updater is left as it was launched: it\'s never told anything', async (t) => {
+    timers(t);
+    const { network, updater, listening } = setUp();
+    const watched = network.watch(true);
+    await settled();
+    await listening();
+    await watched;
+    await network.setInterface(null);
+    await settled();
+    assert.deepEqual(updater, []);
+});
+
+test('a launch with one chosen holds the kit\'s updater from the moment it starts: nowhere, then the service, with the session\'s own rules', async (t) => {
+    timers(t);
+    const { updater, listening, there, NOWHERE } = setUp({ name: ADAPTER });
+    // Not awaited: its check at launch waits only for a proxy the kit has been given.
+    assert.deepEqual(updater, [{ proxyRules: NOWHERE, proxyBypassRules: '<-loopback>' }], 'set as the host starts, never left to the system');
+    await listening();
+    const { proxyRules, proxyBypassRules } = bound;
+    assert.deepEqual(updater.slice(1), [{ proxyRules, proxyBypassRules }]);
+    await there();
+    assert.equal(updater.length, 2, 'the adapter being there changes nothing');
+});
+
+test('the kit\'s updater follows the session through everything that changes its proxy, and through nothing else', async (t) => {
+    timers(t);
+    const { main, network, proxies, updater, listening, there, gone, NOWHERE } = setUp({ name: ADAPTER });
+    await listening();
+    await there();
+    const { proxyRules, proxyBypassRules } = bound;
+    const session = () => proxies.filter((config) => config !== 'closed').map((config) => config.proxyRules ?? config.mode);
+    const updaters = () => updater.map((config) => config?.proxyRules ?? config);
+
+    // Gone, the service refuses for both: nothing to change, as a change would cut a download for no reason.
+    const before = updater.length;
+    await gone();
+    await there();
+    assert.equal(updater.length, before);
+
+    // The service exiting: nowhere at once, then its new port.
+    main.processes[0].emit('exit', 1);
+    await settled();
+    assert.equal(updaters().at(-1), NOWHERE);
+    assert.equal(session().at(-1), NOWHERE);
+    mock.timers.tick(NETWORK.RESTART_MS);
+    await settled();
+    await listening();
+    assert.equal(updaters().at(-1), proxyRules);
+    assert.equal(session().at(-1), proxyRules);
+    assert.equal(updater.at(-1).proxyBypassRules, proxyBypassRules);
+
+    // Any interface, and back.
+    await there();
+    await network.setInterface(null);
+    assert.equal(updater.at(-1), null, 'back to how the app was launched');
+    const answer = network.setInterface(ADAPTER);
+    await settled();
+    assert.equal(updaters().at(-1), proxyRules);
+    await there();
+    await answer;
+});
+
+test('the kit\'s updater refusing its proxy holds nothing else up: the kit logs it', async (t) => {
+    timers(t);
+    const { network, proxies, listening, there } = setUp({ name: ADAPTER, updaterRefuses: true });
+    await listening();
+    await there();
+    await network.whenSettled();
+    assert.deepEqual(proxies.slice(-2), [bound, 'closed']);
+    assert.equal(network.state().present, true);
 });
 
 test('a machine with no IPv6 loopback has the session\'s proxy on 127.0.0.1, where the service says it listens; nothing else it says is taken', async (t) => {

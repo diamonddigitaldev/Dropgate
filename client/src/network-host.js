@@ -18,6 +18,11 @@ const { MAX_INTERFACE_NAME, NETWORK, NETWORK_SERVICE } = require('./constants');
 //   connects. Neither is an IPv4 address, which is what could make Chromium
 //   look up ipv4only.arpa past the proxy (core/network-service.js). With none chosen, it's the system's settings (none with
 //   --no-proxy-server, as the tests launch the app, as the kit's updater does).
+// - The kit's updater has the same proxy, set as the session's is, so an update
+//   check or download never goes direct either: with one chosen, from before
+//   its first check at launch (the kit keeps a proxy until electron-updater
+//   loads, and a check waits for one being set). With none chosen at launch it
+//   isn't touched; choosing none later goes back to how the app was launched.
 // - A launch with one chosen holds the transfer window's work until the service
 //   has said whether it's there (whenSettled(): NETWORK.SETTLE_MS at most, and
 //   then it's taken as gone), so the first check doesn't fail for nothing.
@@ -53,7 +58,7 @@ const listOf = (list) => (Array.isArray(list) ? list : [])
  * Start main's side of the adapter. Call once the app is ready, before the
  * transfer window has any work.
  * @param {object} options
- * @param {any} options.kit - The kit, from start(): its settings and log.
+ * @param {any} options.kit - The kit, from start(): its settings, log and updater.
  * @param {Electron.Session} options.session - The transfer session.
  * @param {(reason: string) => void} [options.onUnavailable] - The chosen adapter went, or the service exited: fail what's running, with this reason.
  * @param {() => void} [options.onChanging] - The person is changing the adapter: stop what's running, as it can't carry on on its old route.
@@ -93,18 +98,23 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
     /** Why nothing can connect now: the chosen adapter is gone, or the service with it. Null otherwise, and before it's known. */
     const refusal = () => (name !== null && present === false ? `${name} isn't connected.` : null);
 
+    /** The one proxy for everything, with an adapter chosen: the service, or nowhere while it isn't there. */
+    const held = () => ({ proxyRules: port === null ? NOWHERE : `socks5://${proxyHost}:${port}`, proxyBypassRules: LOOPBACK_TOO });
+
     /** The transfer session's proxy, as things are now. */
     function proxy() {
         if (name === null) return app.commandLine?.hasSwitch('no-proxy-server') ? { mode: 'direct' } : { mode: 'system' };
-        const rules = port === null ? NOWHERE : `socks5://${proxyHost}:${port}`;
-        return { mode: 'fixed_servers', proxyRules: rules, proxyBypassRules: LOOPBACK_TOO };
+        return { mode: 'fixed_servers', ...held() };
     }
 
-    /** Give the session its proxy, after any set before, and close its connections. */
+    /** Give the session its proxy, after any set before, and close its connections; the updater's, in the same breath. */
     function applyProxy() {
+        // Now, not after the session's: an update check waits only for a proxy the kit has been given. The kit logs a failure itself.
+        const updater = kit.updater.setProxy(name === null ? null : held()).catch(() => {});
         applying = applying.then(async () => {
             await session.setProxy(proxy());
             await session.closeAllConnections();
+            await updater;
         }).catch((error) => kit.log.warn(`Couldn't set the transfer session's proxy (${error?.name ?? 'error'}).`));
         return applying;
     }
