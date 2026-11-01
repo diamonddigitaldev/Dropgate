@@ -141,8 +141,14 @@ const NETWORK_SERVICE = Object.freeze({
     ADAPTERS: 'adapters',                       // { list: [{ name, addresses }] }: the adapters up with an address, whenever the list changes
     STATE: 'state',                             // { name, present, addresses: { v4, v6 } }: the chosen adapter, as it is now, whenever that changes
     GONE: 'gone',                               // { name }: the chosen adapter has gone, and every connection through it is closed
-    IP_RESULT: 'ip-result',                     // { id, v4, v6, latency } (null for a family with no answer), or { id, error: 'timeout' | 'unreachable' }: main's memory only, never written or logged
+    IP_RESULT: 'ip-result',                     // { id, v4, v6, latency, location? } (null for a family with no answer; location: { month, v4, v6 }, each { code, country, isp, asn } or null, with data to look in), or { id, error: 'timeout' | 'unreachable' }: main's memory only, never written or logged
 });
+
+/**
+ * The location data's folder, in the app's resources (from source, in client/,
+ * once scripts/location-data.cjs has fetched it): its two files are never committed.
+ */
+const LOCATION_DATA_FOLDER = 'location-data';
 
 /**
  * The code a transfer fails with, and a server check answers, while the chosen
@@ -306,6 +312,6 @@ const TRANSFERS = Object.freeze({
 });
 
 module.exports = {
-    APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, NETWORK_SERVICE, NETWORK, INTERFACE_UNAVAILABLE, INTERFACE_CHANGED, PARTIAL_FOLDER, READ_PIECE_BYTES,
+    APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, NETWORK_SERVICE, NETWORK, INTERFACE_UNAVAILABLE, INTERFACE_CHANGED, LOCATION_DATA_FOLDER, PARTIAL_FOLDER, READ_PIECE_BYTES,
     SETTINGS_DEFAULTS, MAIN_ONLY_SETTINGS, AT_ONCE_RANGE, MAX_INTERFACE_NAME, SETTINGS_CHECKS, SETTINGS_SCHEMA_VERSION, migrateSettings, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS,
 };

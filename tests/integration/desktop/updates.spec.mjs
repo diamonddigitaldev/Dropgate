@@ -24,7 +24,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from '@playwright/test';
-import { STAND_IN, STAND_IN_ADDRESS, writeAdapters } from '../helpers/desktop.mjs';
+import { STAND_IN, STAND_IN_ADDRESS, addServer, writeAdapters } from '../helpers/desktop.mjs';
 import { expect, test } from '../helpers/test.mjs';
 import { outsideLookups, proxyLookups, resolverJobs } from '../helpers/netlog.mjs';
 import { startUpdateServer } from '../helpers/update-server.mjs';
@@ -128,7 +128,7 @@ const standInAdapters = (app) => app.evaluate(({ utilityProcess }, standIn) => {
     utilityProcess.fork = function (modulePath, args, options) {
         if (!modulePath.endsWith('network-service.js')) return fork.call(this, modulePath, args, options);
         globalThis.__dropgateStandIns++;
-        return fork.call(this, standIn, [modulePath], options);
+        return fork.call(this, standIn, [modulePath, ...args], options);
     };
 }, fileURLToPath(new URL('../helpers/network-stand-in.cjs', import.meta.url)));
 
@@ -330,4 +330,34 @@ test('a saved adapter that is not there: the check at launch reaches nothing, an
     }
     expect(resolverJobs(run.netLog), "the host resolver's jobs").toEqual([]);
     checkedAndGone(run);
+});
+
+// The same build carries DB-IP's real files in its resources, and flag-icons' flags in
+// app.asar, as a person's would (`09` 18.14). A real address, so a real record: what
+// it says is DB-IP's to change, bar Cloudflare's AS number and the shape of the line.
+test.describe('the location data the build put in it', () => {
+    test.use({ localStun: { address: '127.0.0.2', mapped: { v4: '1.1.1.1' } } });
+
+    test('an External IP gets its flag, country and ISP from the app\'s own resources, with no request for them', async ({ server, stun }) => {
+        const run = await launch({});
+        const { app } = run;
+        try {
+            await standInAdapters(app);
+            const window = await app.firstWindow();
+            await addServer(window, server.baseUrl);
+            await window.getByRole('tab', { name: 'Network' }).click();
+            await window.getByRole('switch', { name: 'Check my External IP' }).check();
+
+            await expect(window.locator('#connection-ips')).toHaveText('1.1.1.1');
+            await expect(window.locator('#connection-meta')).toHaveText(/^[^·]+ · [^·]+ \(AS13335\) · Latency \d+ ms$/);
+            const flag = window.locator('#connection-ips img');
+            await expect(flag).toHaveAttribute('title', /^[A-Z]{2}$/);
+            await expect(flag).toHaveAttribute('src', /^\.\.\/node_modules\/flag-icons\/flags\/4x3\/[a-z]{2}\.svg$/);
+            await expect.poll(() => flag.evaluate((image) => image.naturalWidth), { message: "the flag's picture, drawn from app.asar" }).toBeGreaterThan(0);
+            expect(stun.requests.length, 'what the STUN server heard').toBe(1);
+        } finally {
+            await app.close();
+        }
+        checkedAndGone(run);
+    });
 });

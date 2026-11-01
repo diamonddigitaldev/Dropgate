@@ -5,6 +5,7 @@ const net = require('net');
 const { NETWORK, NETWORK_SERVICE } = require('../constants');
 const { AdapterWatch, hasIpv6, isLoopback } = require('./adapters');
 const { BoundResolver, adapterServers, serverAddress, serversFor, systemServers } = require('./bound-dns');
+const { lookUp } = require('./location');
 const { RouteCheck } = require('./routes');
 const { REPLY, readRequest, reply } = require('./socks5');
 const { askBinding, stunTargetOf } = require('./stun');
@@ -37,7 +38,8 @@ const { askBinding, stunTargetOf } = require('./stun');
 //   name looked up through it, its route checked on Linux, and stopped the
 //   moment the adapter goes or changes. With no adapter chosen, it goes as the OS
 //   routes it, and it's the one thing that goes at all. Main hears the answer,
-//   and nothing here keeps it.
+//   and nothing here keeps it. Its country and ISP are looked up on the
+//   machine (location.js), and come with it, sending nothing.
 // It sends nothing else of its own, keeps nothing on disk and logs nothing.
 
 /**
@@ -81,13 +83,15 @@ class NetworkService {
      * @param {readonly string[]} [options.loopbacks] - where the proxy may listen, in order
      * @param {number} [options.stunMs] - how long a STUN server is given to answer
      * @param {typeof dns.promises.lookup} [options.osLookup] - the OS's resolver, for the External IP with no adapter chosen
+     * @param {string | null} [options.locationData] - the folder of the location data, for the External IP's country and ISP
      * @param {(message: object) => void} [options.tell] - to main
      */
     constructor({
         list, watchMs, platform = process.platform, routes = platform === 'linux' ? new RouteCheck() : null,
         ownServers = (name) => adapterServers(name, platform), systemServers: system = () => systemServers(platform),
-        resolver = new BoundResolver(), loopbacks = LOOPBACKS, stunMs = NETWORK.STUN_MS, osLookup = dns.promises.lookup, tell = () => {},
+        resolver = new BoundResolver(), loopbacks = LOOPBACKS, stunMs = NETWORK.STUN_MS, osLookup = dns.promises.lookup, locationData = null, tell = () => {},
     } = {}) {
+        this.locationData = locationData;
         this.loopbacks = loopbacks;
         this.routes = routes;
         this.ownServers = ownServers;
@@ -297,8 +301,9 @@ class NetworkService {
     /**
      * Ask a STUN server for the External IP, once a family, and tell main what
      * came back within NETWORK.STUN_MS: the address of each family that
-     * answered, and the round trip of the first of them. One under way is
-     * called off first. Called off itself, nothing is told.
+     * answered, the round trip of the first of them, and each address's country
+     * and ISP, looked up here. One under way is called off first. Called off
+     * itself, nothing is told.
      * @param {number} id - Main's, for it to know the answer.
      * @param {string} stun - A stun: URL.
      */
@@ -316,15 +321,19 @@ class NetworkService {
         )));
         clearTimeout(timer);
         if (check.calledOff) return;
-        this.ipCheck = null;
         const of = (family) => answers.find((answer) => answer.family === family && answer.ip);
         const [v4, v6] = [of(4), of(6)];
         if (!v4 && !v6) {
+            this.ipCheck = null;
             const timedOut = answers.length > 0 && answers.every(({ error }) => error?.code === 'ETIMEDOUT');
             this.tell({ type: NETWORK_SERVICE.IP_RESULT, id, error: timedOut ? 'timeout' : 'unreachable' });
             return;
         }
-        this.tell({ type: NETWORK_SERVICE.IP_RESULT, id, v4: v4?.ip ?? null, v6: v6?.ip ?? null, latency: (v4 ?? v6).ms });
+        const location = this.locationData === null ? null : await lookUp(this.locationData, { v4: v4?.ip, v6: v6?.ip }).catch(() => null);
+        // Still this check's to tell: the adapter may have gone, or changed, while the data was read.
+        if (check.calledOff) return;
+        this.ipCheck = null;
+        this.tell({ type: NETWORK_SERVICE.IP_RESULT, id, v4: v4?.ip ?? null, v6: v6?.ip ?? null, latency: (v4 ?? v6).ms, ...(location ? { location } : {}) });
     }
 
     /** Stop the External IP check under way, sending nothing more, with nothing told of it. */

@@ -8,13 +8,77 @@ import { test } from 'node:test';
 import { bindingResponse, startStunServer } from '../../tests/integration/helpers/stun.mjs';
 
 const require = createRequire(import.meta.url);
-const { healthOf, stunSourceOf } = require('../src/core/external-ip.js');
+const { ExternalIp, countryWarningOf, healthOf, placeFrom, stunSourceOf } = require('../src/core/external-ip.js');
 const { addressesOf, hasIpv6 } = require('../src/core/adapters.js');
 const { STUN_PORT, askBinding, bindingRequest, firstStunUrl, mappedAddress, stunTargetOf } = require('../src/core/stun.js');
 
 const ID = Buffer.from('0123456789ab');
 const SERVER = { name: 'Share Space' };
 const answered = (p2p) => ({ ok: true, serverInfo: { capabilities: { p2p } } });
+
+test('18.14: the IPv4/IPv6 warning shows when their countries differ, and not otherwise, not saying which is outside a VPN', () => {
+    const of = (v4, v6) => countryWarningOf({ places: { v4: v4 && { code: v4 }, v6: v6 && { code: v6 } } });
+    assert.equal(of('NL', 'GB'), 'Your IPv4 and IPv6 addresses are in different countries (NL and GB), so one of them may not be going through your VPN.');
+    assert.equal(of('GB', 'NL'), 'Your IPv4 and IPv6 addresses are in different countries (GB and NL), so one of them may not be going through your VPN.');
+    assert.equal(of('NL', 'NL'), null);
+    assert.equal(of('NL', null), null, 'an IPv6 address not known');
+    assert.equal(of(null, 'NL'), null, 'an IPv4 address not known');
+    assert.equal(of(null, null), null);
+    assert.equal(countryWarningOf({ places: { v4: { code: null }, v6: { code: 'NL' } } }), null);
+    assert.equal(countryWarningOf(null), null, 'no result');
+    assert.equal(countryWarningOf({ ok: false, reason: 'No answer.' }), null, 'a failed one');
+});
+
+test('18.14: main takes only what a place should hold from the service: a code that can name a file, a name, and an AS number', () => {
+    const good = { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 };
+    assert.deepEqual(placeFrom(good), good);
+    assert.deepEqual(placeFrom({ ...good, secret: 'x' }), good, 'nothing else carried');
+    assert.equal(placeFrom(null), null);
+    assert.equal(placeFrom({}), null);
+    assert.equal(placeFrom('NL'), null);
+    for (const code of ['nl', 'NLD', '../x', 'N', 7, '']) assert.equal(placeFrom({ ...good, code }).code, null, String(code));
+    for (const asn of ['64500', -1, 0, 1.5, Number.MAX_VALUE]) assert.equal(placeFrom({ ...good, asn }).asn, null, String(asn));
+    for (const text of [7, '', '   ', 'x'.repeat(201)]) {
+        assert.equal(placeFrom({ ...good, country: text }).country, null, String(text));
+        assert.equal(placeFrom({ ...good, isp: text }).isp, null, String(text));
+    }
+    assert.equal(placeFrom({ ...good, isp: '  Spaced Out  ' }).isp, 'Spaced Out');
+});
+
+test('18.14: a result holds each address\'s place, as told, only for an address taken; the warning comes with it, and both go with the switch', () => {
+    let sent;
+    const external = new ExternalIp({ source: () => ({ url: 'stun:stun.test', stun: 'stun.test', server: 'Share' }), isOnline: () => true, via: () => null, send: (request) => { sent = request; }, settleMs: 0 });
+    external.networkIs('a network');
+    external.setOn(true);
+    const NL = { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 };
+    const GB = { code: 'GB', country: 'United Kingdom', isp: 'Example Broadband Ltd', asn: 64511 };
+    external.heard({ id: sent.id, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18, location: { month: '2026-11', v4: NL, v6: GB } });
+    assert.deepEqual(external.view().result.places, { v4: NL, v6: GB });
+    assert.match(external.view().warning, /\(NL and GB\)/);
+
+    external.checkAgain();
+    external.heard({ id: sent.id, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18, location: { v4: NL, v6: NL } });
+    assert.equal(external.view().warning, null, 'the same country');
+
+    // A place for an address that wasn't taken goes with it.
+    external.checkAgain();
+    external.heard({ id: sent.id, v4: '203.0.113.42', v6: 'not an address', latency: 18, location: { v4: NL, v6: GB } });
+    assert.deepEqual(external.view().result.places, { v4: NL, v6: null });
+    assert.equal(external.view().warning, null);
+
+    // No data to look in: the address and its latency still stand.
+    external.checkAgain();
+    external.heard({ id: sent.id, v4: '203.0.113.42', v6: null, latency: 18 });
+    assert.deepEqual(external.view().result.places, { v4: null, v6: null });
+    assert.equal(external.view().result.v4, '203.0.113.42');
+
+    external.checkAgain();
+    external.heard({ id: sent.id, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18, location: { v4: NL, v6: GB } });
+    external.setOn(false);
+    assert.equal(external.view().result, null);
+    assert.equal(external.view().warning, null, 'gone with the switch');
+    external.stop();
+});
 
 test('18.13: health is green, yellow and red exactly as the design has it', () => {
     const base = { online: true, name: null, present: null, on: false, checking: false, result: null };

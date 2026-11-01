@@ -6,9 +6,12 @@
 // project's desktop/network.spec.mjs.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 import { mock, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { fakeMain } from './helpers/main-process.mjs';
 
+const CLIENT = fileURLToPath(new URL('..', import.meta.url));
 const require = createRequire(import.meta.url);
 const { INTERFACE_UNAVAILABLE, NETWORK, NETWORK_SERVICE, MAX_INTERFACE_NAME, SETTINGS_CHECKS } = require('../src/constants.js');
 const { interfaceOf, watchingOf } = require('../src/core/payloads.js');
@@ -27,9 +30,10 @@ const settled = async () => {
 /** A default server's STUN server, as main reads it from its last check. */
 const STUN = { url: 'stun:stun.example:3478', stun: 'stun.example', server: 'Share Space' };
 
-function setUp({ name = null, commandLine = {}, updaterRefuses = false, check = false, source = STUN } = {}) {
+function setUp({ name = null, commandLine = {}, updaterRefuses = false, check = false, source = STUN, isPackaged = false } = {}) {
     const main = fakeMain({ settings: { networkInterface: name, externalIpCheck: check } });
     main.electron.app.commandLine = { hasSwitch: (which) => commandLine[which] === true };
+    main.electron.app.isPackaged = isPackaged;
     let online = true;
     main.electron.net.isOnline = () => online;
     const set = [];
@@ -449,7 +453,7 @@ test('on, it asks once at launch and never on a timer; once when the network cha
     assert.equal(askedOf(child).length, 1, 'at launch');
     await answer(1);
     const { result, health } = network.state().connection;
-    assert.deepEqual({ ...result, at: 0 }, { ok: true, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18, at: 0, via: null, stun: STUN.stun });
+    assert.deepEqual({ ...result, at: 0 }, { ok: true, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18, at: 0, via: null, stun: STUN.stun, places: { v4: null, v6: null } });
     assert.equal(health.tone, 'success');
     assert.deepEqual(changes.at(-1).connection.result, result, 'pushed');
 
@@ -680,10 +684,31 @@ test('what it finds is never written or logged: main holds it, and only the wind
     network.windowOpened();
     await listening();
     mock.timers.tick(NETWORK.IP_SETTLE_MS);
-    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 1, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18 });
-    assert.equal(network.state().connection.result.v4, '203.0.113.42');
+    const NL = { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 };
+    const GB = { code: 'GB', country: 'United Kingdom', isp: 'Example Broadband Ltd', asn: 64511 };
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 1, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18, location: { month: '2026-11', v4: NL, v6: GB } });
+    const { result, warning } = network.state().connection;
+    assert.equal(result.v4, '203.0.113.42');
+    assert.deepEqual(result.places, { v4: NL, v6: GB });
+    assert.match(warning, /\(NL and GB\)/);
     assert.deepEqual(set, [], 'the settings');
     assert.deepEqual(logged, [], 'the log');
+});
+
+test('18.14: the service is told where the location data is, as its one argument: the app\'s resources once packaged, beside src/ from source', async (t) => {
+    timers(t);
+    const fromSource = setUp({ check: true });
+    fromSource.network.windowOpened();
+    const [unpackaged] = fromSource.main.processes;
+    assert.equal(unpackaged.args.length, 1);
+    assert.equal(path.relative(CLIENT, unpackaged.args[0]), 'location-data');
+
+    const resources = path.join(CLIENT, 'stand-in-resources');
+    process.resourcesPath = resources;
+    t.after(() => { delete process.resourcesPath; });
+    const packaged = setUp({ check: true, isPackaged: true });
+    packaged.network.windowOpened();
+    assert.deepEqual(packaged.main.processes[0].args, [path.join(resources, 'location-data')]);
 });
 
 test('network:set-interface and network:watch take only what they should, and the setting only a name or null', () => {

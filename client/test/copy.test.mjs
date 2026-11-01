@@ -25,7 +25,7 @@ const slipsOf = (rule) => everything.flatMap(({ where, text }) => copySlips(text
 
 test('the checks read every script and page of the client\'s own, with their words and none of their comments', () => {
     assert.deepEqual(scripts.map(({ name }) => name).sort(), ['constants.js', 'core/adapters.js', 'core/bound-dns.js', 'core/external-ip.js', 'core/file-service.js', 'core/handles.js',
-        'core/network-service.js', 'core/notices.js', 'core/payloads.js', 'core/routes.js', 'core/servers.js', 'core/share.js', 'core/socks5.js', 'core/stun.js', 'core/transfers.js',
+        'core/location.js', 'core/network-service.js', 'core/notices.js', 'core/payloads.js', 'core/routes.js', 'core/servers.js', 'core/share.js', 'core/socks5.js', 'core/stun.js', 'core/transfers.js',
         'file-service.js', 'main.js', 'menu.js', 'network-host.js', 'network-service.js', 'preload.js', 'renderer.js', 'transfer-host.js', 'transfer-preload.js', 'transfer.js', 'tray.js',
         'window-channels.js']);
     assert.deepEqual(pages.map(({ name }) => name).sort(), ['index.html', 'transfer.html']);
@@ -76,7 +76,10 @@ test('a file\'s name or a server\'s address is never recased: nothing the page s
     const renderer = readSource('renderer.js');
     assert.doesNotMatch(css, /text-transform/, 'styles.css recases text');
     assert.doesNotMatch(page + renderer, /\btext-(uppercase|lowercase|capitalize)\b/, 'a Bootstrap class recases text');
-    const recasing = [...renderer.matchAll(/\.(to(Locale)?(Upper|Lower)Case)\(/g)];
+    // A flag's file name, from its country code, isn't anything the page shows.
+    const FLAG_FILE = 'flags/4x3/${code.toLowerCase()}.svg';
+    assert.ok(renderer.includes(FLAG_FILE), 'the flag\'s file');
+    const recasing = [...renderer.replace(FLAG_FILE, '').matchAll(/\.(to(Locale)?(Upper|Lower)Case)\(/g)];
     assert.equal(recasing.length, 1, 'the page recases text');
     assert.match(renderer, /const sentence = \(text\) => \(text \? text\[0\]\.toUpperCase\(\) \+ text\.slice\(1\) : text\);/,
         'the one is the capital after a colon in core\'s reason, which never names a file');

@@ -114,9 +114,11 @@ export function fakeMain({ settings = {} } = {}) {
             port2 = { name: 'port2' };
         },
         utilityProcess: {
-            fork() {
+            fork(modulePath, args = []) {
                 const listeners = new Map();
                 const child = {
+                    modulePath,
+                    args,
                     messages: [],
                     killed: false,
                     postMessage: (message) => child.messages.push(message),

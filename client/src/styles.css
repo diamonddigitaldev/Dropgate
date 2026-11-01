@@ -340,10 +340,52 @@ textarea,
     display: none;
 }
 
+.network-ip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+/* A country's flag: flag-icons' 4x3, the one image in place of a Material Icons Round glyph. */
+.network-flag {
+    width: 20px;
+    height: 15px;
+    flex-shrink: 0;
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+
+/* A country flag-icons has no flag for: its code, in the flag's place. */
+.network-flag-code {
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+
 .network-meta {
     margin: 0;
     font-size: 0.82rem;
     color: var(--bs-secondary-color);
+}
+
+/* The mockup's, in its details: the IPv4 and IPv6 addresses in different countries. */
+.network-warning {
+    display: flex;
+    gap: 0.4rem;
+    align-items: flex-start;
+    font-size: 0.78rem;
+    color: var(--bs-warning-text-emphasis);
+    background: var(--bs-warning-bg-subtle);
+    border: 1px solid var(--bs-warning-border-subtle);
+    border-radius: var(--radius-control);
+    padding: 0.35rem 0.5rem;
+}
+
+.network-warning[hidden] {
+    display: none;
+}
+
+.network-warning .material-icons-round {
+    font-size: 16px;
 }
 
 .network-actions {

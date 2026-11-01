@@ -13,9 +13,47 @@ const { firstStunUrl, stunTargetOf } = require('./stun');
 //
 // What comes back stays in main's memory: it's never written or logged, and it
 // goes when the switch is turned off, when the adapter goes, and with the app.
+// So does each address's country and ISP, which the service looked up on the
+// machine: the service's word is checked here, as any of its is.
 
 /** The OS's name, as every sentence says it. */
 const OS_NAME = process.platform === 'win32' ? 'Windows' : 'Linux';
+
+/** The longest a country's name or an ISP's may be: the databases' are well under it. */
+const MAX_PLACE_TEXT = 200;
+
+/** A country's name or an ISP's, or null for anything else. */
+const placeText = (value) => (typeof value === 'string' && value.trim() !== '' && value.length <= MAX_PLACE_TEXT ? value.trim() : null);
+
+/**
+ * What the service said of one address, with only what it should have said:
+ * its country code (two capitals, which also name its flag's file), the country's
+ * name, the ISP (the AS organisation) and the AS number. Null with nothing left.
+ * @param {any} place
+ * @returns {{ code: string | null, country: string | null, isp: string | null, asn: number | null } | null}
+ */
+function placeFrom(place) {
+    const held = {
+        code: typeof place?.code === 'string' && /^[A-Z]{2}$/.test(place.code) ? place.code : null,
+        country: placeText(place?.country),
+        isp: placeText(place?.isp),
+        asn: Number.isSafeInteger(place?.asn) && place.asn > 0 ? place.asn : null,
+    };
+    return Object.values(held).some((value) => value !== null) ? held : null;
+}
+
+/**
+ * The warning when the IPv4 and IPv6 addresses are in different countries, not
+ * saying which is outside a VPN: either could be. Null otherwise, and when
+ * either's country isn't known.
+ * @param {{ places?: { v4: { code: string | null } | null, v6: { code: string | null } | null } } | null} result
+ * @returns {string | null}
+ */
+function countryWarningOf(result) {
+    const [v4, v6] = [result?.places?.v4?.code, result?.places?.v6?.code];
+    if (!v4 || !v6 || v4 === v6) return null;
+    return `Your IPv4 and IPv6 addresses are in different countries (${v4} and ${v6}), so one of them may not be going through your VPN.`;
+}
 
 /**
  * Where the External IP is asked, from the default server's last check this
@@ -189,15 +227,16 @@ class ExternalIp {
 
     /**
      * The network service's answer. One for a request since dropped is ignored.
-     * @param {{ id: number, v4?: unknown, v6?: unknown, latency?: unknown, error?: unknown }} answer
+     * @param {{ id: number, v4?: unknown, v6?: unknown, latency?: unknown, location?: any, error?: unknown }} answer
      */
-    heard({ id, v4, v6, latency, error }) {
+    heard({ id, v4, v6, latency, location, error }) {
         if (!this.asking || id !== this.asking.id) return;
         const { stun, via } = this.asking;
         this.stopAsking();
         const ips = { v4: net.isIPv4(v4) ? v4 : null, v6: net.isIPv6(v6) ? v6 : null };
         if ((ips.v4 || ips.v6) && Number.isFinite(latency) && latency >= 0) {
-            this.result = { ok: true, ...ips, latency, at: this.now(), via, stun };
+            const places = { v4: ips.v4 ? placeFrom(location?.v4) : null, v6: ips.v6 ? placeFrom(location?.v6) : null };
+            this.result = { ok: true, ...ips, latency, at: this.now(), via, stun, places };
         } else {
             const seconds = NETWORK.STUN_MS / 1000;
             this.result = { ok: false, reason: error === 'timeout' ? `${stun} didn't answer within ${seconds} seconds.` : `${stun} couldn't be reached.` };
@@ -212,6 +251,7 @@ class ExternalIp {
             on: this.on,
             checking: this.on && this.checking,
             result: this.result,
+            warning: countryWarningOf(this.result),
             stun: this.asking?.stun ?? source.stun ?? null,
             server: source.server ?? null,
         };
@@ -222,4 +262,4 @@ class ExternalIp {
     }
 }
 
-module.exports = { ExternalIp, OS_NAME, healthOf, stunSourceOf };
+module.exports = { ExternalIp, OS_NAME, countryWarningOf, healthOf, placeFrom, stunSourceOf };

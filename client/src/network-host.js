@@ -2,7 +2,7 @@
 
 const path = require('path');
 const { app, net, utilityProcess } = require('electron');
-const { MAX_INTERFACE_NAME, NETWORK, NETWORK_SERVICE } = require('./constants');
+const { LOCATION_DATA_FOLDER, MAX_INTERFACE_NAME, NETWORK, NETWORK_SERVICE } = require('./constants');
 const { ExternalIp, healthOf } = require('./core/external-ip');
 
 // Main's side of a chosen adapter: the network service (network-service.js), a
@@ -16,9 +16,10 @@ const { ExternalIp, healthOf } = require('./core/external-ip');
 //   the tab never opened, it never starts.
 // - The External IP (core/external-ip.js) is told what the network is, whenever
 //   the service says it changed, and asks through the service. Its answer stays
-//   here, in memory. So does the connection's health, from it, the adapter and the
-//   OS's word on being online (net.isOnline(), which has no event, so it's read
-//   every NETWORK.ONLINE_MS while the service runs).
+//   here, in memory, with the country and ISP the service looked up on the machine,
+//   in the location data it's told of as it's started. So does the connection's
+//   health, from it, the adapter and the OS's word on being online (net.isOnline(),
+//   which has no event, so it's read every NETWORK.ONLINE_MS while the service runs).
 // - With an adapter chosen, the transfer session has one proxy, with no DIRECT
 //   and loopback sent to it too, so nothing can connect but through it. Until
 //   the service says where it listens, and from the moment it exits, the
@@ -61,6 +62,9 @@ function savedName(stored) {
 const listOf = (list) => (Array.isArray(list) ? list : [])
     .filter((adapter) => typeof adapter?.name === 'string' && Array.isArray(adapter.addresses))
     .map(({ name, addresses }) => ({ name, addresses: addresses.filter((address) => typeof address === 'string') }));
+
+/** Where the location data is: in the app's resources, as the build put it; from source, beside src/. */
+const locationData = () => path.join(app.isPackaged ? process.resourcesPath : path.join(__dirname, '..'), LOCATION_DATA_FOLDER);
 
 /**
  * Start main's side of the adapter. Call once the app is ready, before the
@@ -230,7 +234,7 @@ function createNetworkHost({
         clearTimeout(restartTimer);
         restartTimer = null;
         if (child || !(asked || needed())) return;
-        const started = utilityProcess.fork(path.join(__dirname, 'network-service.js'), [], {
+        const started = utilityProcess.fork(path.join(__dirname, 'network-service.js'), [locationData()], {
             serviceName: 'Dropgate Client Network Service',
             stdio: 'ignore',
         });

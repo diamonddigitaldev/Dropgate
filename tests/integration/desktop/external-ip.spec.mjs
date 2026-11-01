@@ -67,7 +67,7 @@ test.describe('with the check off, as it is by default', () => {
         await expect(line(window)).toHaveText('Connected');
         await expect(line(window)).toHaveAttribute('title', `Connected, through whichever adapter ${process.platform === 'win32' ? 'Windows' : 'Linux'} chooses.`);
         await expect(ips(window)).toBeEmpty();
-        await expect(meta(window)).toHaveText("Your External IP isn't checked. Turn on Check my External IP below to see it.");
+        await expect(meta(window)).toHaveText("Your External IP isn't checked. Turn on Check my External IP below to see it, with its country and ISP.");
         await expect(checked(window)).toBeHidden();
         await expect(checkAgain(window)).toBeHidden();
 
@@ -96,7 +96,7 @@ test.describe('with no adapter chosen', () => {
         await expect(line(window)).toHaveText('Connected');
         await expect(meta(window)).toHaveText(/^Latency \d+ ms$/);
         await expect(checked(window)).toHaveText(/^Checked at \S+( \S+)?, by asking 127\.0\.0\.2\.$/);
-        await expect(window.locator('#external-ip-check-help')).toHaveText(/^Dropgate asks 127\.0\.0\.2, the STUN server .+ \(your default server\) lists, for your address at launch, when your network changes, and when you click Check Again\. Over IPv6 too, where the adapter has it\. That server sees your IP address\.$/);
+        await expect(window.locator('#external-ip-check-help')).toHaveText(/^Dropgate asks 127\.0\.0\.2, the STUN server .+ \(your default server\) lists, for your address at launch, when your network changes, and when you click Check Again\. Over IPv6 too, where the adapter has it\. That server sees your IP address\. Country and ISP are looked up on this computer\.$/);
         await expect(checkAgain(window)).toBeEnabled();
         expect(requestsAt(stun), 'turned on: from wherever the OS sends it').toEqual([{ family: 4, source: '127.0.0.1' }]);
         expect(stun.requests[0].bytes.length, 'a binding request, and nothing else').toBe(20);

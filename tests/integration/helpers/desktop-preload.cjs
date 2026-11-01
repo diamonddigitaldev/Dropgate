@@ -322,7 +322,7 @@ const fork = utilityProcess.fork;
 utilityProcess.fork = function (modulePath, forkArgs = [], options = {}) {
     const name = path.basename(modulePath);
     const child = name === 'network-service.js'
-        ? fork.call(this, NETWORK_STAND_IN, [modulePath], options)
+        ? fork.call(this, NETWORK_STAND_IN, [modulePath, ...forkArgs], options)
         : fork.call(this, modulePath, forkArgs, options);
     record({ event: 'utility', name });
     if (name === 'network-service.js') globalThis.__dropgateNetworkService = child;

@@ -327,6 +327,24 @@ jobs:
           npm ci
           node -e "console.log(require('electron'))"
 
+      # DB-IP's two MMDBs, for the build below: kept for the month, as in
+      # client-build.yml, so each push doesn't ask db-ip.com.
+      - name: Work out the location data's month
+        id: month
+        shell: bash
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the location data for the month
+        uses: actions/cache@v6
+        with:
+          path: client/location-data
+          key: location-data-${{ steps.month.outputs.month }}
+          enableCrossOsArchive: true
+
+      - name: Get the location data
+        working-directory: client
+        run: node scripts/location-data.cjs --or-last-month
+
       # The updater only runs in a packaged app, so the update tests
       # (desktop/updates.spec.mjs) run a build of the app made for them: its
       # build config with the update address swapped for this machine's. On

@@ -10,13 +10,16 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import os from 'node:os';
+import path from 'node:path';
 import readline from 'node:readline';
 import { afterEach, beforeEach, test as nodeTest } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { startStunServer } from '../../tests/integration/helpers/stun.mjs';
+import { writeLocationData } from './helpers/mmdb.mjs';
 import { ATYP, get, openWebSocket, overTls, socks, startDns, startPeer } from './helpers/network.mjs';
 
 const require = createRequire(import.meta.url);
@@ -99,6 +102,78 @@ test('18.11: a request goes from the adapter\'s address alone, with the responde
         assert.deepEqual(stun.requests.map(({ family, source }) => ({ family, source })), [{ family: 4, source: ADAPTER }]);
     } finally {
         await stun.stop();
+    }
+});
+
+test('18.14: a result carries each address\'s country and ISP from the location data, with the one request and nothing more; an address it doesn\'t hold has none', async () => {
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-service-location-'));
+    const dns = await startDns('127.0.0.7', { 'stun.test': '127.0.0.2' });
+    const stun = await startStunServer({ address: '127.0.0.2', mapped: { v4: '203.0.113.42' } });
+    try {
+        writeLocationData(data, { '203.0.113.42': { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 } });
+        await startService({ locationData: data, ownServers: async () => [dns.server] });
+        service.setInterface(STAND_IN);
+        await service.checkIp(1, stun.url);
+        const { location } = await ipResult();
+        assert.deepEqual(location, { month: '2026-11', v4: { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 }, v6: null });
+        assert.equal(stun.requests.length, 1, 'one request, and none for the lookup');
+        assert.deepEqual(dns.queries, [], 'no name asked for it');
+
+        told.length = 0;
+        stun.mapped.v4 = '203.0.113.99';
+        await service.checkIp(2, stun.url);
+        const elsewhere = await ipResult();
+        assert.equal(elsewhere.v4, '203.0.113.99');
+        assert.deepEqual(elsewhere.location, { month: '2026-11', v4: null, v6: null });
+    } finally {
+        await stun.stop();
+        await dns.close();
+        fs.rmSync(data, { recursive: true, force: true });
+    }
+});
+
+test('18.14: with no location data, a result has the address and its latency, and says nothing of a location', async () => {
+    const stun = await startStunServer({ address: '127.0.0.2', mapped: { v4: '203.0.113.42' } });
+    try {
+        await startService({ locationData: path.join(os.tmpdir(), 'dropgate-nowhere') });
+        service.setInterface(STAND_IN);
+        await service.checkIp(1, stun.url);
+        const { v4, location, ...rest } = await ipResult();
+        assert.equal(v4, '203.0.113.42');
+        assert.equal(location, undefined);
+        assert.ok(Number.isInteger(rest.latency));
+    } finally {
+        await stun.stop();
+    }
+});
+
+test('18.14: an answer for a check called off while its data is read isn\'t told', async () => {
+    const stun = await startStunServer({ address: '127.0.0.2', mapped: { v4: '203.0.113.42' } });
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-service-location-'));
+    const realRead = fs.promises.readFile;
+    try {
+        writeLocationData(data, { '203.0.113.42': { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 } });
+        await startService({ locationData: data });
+        service.setInterface(STAND_IN);
+        let reached;
+        let release;
+        const reading = new Promise((resolve) => { reached = resolve; });
+        const held = new Promise((resolve) => { release = resolve; });
+        fs.promises.readFile = async (...args) => {
+            reached();
+            await held;
+            return realRead(...args);
+        };
+        const asking = service.checkIp(1, stun.url);
+        await reading;
+        service.setInterface(null);
+        release();
+        await asking;
+        assert.equal(told.some(({ type }) => type === NETWORK_SERVICE.IP_RESULT), false);
+    } finally {
+        fs.promises.readFile = realRead;
+        await stun.stop();
+        fs.rmSync(data, { recursive: true, force: true });
     }
 });
 

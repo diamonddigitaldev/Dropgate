@@ -267,6 +267,9 @@ class Desktop {
         // The adapters the network service sees (network-stand-in.cjs).
         this.adaptersFile = path.join(root, 'adapters.json');
         this.setAdapters({ [STAND_IN]: STAND_IN_ADDRESS });
+        // The location data the network service reads (network-stand-in.cjs): the test's
+        // own, outside the profile, and not there unless it writes some. A fetched client/location-data is never read.
+        this.locationData = path.join(root, 'location-data');
     }
 
     /**
@@ -311,6 +314,7 @@ class Desktop {
                 DROPGATE_TEST_DOWNLOADS: this.downloads,
                 DROPGATE_TEST_GRANT_DELAY_MS: String(this.grantDelayMs),
                 DROPGATE_TEST_ADAPTERS: this.adaptersFile,
+                DROPGATE_TEST_LOCATION_DATA: this.locationData,
                 ...(this.dnsServer ? { DROPGATE_TEST_DNS: this.dnsServer } : {}),
                 ...(this.silentNetwork ? { DROPGATE_TEST_NETWORK_SILENT: '1' } : {}),
             }),
@@ -373,15 +377,7 @@ class Desktop {
      * @param {number} [opts.maxDownloads]
      */
     async setUp(window, { url = this.serverUrl, lifetime, maxDownloads } = {}) {
-        await openServers(window);
-        await window.locator('#add-server-btn').click();
-        const dialog = addServerDialog(window);
-        await dialog.getByLabel('Server address').fill(url);
-        await dialog.getByRole('button', { name: 'Check', exact: true }).click();
-        await expect(dialog.getByRole('button', { name: 'Add Server', exact: true }), 'the server, found').toBeVisible();
-        await dialog.getByRole('button', { name: 'Add Server', exact: true }).click();
-        await expect(dialog).toBeHidden();
-        await expect(serverStatus(serverRow(window, url))).toHaveText(/^Online · /);
+        await addServer(window, url);
         await setServerOptions(window, url, { lifetime, maxDownloads });
         await window.locator('#nav-rail').getByRole('button', { name: 'Upload' }).click();
     }
@@ -591,6 +587,24 @@ export const NOT_ENCRYPTED = /^Online · Dropgate \S+ · (Plain HTTP · )?Not En
 
 /** Add Server's dialog. */
 export const addServerDialog = (window) => window.getByRole('dialog', { name: 'Add Server' });
+
+/**
+ * Add a server, in Settings > Servers, as a person would: Add Server, its
+ * address, Check, then Add Server once it has found it, with the row showing it online.
+ * @param {import('@playwright/test').Page} window
+ * @param {string} url
+ */
+export async function addServer(window, url) {
+    await openServers(window);
+    await window.locator('#add-server-btn').click();
+    const dialog = addServerDialog(window);
+    await dialog.getByLabel('Server address').fill(url);
+    await dialog.getByRole('button', { name: 'Check', exact: true }).click();
+    await expect(dialog.getByRole('button', { name: 'Add Server', exact: true }), 'the server, found').toBeVisible();
+    await dialog.getByRole('button', { name: 'Add Server', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(serverStatus(serverRow(window, url))).toHaveText(/^Online · /);
+}
 
 /**
  * Set a saved server's settings for new uploads in its row, open in Settings

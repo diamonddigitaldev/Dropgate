@@ -10,8 +10,11 @@
 //   when they're right-clicked, and claims no file type; on Linux, the app is
 //   in Open With for any file. v3's association for "*" registered a literal
 //   ".*" extension, so it never did anything.
-// - files is an allowlist: the client's src/, and only the kit's, Bootstrap's
-//   and Material Icons' files the pages load. CI lists app.asar against it.
+// - files is an allowlist: the client's src/, and only the kit's, Bootstrap's,
+//   Material Icons' and flag-icons' files the pages load. CI lists app.asar against it.
+// - The location data (DB-IP's two MMDBs) goes in the app's resources, from
+//   location-data/, which scripts/location-data.cjs downloads and checks. It's never
+//   committed, and that script is beforePack too: a build without good data fails.
 const { config } = require('@diamonddigitaldev/electron-kit/builder');
 
 module.exports = config(require('./package.json'), {
@@ -30,7 +33,14 @@ module.exports = config(require('./package.json'), {
             '!node_modules/material-icons/{_data,css}{,/**/*}',
             '!node_modules/material-icons/iconfont/!(round.css|material-icons-round.woff|material-icons-round.woff2)',
             '!node_modules/material-icons/index.d.ts',
+            '!node_modules/flag-icons/{css,sass}{,/**/*}',
+            '!node_modules/flag-icons/flags/1x1{,/**/*}',
+            '!node_modules/flag-icons/{README.md,country.json}',
+            '!node_modules/mmdb-lib/README.md',
+            '!node_modules/mmdb-lib/lib/**/*.d.ts',
         ],
+        extraResources: [{ from: 'location-data', to: 'location-data', filter: ['*.mmdb'] }],
+        beforePack: './scripts/location-data.cjs',
         publish: {
             provider: 'github',
             owner: 'diamonddigitaldev',

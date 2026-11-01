@@ -1552,16 +1552,45 @@ document.addEventListener('DOMContentLoaded', async () => {
         /** Whether Check Again has been pressed and hasn't had its answer: it may check the default server first. */
         let checkPressed = false;
 
+        /**
+         * A country's flag: flag-icons' 4x3 SVG, bundled, the one exception to Material Icons Round,
+         * and its tooltip the country code. A country it has no flag for shows its code instead.
+         */
+        function flagOf(code) {
+            const flag = Object.assign(document.createElement('img'), { className: 'network-flag', src: `../node_modules/flag-icons/flags/4x3/${code.toLowerCase()}.svg`, alt: code, title: code, draggable: false });
+            flag.addEventListener('error', () => flag.replaceWith(Object.assign(document.createElement('span'), { className: 'network-flag-code', textContent: code, title: code })));
+            return flag;
+        }
+
+        /** An External IP, with its flag where its country is known. */
+        function externalIpOf(ip, place) {
+            const entry = Object.assign(document.createElement('span'), { className: 'network-ip' });
+            if (place?.code) entry.append(flagOf(place.code));
+            entry.append(ip);
+            return entry;
+        }
+
+        /** "<Country> · <ISP> (<ASN>) · Latency 18 ms", with what's known of the first address that has anything. */
+        function resultLineOf({ places, latency }) {
+            const place = places?.v4 ?? places?.v6;
+            const isp = [place?.isp, place?.asn && `(AS${place.asn})`].filter(Boolean).join(' ');
+            return [place?.country, isp, `Latency ${latency} ms`].filter(Boolean).join(' · ');
+        }
+
         function drawConnection(connection) {
-            const { on, checking, result, stun, health } = connection;
+            const { on, checking, result, warning, stun, health } = connection;
             connectionLine.set(health);
             const cutOff = health.tone === 'danger';
             const shows = on && !cutOff && !checking && result?.ok === true;
-            $('connection-ips').replaceChildren(...(shows ? [result.v4, result.v6].filter(Boolean).map((ip) => Object.assign(document.createElement('span'), { textContent: ip })) : []));
+            $('connection-ips').replaceChildren(...(shows ? [['v4', result.v4], ['v6', result.v6]].filter(([, ip]) => ip).map(([family, ip]) => externalIpOf(ip, result.places?.[family])) : []));
+
+            // Here until the details are built, which is where it goes.
+            $('connection-warning').hidden = !(shows && warning);
+            $('connection-warning-text').textContent = shows && warning ? warning : '';
 
             let meta = "Your External IP isn't known while there's no connection.";
-            if (!on) meta = "Your External IP isn't checked. Turn on Check my External IP below to see it.";
-            else if (shows) meta = `Latency ${result.latency} ms`;
+            if (!on) meta = "Your External IP isn't checked. Turn on Check my External IP below to see it, with its country and ISP.";
+            else if (shows) meta = resultLineOf(result);
             else if (!cutOff && checking) meta = stun ? `Asking ${stun}…` : 'Asking for your address…';
             else if (!cutOff && result) meta = result.reason;
             else if (!cutOff) meta = "Your External IP hasn't been checked since the app started.";
@@ -1601,7 +1630,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         let externalIpOnHelp = null;
         function drawExternalIpSwitch({ stun, server }) {
             const asks = stun && server ? `Dropgate asks ${stun}, the STUN server ${server} (your default server) lists,` : 'Dropgate asks the STUN server your default server lists';
-            const onHelp = `${asks} for your address at launch, when your network changes, and when you click Check Again. Over IPv6 too, where the adapter has it. That server sees your IP address.`;
+            const onHelp = `${asks} for your address at launch, when your network changes, and when you click Check Again. Over IPv6 too, where the adapter has it. That server sees your IP address. Country and ISP are looked up on this computer.`;
             if (onHelp === externalIpOnHelp) return;
             externalIpOnHelp = onHelp;
             const focused = externalIpSwitch && document.activeElement === externalIpSwitch.input;

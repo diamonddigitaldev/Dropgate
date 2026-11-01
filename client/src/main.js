@@ -120,7 +120,8 @@ const { answerWindowChannels } = require('./window-channels');
 //   Nothing restarts by itself.
 // - The External IP, with its switch on and the app showing a window: asked of
 //   the default server's STUN server, from its last check this run
-//   (core/external-ip.js). What it finds stays in memory, never written or logged.
+//   (core/external-ip.js). What it finds stays in memory, never written or logged,
+//   and so do its country and ISP, looked up on the machine (core/location.js).
 // Share with Dropgate (Windows' context menu) launches the app with a file's
 // path and --upload. Main makes the upload itself, with no window: to the
 // default server, checked by the transfer window, with its settings for new
@@ -155,6 +156,9 @@ const kit = require('@diamonddigitaldev/electron-kit/main').start({
             'This software is licensed under the GNU General Public License v3.0.',
             'Dropgate Server is licensed under the GNU Affero General Public License v3.0.',
             '@dropgate/core is licensed under the Apache License v2.0.',
+            // CC BY 4.0 asks for the credit and a link to the licence itself.
+            ['Location data: ', { text: 'IP Geolocation by DB-IP', href: 'https://db-ip.com' }, ', licensed under the ', { text: 'Creative Commons Attribution 4.0 International License', href: 'https://creativecommons.org/licenses/by/4.0/' }, '.'],
+            ['Country flags from ', { text: 'flag-icons', href: 'https://github.com/lipis/flag-icons' }, ', licensed under the MIT License.'],
             'Privacy and anonymity is a human right. Nobody should have to give anything for their right to data freedom.',
         ],
         donate: 'https://buymeacoff.ee/willtda',

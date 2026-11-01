@@ -89,6 +89,27 @@ jobs:
           fi
           rpmbuild --version
 
+      # DB-IP's two MMDBs, which go in the app's resources: this month's, checked as
+      # DB-IP's, and never committed. CI's own builds, which nobody installs, keep
+      # them for the month, so each push doesn't ask db-ip.com, and take last
+      # month's while this month's isn't out. A release's always comes from
+      # db-ip.com, and fails without this month's.
+      - name: Work out the location data's month
+        id: month
+        shell: bash
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the location data for the month
+        if: ${{ !inputs.release }}
+        uses: actions/cache@v6
+        with:
+          path: client/location-data
+          key: location-data-${{ steps.month.outputs.month }}
+          enableCrossOsArchive: true
+
+      - name: Get the location data
+        run: node scripts/location-data.cjs ${{ !inputs.release && '--or-last-month' || '' }}
+
       # Builds this platform's targets from electron-builder.cjs (the kit's config()).
       # Nothing is published, and no token is passed to it.
       - name: Build the packages
@@ -137,10 +158,11 @@ jobs:
           echo "The .desktop file and desktopName match the appId."
 
       # electron-builder.cjs's files is an allowlist: the app's own src/, and only
-      # the files of the kit, Bootstrap and Material Icons the pages load (the
-      # other packages are what electron-store and electron-updater need). This
-      # lists what the packaged app holds outside node_modules, and those three
-      # packages' files, and fails on anything else of theirs.
+      # the files of the kit, Bootstrap, Material Icons and flag-icons the pages load
+      # (the other packages are what electron-store, electron-updater and the
+      # network service's mmdb-lib need). This lists what the packaged app holds
+      # outside node_modules, and those four packages' files, and fails on anything
+      # else of theirs.
       - name: Check the packaged app
         shell: bash
         run: |
@@ -151,18 +173,37 @@ jobs:
           echo
           echo "The kit's, Bootstrap's and Material Icons' files:"
           grep -E '^/node_modules/(@diamonddigitaldev|bootstrap|material-icons)(/|$)' "$list"
-          # What the allowlist keeps of the app and of those three packages.
+          echo
+          echo "flag-icons' files: $(grep -cE '^/node_modules/flag-icons/flags/4x3/[a-z0-9-]+\.svg$' "$list") flags, and"
+          grep -E '^/node_modules/flag-icons(/|$)' "$list" | grep -vE '/flags/4x3/.+\.svg$'
+          # What the allowlist keeps of the app and of those four packages.
           own='^/(node_modules|src|package\.json)(/|$)'
           kit='^/node_modules/@diamonddigitaldev(/electron-kit(/(LICENSE|package\.json|preload\.js|(main|page|css|format)(/.*)?))?)?$'
           bootstrap='^/node_modules/bootstrap(/(LICENSE|package\.json|dist(/css(/bootstrap\.min\.css)?)?))?$'
           icons='^/node_modules/material-icons(/(LICENSE|package\.json|iconfont(/(round\.css|material-icons-round\.woff2?))?))?$'
-          unexpected=$( (grep -vE "$own" "$list"; grep -E '^/node_modules/(@diamonddigitaldev|bootstrap|material-icons)(/|$)' "$list" | grep -vE "$kit|$bootstrap|$icons") || true)
+          flags='^/node_modules/flag-icons(/(LICENSE|package\.json|flags(/4x3(/[a-z0-9-]+\.svg)?)?))?$'
+          unexpected=$( (grep -vE "$own" "$list"; grep -E '^/node_modules/(@diamonddigitaldev|bootstrap|material-icons|flag-icons)(/|$)' "$list" | grep -vE "$kit|$bootstrap|$icons|$flags") || true)
           if [ -n "$unexpected" ]; then
             echo
             echo "Outside the allowlist in client/electron-builder.cjs:"
             echo "$unexpected"
             exit 1
           fi
+
+      # The app reads DB-IP's two files from its resources, and its flags from
+      # flag-icons, whose notice goes with them. This checks the package carries
+      # them, and that the files in it open as DB-IP's.
+      - name: Check the packaged app carries the location data and flags
+        shell: bash
+        run: |
+          resources=$(ls -d dist/*-unpacked/resources)
+          node scripts/location-data.cjs --check "$resources/location-data"
+          list="$RUNNER_TEMP/app-asar.txt"
+          for needed in LICENSE flags/4x3/gb.svg flags/4x3/nl.svg; do
+            grep -qx "/node_modules/flag-icons/$needed" "$list" || { echo "The package has no flag-icons/$needed."; exit 1; }
+          done
+          grep -qx '/node_modules/mmdb-lib/lib/index.js' "$list" || { echo "The package has no mmdb-lib."; exit 1; }
+          echo "The package carries flag-icons' 4x3 flags, its license, and mmdb-lib."
 
       # The app loads core's build from src/dropgate-core.js, which the core job
       # checks against core's source. This checks the package carries it as is.

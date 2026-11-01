@@ -9,12 +9,14 @@
 // tells it the adapter by name (set-interface), and hears the proxy's port,
 // the adapters there are, and the chosen one's state as it changes. If it
 // exits, the sessions' proxy points at nothing, so nothing connects at all.
-// It also asks a STUN server for the External IP, when main says to.
+// It also asks a STUN server for the External IP, when main says to, and looks
+// up its country and ISP in the location data, in the folder main names as this
+// process's one argument: on the machine, with nothing sent.
 
 const { NETWORK_SERVICE } = require('./constants');
 const { NetworkService } = require('./core/network-service');
 
-const service = new NetworkService({ tell: (message) => process.parentPort.postMessage(message) });
+const service = new NetworkService({ locationData: process.argv.at(-1), tell: (message) => process.parentPort.postMessage(message) });
 
 process.parentPort.on('message', ({ data }) => {
     switch (data?.type) {
