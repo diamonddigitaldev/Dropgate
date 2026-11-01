@@ -1,16 +1,24 @@
 'use strict';
 
 const path = require('path');
-const { app, utilityProcess } = require('electron');
+const { app, net, utilityProcess } = require('electron');
 const { MAX_INTERFACE_NAME, NETWORK, NETWORK_SERVICE } = require('./constants');
+const { ExternalIp, healthOf } = require('./core/external-ip');
 
 // Main's side of a chosen adapter: the network service (network-service.js), a
 // utility process holding the SOCKS5 proxy, and the transfer session's proxy
 // settings, which point at it while an adapter is chosen.
 //
-// - The service runs while an adapter is chosen, and while Settings > Network
-//   is shown, for the adapters it lists; it stops NETWORK.IDLE_MS after neither
-//   is so. With no adapter chosen and the tab never opened, it never starts.
+// - The service runs while an adapter is chosen, while the External IP check is
+//   on and the app has a window (a Share with Dropgate launch asks nothing), and
+//   while Settings > Network is shown, for the adapters it lists; it stops
+//   NETWORK.IDLE_MS after none is so. With no adapter chosen, the check off and
+//   the tab never opened, it never starts.
+// - The External IP (core/external-ip.js) is told what the network is, whenever
+//   the service says it changed, and asks through the service. Its answer stays
+//   here, in memory. So does the connection's health, from it, the adapter and the
+//   OS's word on being online (net.isOnline(), which has no event, so it's read
+//   every NETWORK.ONLINE_MS while the service runs).
 // - With an adapter chosen, the transfer session has one proxy, with no DIRECT
 //   and loopback sent to it too, so nothing can connect but through it. Until
 //   the service says where it listens, and from the moment it exits, the
@@ -62,11 +70,20 @@ const listOf = (list) => (Array.isArray(list) ? list : [])
  * @param {Electron.Session} options.session - The transfer session.
  * @param {(reason: string) => void} [options.onUnavailable] - The chosen adapter went, or the service exited: fail what's running, with this reason.
  * @param {() => void} [options.onChanging] - The person is changing the adapter: stop what's running, as it can't carry on on its old route.
- * @param {(state: { name: string | null, present: boolean | null, adapters: { name: string, addresses: string[] }[] | null }) => void} [options.onChanged] - For the window.
+ * @param {(state: { name: string | null, present: boolean | null, adapters: { name: string, addresses: string[] }[] | null, connection: object }) => void} [options.onChanged] - For the window.
+ * @param {() => ReturnType<import('./core/external-ip').stunSourceOf>} [options.stunSource] - Where the External IP is asked, now.
  */
-function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging = () => {}, onChanged = () => {} }) {
+function createNetworkHost({
+    kit, session, onUnavailable = () => {}, onChanging = () => {}, onChanged = () => {}, stunSource = () => ({ reason: "There's no saved server, so there's no STUN server to ask.", waits: true, server: null }),
+}) {
     /** The adapter chosen, by name, or null for any. */
     let name = savedName(kit.settings.get().networkInterface);
+    /** Whether the External IP check's switch is on, and whether the app has had a window: a share's launch alone asks nothing. */
+    let checkWanted = kit.settings.get().externalIpCheck === true;
+    let windowed = false;
+    /** The OS's word on being online, as last read. */
+    let online = net.isOnline();
+    let onlineTimer = null;
     /** Whether it's there: null until the service has said. */
     let present = null;
     /** The service, its proxy's port, and the adapters it last listed. */
@@ -92,8 +109,24 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
     /** Which of the service's reports is the newest: one that waited for the proxy is dropped if another came since. */
     let reports = 0;
 
-    /** What the window draws. */
-    const state = () => ({ name, present: name === null ? null : present, adapters });
+    const external = new ExternalIp({
+        source: stunSource,
+        isOnline: () => net.isOnline(),
+        via: () => name,
+        send: ({ id, stun }) => child?.postMessage({ type: NETWORK_SERVICE.CHECK_IP, id, stun }),
+        changed: () => onChanged(state()),
+    });
+
+    /** What the window draws, and with what health. */
+    function state() {
+        online = net.isOnline();
+        const shown = name === null ? null : present;
+        const view = external.view();
+        return { name, present: shown, adapters, connection: { ...view, health: healthOf({ online, name, present: shown, ...view }) } };
+    }
+
+    /** The network as the External IP goes through it: the chosen adapter's addresses, or with none, every adapter's. */
+    const listAsNetwork = () => (adapters ? JSON.stringify(adapters) : null);
 
     /** Why nothing can connect now: the chosen adapter is gone, or the service with it. Null otherwise, and before it's known. */
     const refusal = () => (name !== null && present === false ? `${name} isn't connected.` : null);
@@ -150,12 +183,14 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
             case NETWORK_SERVICE.ADAPTERS:
                 adapters = listOf(message.list);
                 for (const resolve of listing.splice(0)) resolve();
+                if (name === null) external.networkIs(listAsNetwork());
                 onChanged(state());
                 break;
             case NETWORK_SERVICE.STATE: {
                 // One for a choice since changed.
                 if (message.name !== name) return;
                 if (!message.present) {
+                    external.networkIs(null, { forget: true });
                     lost();
                     onChanged(state());
                     return;
@@ -166,17 +201,29 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
                     if (report !== reports) return;
                     present = true;
                     settle();
+                    external.networkIs(JSON.stringify(message.addresses));
                     onChanged(state());
                 });
                 break;
             }
+            case NETWORK_SERVICE.IP_RESULT:
+                external.heard(message);
+                break;
             default:
                 break;
         }
     }
 
     /** Whether the service is needed now. */
-    const needed = () => !closing && (name !== null || watching);
+    const needed = () => !closing && (name !== null || watching || external.on);
+
+    /** The OS's word on being online has no event: read while the service runs, and told as it changes. */
+    function readOnline() {
+        const now = net.isOnline();
+        if (now === online) return;
+        online = now;
+        onChanged(state());
+    }
 
     /** Start the service, if it's needed, or asked for: a name can't be checked without its list. */
     function startService(asked = false) {
@@ -194,6 +241,8 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
         started.on('exit', () => {
             if (child === started) exited();
         });
+        onlineTimer = setInterval(readOnline, NETWORK.ONLINE_MS);
+        onlineTimer.unref?.();
     }
 
     /** The service has exited: by itself, nothing connects until it's back. */
@@ -201,11 +250,14 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
         const told = stopping;
         clearTimeout(stopTimer);
         stopTimer = null;
+        clearInterval(onlineTimer);
+        onlineTimer = null;
         stopping = false;
         child = null;
         port = null;
         proxyHost = null;
         adapters = null;
+        external.networkIs(null);
         if (closing) return;
         if (name !== null) {
             applyProxy();
@@ -217,14 +269,14 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
         if (needed()) restartTimer = setTimeout(() => startService(), told ? 0 : NETWORK.RESTART_MS);
     }
 
-    /** With no adapter chosen and the tab not shown, the service stops after a while. */
+    /** With nothing needing it, the service stops after a while. */
     function idleSoon() {
         clearTimeout(idleTimer);
         idleTimer = null;
-        if (!child || name !== null || watching) return;
+        if (!child || needed()) return;
         idleTimer = setTimeout(() => {
             idleTimer = null;
-            if (!child || name !== null || watching) return;
+            if (!child || needed()) return;
             stopping = true;
             const stopped = child;
             stopped.postMessage({ type: NETWORK_SERVICE.STOP });
@@ -279,14 +331,31 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
         name = next;
         present = null;
         reports++;
+        external.networkIs(null, { forget: true });
         kit.settings.set({ networkInterface: next });
         await applyProxy();
         child?.postMessage({ type: NETWORK_SERVICE.SET_INTERFACE, name });
-        if (next !== null) await awaitReport();
-        else settle();
+        if (next !== null) {
+            await awaitReport();
+        } else {
+            settle();
+            external.networkIs(listAsNetwork());
+        }
         idleSoon();
         onChanged(state());
         return state();
+    }
+
+    /** The check on, or off, as the switch and the app's windows have it. */
+    function applyCheck() {
+        external.setOn(checkWanted && windowed);
+        if (external.on) {
+            clearTimeout(idleTimer);
+            idleTimer = null;
+            startService();
+        } else {
+            idleSoon();
+        }
     }
 
     if (name !== null) {
@@ -299,6 +368,31 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
     return {
         state,
         refusal,
+
+        /** A window has opened: the check, if its switch is on, runs from here. */
+        windowOpened() {
+            if (windowed) return;
+            windowed = true;
+            applyCheck();
+        },
+
+        /**
+         * Check my External IP, as the switch is now.
+         * @param {boolean} on
+         */
+        setCheck(on) {
+            checkWanted = on;
+            applyCheck();
+        },
+
+        /** The default server's been checked: the launch's check may have been waiting for it. */
+        serverChecked: () => external.serverChecked(),
+
+        /** Check Again. The answer's the state now: the result is pushed when it comes. */
+        checkAgain() {
+            external.checkAgain();
+            return state();
+        },
 
         /** Once it's known whether the chosen adapter is there, with the session's proxy set: the transfer window's work waits for it. */
         whenSettled: () => (name !== null && present === null ? new Promise((resolve) => settling.push(resolve)) : Promise.resolve()).then(() => applying),
@@ -336,6 +430,8 @@ function createNetworkHost({ kit, session, onUnavailable = () => {}, onChanging 
         close() {
             closing = true;
             for (const timer of [restartTimer, idleTimer, stopTimer, settleTimer]) clearTimeout(timer);
+            clearInterval(onlineTimer);
+            external.stop();
             settle();
             child?.kill();
             child = null;

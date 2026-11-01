@@ -195,6 +195,12 @@ If clients see “Too many requests”:
 - **"That link was made with an older version of Dropgate, which this app can't download."** A link from Dropgate 3: a bundle's (`/b/<id>`), or a single file's whose key after the `#` is 44 characters ending in `=`. Ask its sender to update and send the files again.
 - **"That isn't a Dropgate link."** Anything else, such as a link with a query, or one to a page that isn't an upload's.
 
+**"External IP Unavailable" in Settings, under Network**
+- The dot is yellow, and what's wrong is under it and in its tooltip. Your connection may be fine: this only means your External IP couldn't be found.
+- **"… lists no STUN server."** Your default saved server gives none to ask, perhaps as it has direct transfers off. Choose another as your default, or ask its operator.
+- **"… couldn't be reached, so its STUN server isn't known."** Check Again asks your default server again first.
+- **"… didn't answer within 5 seconds."** or **"… couldn't be reached."** The STUN server didn't answer from this network: a firewall or a VPN may be blocking UDP. It's asked again when your network changes, and on Check Again, never by itself in between.
+
 **A `.*` key left in the registry after upgrading from version 3 (Windows)**
 - Version 3, installed for all users, registered an association for a literal `.*` extension, which never did anything, and its uninstaller leaves that key behind. Nothing reads it. To remove it, from a Command Prompt run as administrator:
 

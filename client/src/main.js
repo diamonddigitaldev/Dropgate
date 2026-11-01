@@ -9,6 +9,7 @@ const {
     TRANSFERS, migrateSettings,
 } = require('./constants');
 const { menuItems } = require('./menu');
+const { stunSourceOf } = require('./core/external-ip');
 const { Handles, describeFile } = require('./core/handles');
 const { endNotice, countsLine } = require('./core/notices');
 const {
@@ -117,6 +118,9 @@ const { answerWindowChannels } = require('./window-channels');
 //   check says why, asking nothing. The code is the client's own, so no
 //   fallback moves an upload for it: every server would fail the same way.
 //   Nothing restarts by itself.
+// - The External IP, with its switch on and the app showing a window: asked of
+//   the default server's STUN server, from its last check this run
+//   (core/external-ip.js). What it finds stays in memory, never written or logged.
 // Share with Dropgate (Windows' context menu) launches the app with a file's
 // path and --upload. Main makes the upload itself, with no window: to the
 // default server, checked by the transfer window, with its settings for new
@@ -169,12 +173,16 @@ function atOnceSetting() {
 // Transfers at once reaches the registry as it changes.
 kit.settings.onChange((changes) => {
     if (Object.hasOwn(changes, 'transfersAtOnce')) transfers.setAtOnce(atOnceSetting());
+    if (Object.hasOwn(changes, 'externalIpCheck')) network?.setCheck(changes.externalIpCheck === true);
 });
 
 // The saved servers, and the default, in the settings: main's alone. What
-// each one's last check found is kept in memory only.
+// each one's last check found is kept in memory only. The default's is where
+// the External IP is asked, and the launch's check may be waiting for it.
 const servers = new Servers(kit.settings);
-const checks = new ServerChecks();
+const checks = new ServerChecks((id) => {
+    if (id === servers.default()?.id) network?.serverChecked();
+});
 
 // Where downloads are written until they're whole: emptied at every start and at quit.
 const partials = path.join(app.getPath('userData'), PARTIAL_FOLDER);
@@ -306,6 +314,7 @@ const watched = (win = mainWindow()) => Boolean(win) && win.isVisible() && win.i
 function watchWindow(win) {
     if (appWindows.has(win)) return win;
     appWindows.add(win);
+    network?.windowOpened();
     const owner = win.webContents.id;
     win.on('close', (event) => {
         if (quitting) return;
@@ -400,6 +409,10 @@ if (kit.primary) {
             onUnavailable: (reason) => stopRunning(reason, INTERFACE_UNAVAILABLE),
             onChanging: () => stopRunning('The network interface changed.', INTERFACE_CHANGED),
             onChanged: (state) => mainWindow()?.webContents.send(IPC.NETWORK_CHANGED, state),
+            stunSource: () => {
+                const saved = servers.default();
+                return stunSourceOf(saved, saved ? checks.get(saved.id) : null);
+            },
         });
         app.on('will-quit', () => network.close());
         host = createTransferHost({

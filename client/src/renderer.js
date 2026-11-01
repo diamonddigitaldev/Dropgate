@@ -51,9 +51,11 @@
 // Remove; Add Server checks an address before it's added. The page changes
 // none of it itself: main does, as it asks.
 //
-// Settings > Network (below, "--- Settings > Network ---") is the Adapter card:
-// the adapter every connection is held to, or any. Main holds it, as it holds
-// the servers, and the network service lists the adapters while the tab shows.
+// Settings > Network (below, "--- Settings > Network ---") is the Connection
+// card (health and the External IPs), the Adapter card (the adapter every
+// connection is held to, or any) and the External IP card (its switch). Main
+// holds all of it, as it holds the servers, and the network service lists the
+// adapters while the tab shows.
 
 const api = window.electronAPI;
 const kitApi = window.kitAPI;
@@ -1511,8 +1513,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         // main does, as it's asked, and only to one the network service lists now.
         const OS = navigator.userAgent.includes('Windows') ? 'Windows' : 'Linux';
         const interfaceSelect = $('network-interface');
-        /** The network as main last said: the adapter chosen, whether it's there, and the adapters listed while the tab shows. */
-        let network = { name: null, present: null, adapters: null };
+        /** The network as main last said: the adapter chosen, whether it's there, the adapters listed while the tab shows, and the connection. */
+        let network = {
+            name: null, present: null, adapters: null, connection: { on: false, checking: false, result: null, stun: null, server: null, health: { tone: 'running', text: 'Checking…', title: 'Checking…' } },
+        };
 
         /** An adapter's address to show: its IPv4 one, else one with no scope. */
         const addressOf = ({ addresses }) => addresses.find((address) => !address.includes(':')) ?? addresses.find((address) => !/^fe[89ab]/i.test(address)) ?? addresses[0] ?? '';
@@ -1535,6 +1539,81 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (gone) help = `${name} isn't connected, so Dropgate connects through nothing. Connect it again, or choose another adapter.`;
             else if (name !== null) help = `Dropgate connects only through ${name}, and looks names up through it too. If it disconnects, every transfer stops at once and nothing connects until it's back: Dropgate never uses another adapter.`;
             $('network-interface-help').textContent = help;
+            drawConnection(network.connection);
+        }
+
+        // The Connection card: main's health, in the kit's status line, and what
+        // the last check found, or why there's nothing to show. The page holds it
+        // for as long as it's drawn, and it's asked for through main alone.
+        const connectionLine = kit.ui.statusLine({ text: 'Connected', tone: 'success' });
+        $('connection-status').append(connectionLine.element);
+        const checkAgainBtn = $('connection-check');
+        let restoreCheckAgain = null;
+        /** Whether Check Again has been pressed and hasn't had its answer: it may check the default server first. */
+        let checkPressed = false;
+
+        function drawConnection(connection) {
+            const { on, checking, result, stun, health } = connection;
+            connectionLine.set(health);
+            const cutOff = health.tone === 'danger';
+            const shows = on && !cutOff && !checking && result?.ok === true;
+            $('connection-ips').replaceChildren(...(shows ? [result.v4, result.v6].filter(Boolean).map((ip) => Object.assign(document.createElement('span'), { textContent: ip })) : []));
+
+            let meta = "Your External IP isn't known while there's no connection.";
+            if (!on) meta = "Your External IP isn't checked. Turn on Check my External IP below to see it.";
+            else if (shows) meta = `Latency ${result.latency} ms`;
+            else if (!cutOff && checking) meta = stun ? `Asking ${stun}…` : 'Asking for your address…';
+            else if (!cutOff && result) meta = result.reason;
+            else if (!cutOff) meta = "Your External IP hasn't been checked since the app started.";
+            $('connection-meta').textContent = meta;
+
+            const checked = $('connection-checked');
+            checked.hidden = !shows;
+            checked.textContent = shows ? `Checked at ${new Date(result.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${result.via ? ` through ${result.via}` : ''}, by asking ${result.stun}.` : '';
+
+            // Busy for as long as anything's being asked. Its label's the kit's to put back, with it enabled.
+            $('connection-actions').hidden = !on;
+            if (on && (checking || checkPressed)) {
+                restoreCheckAgain ??= kit.ui.busy(checkAgainBtn, 'Checking…');
+            } else {
+                restoreCheckAgain?.();
+                restoreCheckAgain = null;
+                checkAgainBtn.disabled = cutOff;
+            }
+            drawExternalIpSwitch(connection);
+        }
+
+        checkAgainBtn.addEventListener('click', async () => {
+            checkPressed = true;
+            drawConnection(network.connection);
+            try {
+                network = await api.checkExternalIp();
+            } finally {
+                checkPressed = false;
+                drawConnection(network.connection);
+            }
+        });
+
+        // The External IP card: Check my External IP, off by default. Its help says who sees
+        // the address, by name once a check has found it, so it's made again when that changes:
+        // the kit's switch keeps the words it was made with.
+        let externalIpSwitch = null;
+        let externalIpOnHelp = null;
+        function drawExternalIpSwitch({ stun, server }) {
+            const asks = stun && server ? `Dropgate asks ${stun}, the STUN server ${server} (your default server) lists,` : 'Dropgate asks the STUN server your default server lists';
+            const onHelp = `${asks} for your address at launch, when your network changes, and when you click Check Again. Over IPv6 too, where the adapter has it. That server sees your IP address.`;
+            if (onHelp === externalIpOnHelp) return;
+            externalIpOnHelp = onHelp;
+            const focused = externalIpSwitch && document.activeElement === externalIpSwitch.input;
+            externalIpSwitch = kit.ui.switchField({
+                id: 'external-ip-check',
+                label: 'Check my External IP',
+                checked: externalIpSwitch ? externalIpSwitch.input.checked : settings.externalIpCheck === true,
+                help: { on: onHelp, off: "Your External IP isn't checked, and nothing is asked of any server for it." },
+                onChange: (checked) => kitApi.setSettings({ externalIpCheck: checked }),
+            });
+            $('external-ip-switch').replaceChildren(externalIpSwitch.element);
+            if (focused) externalIpSwitch.input.focus();
         }
         $('network-interface-note').textContent = `Update checks go through the chosen adapter too. Direct transfers can't be held to one adapter, so they're off while one is chosen. Choosing one also sets aside ${OS === 'Windows' ? "Windows'" : "Linux's"} proxy settings for Dropgate.`;
 
@@ -1567,6 +1646,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
 
         // The network service lists the adapters only while this tab shows: with none chosen, it isn't started before then.
+        drawConnection(network.connection);
         api.onNetworkChanged(drawNetwork);
         new IntersectionObserver(([entry]) => {
             api.watchNetwork(entry.isIntersecting).then(drawNetwork, () => {});

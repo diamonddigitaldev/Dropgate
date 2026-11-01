@@ -71,7 +71,7 @@ export const test = base.extend({
     serverClock: [false, { option: true }],
 
     // Have the server offer the tests' own STUN server, on this machine, as its only
-    // ICE server. Set it with test.use({ localStun: true }).
+    // ICE server. Set it with test.use({ localStun: true }), or to startStunServer()'s options.
     localStun: [false, { option: true }],
 
     // That STUN server, or null when the server offers no ICE servers.
@@ -80,7 +80,7 @@ export const test = base.extend({
             await use(null);
             return;
         }
-        const stun = await startStunServer();
+        const stun = await startStunServer(localStun === true ? {} : localStun);
         try {
             await use(stun);
         } finally {

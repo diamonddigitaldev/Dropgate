@@ -57,6 +57,7 @@ const IPC = Object.freeze({
     LINK_COPY: 'link:copy',                     // (link) copy it, kept out of the clipboard's history and sync
     NETWORK_WATCH: 'network:watch',             // ({ on }) -> the network's state: Settings > Network is shown or not; while it is, the network service runs, and the adapters it lists reach the page
     NETWORK_SET_INTERFACE: 'network:set-interface', // ({ name }) -> the network's state: the adapter to hold every connection to, a name the network service lists now, or null for any; anything else is refused
+    NETWORK_CHECK_IP: 'network:check-ip',       // () -> the network's state: Check Again, the External IP asked for now, its answer pushed
     // Main to page.
     FILE_OPENED: 'file:opened',                 // push: { handle, name, size }, a file picked with Open File
     FILE_OPEN_ERROR: 'file:open-error',         // push: the message, when the file picked can't be read
@@ -66,7 +67,7 @@ const IPC = Object.freeze({
     TRANSFER_REMOVED: 'transfer:removed',       // push: [id], transfers gone from main's registry
     UPLOAD_STATUS: 'upload:status',             // push: { type: 'success' | 'cancelled' | 'error', data: { id?, link? | error? } }, an upload's outcome, to the main window
     SERVERS_CHANGED: 'servers:changed',         // push: the saved servers' list answer ({ servers, defaultServer, checks }), when main checked one itself (a fallback trying it)
-    NETWORK_CHANGED: 'network:changed',         // push: the network's state ({ name, present, adapters }), when the chosen adapter or the list of adapters changed
+    NETWORK_CHANGED: 'network:changed',         // push: the network's state ({ name, present, adapters, connection }), when the chosen adapter, the list of adapters, the OS's word on being online or the External IP changed
 });
 
 /** The pushes, which main sends and the page only listens for. */
@@ -133,12 +134,14 @@ const FILE_SERVICE = Object.freeze({
 const NETWORK_SERVICE = Object.freeze({
     // Main to the service.
     SET_INTERFACE: 'set-interface',             // { name: string | null }: the adapter chosen, by name; null for none, and every connection is refused
+    CHECK_IP: 'check-ip',                       // { id, stun }: ask this stun: URL for the External IP, through the adapter chosen, or with none as the OS routes it
     STOP: 'stop',                               // (): close everything, and exit
     // The service to main.
     LISTENING: 'listening',                     // { port, host }: the proxy, on the machine's loopback: ::1, else 127.0.0.1
     ADAPTERS: 'adapters',                       // { list: [{ name, addresses }] }: the adapters up with an address, whenever the list changes
     STATE: 'state',                             // { name, present, addresses: { v4, v6 } }: the chosen adapter, as it is now, whenever that changes
     GONE: 'gone',                               // { name }: the chosen adapter has gone, and every connection through it is closed
+    IP_RESULT: 'ip-result',                     // { id, v4, v6, latency } (null for a family with no answer), or { id, error: 'timeout' | 'unreachable' }: main's memory only, never written or logged
 });
 
 /**
@@ -158,9 +161,16 @@ const INTERFACE_CHANGED = 'INTERFACE_CHANGED';
  * - RESTART_MS: how soon the service is started again after it exits;
  * - IDLE_MS: how long it runs on with no adapter chosen, once Settings >
  *   Network isn't shown;
- * - STOP_MS: how long it's given to stop by itself.
+ * - STOP_MS: how long it's given to stop by itself;
+ * - STUN_MS: how long the External IP's STUN server is given to answer;
+ * - IP_SETTLE_MS: how long after the network last changed the External IP is
+ *   asked: a VPN coming up changes it more than once, each read would be one
+ *   more request to the STUN server, and one sent as an address first appears
+ *   fails, with nothing to ask again;
+ * - ONLINE_MS: how often the OS's word on being online is read, while the
+ *   service runs (it has no event).
  */
-const NETWORK = Object.freeze({ SETTLE_MS: 5_000, RESTART_MS: 1_000, IDLE_MS: 30_000, STOP_MS: 1_000 });
+const NETWORK = Object.freeze({ SETTLE_MS: 5_000, RESTART_MS: 1_000, IDLE_MS: 30_000, STOP_MS: 1_000, STUN_MS: 5_000, IP_SETTLE_MS: 2_000, ONLINE_MS: 1_000 });
 
 /**
  * Where a download is written while it runs: a folder in the app's profile

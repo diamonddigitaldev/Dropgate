@@ -424,7 +424,7 @@ test.describe('when the network service stops', () => {
         const app = await desktop.launch();
         const silent = await app.window();
         await expect.poll(() => silent.evaluate(() => window.electronAPI.watchNetwork(false)), { message: 'the adapter taken as gone', timeout: 15_000 })
-            .toEqual({ name: STAND_IN, present: false, adapters: null });
+            .toMatchObject({ name: STAND_IN, present: false, adapters: null });
 
         const before = server.requests().length;
         await openServers(silent);

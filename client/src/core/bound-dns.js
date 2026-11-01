@@ -178,13 +178,13 @@ class BoundResolver {
      * The addresses a name has, of the families the adapter has (IPv4 first),
      * asked of these servers only, from the adapter's addresses.
      * @param {string} name
-     * @param {{ addresses: { v4: string | null, v6: string | null }, servers: string[] }} through
+     * @param {{ addresses: { v4: string | null, v6: string | null }, servers: string[], family?: 4 | 6 }} through - family: only that one's
      * @returns {Promise<{ address: string, family: 4 | 6 }>}
      */
-    async lookup(name, { addresses, servers }) {
+    async lookup(name, { addresses, servers, family: only }) {
         if (servers.length === 0) throw Object.assign(new Error('No DNS server can be reached through the adapter.'), { code: 'ENETUNREACH' });
         let failure = null;
-        for (const family of [4, 6]) {
+        for (const family of only ? [only] : [4, 6]) {
             const local = family === 4 ? addresses.v4 : addresses.v6;
             if (!local) continue;
             const resolver = new this.Resolver({ timeout: this.timeoutMs, tries: QUERY_TRIES });

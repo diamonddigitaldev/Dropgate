@@ -357,6 +357,22 @@ function answerWindowChannels(main) {
     // The adapter every connection is held to: main's alone, a name the network
     // service lists now, or none. A page can't choose one that isn't there.
     kit.ipc.handle(IPC.NETWORK_SET_INTERFACE, (_event, request) => main.network().setInterface(interfaceOf(request)));
+
+    // Check Again: the External IP, asked now. A default server whose last check
+    // failed, or that has none yet, is checked first, as the person pressing it
+    // would otherwise get the same answer for as long as it says so.
+    kit.ipc.handle(IPC.NETWORK_CHECK_IP, async (event) => {
+        const network = main.network();
+        const fallback = servers.default();
+        if (network.state().connection.on && fallback && !checks.get(fallback.id)?.ok && !network.refusal()) {
+            const check = await main.host().check(serverOf(fallback.url));
+            if (saved(fallback.id)) {
+                checks.set(fallback.id, check);
+                event.sender.send(IPC.SERVERS_CHANGED, listed());
+            }
+        }
+        return network.checkAgain();
+    });
 }
 
 module.exports = { answerWindowChannels };

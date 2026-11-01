@@ -324,6 +324,43 @@ textarea,
     width: min(100%, 26rem);
 }
 
+/* The External IPs, side by side while they fit. */
+.network-ips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 1.1rem;
+    font-family: var(--bs-font-monospace);
+    font-size: 1rem;
+    font-variant-numeric: tabular-nums;
+    user-select: text;
+}
+
+.network-ips:empty {
+    display: none;
+}
+
+.network-meta {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--bs-secondary-color);
+}
+
+.network-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.network-actions[hidden] {
+    display: none;
+}
+
+/* The mockup's: a card's own parts closer together. */
+.network-tab .update-card .card-body {
+    gap: 0.65rem;
+}
+
 /* Add Server's: what the address's check found, before it's added. */
 .server-found {
     border: 1px solid var(--bs-border-color);

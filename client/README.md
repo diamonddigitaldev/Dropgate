@@ -264,6 +264,8 @@ Tests for known issues are marked as expected failures, and there are none today
 node --test --test-reporter=tap "test/*.test.mjs"
 ```
 
+* **The External IP and the connection's health** ([`test/external-ip.test.mjs`](test/external-ip.test.mjs), and the network service's and the main process's tests above). Green, yellow and red exactly as designed, the first `stun:` URL the default server's last check listed, or why there's none, and a binding request on the wire: a header and nothing else, sent once, and an answer taken only with its own ID, of the family asked. The request held to a chosen adapter as a connection is: from its address, its name looked up through it, on Linux its route checked first, and called off the moment the adapter goes or changes. In the main process, with its clock mocked: nothing with the switch off, or for a launch with no window; once on, once at launch, once for a change of the network, however many changes make it, once per **Check Again**, never on a timer; and what it finds never reaches the settings or the log.
+
 GitHub Actions runs the tests this way on Ubuntu and Windows ([`ci.yml`](../.github/workflows/ci.yml)). On Ubuntu it first gives the route check two real adapters, each a veth pair to a network namespace of its own ([`test/helpers/route-netns.sh`](test/helpers/route-netns.sh)), so the route check is tested against the kernel's own routes, with nothing leaving the machine. To run that test on Linux yourself (it needs `sudo`):
 
 ```bash

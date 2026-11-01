@@ -24,8 +24,8 @@ const everything = [...scripts, ...pages].flatMap(({ name, words }) => words.map
 const slipsOf = (rule) => everything.flatMap(({ where, text }) => copySlips(text).filter((reason) => rule.test(reason)).map((reason) => `${where}: ${reason} in ${text}`));
 
 test('the checks read every script and page of the client\'s own, with their words and none of their comments', () => {
-    assert.deepEqual(scripts.map(({ name }) => name).sort(), ['constants.js', 'core/adapters.js', 'core/bound-dns.js', 'core/file-service.js', 'core/handles.js',
-        'core/network-service.js', 'core/notices.js', 'core/payloads.js', 'core/routes.js', 'core/servers.js', 'core/share.js', 'core/socks5.js', 'core/transfers.js',
+    assert.deepEqual(scripts.map(({ name }) => name).sort(), ['constants.js', 'core/adapters.js', 'core/bound-dns.js', 'core/external-ip.js', 'core/file-service.js', 'core/handles.js',
+        'core/network-service.js', 'core/notices.js', 'core/payloads.js', 'core/routes.js', 'core/servers.js', 'core/share.js', 'core/socks5.js', 'core/stun.js', 'core/transfers.js',
         'file-service.js', 'main.js', 'menu.js', 'network-host.js', 'network-service.js', 'preload.js', 'renderer.js', 'transfer-host.js', 'transfer-preload.js', 'transfer.js', 'tray.js',
         'window-channels.js']);
     assert.deepEqual(pages.map(({ name }) => name).sort(), ['index.html', 'transfer.html']);
@@ -86,7 +86,7 @@ test('a file\'s name or a server\'s address is never recased: nothing the page s
 test('a button that says it\'s doing something is the kit\'s busy button: disabled, with its spinner', () => {
     const renderer = readFileSync(new URL('../src/renderer.js', import.meta.url), 'utf8');
     const labels = [...renderer.matchAll(/kit\.ui\.busy\(\w+, ([^)]+)\)/g)].map(([, label]) => label);
-    assert.deepEqual(labels, ["pause ? 'Pausing…' : 'Resuming…'", "'Deleting…'", "'Testing…'", "'Checking…'", "'Adding…'"]);
+    assert.deepEqual(labels, ["pause ? 'Pausing…' : 'Resuming…'", "'Deleting…'", "'Testing…'", "'Checking…'", "'Adding…'", "'Checking…'"]);
     // Never a label the page writes itself: a button's text is the kit's, or its own label.
     assert.doesNotMatch(renderer, /(Btn|Button|button)\.textContent = ['`][^'`]*ing…/);
     assert.doesNotMatch(readSource('index.html'), /<button[^>]*>[^<]*ing…/);

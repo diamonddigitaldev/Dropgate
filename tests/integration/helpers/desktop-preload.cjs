@@ -181,7 +181,12 @@ BrowserWindow.prototype.isFocused = function (...args) {
 // (Asked for as this preload loaded, the app crashed in CI on Linux, or
 // stopped answering on Windows, part-way through an upload.)
 app.whenReady().then(() => {
-    const { powerSaveBlocker, Tray } = electron;
+    const { net, powerSaveBlocker, Tray } = electron;
+
+    // The OS's word on being online, as a test says, when it says
+    // (globalThis.__dropgateOnline, true or false; unset, it's the OS's own).
+    const isOnline = net.isOnline.bind(net);
+    net.isOnline = () => globalThis.__dropgateOnline ?? isOnline();
 
     // The tray icon: its tooltip and menu as they change, and when it goes.
     const setToolTip = Tray.prototype.setToolTip;

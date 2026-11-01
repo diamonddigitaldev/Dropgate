@@ -1,11 +1,13 @@
 'use strict';
 
+const dns = require('dns');
 const net = require('net');
-const { NETWORK_SERVICE } = require('../constants');
-const { AdapterWatch, isLoopback } = require('./adapters');
+const { NETWORK, NETWORK_SERVICE } = require('../constants');
+const { AdapterWatch, hasIpv6, isLoopback } = require('./adapters');
 const { BoundResolver, adapterServers, serverAddress, serversFor, systemServers } = require('./bound-dns');
 const { RouteCheck } = require('./routes');
 const { REPLY, readRequest, reply } = require('./socks5');
+const { askBinding, stunTargetOf } = require('./stun');
 
 // The network service's work, with no Electron: a SOCKS5 proxy on the
 // machine's loopback that holds every connection through it to one adapter,
@@ -30,7 +32,13 @@ const { REPLY, readRequest, reply } = require('./socks5');
 //   the adapter's address only when that address is a loopback one itself (the
 //   tests' stand-in adapter), and unbound otherwise.
 // - With no adapter chosen, nothing connects.
-// It sends nothing of its own, keeps nothing on disk and logs nothing.
+// - The External IP: only when main asks (check-ip), one STUN binding request
+//   a family, each held as a connection is: from the adapter's address, its
+//   name looked up through it, its route checked on Linux, and stopped the
+//   moment the adapter goes or changes. With no adapter chosen, it goes as the OS
+//   routes it, and it's the one thing that goes at all. Main hears the answer,
+//   and nothing here keeps it.
+// It sends nothing else of its own, keeps nothing on disk and logs nothing.
 
 /**
  * Where the proxy listens: IPv6 loopback, else IPv4's. Chromium looks up
@@ -71,19 +79,25 @@ class NetworkService {
      * @param {() => string[]} [options.systemServers] - the system's
      * @param {BoundResolver} [options.resolver]
      * @param {readonly string[]} [options.loopbacks] - where the proxy may listen, in order
+     * @param {number} [options.stunMs] - how long a STUN server is given to answer
+     * @param {typeof dns.promises.lookup} [options.osLookup] - the OS's resolver, for the External IP with no adapter chosen
      * @param {(message: object) => void} [options.tell] - to main
      */
     constructor({
         list, watchMs, platform = process.platform, routes = platform === 'linux' ? new RouteCheck() : null,
         ownServers = (name) => adapterServers(name, platform), systemServers: system = () => systemServers(platform),
-        resolver = new BoundResolver(), loopbacks = LOOPBACKS, tell = () => {},
+        resolver = new BoundResolver(), loopbacks = LOOPBACKS, stunMs = NETWORK.STUN_MS, osLookup = dns.promises.lookup, tell = () => {},
     } = {}) {
         this.loopbacks = loopbacks;
         this.routes = routes;
         this.ownServers = ownServers;
         this.system = system;
         this.resolver = resolver;
+        this.stunMs = stunMs;
+        this.osLookup = osLookup;
         this.tell = tell;
+        /** The External IP check under way: what stops it, and whether it was called off. */
+        this.ipCheck = null;
         /** The adapter chosen, by name, or null for none. */
         this.name = null;
         /** Its own DNS servers, as last read, and the read under way. */
@@ -143,6 +157,7 @@ class NetworkService {
     setInterface(name) {
         this.name = name;
         this.own = [];
+        this.callOffIpCheck();
         this.close(() => true);
         this.routes?.clear();
         this.reading = name === null ? Promise.resolve() : this.readServers(name);
@@ -158,6 +173,8 @@ class NetworkService {
     /** The watched adapter changed: whatever it can't carry now is closed, and main is told. */
     changed(state, before) {
         this.routes?.clear();
+        // A STUN request can't go, or come back, by a route it no longer has. Main asks again.
+        this.callOffIpCheck();
         if (!state.present) {
             this.close(() => true);
             if (before.v4 || before.v6) this.tell({ type: NETWORK_SERVICE.GONE, name: state.name });
@@ -220,11 +237,102 @@ class NetworkService {
                 throw refusal(error?.code === 'ENETUNREACH' ? REPLY.NETWORK_UNREACHABLE : REPLY.HOST_UNREACHABLE);
             }
         }
+        return this.heldTo(address, family, addresses);
+    }
+
+    /** The address to send to this one from: the adapter's, its route checked on Linux; none for a loopback destination, unless the adapter's is. */
+    async heldTo(address, family, addresses) {
         if (isLoopback(address) && !this.loopbackAdapter(addresses)) return { address, family, local: undefined };
         const local = family === 4 ? addresses.v4 : addresses.v6;
         if (!local) throw refusal(REPLY.NETWORK_UNREACHABLE);
         if (this.routes && !(await this.routes.through(address, local, this.name))) throw refusal(REPLY.NETWORK_UNREACHABLE);
         return { address, family, local };
+    }
+
+    /**
+     * The families to ask a STUN server over: a literal address's own; with an
+     * adapter chosen, those it has an address of; with none, IPv4, and IPv6
+     * where the machine has an address that reaches past its own link.
+     * @param {string} host
+     * @returns {(4 | 6)[]}
+     */
+    ipFamilies(host) {
+        const literal = net.isIP(host);
+        const addresses = this.watch.addresses;
+        const ofAdapter = [addresses?.v4 ? 4 : 0, addresses?.v6 ? 6 : 0].filter(Boolean);
+        let families = this.name !== null ? ofAdapter : [4];
+        if (this.name === null) {
+            let interfaces = {};
+            try {
+                interfaces = this.watch.list() ?? {};
+            } catch {
+                // The OS couldn't say: IPv4 alone.
+            }
+            if (hasIpv6(interfaces)) families = [4, 6];
+        }
+        return literal === 0 ? families : families.filter((family) => family === literal);
+    }
+
+    /** One family's binding request: from the address, and by the route, a connection to it would have. */
+    async askOver(family, { host, port }, signal) {
+        const called = new Promise((_, reject) => {
+            if (signal.aborted) reject(signal.reason);
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        // Nothing may be waiting on it by then: a literal address has no step to race.
+        called.catch(() => {});
+        const until = (step) => Promise.race([step, called]);
+        const addresses = this.watch.addresses;
+        let address = host;
+        if (net.isIP(host) === 0) {
+            address = this.name === null
+                ? (await until(this.osLookup(host, { family }))).address
+                : (await until(this.servers(addresses).then((servers) => this.resolver.lookup(host, { addresses, servers, family })))).address;
+        }
+        const { local } = this.name === null ? { local: undefined } : await until(this.heldTo(address, family, addresses));
+        if (signal.aborted) throw signal.reason;
+        return askBinding({ address, family, port, local, signal });
+    }
+
+    /**
+     * Ask a STUN server for the External IP, once a family, and tell main what
+     * came back within NETWORK.STUN_MS: the address of each family that
+     * answered, and the round trip of the first of them. One under way is
+     * called off first. Called off itself, nothing is told.
+     * @param {number} id - Main's, for it to know the answer.
+     * @param {string} stun - A stun: URL.
+     */
+    async checkIp(id, stun) {
+        this.callOffIpCheck();
+        const controller = new AbortController();
+        const check = { controller, calledOff: false };
+        this.ipCheck = check;
+        const target = stunTargetOf(stun);
+        const timer = setTimeout(() => controller.abort(Object.assign(new Error('No answer.'), { code: 'ETIMEDOUT' })), this.stunMs);
+        const families = target ? this.ipFamilies(target.host) : [];
+        const answers = await Promise.all(families.map((family) => this.askOver(family, target, controller.signal).then(
+            (answer) => ({ family, ...answer }),
+            (error) => ({ family, error }),
+        )));
+        clearTimeout(timer);
+        if (check.calledOff) return;
+        this.ipCheck = null;
+        const of = (family) => answers.find((answer) => answer.family === family && answer.ip);
+        const [v4, v6] = [of(4), of(6)];
+        if (!v4 && !v6) {
+            const timedOut = answers.length > 0 && answers.every(({ error }) => error?.code === 'ETIMEDOUT');
+            this.tell({ type: NETWORK_SERVICE.IP_RESULT, id, error: timedOut ? 'timeout' : 'unreachable' });
+            return;
+        }
+        this.tell({ type: NETWORK_SERVICE.IP_RESULT, id, v4: v4?.ip ?? null, v6: v6?.ip ?? null, latency: (v4 ?? v6).ms });
+    }
+
+    /** Stop the External IP check under way, sending nothing more, with nothing told of it. */
+    callOffIpCheck() {
+        if (!this.ipCheck) return;
+        this.ipCheck.calledOff = true;
+        this.ipCheck.controller.abort(Object.assign(new Error('Called off.'), { code: 'ECANCELED' }));
+        this.ipCheck = null;
     }
 
     /** One client of the proxy: its request read, its destination opened, then the two piped together. */
@@ -285,6 +393,7 @@ class NetworkService {
     async stop() {
         this.watch.stop();
         this.name = null;
+        this.callOffIpCheck();
         this.close(() => true);
         await new Promise((resolve) => this.server.close(() => resolve()));
     }

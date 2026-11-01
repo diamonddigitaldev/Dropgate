@@ -97,6 +97,7 @@ export function fakeMain({ settings = {} } = {}) {
 
     const electron = {
         app: { getAppPath: () => CLIENT },
+        net: { isOnline: () => true },
         session: { defaultSession: uiSession },
         ipcMain: {
             handle(channel, handler) {

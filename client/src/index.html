@@ -107,9 +107,22 @@
     <div id="privacy-settings"></div>
 
     <!-- Settings > Network, moved into its tab by renderer.js: the Update tab's cards, filling the pane.
-         Network interface is the adapter every connection is held to, chosen through main; the options,
-         the help line and the note are drawn by renderer.js, naming the OS it runs on. -->
+         Connection is the health and the External IPs, as main last said. Network interface is the adapter
+         every connection is held to, chosen through main; the options, the help line and the note are drawn
+         by renderer.js, naming the OS it runs on. External IP holds the switch that lets it be asked at all. -->
     <div id="network-settings" class="network-tab">
+        <section class="card update-card">
+            <div class="card-body">
+                <h3 class="update-card-title">Connection</h3>
+                <div id="connection-status"></div>
+                <div id="connection-ips" class="network-ips"></div>
+                <p id="connection-meta" class="network-meta"></p>
+                <p id="connection-checked" class="network-meta" hidden></p>
+                <div id="connection-actions" class="network-actions" hidden>
+                    <button type="button" id="connection-check" class="btn btn-outline-secondary btn-sm">Check Again</button>
+                </div>
+            </div>
+        </section>
         <section class="card update-card">
             <div class="card-body">
                 <h3 class="update-card-title">Adapter</h3>
@@ -119,6 +132,12 @@
                     <div class="form-text reserved" id="network-interface-help"></div>
                 </div>
                 <p class="form-text mb-0" id="network-interface-note"></p>
+            </div>
+        </section>
+        <section class="card update-card">
+            <div class="card-body">
+                <h3 class="update-card-title">External IP</h3>
+                <div id="external-ip-switch"></div>
             </div>
         </section>
     </div>

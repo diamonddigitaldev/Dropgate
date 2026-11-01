@@ -22,10 +22,15 @@ function isLoopback(address) {
     return family !== 0 && LOOPBACK.check(address, family === 4 ? 'ipv4' : 'ipv6');
 }
 
+/** An IPv6 entry that can reach past its own link: a link-local fe80:: address can't. */
+const reachesOut = (entry) => entry.family === 'IPv6' && net.isIPv6(entry.address) && !entry.scopeid && !/^fe[89ab]/i.test(entry.address);
+
 /**
  * An adapter's addresses a connection can be bound to: its first IPv4
- * address, and its first IPv6 one with no scope (a link-local fe80::
- * address reaches only its own link), or null for a family it hasn't got.
+ * address, and its first IPv6 one with no scope, a public one (2000::/3) ahead
+ * of a private one (a home router's fd00::, which reaches nothing outside; a
+ * VPN's may, behind its NAT, so one is still used where it's all there is), or
+ * null for a family it hasn't got.
  * @param {NodeJS.Dict<os.NetworkInterfaceInfo[]>} interfaces - os.networkInterfaces()'s answer
  * @param {string} name
  * @returns {{ v4: string | null, v6: string | null } | null} null when it isn't listed
@@ -34,8 +39,17 @@ function addressesOf(interfaces, name) {
     if (!Object.hasOwn(interfaces, name) || !Array.isArray(interfaces[name])) return null;
     const entries = interfaces[name];
     const v4 = entries.find((entry) => entry.family === 'IPv4' && net.isIPv4(entry.address))?.address ?? null;
-    const v6 = entries.find((entry) => entry.family === 'IPv6' && net.isIPv6(entry.address) && !entry.scopeid && !/^fe[89ab]/i.test(entry.address))?.address ?? null;
+    const v6 = (entries.find((entry) => reachesOut(entry) && /^[23][0-9a-f]{3}:/i.test(entry.address)) ?? entries.find(reachesOut))?.address ?? null;
     return { v4, v6 };
+}
+
+/**
+ * Whether the machine has an IPv6 address that can reach past its own link,
+ * on any adapter but the system's loopback.
+ * @param {NodeJS.Dict<os.NetworkInterfaceInfo[]>} interfaces
+ */
+function hasIpv6(interfaces) {
+    return Object.values(interfaces).some((entries) => Array.isArray(entries) && entries.some((entry) => !entry.internal && reachesOut(entry)));
 }
 
 /**
@@ -128,4 +142,4 @@ class AdapterWatch {
     }
 }
 
-module.exports = { AdapterWatch, WATCH_MS, addressesOf, adapterList, isLoopback };
+module.exports = { AdapterWatch, WATCH_MS, addressesOf, adapterList, hasIpv6, isLoopback };

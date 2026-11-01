@@ -195,10 +195,17 @@ class Servers {
  */
 class ServerChecks {
     #found = new Map();
+    #onSet;
+
+    /** @param {(id: string) => void} [onSet] - A saved server's just been checked. */
+    constructor(onSet = () => {}) {
+        this.#onSet = onSet;
+    }
 
     /** Keep a saved server's latest check, in place of the one before. */
     set(id, check) {
         this.#found.set(id, check);
+        this.#onSet(id);
     }
 
     get(id) {

@@ -9,6 +9,7 @@
 // tells it the adapter by name (set-interface), and hears the proxy's port,
 // the adapters there are, and the chosen one's state as it changes. If it
 // exits, the sessions' proxy points at nothing, so nothing connects at all.
+// It also asks a STUN server for the External IP, when main says to.
 
 const { NETWORK_SERVICE } = require('./constants');
 const { NetworkService } = require('./core/network-service');
@@ -20,6 +21,10 @@ process.parentPort.on('message', ({ data }) => {
         case NETWORK_SERVICE.SET_INTERFACE:
             // Anything but a name or null chooses none: nothing connects.
             service.setInterface(typeof data.name === 'string' && data.name !== '' ? data.name : null);
+            break;
+        case NETWORK_SERVICE.CHECK_IP:
+            // Nothing to tell of a failure here but main, which is what failed.
+            service.checkIp(data.id, data.stun).catch(() => {});
             break;
         case NETWORK_SERVICE.STOP:
             service.stop().finally(() => process.exit(0));

@@ -12,9 +12,11 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createRequire } from 'node:module';
 import net from 'node:net';
+import os from 'node:os';
 import readline from 'node:readline';
 import { afterEach, beforeEach, test as nodeTest } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { startStunServer } from '../../tests/integration/helpers/stun.mjs';
 import { ATYP, get, openWebSocket, overTls, socks, startDns, startPeer } from './helpers/network.mjs';
 
 const require = createRequire(import.meta.url);
@@ -26,7 +28,7 @@ const { REPLY } = require('../src/core/socks5.js');
 const bound = require('../src/core/bound-dns.js');
 
 /** Each test, failing rather than waiting for ever if a connection is never closed or answered. */
-const test = (name, fn) => nodeTest(name, { timeout: 30_000 }, fn);
+const test = (name, ...rest) => nodeTest(name, { timeout: 30_000, ...(rest.length > 1 ? rest[0] : {}) }, rest.at(-1));
 
 const STAND_IN = process.platform === 'linux' ? 'lo' : 'Stand-in';
 const ADAPTER = '127.0.0.3';
@@ -70,6 +72,189 @@ afterEach(async () => {
     await service?.stop();
     service = null;
     await Promise.all([peer.close(), ownDns.close(), systemDns.close()]);
+});
+
+// --- The External IP (`09` 18.11): one binding request a family, held as a connection is ---
+
+/** What main heard of the External IP, once it has. */
+async function ipResult() {
+    const found = () => told.find(({ type }) => type === NETWORK_SERVICE.IP_RESULT);
+    while (!found()) await new Promise((resolve) => setTimeout(resolve, 5));
+    return found();
+}
+
+/** IPv6's loopback, where the machine has it: its tests are skipped elsewhere. */
+const IPV6 = Object.values(os.networkInterfaces()).flat().some(({ address }) => address === '::1');
+
+test('18.11: a request goes from the adapter\'s address alone, with the responder\'s answer and its round trip told to main', async () => {
+    const stun = await startStunServer({ address: '127.0.0.2', mapped: { v4: '203.0.113.42' } });
+    try {
+        await startService();
+        service.setInterface(STAND_IN);
+        await service.checkIp(1, stun.url);
+        const { type, ...answer } = await ipResult();
+        assert.equal(type, NETWORK_SERVICE.IP_RESULT);
+        assert.deepEqual({ ...answer, latency: 0 }, { id: 1, v4: '203.0.113.42', v6: null, latency: 0 });
+        assert.ok(Number.isInteger(answer.latency) && answer.latency >= 0 && answer.latency < 1_000);
+        assert.deepEqual(stun.requests.map(({ family, source }) => ({ family, source })), [{ family: 4, source: ADAPTER }]);
+    } finally {
+        await stun.stop();
+    }
+});
+
+test('18.11: a name is looked up through the adapter, and with an IPv6 address a second request goes, from that address', { skip: !IPV6 && 'no IPv6 loopback here' }, async () => {
+    const stun = await startStunServer({ address: '127.0.0.2', address6: '::1', mapped: { v4: '203.0.113.42', v6: '2001:db8:5:12::42' } });
+    const dns = await startDns('127.0.0.5', { 'stun.test': '127.0.0.2' }, { 'stun.test': '::1' });
+    try {
+        own = [dns.server];
+        adapters = { [STAND_IN]: [...adapter(ADAPTER), { address: '::1', netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', family: 'IPv6', mac: '00:00:00:00:00:00', internal: false, cidr: '::1/128', scopeid: 0 }] };
+        await startService();
+        service.setInterface(STAND_IN);
+        await service.checkIp(1, `stun:stun.test:${stun.port}`);
+        const { v4, v6 } = await ipResult();
+        assert.deepEqual({ v4, v6 }, { v4: '203.0.113.42', v6: '2001:db8:5:12::42' });
+        assert.deepEqual(stun.requests.map(({ family, source }) => ({ family, source })).sort((a, b) => a.family - b.family), [{ family: 4, source: ADAPTER }, { family: 6, source: '::1' }]);
+        assert.deepEqual([...new Set(dns.queries.map(({ source }) => source))], [ADAPTER], 'every lookup through it');
+        assert.deepEqual(dns.queries.map(({ type }) => type).sort(), ['A', 'AAAA']);
+    } finally {
+        await Promise.all([stun.stop(), dns.close()]);
+    }
+});
+
+test('18.11: an adapter with no IPv6 address asks nothing over IPv6, of a name or of an IPv6 address', { skip: !IPV6 && 'no IPv6 loopback here' }, async () => {
+    const stun = await startStunServer({ address: '127.0.0.2', address6: '::1' });
+    const dns = await startDns('127.0.0.5', { 'stun.test': '127.0.0.2' }, { 'stun.test': '::1' });
+    try {
+        own = [dns.server];
+        await startService();
+        service.setInterface(STAND_IN);
+        await service.checkIp(1, `stun:stun.test:${stun.port}`);
+        await ipResult();
+        assert.deepEqual(stun.requests.map(({ family }) => family), [4]);
+        assert.deepEqual(dns.queries.map(({ type }) => type), ['A']);
+
+        told.length = 0;
+        await service.checkIp(2, `stun:[::1]:${stun.port}`);
+        assert.deepEqual(await ipResult(), { type: NETWORK_SERVICE.IP_RESULT, id: 2, error: 'unreachable' });
+        assert.equal(stun.requests.length, 1);
+    } finally {
+        await Promise.all([stun.stop(), dns.close()]);
+    }
+});
+
+test('18.11: with no adapter chosen, it goes as the OS routes it, through the OS\'s resolver for a name, and IPv6 only where the machine has an address for it', { skip: !IPV6 && 'no IPv6 loopback here' }, async () => {
+    const stun = await startStunServer({ address: '127.0.0.2', address6: '::1', mapped: { v4: '203.0.113.42', v6: '2001:db8:5:12::42' } });
+    const lookups = [];
+    try {
+        await startService({
+            osLookup: async (name, { family }) => {
+                lookups.push({ name, family });
+                return { address: family === 4 ? '127.0.0.2' : '::1', family };
+            },
+        });
+        await service.checkIp(1, `stun:stun.test:${stun.port}`);
+        assert.deepEqual((await ipResult()).v6, null, 'the machine has none');
+        assert.deepEqual(lookups, [{ name: 'stun.test', family: 4 }]);
+        assert.deepEqual(stun.requests.map(({ family, source }) => ({ family, source })), [{ family: 4, source: '127.0.0.1' }], 'not the stand-in adapter\'s address: unbound');
+
+        told.length = 0;
+        adapters[STAND_IN].push({ address: '2001:db8::5', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6', mac: '00:00:00:00:00:00', internal: false, cidr: '2001:db8::5/64', scopeid: 0 });
+        await service.checkIp(2, `stun:stun.test:${stun.port}`);
+        assert.deepEqual((await ipResult()).v6, '2001:db8:5:12::42');
+        assert.deepEqual(stun.requests.map(({ family }) => family).sort(), [4, 4, 6]);
+    } finally {
+        await stun.stop();
+    }
+});
+
+test('18.11: one that doesn\'t answer is told as a timeout, after one request; a family that answers is told without the one that doesn\'t', async () => {
+    const stun = await startStunServer({ address: '127.0.0.2', silent: true });
+    try {
+        await startService({ stunMs: 300 });
+        service.setInterface(STAND_IN);
+        await service.checkIp(1, stun.url);
+        assert.deepEqual(await ipResult(), { type: NETWORK_SERVICE.IP_RESULT, id: 1, error: 'timeout' });
+        assert.equal(stun.requests.length, 1);
+    } finally {
+        await stun.stop();
+    }
+    assert.equal(new NetworkService({ list: () => ({}), tell: () => {} }).stunMs, 5_000, 'five seconds to answer');
+});
+
+test('18.11: a bad URL or a name the adapter can\'t look up is told as unreachable, with nothing sent', async () => {
+    const stun = await startStunServer({ address: '127.0.0.2' });
+    try {
+        await startService();
+        service.setInterface(STAND_IN);
+        await service.checkIp(1, 'http://127.0.0.2/');
+        assert.deepEqual(await ipResult(), { type: NETWORK_SERVICE.IP_RESULT, id: 1, error: 'unreachable' });
+        told.length = 0;
+        await service.checkIp(2, `stun:nowhere.test:${stun.port}`);
+        assert.deepEqual(await ipResult(), { type: NETWORK_SERVICE.IP_RESULT, id: 2, error: 'unreachable' });
+        assert.deepEqual(stun.requests, []);
+    } finally {
+        await stun.stop();
+    }
+});
+
+test('18.11: the adapter gone, nothing is sent; gone or changed mid-request, it\'s called off, and nothing more is told of it', async () => {
+    const stun = await startStunServer({ address: '127.0.0.2', silent: true });
+    try {
+        await startService();
+        service.setInterface(STAND_IN);
+        const asking = service.checkIp(1, stun.url);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.equal(stun.requests.length, 1);
+        adapters = {};
+        service.watch.read();
+        await asking;
+        assert.equal(told.some(({ type }) => type === NETWORK_SERVICE.IP_RESULT), false, 'called off, it says nothing');
+
+        // Gone: it can't go.
+        await service.checkIp(2, stun.url);
+        assert.deepEqual(await ipResult(), { type: NETWORK_SERVICE.IP_RESULT, id: 2, error: 'unreachable' });
+        assert.equal(stun.requests.length, 1, 'nothing sent through nothing');
+
+        // Changed mid-request.
+        told.length = 0;
+        adapters = { [STAND_IN]: adapter(ADAPTER) };
+        service.watch.read();
+        const moving = service.checkIp(3, stun.url);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        adapters = { [STAND_IN]: adapter('127.0.0.4') };
+        service.watch.read();
+        await moving;
+        assert.equal(told.some(({ type }) => type === NETWORK_SERVICE.IP_RESULT), false);
+
+        // Another asked: the one before is called off.
+        const first = service.checkIp(4, stun.url);
+        const second = service.checkIp(5, 'not a url');
+        await Promise.all([first, second]);
+        assert.deepEqual(told.filter(({ type }) => type === NETWORK_SERVICE.IP_RESULT).map(({ id }) => id), [5]);
+    } finally {
+        await stun.stop();
+    }
+});
+
+test('18.11: on Linux, a route not through the adapter is refused before anything is sent, and one through it goes', async () => {
+    const stun = await startStunServer({ address: '127.0.0.2', mapped: { v4: '203.0.113.42' } });
+    try {
+        let device = 'eth1';
+        const routes = new RouteCheck({ ask: async () => `127.0.0.2 from ${ADAPTER} dev ${device} uid 1000\n    cache\n`, cacheMs: 0 });
+        await startService({ routes });
+        service.setInterface(STAND_IN);
+        await service.checkIp(1, stun.url);
+        assert.deepEqual(await ipResult(), { type: NETWORK_SERVICE.IP_RESULT, id: 1, error: 'unreachable' });
+        assert.deepEqual(stun.requests, [], 'refused before anything is sent');
+
+        told.length = 0;
+        device = STAND_IN;
+        await service.checkIp(2, stun.url);
+        assert.equal((await ipResult()).v4, '203.0.113.42');
+        assert.equal(stun.requests.length, 1);
+    } finally {
+        await stun.stop();
+    }
 });
 
 /** Wait for a socket to close, 5 s at most; how long it took (Infinity: it didn't). */

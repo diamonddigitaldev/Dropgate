@@ -79,6 +79,13 @@ function setUp({ settings = SETTINGS, check = { ok: true } } = {}) {
         check: record('host.check', Promise.resolve(check)),
     };
 
+    const networkHost = { on: true, refused: null };
+    Object.assign(networkHost, {
+        state: () => ({ connection: { on: networkHost.on } }),
+        refusal: () => networkHost.refused,
+        checkAgain: record('network.checkAgain', { answered: true }),
+    });
+
     const { answerWindowChannels } = main.load('../src/window-channels.js');
     answerWindowChannels({
         kit: main.kit,
@@ -87,6 +94,7 @@ function setUp({ settings = SETTINGS, check = { ok: true } } = {}) {
         servers,
         checks,
         host: () => transferHost,
+        network: () => networkHost,
         windowReady: record('windowReady'),
         start: record('start'),
         pause: record('pause', Promise.resolve({})),
@@ -113,7 +121,7 @@ function setUp({ settings = SETTINGS, check = { ok: true } } = {}) {
         onPauseEnding: record('onPauseEnding'),
         onFinished: record('onFinished'),
     });
-    return { main, work, handles, transfers, host, servers, checks, stored: () => current };
+    return { main, work, handles, transfers, host, servers, checks, networkHost, stored: () => current };
 }
 
 /** Each payload, invoked on a channel from a page, is refused with this message, and nothing is done. */
@@ -305,6 +313,45 @@ test('server:add takes a server\'s address, checks it in the transfer window, an
         const answer = await elsewhere.main.invoke(IPC.SERVER_ADD, elsewhere.main.windowPage(), { url: 'https://elsewhere.test' });
         assert.deepEqual([answer.check, answer.server, answer.servers], [check, undefined, []], JSON.stringify(check));
     }
+});
+
+test('network:check-ip asks through main: a default server with no good check is checked first, once, its row told; with a good one, or the switch off, or its adapter gone, no server is asked', async () => {
+    const first = saved({ url: 'https://one.test' });
+    const asked = (setup) => setup.work.filter(([name]) => name === 'host.check');
+    const again = (setup) => setup.work.filter(([name]) => name === 'network.checkAgain');
+    const answering = { settings: { servers: [first], defaultServer: first.id }, check: FOUND };
+
+    // Never checked: it is, and then the External IP's asked.
+    const setup = setUp(answering);
+    const page = setup.main.windowPage();
+    assert.deepEqual(await setup.main.invoke(IPC.NETWORK_CHECK_IP, page), { answered: true });
+    assert.deepEqual(asked(setup), [['host.check', { url: 'https://one.test', allowInsecure: false }]]);
+    assert.deepEqual(setup.checks.get(first.id), FOUND);
+    assert.equal(page.sender.sent.at(-1)[0], IPC.SERVERS_CHANGED, 'its row says what it found');
+    assert.equal(again(setup).length, 1);
+
+    // A good check to read: no server's asked again.
+    await setup.main.invoke(IPC.NETWORK_CHECK_IP, page);
+    assert.equal(asked(setup).length, 1);
+    assert.equal(again(setup).length, 2);
+
+    // Its last check failed: checked again.
+    setup.checks.set(first.id, { ok: false });
+    await setup.main.invoke(IPC.NETWORK_CHECK_IP, page);
+    assert.equal(asked(setup).length, 2);
+
+    // The switch off, or the adapter gone: no server is asked.
+    const off = setUp(answering);
+    off.networkHost.on = false;
+    await off.main.invoke(IPC.NETWORK_CHECK_IP, off.main.windowPage());
+    assert.deepEqual(asked(off), []);
+    const gone = setUp(answering);
+    gone.networkHost.refused = "wg0 isn't connected.";
+    await gone.main.invoke(IPC.NETWORK_CHECK_IP, gone.main.windowPage());
+    assert.deepEqual(asked(gone), []);
+
+    // Only the app's own window may ask.
+    await assert.rejects(setup.main.invoke(IPC.NETWORK_CHECK_IP, setup.main.transferPage()));
 });
 
 test('server:test checks a saved server, by its ID, at its saved address; main keeps what it found in memory only, and every list answer says it until the server goes', async () => {

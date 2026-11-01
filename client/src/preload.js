@@ -47,6 +47,7 @@ const CH = {
     LINK_COPY: 'link:copy',
     NETWORK_WATCH: 'network:watch',
     NETWORK_SET_INTERFACE: 'network:set-interface',
+    NETWORK_CHECK_IP: 'network:check-ip',
     FILE_OPENED: 'file:opened',
     FILE_OPEN_ERROR: 'file:open-error',
     TRANSFER_ASK_INSECURE: 'transfer:ask-insecure',
@@ -108,5 +109,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Settings > Network: main holds the adapter, and asks the network service which there are. The page holds neither.
     watchNetwork: (on) => ipcRenderer.invoke(CH.NETWORK_WATCH, { on }),
     setNetworkInterface: (name) => ipcRenderer.invoke(CH.NETWORK_SET_INTERFACE, { name }),
+    checkExternalIp: () => ipcRenderer.invoke(CH.NETWORK_CHECK_IP),
     onNetworkChanged: (callback) => on(CH.NETWORK_CHANGED, callback),
 });

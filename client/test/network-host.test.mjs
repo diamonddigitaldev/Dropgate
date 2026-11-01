@@ -24,12 +24,18 @@ const settled = async () => {
     for (let i = 0; i < 20; i += 1) await Promise.resolve();
 };
 
-function setUp({ name = null, commandLine = {}, updaterRefuses = false } = {}) {
-    const main = fakeMain({ settings: { networkInterface: name } });
+/** A default server's STUN server, as main reads it from its last check. */
+const STUN = { url: 'stun:stun.example:3478', stun: 'stun.example', server: 'Share Space' };
+
+function setUp({ name = null, commandLine = {}, updaterRefuses = false, check = false, source = STUN } = {}) {
+    const main = fakeMain({ settings: { networkInterface: name, externalIpCheck: check } });
     main.electron.app.commandLine = { hasSwitch: (which) => commandLine[which] === true };
+    let online = true;
+    main.electron.net.isOnline = () => online;
     const set = [];
     main.kit.settings.set = (changes) => set.push(changes);
-    main.kit.log = { warn: () => {} };
+    const logged = [];
+    main.kit.log = { warn: (line) => logged.push(line), info: (line) => logged.push(line), error: (line) => logged.push(line) };
     const updater = [];
     main.kit.updater = { setProxy: updaterRefuses ? () => Promise.reject(new Error('Refused.')) : async (config) => { updater.push(config); } };
     const proxies = [];
@@ -41,12 +47,14 @@ function setUp({ name = null, commandLine = {}, updaterRefuses = false } = {}) {
     const changing = [];
     const changes = [];
     const { createNetworkHost, NOWHERE } = main.load('../src/network-host.js');
+    const sources = { now: source };
     const network = createNetworkHost({
         kit: main.kit,
         session,
         onUnavailable: (reason) => unavailable.push(reason),
         onChanging: () => changing.push(true),
         onChanged: (state) => changes.push(state),
+        stunSource: () => sources.now,
     });
     /** What the running service says, as it says it. */
     const tell = async (message, child = main.processes.at(-1)) => {
@@ -60,15 +68,23 @@ function setUp({ name = null, commandLine = {}, updaterRefuses = false } = {}) {
     };
     const there = (addresses = { v4: '10.64.12.7', v6: null }) => tell({ type: NETWORK_SERVICE.STATE, name: ADAPTER, present: true, addresses });
     const gone = () => tell({ type: NETWORK_SERVICE.STATE, name: ADAPTER, present: false, addresses: { v4: null, v6: null } });
-    return { main, network, proxies, updater, set, unavailable, changing, changes, tell, listening, there, gone, NOWHERE };
+    return {
+        main, network, proxies, updater, set, logged, unavailable, changing, changes, tell, listening, there, gone, NOWHERE, sources, setOnline: (now) => { online = now; },
+    };
 }
 
 const toService = (child) => child.messages.filter(({ type }) => type === NETWORK_SERVICE.SET_INTERFACE).map(({ name }) => name);
 const bound = { mode: 'fixed_servers', proxyRules: `socks5://[::1]:${PORT}`, proxyBypassRules: '<-loopback>' };
 
-function timers(t) {
+/** The network's state without its connection, which its own tests read. */
+const adapterState = ({ name, present, adapters }) => ({ name, present, adapters });
+
+/** What the service was asked of the External IP. */
+const askedOf = (child) => child.messages.filter(({ type }) => type === NETWORK_SERVICE.CHECK_IP);
+
+function timers(t, apis = ['setTimeout']) {
     t.after(() => mock.timers.reset());
-    mock.timers.enable({ apis: ['setTimeout'] });
+    mock.timers.enable({ apis });
 }
 
 test('with no adapter chosen, the service is never started and the session is left as it is', async (t) => {
@@ -78,7 +94,7 @@ test('with no adapter chosen, the service is never started and the session is le
     assert.deepEqual(main.processes, []);
     assert.deepEqual(proxies, []);
     assert.equal(network.refusal(), null);
-    assert.deepEqual(network.state(), { name: null, present: null, adapters: null });
+    assert.deepEqual(adapterState(network.state()), { name: null, present: null, adapters: null });
     await network.whenSettled();
     assert.deepEqual(unavailable, []);
 });
@@ -293,7 +309,7 @@ test('Settings > Network shown starts the service for its list; hidden, with non
     const { main, network, listening } = setUp();
 
     // Hidden, as the page first says: nothing starts.
-    assert.deepEqual(await network.watch(false), { name: null, present: null, adapters: null });
+    assert.deepEqual(adapterState(await network.watch(false)), { name: null, present: null, adapters: null });
     assert.deepEqual(main.processes, []);
 
     const shown = network.watch(true);
@@ -356,7 +372,7 @@ test('going back to any interface gives the session the system\'s settings, clos
     const before = proxies.length;
 
     const answer = await network.setInterface(null);
-    assert.deepEqual(answer, { name: null, present: null, adapters: LIST });
+    assert.deepEqual(adapterState(answer), { name: null, present: null, adapters: LIST });
     assert.deepEqual(changing, [true]);
     assert.deepEqual(set, [{ networkInterface: null }]);
     assert.deepEqual(proxies.slice(before), [{ mode: 'system' }, 'closed']);
@@ -384,6 +400,290 @@ test('a state for an adapter since changed is ignored', async (t) => {
     await tell({ type: NETWORK_SERVICE.STATE, name: 'Ethernet 3', present: false, addresses: { v4: null, v6: null } });
     assert.deepEqual(unavailable, []);
     assert.equal(network.refusal(), null);
+});
+
+// --- The External IP (`09` 18.11, 18.12): when it's asked, as main decides ---
+
+test('with the check off (the default), the service never starts for it and nothing is asked, whatever the network does', async (t) => {
+    timers(t);
+    const { main, network, listening } = setUp();
+    network.windowOpened();
+    network.serverChecked();
+    await settled();
+    assert.deepEqual(main.processes, [], 'no service');
+
+    // Running for the tab: its list changing asks nothing.
+    const shown = network.watch(true);
+    await listening();
+    await shown;
+    await listening([...LIST, { name: 'Tailscale', addresses: ['100.80.130.2'] }]);
+    mock.timers.tick(NETWORK.IP_SETTLE_MS * 10);
+    network.checkAgain();
+    await settled();
+    assert.deepEqual(askedOf(main.processes[0]), []);
+    assert.deepEqual(network.state().connection.result, null);
+});
+
+test('on, a launch with no window (a share) starts nothing and asks nothing; its window opening does', async (t) => {
+    timers(t);
+    const { main, network, listening } = setUp({ check: true });
+    await settled();
+    assert.deepEqual(main.processes, [], 'a share asks nothing');
+    network.windowOpened();
+    assert.equal(main.processes.length, 1);
+    await listening();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    assert.deepEqual(askedOf(main.processes[0]), [{ type: NETWORK_SERVICE.CHECK_IP, id: 1, stun: STUN.url }]);
+});
+
+test('on, it asks once at launch and never on a timer; once when the network changes, however many changes make it; once per Check Again', async (t) => {
+    timers(t, ['setTimeout', 'setInterval']);
+    const { main, network, listening, tell, changes } = setUp({ check: true });
+    network.windowOpened();
+    await listening();
+    const [child] = main.processes;
+    const answer = (id) => tell({ type: NETWORK_SERVICE.IP_RESULT, id, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18 });
+
+    assert.equal(network.state().connection.checking, true, 'it says so from here');
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    assert.equal(askedOf(child).length, 1, 'at launch');
+    await answer(1);
+    const { result, health } = network.state().connection;
+    assert.deepEqual({ ...result, at: 0 }, { ok: true, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18, at: 0, via: null, stun: STUN.stun });
+    assert.equal(health.tone, 'success');
+    assert.deepEqual(changes.at(-1).connection.result, result, 'pushed');
+
+    // A day later: nothing. No timer of any length asks.
+    for (let hour = 0; hour < 24; hour += 1) mock.timers.tick(3_600_000);
+    assert.equal(askedOf(child).length, 1, 'never on a timer');
+
+    // A VPN coming up: three changes in a row, one request, after the last.
+    const moved = (address) => tell({ type: NETWORK_SERVICE.ADAPTERS, list: [{ name: ADAPTER, addresses: [address] }] });
+    await moved('10.64.12.8');
+    mock.timers.tick(NETWORK.IP_SETTLE_MS - 1);
+    await moved('10.64.12.9');
+    mock.timers.tick(NETWORK.IP_SETTLE_MS - 1);
+    await moved('10.64.12.10');
+    assert.equal(askedOf(child).length, 1);
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    assert.equal(askedOf(child).length, 2, 'once for the change');
+    await answer(2);
+
+    // The same list again asks nothing, and nor does one that's back before it settled.
+    await moved('10.64.12.10');
+    mock.timers.tick(NETWORK.IP_SETTLE_MS * 2);
+    assert.equal(askedOf(child).length, 2);
+    await moved('10.64.12.11');
+    assert.equal(network.state().connection.checking, true);
+    await moved('10.64.12.10');
+    assert.equal(network.state().connection.checking, false);
+    mock.timers.tick(NETWORK.IP_SETTLE_MS * 2);
+    assert.equal(askedOf(child).length, 2);
+
+    network.checkAgain();
+    assert.equal(askedOf(child).length, 3, 'Check Again');
+    network.checkAgain();
+    assert.equal(askedOf(child).length, 3, 'not again while one is under way');
+    await answer(3);
+    network.checkAgain();
+    assert.equal(askedOf(child).length, 4);
+});
+
+test('with an adapter chosen, its addresses are what count: another adapter changing asks nothing; gone, what was known goes; back, it asks', async (t) => {
+    timers(t);
+    const { main, network, listening, there, gone, tell } = setUp({ name: ADAPTER, check: true });
+    network.windowOpened();
+    await listening();
+    await there();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    const [child] = main.processes;
+    assert.equal(askedOf(child).length, 1, 'at launch, once it\'s there');
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 1, v4: '203.0.113.42', v6: null, latency: 18 });
+    assert.equal(network.state().connection.result.via, ADAPTER);
+
+    await tell({ type: NETWORK_SERVICE.ADAPTERS, list: [...LIST, { name: 'Tailscale', addresses: ['100.80.130.2'] }] });
+    mock.timers.tick(NETWORK.IP_SETTLE_MS * 2);
+    assert.equal(askedOf(child).length, 1, 'another adapter');
+
+    await there({ v4: '10.64.12.8', v6: null });
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    assert.equal(askedOf(child).length, 2, 'its address changed');
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 2, v4: '203.0.113.43', v6: null, latency: 19 });
+
+    await gone();
+    assert.equal(network.state().connection.result, null, 'what was known went with it');
+    assert.equal(network.state().connection.health.tone, 'danger');
+    network.checkAgain();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS * 2);
+    assert.equal(askedOf(child).length, 2, 'nothing is asked through nothing');
+
+    await there({ v4: '10.64.12.8', v6: null });
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    assert.equal(askedOf(child).length, 3, 'back');
+});
+
+test('an answer for a request since dropped is ignored: the adapter changing, or the switch going off, mid-request', async (t) => {
+    timers(t);
+    const { main, network, listening, there, tell } = setUp({ name: ADAPTER, check: true });
+    network.windowOpened();
+    await listening();
+    await there();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+
+    await there({ v4: '10.64.12.8', v6: null });
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 1, v4: '203.0.113.42', v6: null, latency: 18 });
+    assert.equal(network.state().connection.result, null, 'the old adapter\'s address');
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    assert.equal(askedOf(main.processes[0]).length, 2);
+
+    network.setCheck(false);
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 2, v4: '203.0.113.42', v6: null, latency: 18 });
+    assert.equal(network.state().connection.result, null);
+    assert.equal(network.state().connection.on, false);
+});
+
+test('with no STUN server to ask, nothing is, and the state says why; one waiting on the default server\'s check goes when it comes', async (t) => {
+    timers(t);
+    const { main, network, listening, sources } = setUp({ check: true, source: { reason: 'Not yet.', waits: true, unchecked: true, server: 'Share Space' } });
+    network.windowOpened();
+    await listening();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    const [child] = main.processes;
+    assert.deepEqual(askedOf(child), []);
+    assert.equal(network.state().connection.result, null, 'nothing to say yet');
+    assert.equal(network.state().connection.health.text, 'Connected · External IP Not Checked Yet');
+
+    // No STUN server: said, and no later check brings a request by itself.
+    sources.now = { reason: 'Share Space lists no STUN server.', waits: false, server: 'Share Space' };
+    network.serverChecked();
+    assert.deepEqual(askedOf(child), []);
+    assert.deepEqual(network.state().connection.result, { ok: false, reason: 'Share Space lists no STUN server.' });
+    assert.equal(network.state().connection.health.text, 'Connected · External IP Unavailable');
+    assert.equal(network.state().connection.health.title, 'Share Space lists no STUN server.');
+    sources.now = STUN;
+    network.serverChecked();
+    assert.deepEqual(askedOf(child), [], 'nothing was waiting');
+    // Check Again reads it afresh.
+    network.checkAgain();
+    assert.equal(askedOf(child).length, 1);
+});
+
+test('the launch\'s check goes when the default server\'s first check says where to ask, and that check going again later asks nothing more', async (t) => {
+    timers(t);
+    const { main, network, listening, sources, tell } = setUp({ check: true, source: { reason: 'Not yet.', waits: true, unchecked: true, server: 'Share Space' } });
+    network.windowOpened();
+    await listening();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    const [child] = main.processes;
+    sources.now = STUN;
+    network.serverChecked();
+    assert.equal(askedOf(child).length, 1);
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 1, v4: '203.0.113.42', v6: null, latency: 18 });
+    network.serverChecked();
+    network.serverChecked();
+    assert.equal(askedOf(child).length, 1, 'the default is checked before each upload too');
+});
+
+test('a failed answer says why, as yellow; nothing is asked again until the network or the person says', async (t) => {
+    timers(t);
+    const { main, network, listening, tell } = setUp({ check: true });
+    network.windowOpened();
+    await listening();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 1, error: 'timeout' });
+    assert.deepEqual(network.state().connection.result, { ok: false, reason: 'stun.example didn\'t answer within 5 seconds.' });
+    assert.equal(network.state().connection.health.tone, 'warning');
+    mock.timers.tick(3_600_000);
+    assert.equal(askedOf(main.processes[0]).length, 1);
+    network.checkAgain();
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 2, error: 'unreachable' });
+    assert.deepEqual(network.state().connection.result, { ok: false, reason: 'stun.example couldn\'t be reached.' });
+    // A word from the service that isn't an address is no address.
+    network.checkAgain();
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 3, v4: '<b>not an address</b>', v6: null, latency: 18 });
+    assert.equal(network.state().connection.result.ok, false);
+});
+
+test('offline, nothing is asked; the OS\'s word is read as the service runs, and told as it changes', async (t) => {
+    timers(t, ['setTimeout', 'setInterval']);
+    const { main, network, listening, setOnline, changes } = setUp({ check: true });
+    network.windowOpened();
+    await listening();
+    setOnline(false);
+    mock.timers.tick(NETWORK.ONLINE_MS);
+    assert.equal(changes.at(-1).connection.health.tone, 'danger');
+    assert.equal(changes.at(-1).connection.health.text, 'Offline');
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    network.checkAgain();
+    assert.deepEqual(askedOf(main.processes[0]), []);
+
+    setOnline(true);
+    mock.timers.tick(NETWORK.ONLINE_MS);
+    assert.notEqual(changes.at(-1).connection.health.tone, 'danger');
+});
+
+test('the switch turned on asks at once, the service started for it; off, what was known goes, and with nothing else needing it the service stops', async (t) => {
+    timers(t);
+    const { main, network, listening, tell } = setUp();
+    network.windowOpened();
+    network.setCheck(true);
+    assert.equal(main.processes.length, 1, 'started for it');
+    await listening();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    const [child] = main.processes;
+    assert.equal(askedOf(child).length, 1);
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 1, v4: '203.0.113.42', v6: null, latency: 18 });
+
+    // Off and on with the service still up: on asks at once, it being the person's asking.
+    network.setCheck(false);
+    assert.equal(network.state().connection.result, null);
+    network.setCheck(true);
+    assert.equal(askedOf(child).length, 2);
+
+    network.setCheck(false);
+    mock.timers.tick(NETWORK.IDLE_MS);
+    assert.deepEqual(child.messages.at(-1), { type: NETWORK_SERVICE.STOP });
+});
+
+test('on, the service stays with nothing else asking for it, and is started again if it exits: the same network asks nothing more, a request it took with it does', async (t) => {
+    timers(t);
+    const { main, network, listening, tell } = setUp({ check: true });
+    network.windowOpened();
+    await listening();
+    mock.timers.tick(NETWORK.IDLE_MS * 10);
+    const [first] = main.processes;
+    assert.deepEqual(first.messages.filter(({ type }) => type === NETWORK_SERVICE.STOP), []);
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 1, v4: '203.0.113.42', v6: null, latency: 18 });
+    const { result } = network.state().connection;
+    assert.equal(result.ok, true);
+
+    first.emit('exit', 1);
+    mock.timers.tick(NETWORK.RESTART_MS);
+    assert.equal(main.processes.length, 2);
+    await listening();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    assert.deepEqual(askedOf(main.processes[1]), [], 'the same network');
+    assert.deepEqual(network.state().connection.result, result, 'still known');
+
+    network.checkAgain();
+    assert.equal(askedOf(main.processes[1]).length, 1);
+    main.processes[1].emit('exit', 1);
+    mock.timers.tick(NETWORK.RESTART_MS);
+    await listening();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    assert.equal(askedOf(main.processes[2]).length, 1, 'the request it took with it');
+});
+
+test('what it finds is never written or logged: main holds it, and only the window hears it', async (t) => {
+    timers(t);
+    const { network, listening, tell, set, logged } = setUp({ check: true });
+    network.windowOpened();
+    await listening();
+    mock.timers.tick(NETWORK.IP_SETTLE_MS);
+    await tell({ type: NETWORK_SERVICE.IP_RESULT, id: 1, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18 });
+    assert.equal(network.state().connection.result.v4, '203.0.113.42');
+    assert.deepEqual(set, [], 'the settings');
+    assert.deepEqual(logged, [], 'the log');
 });
 
 test('network:set-interface and network:watch take only what they should, and the setting only a name or null', () => {
