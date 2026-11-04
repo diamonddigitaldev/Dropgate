@@ -63,7 +63,7 @@ Download the file for your OS from the latest release on the [releases page](htt
 4. Choose whether to add **Share with Dropgate** to the menu a file shows when it's right-clicked (ticked by default). Your choice is kept for updates.
 5. It adds a desktop shortcut, and one in the Start menu's **Diamond Digital Development** folder.
 
-To open files with the app, drop them on its desktop shortcut, or use **Share with Dropgate**. It claims no file type, so it's never any file's default. Uninstalling it (**Settings** > **Apps**) takes away everything the installer added.
+To open files with the app, drop them on its desktop shortcut, or use **Share with Dropgate**. It claims no file type, so it's never any file's default. Uninstalling it (**Settings** > **Apps**) takes away everything the installer added. Your settings, saved servers and any location data the app downloaded (in `%APPDATA%\dropgate-client`) go too if you tick **Also remove settings and logs** as it starts; otherwise they stay, so a reinstall starts where you left off.
 
 ### Linux
 
@@ -91,6 +91,12 @@ chmod +x Dropgate-Client-<version>.AppImage
 It runs for whoever runs it, and adds itself to the menu and **Open With**, and shows its own icon in the taskbar or dock, only once a tool such as AppImageLauncher or Gear Lever has integrated it.
 
 There's no right-click "Share with Dropgate" on Linux: use **Open With**, which adds the files to Upload.
+
+Removing the `.deb` or `.rpm` (`sudo apt remove dropgate-client`, `sudo dnf remove dropgate-client`), or deleting the AppImage, leaves each person's settings, saved servers and any location data the app downloaded in their home folder, as Linux packages do. To delete them too, run this as that person:
+
+```bash
+rm -rf ~/.config/dropgate-client
+```
 
 The `latest.yml`, `latest-linux.yml` and `.blockmap` files on each release are for the app's updater: you don't need to download them.
 
