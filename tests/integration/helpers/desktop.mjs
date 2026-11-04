@@ -239,6 +239,8 @@ class Desktop {
     dnsServer = null;
     /** Whether the next launch's network service stays silent, never saying it's there (network-stand-in.cjs). */
     silentNetwork = false;
+    /** The next launch's stand-in for db-ip.com (dbip.mjs), its address: with none, DB-IP's downloads are refused on this machine. */
+    dbIp = null;
     /** Other addresses the app may ask in this test, each as an origin: by default, only the test's server's and its TLS proxy's. */
     alsoAllowed = [];
 
@@ -267,9 +269,11 @@ class Desktop {
         // The adapters the network service sees (network-stand-in.cjs).
         this.adaptersFile = path.join(root, 'adapters.json');
         this.setAdapters({ [STAND_IN]: STAND_IN_ADDRESS });
-        // The location data the network service reads (network-stand-in.cjs): the test's
-        // own, outside the profile, and not there unless it writes some. A fetched client/location-data is never read.
+        // The location data in the app's resources, as main and the network service read it (desktop-preload.cjs):
+        // the test's own, outside the profile, and not there unless it writes some. A fetched client/location-data is never read.
         this.locationData = path.join(root, 'location-data');
+        // Where the monthly refresh keeps what it downloads: the app's own folder, in its profile.
+        this.refreshedData = path.join(this.profile, 'Location Data');
     }
 
     /**
@@ -317,6 +321,7 @@ class Desktop {
                 DROPGATE_TEST_LOCATION_DATA: this.locationData,
                 ...(this.dnsServer ? { DROPGATE_TEST_DNS: this.dnsServer } : {}),
                 ...(this.silentNetwork ? { DROPGATE_TEST_NETWORK_SILENT: '1' } : {}),
+                ...(this.dbIp ? { DROPGATE_TEST_DBIP: this.dbIp } : {}),
             }),
             // The TLS proxy's certificate is made up for the test, so the app is told to accept it.
             ignoreHTTPSErrors: Boolean(this.proxy),

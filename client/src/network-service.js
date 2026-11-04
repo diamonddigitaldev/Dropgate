@@ -10,13 +10,16 @@
 // the adapters there are, and the chosen one's state as it changes. If it
 // exits, the sessions' proxy points at nothing, so nothing connects at all.
 // It also asks a STUN server for the External IP, when main says to, and looks
-// up its country and ISP in the location data, in the folder main names as this
-// process's one argument: on the machine, with nothing sent.
+// up its country and ISP in the location data, on the machine, with nothing sent:
+// in the newest of the two folders main names as this process's arguments, the
+// app's own (its resources) and the monthly refresh's (in the profile), which it
+// downloads into when main says to (refresh-location).
 
 const { NETWORK_SERVICE } = require('./constants');
 const { NetworkService } = require('./core/network-service');
 
-const service = new NetworkService({ locationData: process.argv.at(-1), tell: (message) => process.parentPort.postMessage(message) });
+const [ownData, refreshedData] = process.argv.slice(-2);
+const service = new NetworkService({ locationData: [ownData, refreshedData], refreshInto: refreshedData, tell: (message) => process.parentPort.postMessage(message) });
 
 process.parentPort.on('message', ({ data }) => {
     switch (data?.type) {
@@ -27,6 +30,9 @@ process.parentPort.on('message', ({ data }) => {
         case NETWORK_SERVICE.CHECK_IP:
             // Nothing to tell of a failure here but main, which is what failed.
             service.checkIp(data.id, data.stun).catch(() => {});
+            break;
+        case NETWORK_SERVICE.REFRESH_LOCATION:
+            service.refreshLocation(data.month).catch(() => {});
             break;
         case NETWORK_SERVICE.STOP:
             service.stop().finally(() => process.exit(0));

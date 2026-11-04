@@ -1,9 +1,11 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const { app, net, utilityProcess } = require('electron');
-const { LOCATION_DATA_FOLDER, MAX_INTERFACE_NAME, NETWORK, NETWORK_SERVICE } = require('./constants');
+const { LOCATION_DATA_FOLDER, MAX_INTERFACE_NAME, NETWORK, NETWORK_SERVICE, REFRESHED_DATA_FOLDER } = require('./constants');
 const { ExternalIp, healthOf } = require('./core/external-ip');
+const { monthAt, monthHeld } = require('./core/location');
 
 // Main's side of a chosen adapter: the network service (network-service.js), a
 // utility process holding the SOCKS5 proxy, and the transfer session's proxy
@@ -46,6 +48,19 @@ const { ExternalIp, healthOf } = require('./core/external-ip');
 //   route.
 // - The name saved is the person's choice, the one thing it keeps. A stored one
 //   of the wrong kind is taken as a name no adapter has, never as "any".
+// - The location data's month, read here from the end of each file (its
+//   metadata alone) as the first window opens, so Settings > Network and the
+//   details can say it with nothing else running: the bottom bar starts nothing.
+//   The newest of the app's own and the monthly refresh's is the one used (the
+//   service picks it the same way); the refresh's are deleted once the app's own
+//   are as new (a newer release brought them), and as its switch goes off.
+// - The monthly refresh (locationRefresh, off by default): with the app showing
+//   a window (a share's launch asks nothing), once a run, when the data held is
+//   from an earlier month than this one (UTC, as DB-IP's files are named), the
+//   service downloads that month's through the adapter: with one chosen, once
+//   it's there. Turning the switch on is the person asking, so that goes too. A
+//   failure, or the app quitting first, is tried again at the next launch, never
+//   sooner; kept, it's used at once, and nothing more is asked that month.
 
 /** A port nothing can listen on: connecting to it fails at once. */
 const NOWHERE = 'socks5://[::1]:0';
@@ -66,6 +81,12 @@ const listOf = (list) => (Array.isArray(list) ? list : [])
 
 /** Where the location data is: in the app's resources, as the build put it; from source, beside src/. */
 const locationData = () => path.join(app.isPackaged ? process.resourcesPath : path.join(__dirname, '..'), LOCATION_DATA_FOLDER);
+
+/** Where the monthly refresh keeps what it downloads: in the profile. */
+const refreshedData = () => path.join(app.getPath('userData'), REFRESHED_DATA_FOLDER);
+
+/** This month, as DB-IP names its files: 2026-11, in UTC. */
+const thisMonth = () => monthAt(new Date(Date.now()));
 
 /**
  * Start main's side of the adapter. Call once the app is ready, before the
@@ -115,6 +136,16 @@ function createNetworkHost({
     let changing = Promise.resolve();
     /** Which of the service's reports is the newest: one that waited for the proxy is dropped if another came since. */
     let reports = 0;
+    /**
+     * The location data: the month used and the app's own, once read (null
+     * till then; a month null with none); the refresh's switch, whether it's
+     * been asked for this run, and whether it's under way.
+     */
+    let location = null;
+    let readingLocation = Promise.resolve();
+    let refreshOn = kit.settings.get().locationRefresh === true;
+    let refreshTried = false;
+    let refreshing = false;
 
     const external = new ExternalIp({
         source: stunSource,
@@ -129,7 +160,52 @@ function createNetworkHost({
         online = net.isOnline();
         const shown = name === null ? null : present;
         const view = external.view();
-        return { name, present: shown, adapters, connection: { ...view, health: healthOf({ online, name, present: shown, ...view }) } };
+        return { name, present: shown, adapters, location, connection: { ...view, health: healthOf({ online, name, present: shown, ...view }) } };
+    }
+
+    /**
+     * Read which location data is used, and its month: the refresh's while its
+     * switch is on and it's newer than the app's own, which it's deleted for
+     * otherwise. Each read after the last.
+     */
+    function readLocation() {
+        readingLocation = readingLocation.then(async () => {
+            const refreshed = refreshedData();
+            const [own, kept] = await Promise.all([monthHeld(locationData()), monthHeld(refreshed)]);
+            const used = refreshOn && kept !== null && (own === null || kept > own);
+            if (!used) {
+                await fs.promises.rm(refreshed, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+                    .catch((error) => kit.log.warn(`Couldn't delete the refreshed location data (${error?.code ?? 'error'}).`));
+            }
+            location = { month: used ? kept : own, own };
+        });
+        return readingLocation;
+    }
+
+    /** Whether the refresh is due: on, the data read (as a window opens: a share's launch reads nothing) and from before this month, and not asked for yet this run. */
+    const refreshDue = () => refreshOn && !closing && location !== null && !refreshTried
+        && (location.month === null || location.month < thisMonth());
+
+    /** Ask the service for this month's location data, if it's due and the network can carry it: with an adapter chosen, once it's there. */
+    function refreshIfDue() {
+        if (!refreshDue() || (name !== null && present !== true)) return;
+        refreshTried = true;
+        refreshing = true;
+        clearTimeout(idleTimer);
+        idleTimer = null;
+        startService();
+        // A service just started is asked once it listens.
+        if (port !== null) child.postMessage({ type: NETWORK_SERVICE.REFRESH_LOCATION, month: thisMonth() });
+    }
+
+    /** The service's word on the refresh: what's kept is read again, and used from now on. */
+    function refreshed(message) {
+        if (!refreshing) return;
+        refreshing = false;
+        if (typeof message.month === 'string') kit.log.info('The location data was refreshed.');
+        else kit.log.warn(`The location data couldn't be refreshed (${message.error === 'refused' ? "the files weren't DB-IP's" : "DB-IP couldn't be reached"}). It's tried again at the next launch.`);
+        readLocation().then(() => onChanged(state()));
+        idleSoon();
     }
 
     /** The network as the External IP goes through it: the chosen adapter's addresses, or with none, every adapter's. */
@@ -186,6 +262,7 @@ function createNetworkHost({
                     applyProxy();
                     child.postMessage({ type: NETWORK_SERVICE.SET_INTERFACE, name });
                 }
+                if (refreshing) child.postMessage({ type: NETWORK_SERVICE.REFRESH_LOCATION, month: thisMonth() });
                 break;
             case NETWORK_SERVICE.ADAPTERS:
                 adapters = listOf(message.list);
@@ -209,6 +286,7 @@ function createNetworkHost({
                     present = true;
                     settle();
                     external.networkIs(JSON.stringify(message.addresses));
+                    refreshIfDue();
                     onChanged(state());
                 });
                 break;
@@ -216,13 +294,16 @@ function createNetworkHost({
             case NETWORK_SERVICE.IP_RESULT:
                 external.heard(message);
                 break;
+            case NETWORK_SERVICE.LOCATION_REFRESHED:
+                refreshed(message);
+                break;
             default:
                 break;
         }
     }
 
     /** Whether the service is needed now. */
-    const needed = () => !closing && (name !== null || watching || external.on);
+    const needed = () => !closing && (name !== null || watching || external.on || refreshing);
 
     /** The OS's word on being online has no event: read while the service runs, and told as it changes. */
     function readOnline() {
@@ -249,7 +330,7 @@ function createNetworkHost({
         clearTimeout(restartTimer);
         restartTimer = null;
         if (child || !(asked || needed())) return;
-        const started = utilityProcess.fork(path.join(__dirname, 'network-service.js'), [locationData()], {
+        const started = utilityProcess.fork(path.join(__dirname, 'network-service.js'), [locationData(), refreshedData()], {
             serviceName: 'Dropgate Client Network Service',
             stdio: 'ignore',
         });
@@ -275,6 +356,8 @@ function createNetworkHost({
         proxyHost = null;
         adapters = null;
         external.networkIs(null);
+        // A refresh it took with it is tried at the next launch.
+        refreshing = false;
         if (closing) return;
         if (name !== null) {
             applyProxy();
@@ -386,12 +469,28 @@ function createNetworkHost({
         state,
         refusal,
 
-        /** A window has opened: the check, if its switch is on, runs from here. */
+        /** A window has opened: the check, if its switch is on, runs from here; the location data is read, and refreshed if it's due. */
         windowOpened() {
             if (windowed) return;
             windowed = true;
             followOnline();
             applyCheck();
+            readLocation().then(() => {
+                refreshIfDue();
+                onChanged(state());
+            });
+        },
+
+        /**
+         * Refresh location data monthly, as the switch is now: on, it's refreshed
+         * now if it's due; off, the refresh's files go, and the app's own are used.
+         * @param {boolean} on
+         */
+        setRefresh(on) {
+            if (on === refreshOn) return;
+            refreshOn = on;
+            if (on) refreshIfDue();
+            else if (windowed) readLocation().then(() => onChanged(state()));
         },
 
         /**

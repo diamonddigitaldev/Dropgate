@@ -6,6 +6,7 @@ const { NETWORK, NETWORK_SERVICE } = require('../constants');
 const { AdapterWatch, hasIpv6, isLoopback } = require('./adapters');
 const { BoundResolver, adapterServers, serverAddress, serversFor, systemServers } = require('./bound-dns');
 const { lookUp } = require('./location');
+const { refreshLocation } = require('./location-refresh');
 const { RouteCheck } = require('./routes');
 const { REPLY, readRequest, reply } = require('./socks5');
 const { askBinding, stunTargetOf } = require('./stun');
@@ -39,8 +40,13 @@ const { askBinding, stunTargetOf } = require('./stun');
 //   moment the adapter goes or changes. With no adapter chosen, it goes as the OS
 //   routes it, and it's the one thing that goes at all. Main hears the answer,
 //   and nothing here keeps it. Its country and ISP are looked up on the
-//   machine (location.js), and come with it, sending nothing.
-// It sends nothing else of its own, keeps nothing on disk and logs nothing.
+//   machine (location.js), in the newest location data held, and come with it,
+//   sending nothing.
+// - The location data's monthly refresh: only when main asks (refresh-location),
+//   that month's two files from DB-IP (location-refresh.js), each connection held
+//   as the External IP's are, kept in the profile only if both are DB-IP's.
+//   Called off as the adapter goes or changes.
+// It sends nothing else of its own, keeps nothing else on disk and logs nothing.
 
 /**
  * Where the proxy listens: IPv6 loopback, else IPv4's. Chromium looks up
@@ -83,15 +89,23 @@ class NetworkService {
      * @param {readonly string[]} [options.loopbacks] - where the proxy may listen, in order
      * @param {number} [options.stunMs] - how long a STUN server is given to answer
      * @param {typeof dns.promises.lookup} [options.osLookup] - the OS's resolver, for the External IP with no adapter chosen
-     * @param {string | null} [options.locationData] - the folder of the location data, for the External IP's country and ISP
+     * @param {string | string[] | null} [options.locationData] - the location data's folders, for the External IP's country and ISP: the newest held is used
+     * @param {string | null} [options.refreshInto] - where the monthly refresh keeps what it downloads
+     * @param {string} [options.locationBase] - DB-IP's address for its files
+     * @param {typeof import('https').request} [options.request] - how the refresh asks for them
+     * @param {number} [options.minNodes] - the fewest nodes a refreshed file may have
      * @param {(message: object) => void} [options.tell] - to main
      */
     constructor({
         list, watchMs, platform = process.platform, routes = platform === 'linux' ? new RouteCheck() : null,
         ownServers = (name) => adapterServers(name, platform), systemServers: system = () => systemServers(platform),
         resolver = new BoundResolver(), loopbacks = LOOPBACKS, stunMs = NETWORK.STUN_MS, osLookup = dns.promises.lookup, locationData = null, tell = () => {},
+        refreshInto = null, locationBase, request, minNodes,
     } = {}) {
         this.locationData = locationData;
+        this.refresh = { into: refreshInto, base: locationBase, request, minNodes };
+        /** The refresh under way: what stops it. */
+        this.refreshing = null;
         this.loopbacks = loopbacks;
         this.routes = routes;
         this.ownServers = ownServers;
@@ -162,6 +176,7 @@ class NetworkService {
         this.name = name;
         this.own = [];
         this.callOffIpCheck();
+        this.callOffRefresh();
         this.close(() => true);
         this.routes?.clear();
         this.reading = name === null ? Promise.resolve() : this.readServers(name);
@@ -180,12 +195,17 @@ class NetworkService {
         // A STUN request can't go, or come back, by a route it no longer has. Main asks again.
         this.callOffIpCheck();
         if (!state.present) {
+            // Nor can a refresh, which waits for the next launch.
+            this.callOffRefresh();
             this.close(() => true);
             if (before.v4 || before.v6) this.tell({ type: NETWORK_SERVICE.GONE, name: state.name });
         } else {
             // A family whose address went or changed: its connections go, and those still opening.
             const moved = [4, 6].filter((family) => (family === 4 ? before.v4 : before.v6) && (family === 4 ? before.v4 !== state.addresses.v4 : before.v6 !== state.addresses.v6));
-            if (moved.length > 0) this.close((entry) => entry.family === null || (entry.local && moved.includes(entry.family)));
+            if (moved.length > 0) {
+                this.close((entry) => entry.family === null || (entry.local && moved.includes(entry.family)));
+                this.callOffRefresh();
+            }
             // A VPN that reconnects may come back with other DNS servers.
             if (before.v4 || before.v6) this.reading = this.readServers(state.name);
         }
@@ -344,6 +364,37 @@ class NetworkService {
         this.ipCheck = null;
     }
 
+    /**
+     * Download the location data of this month, through the adapter (as the OS
+     * routes it, with none chosen), and keep it if both files are DB-IP's: main
+     * is told the month kept, or that nothing was. One under way, nothing more
+     * is asked.
+     * @param {string} month - As 2026-11.
+     */
+    async refreshLocation(month) {
+        if (this.refreshing) return;
+        const controller = new AbortController();
+        this.refreshing = controller;
+        // With an adapter chosen, it's held as a connection is: refused while it's gone.
+        const route = (host) => (this.name === null ? Promise.resolve(null) : this.destination(host));
+        let told;
+        try {
+            if (!this.refresh.into || !/^\d{4}-(?:0[1-9]|1[0-2])$/.test(String(month))) throw new Error('Nothing to refresh.');
+            const { into: folder, base, request, minNodes } = this.refresh;
+            told = { month: await refreshLocation({ month, folder, route, signal: controller.signal, request, base, minNodes }) };
+        } catch (error) {
+            told = { error: error?.refused ? 'refused' : 'unreachable' };
+        }
+        if (this.refreshing === controller) this.refreshing = null;
+        this.tell({ type: NETWORK_SERVICE.LOCATION_REFRESHED, ...told });
+    }
+
+    /** Stop the refresh under way, keeping nothing: main hears it failed, and it's tried at the next launch. */
+    callOffRefresh() {
+        this.refreshing?.abort(Object.assign(new Error('Called off.'), { code: 'ECANCELED' }));
+        this.refreshing = null;
+    }
+
     /** One client of the proxy: its request read, its destination opened, then the two piped together. */
     async serve(client) {
         const entry = { client, upstream: null, family: null, local: null };
@@ -403,6 +454,7 @@ class NetworkService {
         this.watch.stop();
         this.name = null;
         this.callOffIpCheck();
+        this.callOffRefresh();
         this.close(() => true);
         await new Promise((resolve) => this.server.close(() => resolve()));
     }

@@ -7,6 +7,7 @@
 // channel as a page would, from a frame showing one of the client's pages in
 // one of the sessions.
 import Module, { createRequire } from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -34,8 +35,12 @@ function loadWith(file, electron) {
     }
 }
 
+/** Each stand-in main's own profile folder (userData), made only by what writes to it. */
+let profiles = 0;
+
 /** A stand-in main process, with the kit's IPC checks, for one test. */
 export function fakeMain({ settings = {} } = {}) {
+    const userData = path.join(os.tmpdir(), `dropgate-fake-profile-${process.pid}-${++profiles}`);
     /** @type {Map<string, Function>} ipcMain's handlers, by channel. */
     const handlers = new Map();
     const uiSession = { name: 'ui' };
@@ -96,7 +101,7 @@ export function fakeMain({ settings = {} } = {}) {
     }
 
     const electron = {
-        app: { getAppPath: () => CLIENT },
+        app: { getAppPath: () => CLIENT, getPath: (name) => (name === 'userData' ? userData : path.join(userData, name)) },
         net: { isOnline: () => true },
         session: { defaultSession: uiSession },
         ipcMain: {

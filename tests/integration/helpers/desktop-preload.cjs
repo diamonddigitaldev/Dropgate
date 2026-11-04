@@ -88,6 +88,27 @@ if (!DOWNLOADS || !path.isAbsolute(DOWNLOADS)) throw new Error("DROPGATE_TEST_DO
 const getPath = app.getPath.bind(app);
 app.getPath = (name) => (name === 'downloads' ? DOWNLOADS : getPath(name));
 
+// The location data in the app's resources (from source, client/location-data,
+// which may hold DB-IP's real files) is the test's own small databases
+// (DROPGATE_TEST_LOCATION_DATA), and not there unless the test writes some: for
+// main, which reads its month, and for the network service, which is named the
+// folder. The packaged build's tests set none, so it reads what the build put in
+// its resources. The monthly refresh's, in the profile, is the app's own.
+const LOCATION_DATA = process.env.DROPGATE_TEST_LOCATION_DATA;
+const RESOURCES_DATA = path.resolve(__dirname, '../../../client/location-data');
+const sameFolder = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+/** A path in the resources' location data, as the test's; any other as it is. */
+const locationPath = (file) => {
+    if (!LOCATION_DATA || typeof file !== 'string') return file;
+    const resolved = path.resolve(file);
+    if (sameFolder(resolved, RESOURCES_DATA)) return LOCATION_DATA;
+    return sameFolder(path.dirname(resolved), RESOURCES_DATA) ? path.join(LOCATION_DATA, path.basename(resolved)) : file;
+};
+const openFile = fs.promises.open;
+fs.promises.open = function (file, ...rest) {
+    return openFile.call(this, locationPath(file), ...rest);
+};
+
 // The system's folder picker is answered by the test: the folder it sets in
 // globalThis.__dropgateFolderPick (app.evaluate()), or none (cancelled), so a
 // test never waits on a dialog. Every one asked is written down.
@@ -322,7 +343,7 @@ const fork = utilityProcess.fork;
 utilityProcess.fork = function (modulePath, forkArgs = [], options = {}) {
     const name = path.basename(modulePath);
     const child = name === 'network-service.js'
-        ? fork.call(this, NETWORK_STAND_IN, [modulePath, ...forkArgs], options)
+        ? fork.call(this, NETWORK_STAND_IN, [modulePath, ...forkArgs.map(locationPath)], options)
         : fork.call(this, modulePath, forkArgs, options);
     record({ event: 'utility', name });
     if (name === 'network-service.js') globalThis.__dropgateNetworkService = child;

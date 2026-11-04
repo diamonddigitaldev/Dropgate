@@ -7,9 +7,15 @@
 // - the system's DNS server, with DROPGATE_TEST_DNS, is the test's responder.
 //   On Linux, systemd-resolved's upstream servers would be asked instead of a
 //   server on the machine, so that file reads as not there;
-// - the location data, with DROPGATE_TEST_LOCATION_DATA, is the test's own small
-//   databases, in place of the folder main named, its last argument. (The packaged
-//   build's tests set none, so it reads what the build put in its resources.)
+// - DB-IP's downloads (the location data's monthly refresh) go to the test's
+//   stand-in for db-ip.com (DROPGATE_TEST_DBIP, dbip.mjs), over plain HTTP, with
+//   everything else as the service made them: the address it binds to, and with
+//   an adapter chosen, the address it looked download.db-ip.com up as, through
+//   the adapter (the test's DNS server answers the stand-in's). With no stand-in,
+//   they're refused on this machine. Nothing reaches db-ip.com.
+// (The location data, with DROPGATE_TEST_LOCATION_DATA, is the test's own small
+// databases in place of the app's resources: desktop-preload.cjs names that
+// folder in the service's arguments.)
 // With DROPGATE_TEST_EVENTS, everything the service tries to send is written down
 // there as it's tried, as { event: 'service-network', how, to }: a datagram, a
 // connection, a name looked up by the OS or asked of a DNS server, or a request
@@ -25,7 +31,33 @@ const https = require('node:https');
 const net = require('node:net');
 const os = require('node:os');
 
-const entry = process.argv.at(-2);
+// Its arguments: the real entry, then main's two, the location data's folders.
+const entry = process.argv.at(-3);
+
+/** DB-IP's host: its requests go to the test's stand-in, or nowhere. */
+const DBIP_HOST = 'download.db-ip.com';
+
+/** Send each request for DB-IP's files to the stand-in, and the rest on as they were. */
+function redirectDbIp() {
+    const plain = http.request;
+    const secure = https.request;
+    https.request = function (first, ...rest) {
+        const url = first instanceof URL ? first : typeof first === 'string' ? new URL(first) : null;
+        if (url?.hostname !== DBIP_HOST) return secure.call(this, first, ...rest);
+        const [options = {}, callback] = typeof rest[0] === 'function' ? [{}, rest[0]] : rest;
+        // With no stand-in, a port on this machine nothing answers.
+        const standIn = new URL(process.env.DROPGATE_TEST_DBIP || 'http://127.0.0.1:9');
+        return plain.call(this, {
+            ...options,
+            protocol: 'http:',
+            // Looked up through the adapter, the address the service found is kept; with none, the OS isn't asked.
+            hostname: options.lookup ? url.hostname : standIn.hostname,
+            port: standIn.port,
+            path: `${url.pathname}${url.search}`,
+            headers: { ...options.headers, host: url.host },
+        }, callback);
+    };
+}
 
 /** Write down each call of this, with where it's going, and carry on. */
 function noteCalls(holder, name, how, to) {
@@ -41,7 +73,8 @@ function noteCalls(holder, name, how, to) {
 if (process.env.DROPGATE_TEST_NETWORK_SILENT === '1') {
     setInterval(() => {}, 60_000);
 } else {
-    if (process.env.DROPGATE_TEST_LOCATION_DATA) process.argv[process.argv.length - 1] = process.env.DROPGATE_TEST_LOCATION_DATA;
+    // Before the watch, so it's the service's own request that's written down.
+    redirectDbIp();
     // A STUN request's socket is connected first, then sends with no address.
     noteCalls(dgram.Socket.prototype, 'connect', 'datagram-to', (port, address) => `${port} ${address}`);
     noteCalls(dgram.Socket.prototype, 'send', 'datagram', (...args) => args.filter((arg) => ['string', 'number'].includes(typeof arg)).slice(-2).join(' '));

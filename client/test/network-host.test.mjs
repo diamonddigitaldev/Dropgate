@@ -1,15 +1,19 @@
 // Main's side of a chosen adapter (src/network-host.js), loaded in plain Node
 // with a stand-in for Electron (helpers/main-process.mjs) and its clock mocked:
 // when the network service runs, what the transfer session's proxy is, what
-// main is told as the adapter goes, and which names are taken. The service
+// main is told as the adapter goes, and which names are taken; and the location
+// data's month and its monthly refresh, on folders of the test's own. The service
 // itself is network-service.test.mjs's; the two together are the desktop
 // project's desktop/network.spec.mjs.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
 import { mock, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { fakeMain } from './helpers/main-process.mjs';
+import { monthFromNow, writeLocationData } from './helpers/mmdb.mjs';
 
 const CLIENT = fileURLToPath(new URL('..', import.meta.url));
 const require = createRequire(import.meta.url);
@@ -30,10 +34,11 @@ const settled = async () => {
 /** A default server's STUN server, as main reads it from its last check. */
 const STUN = { url: 'stun:stun.example:3478', stun: 'stun.example', server: 'Share Space' };
 
-function setUp({ name = null, commandLine = {}, updaterRefuses = false, check = false, bar = false, source = STUN, isPackaged = false } = {}) {
-    const main = fakeMain({ settings: { networkInterface: name, externalIpCheck: check, networkBar: bar } });
+function setUp({ name = null, commandLine = {}, updaterRefuses = false, check = false, bar = false, refresh = false, source = STUN, isPackaged = false, userData = null } = {}) {
+    const main = fakeMain({ settings: { networkInterface: name, externalIpCheck: check, networkBar: bar, locationRefresh: refresh } });
     main.electron.app.commandLine = { hasSwitch: (which) => commandLine[which] === true };
     main.electron.app.isPackaged = isPackaged;
+    if (userData) main.electron.app.getPath = (which) => (which === 'userData' ? userData : path.join(userData, which));
     let online = true;
     main.electron.net.isOnline = () => online;
     const set = [];
@@ -726,20 +731,215 @@ test('what it finds is never written or logged: main holds it, and only the wind
     assert.deepEqual(logged, [], 'the log');
 });
 
-test('18.14: the service is told where the location data is, as its one argument: the app\'s resources once packaged, beside src/ from source', async (t) => {
+test('18.14, 18.16: the service is told where the location data is, as its two arguments: the app\'s resources (once packaged; beside src/ from source), then the refresh\'s, in the profile', async (t) => {
     timers(t);
-    const fromSource = setUp({ check: true });
+    const profile = path.join(os.tmpdir(), 'stand-in-profile');
+    const fromSource = setUp({ check: true, userData: profile });
     fromSource.network.windowOpened();
     const [unpackaged] = fromSource.main.processes;
-    assert.equal(unpackaged.args.length, 1);
+    assert.equal(unpackaged.args.length, 2);
     assert.equal(path.relative(CLIENT, unpackaged.args[0]), 'location-data');
+    assert.equal(unpackaged.args[1], path.join(profile, 'Location Data'));
 
     const resources = path.join(CLIENT, 'stand-in-resources');
     process.resourcesPath = resources;
     t.after(() => { delete process.resourcesPath; });
-    const packaged = setUp({ check: true, isPackaged: true });
+    const packaged = setUp({ check: true, isPackaged: true, userData: profile });
     packaged.network.windowOpened();
-    assert.deepEqual(packaged.main.processes[0].args, [path.join(resources, 'location-data')]);
+    assert.deepEqual(packaged.main.processes[0].args, [path.join(resources, 'location-data'), path.join(profile, 'Location Data')]);
+});
+
+// --- The location data's month and its monthly refresh (`09` 18.16) ---
+
+const PLACES = { '203.0.113.42': { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 } };
+const THIS_MONTH = monthFromNow(0);
+const LAST_MONTH = monthFromNow(-1);
+
+/** The app's resources and its profile, as folders of the test's own: the app's own data of one month, and the refresh's of another, if any. */
+function locationFolders(t, { own = null, refreshed = null } = {}) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-host-location-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const resources = path.join(root, 'resources');
+    const userData = path.join(root, 'profile');
+    process.resourcesPath = resources;
+    t.after(() => { delete process.resourcesPath; });
+    if (own) writeLocationData(path.join(resources, 'location-data'), PLACES, { month: own });
+    if (refreshed) writeLocationData(path.join(userData, 'Location Data'), PLACES, { month: refreshed });
+    return { userData, refreshedData: path.join(userData, 'Location Data') };
+}
+
+/** Wait, letting files be read, until this holds, 5 s at most: the mocked clock isn't moved. */
+async function until(holds, what) {
+    const end = Date.now() + 5_000;
+    while (!holds() && Date.now() < end) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(holds(), what);
+}
+
+/** What the service was asked of the location data. */
+const refreshesOf = (main) => main.processes.flatMap((child) => child.messages).filter(({ type }) => type === NETWORK_SERVICE.REFRESH_LOCATION);
+
+test('18.16: off (the default), nothing is asked for it, whatever the month held; the month is read as the window opens, with nothing started; a refresh\'s files left from before are deleted', async (t) => {
+    timers(t);
+    const { userData, refreshedData } = locationFolders(t, { own: LAST_MONTH, refreshed: THIS_MONTH });
+    const { main, network, changes } = setUp({ isPackaged: true, userData });
+    assert.equal(network.state().location, null, 'not read before a window');
+    network.windowOpened();
+    await until(() => network.state().location !== null, 'the month read');
+    assert.deepEqual(network.state().location, { month: LAST_MONTH, own: LAST_MONTH }, "the app's own: the refresh is off");
+    await until(() => changes.at(-1)?.location !== null && changes.at(-1)?.location !== undefined, 'the window told');
+    assert.deepEqual(changes.at(-1).location, { month: LAST_MONTH, own: LAST_MONTH });
+    assert.equal(fs.existsSync(refreshedData), false, "the refresh's files, deleted");
+    mock.timers.tick(NETWORK.IDLE_MS * 10);
+    assert.deepEqual(main.processes, [], 'nothing started for it');
+    assert.deepEqual(refreshesOf(main), []);
+});
+
+test('18.16: with no data at all (from source, nothing fetched), the month is none', async (t) => {
+    timers(t);
+    const { userData } = locationFolders(t);
+    const { network } = setUp({ isPackaged: true, userData });
+    network.windowOpened();
+    await until(() => network.state().location !== null, 'read');
+    assert.deepEqual(network.state().location, { month: null, own: null });
+});
+
+test('18.16: on, with the data from an earlier month, the service is asked once for this month as the first window opens, once it listens; kept, it\'s used at once, and nothing more is asked that month', async (t) => {
+    timers(t);
+    const { userData, refreshedData } = locationFolders(t, { own: LAST_MONTH });
+    const { main, network, listening, tell, changes, logged } = setUp({ isPackaged: true, userData, refresh: true });
+    await settled();
+    assert.deepEqual(main.processes, [], 'a share asks nothing');
+    network.windowOpened();
+    await until(() => main.processes.length === 1, 'the service started for it');
+    assert.deepEqual(refreshesOf(main), [], 'not before it listens');
+    await listening();
+    assert.deepEqual(refreshesOf(main), [{ type: NETWORK_SERVICE.REFRESH_LOCATION, month: THIS_MONTH }]);
+    mock.timers.tick(NETWORK.IDLE_MS * 2);
+    assert.ok(!main.processes[0].messages.some(({ type }) => type === NETWORK_SERVICE.STOP), 'kept running while it downloads');
+
+    // The service kept this month's: main reads it, and it's the one used.
+    writeLocationData(refreshedData, PLACES, { month: THIS_MONTH });
+    await tell({ type: NETWORK_SERVICE.LOCATION_REFRESHED, month: THIS_MONTH });
+    await until(() => network.state().location?.month === THIS_MONTH, 'used at once');
+    assert.deepEqual(network.state().location, { month: THIS_MONTH, own: LAST_MONTH });
+    await until(() => changes.at(-1)?.location?.month === THIS_MONTH, 'the window told');
+    assert.ok(logged.includes('The location data was refreshed.'));
+    mock.timers.tick(NETWORK.IDLE_MS);
+    assert.deepEqual(main.processes[0].messages.at(-1), { type: NETWORK_SERVICE.STOP }, 'with nothing else needing it, it stops');
+
+    // Not again that month: off and on, or another launch.
+    network.setRefresh(false);
+    await until(() => !fs.existsSync(refreshedData), "off, the refresh's files go");
+    await until(() => network.state().location?.month === LAST_MONTH, "off, the app's own are used");
+    network.setRefresh(true);
+    await settled();
+    assert.equal(refreshesOf(main).length, 1, 'asked once this run');
+    writeLocationData(refreshedData, PLACES, { month: THIS_MONTH });
+    const again = setUp({ isPackaged: true, userData, refresh: true });
+    again.network.windowOpened();
+    await until(() => again.network.state().location !== null, 'read');
+    assert.deepEqual(again.network.state().location, { month: THIS_MONTH, own: LAST_MONTH });
+    await settled();
+    assert.deepEqual(again.main.processes, [], "nothing asked: the data is this month's");
+});
+
+test('18.16: a failure, the files refused, or the service exiting with it, is tried again at the next launch, never sooner: not by the switch, not by another window', async (t) => {
+    timers(t);
+    const { userData } = locationFolders(t, { own: LAST_MONTH });
+    for (const ending of [{ error: 'unreachable' }, { error: 'refused' }, 'exit']) {
+        const { main, network, listening, tell, logged } = setUp({ isPackaged: true, userData, refresh: true });
+        network.windowOpened();
+        await until(() => main.processes.length === 1, 'started');
+        await listening();
+        assert.equal(refreshesOf(main).length, 1);
+        if (ending === 'exit') {
+            main.processes[0].emit('exit', 1);
+            mock.timers.tick(NETWORK.RESTART_MS);
+            assert.equal(main.processes.length, 1, 'not started again for it');
+        } else {
+            await tell({ type: NETWORK_SERVICE.LOCATION_REFRESHED, ...ending });
+            assert.match(logged.at(-1), ending.error === 'refused' ? /the files weren't DB-IP's\). It's tried again at the next launch\.$/ : /DB-IP couldn't be reached\). It's tried again at the next launch\.$/);
+        }
+        await until(() => network.state().location?.month === LAST_MONTH, 'the old data kept');
+        network.setRefresh(false);
+        network.setRefresh(true);
+        network.windowOpened();
+        await settled();
+        assert.equal(refreshesOf(main).length, 1, `${JSON.stringify(ending)}: once this run`);
+    }
+    const next = setUp({ isPackaged: true, userData, refresh: true });
+    next.network.windowOpened();
+    await until(() => next.main.processes.length === 1, 'the next launch tries again');
+});
+
+test('18.16: turned on, it\'s the person asking: refreshed then if it\'s due; not if the data held is this month\'s', async (t) => {
+    timers(t);
+    const { userData } = locationFolders(t, { own: LAST_MONTH });
+    const { main, network, listening } = setUp({ isPackaged: true, userData });
+    network.windowOpened();
+    await until(() => network.state().location !== null, 'read');
+    assert.deepEqual(main.processes, []);
+    network.setRefresh(true);
+    assert.equal(main.processes.length, 1, 'started for it');
+    await listening();
+    assert.deepEqual(refreshesOf(main), [{ type: NETWORK_SERVICE.REFRESH_LOCATION, month: THIS_MONTH }]);
+
+    const current = locationFolders(t, { own: THIS_MONTH });
+    const fresh = setUp({ isPackaged: true, userData: current.userData });
+    fresh.network.windowOpened();
+    await until(() => fresh.network.state().location !== null, 'read');
+    fresh.network.setRefresh(true);
+    await settled();
+    assert.deepEqual(fresh.main.processes, [], 'nothing due');
+});
+
+test('18.16: with an adapter chosen, it\'s asked once the adapter\'s there, never while it isn\'t', async (t) => {
+    timers(t);
+    const { userData } = locationFolders(t, { own: LAST_MONTH });
+    const { main, network, listening, there, gone } = setUp({ isPackaged: true, userData, refresh: true, name: ADAPTER });
+    network.windowOpened();
+    await until(() => network.state().location !== null, 'read');
+    await listening();
+    await gone();
+    await settled();
+    assert.deepEqual(refreshesOf(main), [], 'gone: nothing asked');
+    await there();
+    await until(() => refreshesOf(main).length === 1, "asked once it's there");
+    await gone();
+    await there();
+    await settled();
+    assert.equal(refreshesOf(main).length, 1);
+});
+
+test('18.16: the newest month wins: the refresh\'s while it\'s newer than the app\'s own; a newer release\'s own replaces it, which is deleted; one cut off between its files isn\'t whole', async (t) => {
+    timers(t);
+    const newer = locationFolders(t, { own: LAST_MONTH, refreshed: THIS_MONTH });
+    const kept = setUp({ isPackaged: true, userData: newer.userData, refresh: true });
+    kept.network.windowOpened();
+    await until(() => kept.network.state().location !== null, 'read');
+    assert.deepEqual(kept.network.state().location, { month: THIS_MONTH, own: LAST_MONTH });
+    assert.ok(fs.existsSync(newer.refreshedData));
+    await settled();
+    assert.deepEqual(kept.main.processes, [], 'nothing due');
+
+    const release = locationFolders(t, { own: THIS_MONTH, refreshed: LAST_MONTH });
+    const replaced = setUp({ isPackaged: true, userData: release.userData, refresh: true });
+    replaced.network.windowOpened();
+    await until(() => replaced.network.state().location !== null, 'read');
+    assert.deepEqual(replaced.network.state().location, { month: THIS_MONTH, own: THIS_MONTH });
+    assert.equal(fs.existsSync(release.refreshedData), false, 'the older, deleted');
+    assert.deepEqual(replaced.main.processes, [], 'nothing due');
+
+    // A refresh cut off between its two files isn't whole: the app's own are used, and it's due again.
+    const cut = locationFolders(t, { own: LAST_MONTH, refreshed: THIS_MONTH });
+    const older = locationFolders(t, { refreshed: LAST_MONTH });
+    fs.copyFileSync(path.join(older.refreshedData, 'dbip-asn-lite.mmdb'), path.join(cut.refreshedData, 'dbip-asn-lite.mmdb'));
+    process.resourcesPath = path.join(path.dirname(cut.userData), 'resources');
+    const partial = setUp({ isPackaged: true, userData: cut.userData, refresh: true });
+    partial.network.windowOpened();
+    await until(() => partial.network.state().location !== null, 'read');
+    assert.deepEqual(partial.network.state().location, { month: LAST_MONTH, own: LAST_MONTH });
+    await until(() => partial.main.processes.length === 1, 'due again');
 });
 
 test('network:set-interface and network:watch take only what they should, and the setting only a name or null', () => {

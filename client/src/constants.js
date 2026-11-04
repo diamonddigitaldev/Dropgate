@@ -135,6 +135,7 @@ const NETWORK_SERVICE = Object.freeze({
     // Main to the service.
     SET_INTERFACE: 'set-interface',             // { name: string | null }: the adapter chosen, by name; null for none, and every connection is refused
     CHECK_IP: 'check-ip',                       // { id, stun }: ask this stun: URL for the External IP, through the adapter chosen, or with none as the OS routes it
+    REFRESH_LOCATION: 'refresh-location',       // { month }: download DB-IP's two files of that month (2026-11), through the adapter chosen, or with none as the OS routes it, and keep them only if both are DB-IP's
     STOP: 'stop',                               // (): close everything, and exit
     // The service to main.
     LISTENING: 'listening',                     // { port, host }: the proxy, on the machine's loopback: ::1, else 127.0.0.1
@@ -142,6 +143,7 @@ const NETWORK_SERVICE = Object.freeze({
     STATE: 'state',                             // { name, present, addresses: { v4, v6 } }: the chosen adapter, as it is now, whenever that changes
     GONE: 'gone',                               // { name }: the chosen adapter has gone, and every connection through it is closed
     IP_RESULT: 'ip-result',                     // { id, v4, v6, latency, location? } (null for a family with no answer; location: { month, v4, v6 }, each { code, country, isp, asn } or null, with data to look in), or { id, error: 'timeout' | 'unreachable' }: main's memory only, never written or logged
+    LOCATION_REFRESHED: 'location-refreshed',   // { month } once both files are checked and kept, or { error: 'unreachable' | 'refused' }: nothing was kept
 });
 
 /**
@@ -149,6 +151,13 @@ const NETWORK_SERVICE = Object.freeze({
  * once scripts/location-data.cjs has fetched it): its two files are never committed.
  */
 const LOCATION_DATA_FOLDER = 'location-data';
+
+/**
+ * Where the monthly refresh keeps DB-IP's files, in the app's profile (userData):
+ * used while they're newer than the app's own, and deleted once they aren't, or
+ * as the refresh is turned off.
+ */
+const REFRESHED_DATA_FOLDER = 'Location Data';
 
 /**
  * The code a transfer fails with, and a server check answers, while the chosen
@@ -312,6 +321,6 @@ const TRANSFERS = Object.freeze({
 });
 
 module.exports = {
-    APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, NETWORK_SERVICE, NETWORK, INTERFACE_UNAVAILABLE, INTERFACE_CHANGED, LOCATION_DATA_FOLDER, PARTIAL_FOLDER, READ_PIECE_BYTES,
+    APP_NAME, IPC, PUSHES, ENGINE, ENGINE_PUSHES, FILE_SERVICE, NETWORK_SERVICE, NETWORK, INTERFACE_UNAVAILABLE, INTERFACE_CHANGED, LOCATION_DATA_FOLDER, REFRESHED_DATA_FOLDER, PARTIAL_FOLDER, READ_PIECE_BYTES,
     SETTINGS_DEFAULTS, MAIN_ONLY_SETTINGS, AT_ONCE_RANGE, MAX_INTERFACE_NAME, SETTINGS_CHECKS, SETTINGS_SCHEMA_VERSION, migrateSettings, V3_STORE_KEYS, WINDOW, BATCH_DEBOUNCE_MS, TRANSFERS,
 };

@@ -1518,9 +1518,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         // main does, as it's asked, and only to one the network service lists now.
         const OS = navigator.userAgent.includes('Windows') ? 'Windows' : 'Linux';
         const interfaceSelect = $('network-interface');
-        /** The network as main last said: the adapter chosen, whether it's there, the adapters listed while the tab shows, and the connection. */
+        /** The network as main last said: the adapter chosen, whether it's there, the adapters listed while the tab shows, the location data's month, and the connection. */
         let network = {
-            name: null, present: null, adapters: null, connection: { on: false, checking: false, result: null, stun: null, server: null, health: { tone: 'running', text: 'Checking…', short: 'Checking…', title: 'Checking…' } },
+            name: null, present: null, adapters: null, location: null, connection: { on: false, checking: false, result: null, stun: null, server: null, health: { tone: 'running', text: 'Checking…', short: 'Checking…', title: 'Checking…' } },
         };
 
         /** An adapter's address to show: its IPv4 one, else one with no scope. */
@@ -1544,6 +1544,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (gone) help = `${name} isn't connected, so Dropgate connects through nothing. Connect it again, or choose another adapter.`;
             else if (name !== null) help = `Dropgate connects only through ${name}, and looks names up through it too. If it disconnects, every transfer stops at once and nothing connects until it's back: Dropgate never uses another adapter.`;
             $('network-interface-help').textContent = help;
+            drawLocation(network.location);
             drawConnection(network.connection);
         }
 
@@ -1674,7 +1675,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             $('details-facts').replaceChildren(...facts);
             $('details-warning').hidden = !(shows && warning);
             $('details-warning-text').textContent = shows && warning ? warning : '';
-            const month = result?.ok ? result.month : null;
+            // The month main read as the window opened; until then, the one the last check looked in.
+            const month = network.location?.month ?? (result?.ok ? result.month : null);
             $('details-data').hidden = !month;
             $('details-data').textContent = month ? `Location data: DB-IP, ${monthName(month)}` : '';
         }
@@ -1775,6 +1777,40 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (focused) externalIpSwitch.input.focus();
         }
 
+        // The Location Data card: where country and ISP come from, and the month, as
+        // main read it (nothing shows till then), and Refresh location data monthly,
+        // off by default. Off, the app's own data is used (main deletes any
+        // refreshed), so its month is the one said; its help names it, so the
+        // switch is made again when that's known: the kit's keeps its words.
+        let refreshSwitch = null;
+        let refreshOffHelp = null;
+        function drawLocation(location) {
+            const on = refreshSwitch ? refreshSwitch.input.checked : settings.locationRefresh === true;
+            const month = on ? location?.month : location?.own;
+            const line = $('location-data-line');
+            if (!location) line.textContent = '';
+            else if (!month) line.textContent = "This copy of Dropgate has no location data, so country and ISP aren't shown.";
+            else if (on) line.textContent = `Country and ISP come from DB-IP's free location data, ${monthName(month)}, refreshed on the 1st. Your IP address isn't sent anywhere to look them up.`;
+            else line.textContent = `Country and ISP come from DB-IP's free location data, ${monthName(month)}, which came with this version. Your IP address isn't sent anywhere to look them up.`;
+
+            const offHelp = `Dropgate uses the location data that came with this version${location?.own ? ` (${monthName(location.own)})` : ''}.`;
+            if (offHelp === refreshOffHelp) return;
+            refreshOffHelp = offHelp;
+            const focused = refreshSwitch && document.activeElement === refreshSwitch.input;
+            refreshSwitch = kit.ui.switchField({
+                id: 'location-refresh',
+                label: 'Refresh location data monthly',
+                checked: on,
+                help: { on: "Once a month, Dropgate downloads DB-IP's newest location data from db-ip.com, which sees your IP address.", off: offHelp },
+                onChange: (checked) => {
+                    kitApi.setSettings({ locationRefresh: checked });
+                    drawLocation(network.location);
+                },
+            });
+            $('location-refresh-switch').replaceChildren(refreshSwitch.element);
+            if (focused) refreshSwitch.input.focus();
+        }
+
         // The bottom bar's switches: the bar itself, on the Connection card, and the
         // addresses it shows, on the External IP card, greyed while the bar or the
         // check is off, as neither does anything then. The bar is the kit's, hidden
@@ -1861,6 +1897,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         // The network service lists the adapters only while this tab shows: with none chosen, it isn't started before then.
         // The observer's first word, as the page sets itself up, is that it doesn't: main's answer is the state the
         // bottom bar is first drawn from, with nothing started for it.
+        drawLocation(network.location);
         drawConnection(network.connection);
         api.onNetworkChanged(drawNetwork);
         new IntersectionObserver(([entry]) => {

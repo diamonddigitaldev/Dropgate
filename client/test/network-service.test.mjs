@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
+import https from 'node:https';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import os from 'node:os';
@@ -18,13 +19,16 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { afterEach, beforeEach, test as nodeTest } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 import { startStunServer } from '../../tests/integration/helpers/stun.mjs';
-import { writeLocationData } from './helpers/mmdb.mjs';
+import { selfSignedCertificate } from '../../tests/integration/helpers/tls.mjs';
+import { WHOLE, locationDatabases, mmdb, writeLocationData } from './helpers/mmdb.mjs';
 import { ATYP, get, openWebSocket, overTls, socks, startDns, startPeer } from './helpers/network.mjs';
 
 const require = createRequire(import.meta.url);
 const { NETWORK_SERVICE } = require('../src/constants.js');
 const { NetworkService } = require('../src/core/network-service.js');
+const { monthOf, openDatabase } = require('../src/core/location.js');
 const { RouteCheck, deviceOf } = require('../src/core/routes.js');
 const { addressesOf, adapterList } = require('../src/core/adapters.js');
 const { REPLY } = require('../src/core/socks5.js');
@@ -177,7 +181,253 @@ test('18.14: an answer for a check called off while its data is read isn\'t told
     }
 });
 
-test('18.11: a name is looked up through the adapter, and with an IPv6 address a second request goes, from that address', { skip: !IPV6 && 'no IPv6 loopback here' }, async () => {
+// --- The location data's monthly refresh (`09` 18.16): held as a connection is ---
+
+/** DB-IP's files, as whole as its own (WHOLE nodes), packed, made once a month. */
+const packedMonths = new Map();
+function packedMonth(month) {
+    if (!packedMonths.has(month)) {
+        const { country, asn } = locationDatabases({ '203.0.113.42': { code: 'GB', country: 'United Kingdom', isp: 'Example Broadband Ltd', asn: 64511 } }, { month, minNodes: WHOLE });
+        packedMonths.set(month, { country: zlib.gzipSync(country), asn: zlib.gzipSync(asn) });
+    }
+    return packedMonths.get(month);
+}
+
+/**
+ * A stand-in for download.db-ip.com over HTTPS, on 127.0.0.2: the files it
+ * serves, by name; every request, with where it came from. A file may be held
+ * until released, or answered with a redirect.
+ */
+async function startDbIp() {
+    const { key, cert } = selfSignedCertificate();
+    const files = new Map();
+    const redirects = new Map();
+    const requests = [];
+    let holding = null;
+    /** Every URL the service asked for, whatever became of it. */
+    const asked = [];
+    const server = https.createServer({ key, cert }, async (request, response) => {
+        requests.push({ path: request.url, from: request.socket.remoteAddress });
+        if (redirects.has(request.url)) {
+            response.writeHead(302, { Location: redirects.get(request.url) }).end();
+            return;
+        }
+        const body = files.get(request.url.replace(/^\/free\//, ''));
+        if (!body) {
+            response.writeHead(404).end();
+            return;
+        }
+        response.writeHead(200, { 'Content-Length': body.length });
+        if (holding) {
+            response.write(body.subarray(0, 1024));
+            await holding.promise;
+        }
+        response.end(holding ? body.subarray(1024) : body);
+    });
+    const open = new Set();
+    server.on('connection', (socket) => {
+        open.add(socket);
+        socket.on('close', () => open.delete(socket));
+    });
+    server.listen(0, '127.0.0.2');
+    await once(server, 'listening');
+    const { port } = server.address();
+    return {
+        port,
+        requests,
+        asked,
+        files,
+        redirects,
+        /** The service's way of asking it: trusting its certificate, whatever name it was asked by. */
+        request: (url, options, callback) => {
+            asked.push(String(url));
+            return https.request(url, { ...options, ca: cert, checkServerIdentity: () => undefined }, callback);
+        },
+        serve(month, instead = {}) {
+            const packed = packedMonth(month);
+            for (const kind of ['country', 'asn']) files.set(`dbip-${kind}-lite-${month}.mmdb.gz`, instead[kind] ?? packed[kind]);
+        },
+        hold() {
+            holding = Promise.withResolvers();
+        },
+        release: () => holding?.resolve(),
+        async close() {
+            holding?.resolve();
+            for (const socket of open) socket.destroy();
+            await new Promise((resolve) => server.close(resolve));
+        },
+    };
+}
+
+/** A month of the test's own: DB-IP's files are asked for by name, whatever the month. */
+const MONTH = '2026-11';
+
+/** Wait until this holds, 20 s at most, so a test that's gone wrong ends instead of waiting for ever. */
+async function waitFor(holds, what) {
+    const end = Date.now() + 20_000;
+    while (!holds()) {
+        if (Date.now() > end) throw new Error(`Waited 20 s for ${what}.`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+}
+
+/** What main heard of the refresh, once it has. */
+async function refreshed() {
+    const found = () => told.find(({ type }) => type === NETWORK_SERVICE.LOCATION_REFRESHED);
+    await waitFor(found, 'the refresh to be told');
+    return found();
+}
+
+/** A folder of the test's own, gone after it. */
+const tempFolder = (t) => {
+    const made = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-service-refresh-'));
+    t.after(() => fs.rmSync(made, { recursive: true, force: true }));
+    return made;
+};
+
+/** The months the files in a folder are from, as main reads them. */
+const monthsIn = async (folder) => Promise.all(['dbip-country-lite.mmdb', 'dbip-asn-lite.mmdb'].map(async (file) => {
+    try {
+        return monthOf(openDatabase(file.includes('asn') ? 'asn' : 'country', fs.readFileSync(path.join(folder, file))));
+    } catch {
+        return null;
+    }
+}));
+
+test('18.16: the refresh downloads the month\'s two files from the adapter\'s address, its name looked up through the adapter, checks them, and keeps both; main is told the month', async (t) => {
+    const dbip = await startDbIp();
+    t.after(() => dbip.close());
+    const into = tempFolder(t);
+    dbip.serve(MONTH);
+    await startService({ refreshInto: into, locationBase: `https://${NAME}:${dbip.port}/free/`, request: dbip.request });
+    service.setInterface(STAND_IN);
+    await service.reading;
+    await service.refreshLocation(MONTH);
+    assert.deepEqual(await refreshed(), { type: NETWORK_SERVICE.LOCATION_REFRESHED, month: MONTH });
+    assert.deepEqual(dbip.requests.map(({ path: asked }) => asked), [`/free/dbip-country-lite-${MONTH}.mmdb.gz`, `/free/dbip-asn-lite-${MONTH}.mmdb.gz`]);
+    assert.deepEqual([...new Set(dbip.requests.map(({ from }) => from))], [ADAPTER], 'from the adapter\'s address alone');
+    assert.ok(ownDns.queries.some(({ name }) => name === NAME), 'its name asked of the adapter\'s own DNS server');
+    assert.deepEqual(systemDns.queries, [], 'and of no other');
+    assert.deepEqual(await monthsIn(into), [MONTH, MONTH]);
+    assert.deepEqual(fs.readdirSync(into).sort(), ['dbip-asn-lite.mmdb', 'dbip-country-lite.mmdb'], 'nothing else left');
+});
+
+test('18.16: with no adapter chosen, it goes as the OS routes it', async (t) => {
+    const dbip = await startDbIp();
+    t.after(() => dbip.close());
+    const into = tempFolder(t);
+    dbip.serve(MONTH);
+    await startService({ refreshInto: into, locationBase: `https://127.0.0.2:${dbip.port}/free/`, request: dbip.request });
+    await service.refreshLocation(MONTH);
+    assert.deepEqual(await refreshed(), { type: NETWORK_SERVICE.LOCATION_REFRESHED, month: MONTH });
+    assert.equal(dbip.requests.length, 2);
+    assert.ok(dbip.requests.every(({ from }) => from !== ADAPTER), 'not bound');
+});
+
+test('18.16: a file that isn\'t DB-IP\'s, of another month, too small or not packed is refused, and neither is kept: the data there stays; one not there is unreachable', async (t) => {
+    const dbip = await startDbIp();
+    t.after(() => dbip.close());
+    const into = tempFolder(t);
+    writeLocationData(into, { '203.0.113.42': { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 } }, { month: '2026-10' });
+    const record = { '8.8.8.8': { country: { iso_code: 'US', names: { en: 'United States' } } } };
+    const refusals = {
+        "MaxMind's": { country: zlib.gzipSync(mmdb({ type: 'GeoLite2-Country', description: 'GeoLite2 Country database', records: record, minNodes: WHOLE })) },
+        'another month\'s': { asn: packedMonth('2026-09').asn },
+        'a small one': { country: zlib.gzipSync(locationDatabases({}, { month: MONTH }).country) },
+        'not packed': { asn: Buffer.from('<html>Rate limited</html>') },
+    };
+    for (const [what, instead] of Object.entries(refusals)) {
+        dbip.serve(MONTH, instead);
+        told = [];
+        await startService({ refreshInto: into, locationBase: `https://127.0.0.2:${dbip.port}/free/`, request: dbip.request });
+        await service.refreshLocation(MONTH);
+        assert.deepEqual(await refreshed(), { type: NETWORK_SERVICE.LOCATION_REFRESHED, error: 'refused' }, what);
+        assert.deepEqual(await monthsIn(into), ['2026-10', '2026-10'], `${what}: the old data stays, whole`);
+        assert.deepEqual(fs.readdirSync(into).sort(), ['dbip-asn-lite.mmdb', 'dbip-country-lite.mmdb'], `${what}: nothing else left`);
+        await service.stop();
+    }
+    dbip.files.clear();
+    told = [];
+    await startService({ refreshInto: into, locationBase: `https://127.0.0.2:${dbip.port}/free/`, request: dbip.request });
+    await service.refreshLocation(MONTH);
+    assert.deepEqual(await refreshed(), { type: NETWORK_SERVICE.LOCATION_REFRESHED, error: 'unreachable' });
+    assert.deepEqual(await monthsIn(into), ['2026-10', '2026-10']);
+});
+
+test('18.16: with an adapter chosen and gone, nothing is sent; gone mid-download, it\'s called off and nothing is kept', async (t) => {
+    const dbip = await startDbIp();
+    t.after(() => dbip.close());
+    const into = tempFolder(t);
+    dbip.serve(MONTH);
+    adapters = {};
+    await startService({ refreshInto: into, locationBase: `https://${NAME}:${dbip.port}/free/`, request: dbip.request, watchMs: 50 });
+    service.setInterface(STAND_IN);
+    await service.refreshLocation(MONTH);
+    assert.deepEqual(await refreshed(), { type: NETWORK_SERVICE.LOCATION_REFRESHED, error: 'unreachable' });
+    assert.deepEqual(dbip.requests, [], 'nothing sent');
+
+    adapters = { [STAND_IN]: adapter(ADAPTER) };
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    told = [];
+    dbip.hold();
+    const asking = service.refreshLocation(MONTH);
+    await waitFor(() => dbip.requests.length > 0, 'the download to start');
+    adapters = {};
+    await asking;
+    assert.deepEqual(await refreshed(), { type: NETWORK_SERVICE.LOCATION_REFRESHED, error: 'unreachable' });
+    assert.deepEqual(fs.readdirSync(into), [], 'nothing kept');
+});
+
+test('18.16: a redirect is followed to HTTPS, through the adapter as the first was, three at most; never to plain HTTP', async (t) => {
+    const dbip = await startDbIp();
+    t.after(() => dbip.close());
+    const into = tempFolder(t);
+    dbip.serve(MONTH);
+    const base = `https://${NAME}:${dbip.port}`;
+    dbip.redirects.set(`/free/dbip-country-lite-${MONTH}.mmdb.gz`, `${base}/elsewhere/1`);
+    dbip.redirects.set('/elsewhere/1', `/free/dbip-country-lite-${MONTH}.mmdb.gz?moved`);
+    dbip.files.set(`dbip-country-lite-${MONTH}.mmdb.gz?moved`, dbip.files.get(`dbip-country-lite-${MONTH}.mmdb.gz`));
+    await startService({ refreshInto: into, locationBase: `${base}/free/`, request: dbip.request });
+    service.setInterface(STAND_IN);
+    await service.refreshLocation(MONTH);
+    assert.deepEqual(await refreshed(), { type: NETWORK_SERVICE.LOCATION_REFRESHED, month: MONTH });
+    assert.equal(dbip.requests.length, 4);
+    assert.deepEqual([...new Set(dbip.requests.map(({ from }) => from))], [ADAPTER]);
+
+    for (const [what, target] of [['plain HTTP', `http://${NAME}:${dbip.port}/free/x`], ['round and round', `/free/dbip-asn-lite-${MONTH}.mmdb.gz`]]) {
+        told = [];
+        dbip.requests.length = 0;
+        dbip.redirects.clear();
+        dbip.redirects.set(`/free/dbip-asn-lite-${MONTH}.mmdb.gz`, target);
+        dbip.asked.length = 0;
+        await service.refreshLocation(MONTH);
+        assert.ok((await refreshed()).error, what);
+        assert.ok(dbip.requests.length <= 1 + 1 + 3, `${what}: three redirects at most`);
+        assert.ok(dbip.asked.every((url) => url.startsWith('https:')), `${what}: nothing asked but over HTTPS: ${dbip.asked}`);
+    }
+    assert.deepEqual(await monthsIn(into), [MONTH, MONTH], 'what was kept stays');
+});
+
+test('18.16: a check looks its address up in the newest data held: the refresh\'s, once kept, at once', async (t) => {
+    const dbip = await startDbIp();
+    t.after(() => dbip.close());
+    const own = tempFolder(t);
+    const into = tempFolder(t);
+    writeLocationData(own, { '203.0.113.42': { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 } }, { month: '2026-10' });
+    const stun = await startStunServer({ address: '127.0.0.2', mapped: { v4: '203.0.113.42' } });
+    t.after(() => stun.stop());
+    dbip.serve(MONTH);
+    await startService({ locationData: [own, into], refreshInto: into, locationBase: `https://127.0.0.2:${dbip.port}/free/`, request: dbip.request });
+    await service.checkIp(1, stun.url);
+    assert.deepEqual((await ipResult()).location, { month: '2026-10', v4: { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 }, v6: null });
+    await service.refreshLocation(MONTH);
+    assert.equal((await refreshed()).month, MONTH);
+    told = [];
+    await service.checkIp(2, stun.url);
+    assert.deepEqual((await ipResult()).location, { month: MONTH, v4: { code: 'GB', country: 'United Kingdom', isp: 'Example Broadband Ltd', asn: 64511 }, v6: null });
+});
+
+test('18.11: a name is looked up through the adapter, and with an IPv6 address a second request goes, from that address',{ skip: !IPV6 && 'no IPv6 loopback here' }, async () => {
     const stun = await startStunServer({ address: '127.0.0.2', address6: '::1', mapped: { v4: '203.0.113.42', v6: '2001:db8:5:12::42' } });
     const dns = await startDns('127.0.0.5', { 'stun.test': '127.0.0.2' }, { 'stun.test': '::1' });
     try {

@@ -22,57 +22,15 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const zlib = require('zlib');
 const { LOCATION_DATA_FOLDER } = require('../src/constants');
-const { DATABASES, monthOf, openDatabase } = require('../src/core/location');
+const { BASE_URL, DATABASES, DOWNLOAD_MS, MAX_PACKED_BYTES, checkDatabase, monthAt, unpack, urlOf } = require('../src/core/location');
 
-const BASE_URL = 'https://download.db-ip.com/free/';
 const FOLDER = path.join(__dirname, '..', LOCATION_DATA_FOLDER);
-const DOWNLOAD_MS = 120_000;
-
-/** Each download's most, packed and unpacked: November 2026's are 4 and 5 MB, 8.5 and 9.6 MB. */
-const MAX_PACKED_BYTES = 64 * 1024 * 1024;
-const MAX_BYTES = 256 * 1024 * 1024;
-
-/** The fewest nodes either has had (over a million): a small file naming itself DB-IP's isn't the database. */
-const MIN_NODES = 500_000;
-
-/** An address each must know, and how its record reads: Google's public DNS has been in both for as long as they've existed. */
-const KNOWN_ADDRESS = '8.8.8.8';
-const READS = Object.freeze({
-    country: (record) => /^[A-Z]{2}$/.test(record?.country?.iso_code) && typeof record?.country?.names?.en === 'string',
-    asn: (record) => Number.isSafeInteger(record?.autonomous_system_number) && typeof record?.autonomous_system_organization === 'string',
-});
-
-/** A month as 2026-11, in UTC, as DB-IP's files are named. */
-const monthAt = (date) => date.toISOString().slice(0, 7);
 
 /** The month before this one. */
 function monthBefore(month) {
     const [year, number] = month.split('-').map(Number);
     return monthAt(new Date(Date.UTC(year, number - 2, 1)));
-}
-
-/** DB-IP's address for one month's file. */
-const urlOf = (kind, month, base) => `${base}${DATABASES[kind].file.replace('.mmdb', `-${month}.mmdb.gz`)}`;
-
-/**
- * Whether these bytes are DB-IP's database of this kind, whole, and of this
- * month if one's asked: throws, saying why, if not.
- * @param {'country' | 'asn'} kind
- * @param {Buffer} bytes
- * @param {object} [options]
- * @param {string} [options.month]
- * @param {number} [options.minNodes]
- * @returns {string} The month it's from.
- */
-function checkDatabase(kind, bytes, { month, minNodes = MIN_NODES } = {}) {
-    const reader = openDatabase(kind, bytes);
-    if (reader.metadata.nodeCount < minNodes) throw new Error(`It has only ${reader.metadata.nodeCount} nodes, so it isn't the whole database.`);
-    if (!READS[kind](reader.get(KNOWN_ADDRESS))) throw new Error(`It doesn't read as DB-IP's records do, for ${KNOWN_ADDRESS}.`);
-    const built = monthOf(reader);
-    if (month && built !== month) throw new Error(`It's from ${built}, not ${month}.`);
-    return built;
 }
 
 /**
@@ -105,7 +63,7 @@ async function downloadFile(url, fetcher) {
     if (!response.ok) throw Object.assign(new Error(`${url} answered ${response.status}.`), { status: response.status });
     const packed = Buffer.from(await response.arrayBuffer());
     if (packed.length > MAX_PACKED_BYTES) throw new Error(`${url} is ${packed.length} bytes, far more than it should be.`);
-    return zlib.gunzipSync(packed, { maxOutputLength: MAX_BYTES });
+    return unpack(packed);
 }
 
 /**

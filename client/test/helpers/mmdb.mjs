@@ -71,18 +71,22 @@ function bitsOf(address) {
  * @param {string} [options.type] - What it says it is.
  * @param {string} [options.description]
  * @param {string} [options.month] - The month it says it was built in, as 2026-11.
+ * @param {number} [options.minNodes] - The fewest nodes it has: filled out to as many as DB-IP's whole
+ *   database has at least, with addresses in fd00::/16 holding one record, it passes the check of a refresh.
  * @returns {Buffer}
  */
-export function mmdb({ records, type = 'DBIP-Country-Lite', description = 'DB-IP.com - IP to Country', month = '2026-11' }) {
+export function mmdb({ records, type = 'DBIP-Country-Lite', description = 'DB-IP.com - IP to Country', month = '2026-11', minNodes = 0 }) {
     const data = [];
     let dataLength = 0;
     const root = { children: [null, null] };
     let nodes = 1;
-    for (const [address, record] of Object.entries(records)) {
+    const store = (record) => {
         const encoded = encode(record);
-        const offset = dataLength;
         data.push(encoded);
         dataLength += encoded.length;
+        return dataLength - encoded.length;
+    };
+    const insert = (address, offset) => {
         const bits = bitsOf(address);
         let node = root;
         for (let i = 0; i < bits.length - 1; i++) {
@@ -94,7 +98,11 @@ export function mmdb({ records, type = 'DBIP-Country-Lite', description = 'DB-IP
             node = node.children[bit];
         }
         node.children[Number(bits.at(-1))] = { offset };
-    }
+    };
+    for (const [address, record] of Object.entries(records)) insert(address, store(record));
+    // Each filler address parts from the others after its first 32 bits, so it brings about 96 nodes of its own.
+    const filler = nodes < minNodes ? store({ filler: 'yes' }) : null;
+    for (let n = 1; nodes < minNodes; n++) insert(`fd00:${n.toString(16)}::1`, filler);
 
     // Numbered as they're met, so a child's number is known once its parent's written.
     const order = [root];
@@ -137,20 +145,34 @@ export const asnRecord = ({ isp, asn }) => ({ autonomous_system_number: asn, aut
 /** Google's public DNS, which the build's check asks each database for. */
 export const KNOWN = '8.8.8.8';
 
-/** The two databases' bytes, for these addresses. */
-export function locationDatabases(places, { month = '2026-11' } = {}) {
+/** As many nodes as DB-IP's whole database has at least: the check of a refreshed file (core/location.js' MIN_NODES). */
+export const WHOLE = 500_000;
+
+/**
+ * The two databases' bytes, for these addresses.
+ * @param {Record<string, { code: string, country: string, isp: string, asn: number }>} places
+ * @param {{ month?: string, minNodes?: number }} [options] - minNodes: WHOLE for files a refresh takes.
+ */
+export function locationDatabases(places, { month = '2026-11', minNodes = 0 } = {}) {
     const known = { [KNOWN]: { code: 'US', country: 'United States', isp: 'Google LLC', asn: 15169 } };
     const all = Object.entries({ ...known, ...places });
     return {
-        country: mmdb({ month, records: Object.fromEntries(all.map(([ip, place]) => [ip, countryRecord(place)])) }),
-        asn: mmdb({ month, type: 'DBIP-ASN-Lite (compat=GeoLite2-ASN)', description: 'DB-IP.com - IP to ASN', records: Object.fromEntries(all.map(([ip, place]) => [ip, asnRecord(place)])) }),
+        country: mmdb({ month, minNodes, records: Object.fromEntries(all.map(([ip, place]) => [ip, countryRecord(place)])) }),
+        asn: mmdb({ month, minNodes, type: 'DBIP-ASN-Lite (compat=GeoLite2-ASN)', description: 'DB-IP.com - IP to ASN', records: Object.fromEntries(all.map(([ip, place]) => [ip, asnRecord(place)])) }),
     };
+}
+
+/** A month as 2026-11, in UTC, this many months from now. */
+export function monthFromNow(months = 0) {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + months, 1)).toISOString().slice(0, 7);
 }
 
 /**
  * Write the two databases in a folder, as the app's resources hold them.
  * @param {string} folder
  * @param {Record<string, { code: string, country: string, isp: string, asn: number }>} places - Each address, and where it is.
+ * @param {{ month?: string, minNodes?: number }} [options]
  */
 export function writeLocationData(folder, places, options) {
     const { country, asn } = locationDatabases(places, options);

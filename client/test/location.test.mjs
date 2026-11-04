@@ -1,8 +1,10 @@
 // Country and ISP, looked up on the machine (`09` 18.14): in a small test database
 // of the tests' own, with every way off the machine watched; and the build that
 // fetches DB-IP's two files, from a stand-in for db-ip.com on this machine, taking
-// only what opens as DB-IP's. What the service tells main is
-// network-service.test.mjs's, and the app is desktop/location.spec.mjs'.
+// only what opens as DB-IP's; and the month held, read from each file's end, the
+// newest of the app's own and the monthly refresh's winning (18.16). What the
+// service tells main, and its refresh, are network-service.test.mjs's, and the app
+// is desktop/location.spec.mjs' and desktop/location-refresh.spec.mjs'.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import dgram from 'node:dgram';
@@ -17,10 +19,10 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
-import { KNOWN, countryRecord, locationDatabases, mmdb, writeLocationData } from './helpers/mmdb.mjs';
+import { KNOWN, WHOLE, countryRecord, locationDatabases, mmdb, writeLocationData } from './helpers/mmdb.mjs';
 
 const require = createRequire(import.meta.url);
-const { DATABASES, lookUp, monthOf, openDatabase, placeOf } = require('../src/core/location.js');
+const { BASE_URL, DATABASES, lookUp, monthHeld, monthOf, newestData, openDatabase, placeOf } = require('../src/core/location.js');
 const build = require('../scripts/location-data.cjs');
 
 const CLIENT = fileURLToPath(new URL('..', import.meta.url));
@@ -135,6 +137,73 @@ test('18.14: a lookup makes no request: no socket of either kind, no HTTP, no fe
 test('18.14: the code keeps nothing of a lookup, and asks nothing but its files', () => {
     const source = fs.readFileSync(new URL('../src/core/location.js', import.meta.url), 'utf8');
     assert.doesNotMatch(source, /require\('(http|https|dns|dgram|tls|electron)'\)|\bfetch\(|writeFile|appendFile|console\./);
+});
+
+test('18.16: the month held is read from the end of each file alone, as DB-IP\'s; a folder isn\'t whole without both, of one month', async () => {
+    const data = folder();
+    assert.equal(await monthHeld(data), null, 'nothing there');
+    writeLocationData(data, PLACES, { month: '2026-10' });
+    assert.equal(await monthHeld(data), '2026-10');
+
+    // Only the end is read: the metadata, not the 18 MB before it.
+    const opened = [];
+    const realOpen = fs.promises.open;
+    fs.promises.open = async (...args) => {
+        const file = await realOpen(...args);
+        const realRead = file.read.bind(file);
+        file.read = async (options) => {
+            opened.push(options.buffer.length);
+            return realRead(options);
+        };
+        return file;
+    };
+    const whole = folder();
+    writeLocationData(whole, PLACES, { minNodes: WHOLE });
+    try {
+        assert.equal(await monthHeld(whole), '2026-11');
+    } finally {
+        fs.promises.open = realOpen;
+    }
+    assert.deepEqual(opened, [128 * 1024 + 14, 128 * 1024 + 14], 'each file\'s last 128 KiB and its marker');
+    assert.ok(fs.statSync(path.join(whole, DATABASES.country.file)).size > 1024 * 1024);
+
+    fs.writeFileSync(path.join(data, DATABASES.asn.file), locationDatabases(PLACES, { month: '2026-09' }).asn);
+    assert.equal(await monthHeld(data), null, 'two months: a refresh cut off between its files');
+    fs.writeFileSync(path.join(data, DATABASES.asn.file), mmdb({ type: 'GeoLite2-ASN', description: 'GeoLite2 ASN database', records: {} }));
+    assert.equal(await monthHeld(data), null, "another's database");
+    fs.writeFileSync(path.join(data, DATABASES.asn.file), Buffer.from('<html>Not a database</html>'));
+    assert.equal(await monthHeld(data), null, 'no database');
+    fs.rmSync(path.join(data, DATABASES.asn.file));
+    assert.equal(await monthHeld(data), null, 'one file');
+});
+
+test('18.16: of the app\'s own and the refresh\'s, the newest month is the one looked in; on a tie, the app\'s own; one not whole is passed over', async () => {
+    const own = folder();
+    const refreshed = folder();
+    writeLocationData(own, PLACES, { month: '2026-10' });
+    writeLocationData(refreshed, { '203.0.113.42': { code: 'GB', country: 'United Kingdom', isp: 'Example Broadband Ltd', asn: 64511 } }, { month: '2026-11' });
+    assert.deepEqual(await newestData([own, refreshed]), { folder: refreshed, month: '2026-11' });
+    assert.equal((await lookUp([own, refreshed], { v4: '203.0.113.42' })).v4.code, 'GB');
+
+    writeLocationData(own, PLACES, { month: '2026-12' });
+    assert.deepEqual(await newestData([own, refreshed]), { folder: own, month: '2026-12' }, 'a newer release\'s own');
+    assert.equal((await lookUp([own, refreshed], { v4: '203.0.113.42' })).v4.code, 'NL');
+
+    writeLocationData(own, PLACES, { month: '2026-11' });
+    assert.deepEqual(await newestData([own, refreshed]), { folder: own, month: '2026-11' }, 'a tie');
+
+    fs.rmSync(path.join(own, DATABASES.asn.file));
+    assert.deepEqual(await newestData([own, refreshed]), { folder: refreshed, month: '2026-11' }, 'not whole');
+    assert.equal(await newestData([folder(), folder()]), null);
+    assert.equal((await lookUp([own, folder()], { v4: '203.0.113.42' })).v4.country, 'Netherlands', 'none whole: the first, for what it has');
+});
+
+test('18.16: the refresh asks nothing but DB-IP\'s address, over HTTPS, and writes nothing but its two files in the folder it\'s given', () => {
+    const source = fs.readFileSync(new URL('../src/core/location-refresh.js', import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /require\('(http|dns|dgram|net|tls|electron)'\)|\bfetch\(|appendFile|console\./);
+    assert.match(source, /require\('https'\)/);
+    assert.equal(BASE_URL, 'https://download.db-ip.com/free/');
+    assert.deepEqual(source.match(/fs\.promises\.\w+/g).sort(), ['fs.promises.mkdir', 'fs.promises.rename', 'fs.promises.rm', 'fs.promises.writeFile']);
 });
 
 test('the bad address and the record with nothing are no place', () => {

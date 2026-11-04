@@ -25,7 +25,7 @@ const slipsOf = (rule) => everything.flatMap(({ where, text }) => copySlips(text
 
 test('the checks read every script and page of the client\'s own, with their words and none of their comments', () => {
     assert.deepEqual(scripts.map(({ name }) => name).sort(), ['constants.js', 'core/adapters.js', 'core/bound-dns.js', 'core/external-ip.js', 'core/file-service.js', 'core/handles.js',
-        'core/location.js', 'core/network-service.js', 'core/notices.js', 'core/payloads.js', 'core/routes.js', 'core/servers.js', 'core/share.js', 'core/socks5.js', 'core/stun.js', 'core/transfers.js',
+        'core/location-refresh.js', 'core/location.js', 'core/network-service.js', 'core/notices.js', 'core/payloads.js', 'core/routes.js', 'core/servers.js', 'core/share.js', 'core/socks5.js', 'core/stun.js', 'core/transfers.js',
         'file-service.js', 'main.js', 'menu.js', 'network-host.js', 'network-service.js', 'preload.js', 'renderer.js', 'transfer-host.js', 'transfer-preload.js', 'transfer.js', 'tray.js',
         'window-channels.js']);
     assert.deepEqual(pages.map(({ name }) => name).sort(), ['index.html', 'transfer.html']);
