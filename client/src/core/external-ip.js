@@ -14,7 +14,8 @@ const { firstStunUrl, stunTargetOf } = require('./stun');
 // What comes back stays in main's memory: it's never written or logged, and it
 // goes when the switch is turned off, when the adapter goes, and with the app.
 // So does each address's country and ISP, which the service looked up on the
-// machine: the service's word is checked here, as any of its is.
+// machine, and the month of the data it looked in: the service's word is checked
+// here, as any of its is.
 
 /** The OS's name, as every sentence says it. */
 const OS_NAME = process.platform === 'win32' ? 'Windows' : 'Linux';
@@ -41,6 +42,9 @@ function placeFrom(place) {
     };
     return Object.values(held).some((value) => value !== null) ? held : null;
 }
+
+/** The month the location data the service looked in was built, as 2026-11, or null for anything else. */
+const monthFrom = (month) => (typeof month === 'string' && /^\d{4}-(?:0[1-9]|1[0-2])$/.test(month) ? month : null);
 
 /**
  * The warning when the IPv4 and IPv6 addresses are in different countries, not
@@ -83,7 +87,9 @@ function stunSourceOf(server, check) {
  * - red: the OS says offline, or the adapter chosen is gone;
  * - yellow: online, but the check (while it's on) failed or hasn't run;
  * - green: online, the adapter chosen there, and the check (while it's on) answered.
- * Blue, for the moment it's being found out.
+ * Blue, for the moment it's being found out. `text` is the long form (the
+ * Connection card's, the details' head), `short` the bottom bar's: the adapter's
+ * name where it's well, and `title` is what the colour means, for a tooltip.
  * @param {object} now
  * @param {boolean} now.online - net.isOnline()
  * @param {string | null} now.name - The adapter chosen.
@@ -93,19 +99,19 @@ function stunSourceOf(server, check) {
  * @param {{ ok: boolean, reason?: string } | null} now.result
  * @param {string | null} [now.stun]
  * @param {string} [os]
- * @returns {{ tone: 'success' | 'warning' | 'danger' | 'running', text: string, title: string }}
+ * @returns {{ tone: 'success' | 'warning' | 'danger' | 'running', text: string, short: string, title: string }}
  */
 function healthOf({ online, name, present, on, checking, result, stun = null }, os = OS_NAME) {
-    if (!online) return { tone: 'danger', text: 'Offline', title: `${os} says this computer has no network connection.` };
+    if (!online) return { tone: 'danger', text: 'Offline', short: 'Offline', title: `${os} says this computer has no network connection.` };
     if (name !== null && present === false) {
-        return { tone: 'danger', text: `${name} isn't connected`, title: `Dropgate is set to use only ${name} (Settings > Network), so it connects through nothing until it's back.` };
+        return { tone: 'danger', text: `${name} isn't connected`, short: `${name} isn't connected`, title: `Dropgate is set to use only ${name} (Settings > Network), so it connects through nothing until it's back.` };
     }
-    if (name !== null && present === null) return { tone: 'running', text: 'Checking…', title: `Finding out whether ${name} is connected.` };
-    if (on && checking) return { tone: 'running', text: 'Checking your External IP…', title: stun ? `Asking ${stun} for your address.` : 'Asking for your address.' };
-    if (on && !result) return { tone: 'warning', text: 'Connected · External IP Not Checked Yet', title: "Your External IP hasn't been checked since the app started." };
-    if (on && !result.ok) return { tone: 'warning', text: 'Connected · External IP Unavailable', title: result.reason };
-    if (name !== null) return { tone: 'success', text: `Connected through ${name}`, title: `Connected. Dropgate uses only ${name}.` };
-    return { tone: 'success', text: 'Connected', title: `Connected, through whichever adapter ${os} chooses.` };
+    if (name !== null && present === null) return { tone: 'running', text: 'Checking…', short: 'Checking…', title: `Finding out whether ${name} is connected.` };
+    if (on && checking) return { tone: 'running', text: 'Checking your External IP…', short: 'Checking…', title: stun ? `Asking ${stun} for your address.` : 'Asking for your address.' };
+    if (on && !result) return { tone: 'warning', text: 'Connected · External IP Not Checked Yet', short: 'Not checked yet', title: "Your External IP hasn't been checked since the app started." };
+    if (on && !result.ok) return { tone: 'warning', text: 'Connected · External IP Unavailable', short: 'External IP unavailable', title: result.reason };
+    if (name !== null) return { tone: 'success', text: `Connected through ${name}`, short: name, title: `Connected. Dropgate uses only ${name}.` };
+    return { tone: 'success', text: 'Connected', short: 'Connected', title: `Connected, through whichever adapter ${os} chooses.` };
 }
 
 class ExternalIp {
@@ -236,7 +242,7 @@ class ExternalIp {
         const ips = { v4: net.isIPv4(v4) ? v4 : null, v6: net.isIPv6(v6) ? v6 : null };
         if ((ips.v4 || ips.v6) && Number.isFinite(latency) && latency >= 0) {
             const places = { v4: ips.v4 ? placeFrom(location?.v4) : null, v6: ips.v6 ? placeFrom(location?.v6) : null };
-            this.result = { ok: true, ...ips, latency, at: this.now(), via, stun, places };
+            this.result = { ok: true, ...ips, latency, at: this.now(), via, stun, places, month: monthFrom(location?.month) };
         } else {
             const seconds = NETWORK.STUN_MS / 1000;
             this.result = { ok: false, reason: error === 'timeout' ? `${stun} didn't answer within ${seconds} seconds.` : `${stun} couldn't be reached.` };
@@ -262,4 +268,4 @@ class ExternalIp {
     }
 }
 
-module.exports = { ExternalIp, OS_NAME, countryWarningOf, healthOf, placeFrom, stunSourceOf };
+module.exports = { ExternalIp, OS_NAME, countryWarningOf, healthOf, monthFrom, placeFrom, stunSourceOf };

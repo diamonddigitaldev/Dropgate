@@ -137,11 +137,14 @@ function titleCased(word, first) {
     return ok(head, first) && rest.every((part) => ok(part, false));
 }
 
+/** Units, after their number ("Latency 18 ms"): a symbol, never a word to recase. */
+const UNITS = new Set(['ms']);
+
 /** The bullet-separated items (" · ", or the tray's " • ") in a text that aren't in Title Case, but those that are sentences. */
 export function untitled(text) {
     if (!/ [·•] /.test(text)) return [];
     return text.split(/ [·•] /).map((item) => item.trim()).filter((item) => item && !/[.!?]$/.test(item))
-        .filter((item) => !item.split(/\s+/).every((word, i) => titleCased(word, i === 0)));
+        .filter((item) => !item.split(/\s+/).every((word, i, words) => titleCased(word, i === 0) || (i > 0 && /^\d/.test(words[i - 1]) && UNITS.has(word))));
 }
 
 /**

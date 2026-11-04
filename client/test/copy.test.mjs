@@ -68,6 +68,10 @@ test('items between bullets are in Title Case, unless an item is a sentence', ()
     assert.deepEqual(untitled('Uploaded · end-to-end encrypted'), ['end-to-end encrypted']);
     assert.deepEqual(untitled('1 paused · 2 Ready'), ['1 paused']);
     assert.deepEqual(untitled('Online · Dropgate 4.0.0 · End-to-end Encrypted'), ['End-to-end Encrypted']);
+    // A unit after its number is a symbol, never recased; anywhere else, it's a word.
+    assert.deepEqual(untitled('Netherlands · Example Hosting B.V. (AS64500) · Latency 18 ms'), []);
+    assert.deepEqual(untitled('Netherlands · Latency ms'), ['Latency ms']);
+    assert.deepEqual(untitled('Netherlands · ms Latency'), ['ms Latency']);
 });
 
 test('a file\'s name or a server\'s address is never recased: nothing the page shows changes case, but the first letter of core\'s reason', () => {

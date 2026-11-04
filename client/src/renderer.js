@@ -52,10 +52,13 @@
 // none of it itself: main does, as it asks.
 //
 // Settings > Network (below, "--- Settings > Network ---") is the Connection
-// card (health and the External IPs), the Adapter card (the adapter every
-// connection is held to, or any) and the External IP card (its switch). Main
-// holds all of it, as it holds the servers, and the network service lists the
-// adapters while the tab shows.
+// card (health, the External IPs and the bottom bar's switch), the Adapter card
+// (the adapter every connection is held to, or any) and the External IP card
+// (its switch, and which addresses the bar shows). Main holds all of it, as it
+// holds the servers, and the network service lists the adapters while the tab
+// shows. The bottom bar, off by default, draws the same: the health and the
+// External IPs it's let show, opening the details (what's known, the country
+// warning, Check Again and Network Settings).
 
 const api = window.electronAPI;
 const kitApi = window.kitAPI;
@@ -141,6 +144,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             credits: { logo: 'img/dropgate.png' },
             // Restart Now asks first while main has an upload running, paused, or waiting to (Share with Dropgate's too).
             busy: async () => (await api.isBusy() ? BUSY_REASON : null),
+            // The connection, in a bar along the bottom (Settings > Network, below): hidden until it's turned on.
+            statusBar: { items: [{ id: 'connection', label: 'Connection', live: true, panel: { label: 'Connection Details', width: 440 } }] },
         });
 
         // --- The cards ---
@@ -1515,7 +1520,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const interfaceSelect = $('network-interface');
         /** The network as main last said: the adapter chosen, whether it's there, the adapters listed while the tab shows, and the connection. */
         let network = {
-            name: null, present: null, adapters: null, connection: { on: false, checking: false, result: null, stun: null, server: null, health: { tone: 'running', text: 'Checking…', title: 'Checking…' } },
+            name: null, present: null, adapters: null, connection: { on: false, checking: false, result: null, stun: null, server: null, health: { tone: 'running', text: 'Checking…', short: 'Checking…', title: 'Checking…' } },
         };
 
         /** An adapter's address to show: its IPv4 one, else one with no scope. */
@@ -1544,13 +1549,39 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         // The Connection card: main's health, in the kit's status line, and what
         // the last check found, or why there's nothing to show. The page holds it
-        // for as long as it's drawn, and it's asked for through main alone.
+        // for as long as it's drawn, and it's asked for through main alone. The
+        // bottom bar and its details draw the same, in their own words: the bar
+        // the health's short form, the details its long one.
         const connectionLine = kit.ui.statusLine({ text: 'Connected', tone: 'success' });
         $('connection-status').append(connectionLine.element);
         const checkAgainBtn = $('connection-check');
-        let restoreCheckAgain = null;
+        /** Check Again, on the card and in the details, and each one's label to put back while it's busy. */
+        const checkButtons = [checkAgainBtn, $('details-check')];
+        const restoreChecks = new Map();
         /** Whether Check Again has been pressed and hasn't had its answer: it may check the default server first. */
         let checkPressed = false;
+
+        /** The bottom bar's switches, as saved: the bar (off by default), and the External IPs it shows. */
+        const bar = { on: settings.networkBar === true, v4: settings.barShowsIpv4 !== false, v6: settings.barShowsIpv6 !== false };
+        const connectionItem = shell.statusBar.item('connection');
+        const barLine = kit.ui.statusLine({ text: 'Connected', tone: 'success' });
+        connectionItem.button.append(barLine.element);
+        // The details: the page's own parts, in the kit's panel, its Close beside the first.
+        const detailsLine = kit.ui.statusLine({ text: 'Connected', tone: 'success' });
+        $('details-status').append(detailsLine.element);
+        connectionItem.panel.append(...$('connection-details').children);
+        $('connection-details').remove();
+        /** The kit's panel around them, which takes the focus as it opens. */
+        const detailsPanel = connectionItem.panel.closest('[role="dialog"]');
+
+        /** A status line's words, from main's health: the kit's line takes nothing else. */
+        const lineOf = ({ tone, title }, text) => ({ tone, text, title });
+
+        /** Whether the last check's answer shows: the check on, a connection, nothing being asked, and an answer. */
+        const showsIps = ({ on, checking, result, health }) => on && health.tone !== 'danger' && !checking && result?.ok === true;
+
+        /** The month the location data is from, as "November 2026". */
+        const monthName = (month) => new Date(`${month}-01T00:00:00Z`).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 
         /**
          * A country's flag: flag-icons' 4x3 SVG, bundled, the one exception to Material Icons Round,
@@ -1562,9 +1593,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             return flag;
         }
 
-        /** An External IP, with its flag where its country is known. */
-        function externalIpOf(ip, place) {
-            const entry = Object.assign(document.createElement('span'), { className: 'network-ip' });
+        /** An External IP, with its flag where its country is known: the card's, or (network-addr) the bar's and the details'. */
+        function externalIpOf(ip, place, className = 'network-ip') {
+            const entry = Object.assign(document.createElement('span'), { className });
             if (place?.code) entry.append(flagOf(place.code));
             entry.append(ip);
             return entry;
@@ -1577,16 +1608,103 @@ document.addEventListener('DOMContentLoaded', async () => {
             return [place?.country, isp, `Latency ${latency} ms`].filter(Boolean).join(' · ');
         }
 
-        function drawConnection(connection) {
-            const { on, checking, result, warning, stun, health } = connection;
-            connectionLine.set(health);
-            const cutOff = health.tone === 'danger';
-            const shows = on && !cutOff && !checking && result?.ok === true;
-            $('connection-ips').replaceChildren(...(shows ? [['v4', result.v4], ['v6', result.v6]].filter(([, ip]) => ip).map(([family, ip]) => externalIpOf(ip, result.places?.[family])) : []));
+        /** What's known of each address, as lines: one, where they say the same, else "IPv4: …" and "IPv6: …" for those known. */
+        function perAddress(result, textOf) {
+            const all = [['v4', 'IPv4'], ['v6', 'IPv6']].filter(([family]) => result[family]).map(([family, label]) => [label, textOf(result.places?.[family])]);
+            const known = all.filter(([, text]) => text);
+            if (known.length === 0) return [];
+            if (all.every(([, text]) => text === known[0][1])) return [known[0][1]];
+            return known.map(([label, text]) => `${label}: ${text}`);
+        }
+        const countryOf = (place) => (place?.country ? (place.code ? `${place.country} (${place.code})` : place.country) : place?.code ?? null);
+        const ispOf = (place) => (place?.isp ? [place.isp, place.asn && `(AS${place.asn})`].filter(Boolean).join(' ') : place?.asn ? `AS${place.asn}` : null);
 
-            // Here until the details are built, which is where it goes.
-            $('connection-warning').hidden = !(shows && warning);
-            $('connection-warning-text').textContent = shows && warning ? warning : '';
+        /** The bottom bar's item: the health's short form, its tooltip what the colour means, then each External IP it's let show. */
+        function drawBar(connection) {
+            const { result, health } = connection;
+            barLine.set(lineOf(health, health.short));
+            const ips = showsIps(connection) ? [['v4', result.v4], ['v6', result.v6]].filter(([family, ip]) => ip && bar[family]) : [];
+            connectionItem.button.replaceChildren(barLine.element, ...ips.flatMap(([family, ip]) => [
+                Object.assign(document.createElement('span'), { className: 'network-bar-sep' }),
+                externalIpOf(ip, result.places?.[family], 'network-addr'),
+            ]));
+        }
+
+        /** The details: the health's long form, what's known (the mockup's rows), the country warning, and the data's month. */
+        function drawDetails(connection) {
+            const { on, checking, result, warning, stun, health } = connection;
+            const { name, present, adapters } = network;
+            detailsLine.set(lineOf(health, health.text));
+            const shows = showsIps(connection);
+            const facts = [];
+            const fact = (term, ...lines) => {
+                const value = document.createElement('dd');
+                value.append(...lines.map((line) => {
+                    const row = document.createElement('div');
+                    row.append(line);
+                    return row;
+                }));
+                facts.push(Object.assign(document.createElement('dt'), { textContent: term }), value);
+            };
+            if (shows) {
+                fact('External IP', ...[['v4', result.v4], ['v6', result.v6]].filter(([, ip]) => ip).map(([family, ip]) => externalIpOf(ip, result.places?.[family], 'network-addr')));
+                const countries = perAddress(result, countryOf);
+                if (countries.length > 0) fact('Country', ...countries);
+                const isps = perAddress(result, ispOf);
+                if (isps.length > 0) fact('ISP', ...isps);
+            } else if (!on) {
+                fact('External IP', 'Not checked. Turn on Check my External IP in Settings > Network.');
+            } else if (health.tone === 'danger') {
+                fact('External IP', "Not known while there's no connection.");
+            } else if (checking) {
+                fact('External IP', stun ? `Asking ${stun}…` : 'Asking for your address…');
+            } else {
+                fact('External IP', result?.reason ?? 'Not checked since the app started.');
+            }
+            if (name === null) {
+                fact('Adapter', `Any interface, as ${OS} chooses`);
+            } else {
+                const listed = adapters?.find((adapter) => adapter.name === name);
+                fact('Adapter', present === false ? `${name} · Not Connected` : listed ? `${name} · ${addressOf(listed)}` : name, 'Dropgate uses only this adapter.');
+            }
+            if (shows) {
+                fact('Latency', `${result.latency} ms to ${result.stun}`);
+                fact('Checked', `${timeOf(result.at)}, by asking ${result.stun}`);
+            }
+            $('details-facts').replaceChildren(...facts);
+            $('details-warning').hidden = !(shows && warning);
+            $('details-warning-text').textContent = shows && warning ? warning : '';
+            const month = result?.ok ? result.month : null;
+            $('details-data').hidden = !month;
+            $('details-data').textContent = month ? `Location data: DB-IP, ${monthName(month)}` : '';
+        }
+
+        /** Check Again, on the card and in the details: busy for as long as anything's being asked; its label's the kit's to put back, with it enabled. */
+        function drawCheckButtons({ on, checking, health }) {
+            for (const button of checkButtons) {
+                if (on && (checking || checkPressed)) {
+                    if (!restoreChecks.has(button)) restoreChecks.set(button, kit.ui.busy(button, 'Checking…'));
+                } else if (restoreChecks.has(button)) {
+                    restoreChecks.get(button)();
+                    restoreChecks.delete(button);
+                    button.disabled = !on || health.tone === 'danger';
+                    // The details' focus, held by the panel while it was busy, goes back to it.
+                    if (button === $('details-check') && document.activeElement === detailsPanel && !button.disabled) button.focus();
+                } else {
+                    button.disabled = !on || health.tone === 'danger';
+                }
+            }
+        }
+
+        /** A time of day, as the person's clock shows it. */
+        const timeOf = (at) => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+        function drawConnection(connection) {
+            const { on, checking, result, stun, health } = connection;
+            connectionLine.set(lineOf(health, health.text));
+            const cutOff = health.tone === 'danger';
+            const shows = showsIps(connection);
+            $('connection-ips').replaceChildren(...(shows ? [['v4', result.v4], ['v6', result.v6]].filter(([, ip]) => ip).map(([family, ip]) => externalIpOf(ip, result.places?.[family])) : []));
 
             let meta = "Your External IP isn't known while there's no connection.";
             if (!on) meta = "Your External IP isn't checked. Turn on Check my External IP below to see it, with its country and ISP.";
@@ -1598,22 +1716,24 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             const checked = $('connection-checked');
             checked.hidden = !shows;
-            checked.textContent = shows ? `Checked at ${new Date(result.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}${result.via ? ` through ${result.via}` : ''}, by asking ${result.stun}.` : '';
+            checked.textContent = shows ? `Checked at ${timeOf(result.at)}${result.via ? ` through ${result.via}` : ''}, by asking ${result.stun}.` : '';
 
-            // Busy for as long as anything's being asked. Its label's the kit's to put back, with it enabled.
             $('connection-actions').hidden = !on;
-            if (on && (checking || checkPressed)) {
-                restoreCheckAgain ??= kit.ui.busy(checkAgainBtn, 'Checking…');
-            } else {
-                restoreCheckAgain?.();
-                restoreCheckAgain = null;
-                checkAgainBtn.disabled = cutOff;
-            }
+            drawCheckButtons(connection);
             drawExternalIpSwitch(connection);
+            drawBarSwitches();
+            drawBar(connection);
+            drawDetails(connection);
         }
 
-        checkAgainBtn.addEventListener('click', async () => {
+        /**
+         * Check Again, from the card or the details: the answer's pushed when it comes.
+         * Busy, the button can't hold the focus, so in the details it's the panel's
+         * (Escape still closes it) until the button's back.
+         */
+        async function checkAgain() {
             checkPressed = true;
+            if (connectionItem.panel.contains(document.activeElement)) detailsPanel.focus();
             drawConnection(network.connection);
             try {
                 network = await api.checkExternalIp();
@@ -1621,6 +1741,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                 checkPressed = false;
                 drawConnection(network.connection);
             }
+        }
+        for (const button of checkButtons) button.addEventListener('click', checkAgain);
+
+        // Network Settings, in the details: they close, and the tab shows.
+        $('details-settings').addEventListener('click', () => {
+            connectionItem.close();
+            shell.showSettings('network');
         });
 
         // The External IP card: Check my External IP, off by default. Its help says who sees
@@ -1639,11 +1766,68 @@ document.addEventListener('DOMContentLoaded', async () => {
                 label: 'Check my External IP',
                 checked: externalIpSwitch ? externalIpSwitch.input.checked : settings.externalIpCheck === true,
                 help: { on: onHelp, off: "Your External IP isn't checked, and nothing is asked of any server for it." },
-                onChange: (checked) => kitApi.setSettings({ externalIpCheck: checked }),
+                onChange: (checked) => {
+                    kitApi.setSettings({ externalIpCheck: checked });
+                    drawBarSwitches();
+                },
             });
             $('external-ip-switch').replaceChildren(externalIpSwitch.element);
             if (focused) externalIpSwitch.input.focus();
         }
+
+        // The bottom bar's switches: the bar itself, on the Connection card, and the
+        // addresses it shows, on the External IP card, greyed while the bar or the
+        // check is off, as neither does anything then. The bar is the kit's, hidden
+        // until it's turned on.
+        const barSwitch = kit.ui.switchField({
+            id: 'network-bar',
+            label: 'Show the connection in the bottom bar',
+            checked: bar.on,
+            help: {
+                on: "The bar along the bottom of the window shows the connection's health, and your External IP when it's checked. Click it for the details.",
+                off: "The bottom bar is hidden. The connection's health shows here only.",
+            },
+            onChange: (checked) => {
+                bar.on = checked;
+                kitApi.setSettings({ networkBar: checked });
+                drawBarSwitches();
+            },
+        });
+        $('network-bar-switch').append(barSwitch.element);
+        const showSwitches = {
+            v4: kit.ui.switchField({
+                id: 'network-bar-ipv4',
+                label: 'Show IPv4',
+                checked: bar.v4,
+                help: { on: 'The bottom bar shows your IPv4 External IP, with its flag.', off: "The bottom bar leaves out your IPv4 address. It's still here and in the details." },
+                onChange: (checked) => {
+                    bar.v4 = checked;
+                    kitApi.setSettings({ barShowsIpv4: checked });
+                    drawBar(network.connection);
+                },
+            }),
+            v6: kit.ui.switchField({
+                id: 'network-bar-ipv6',
+                label: 'Show IPv6',
+                checked: bar.v6,
+                help: { on: 'The bottom bar shows your IPv6 External IP, with its flag, where the adapter has one.', off: "The bottom bar leaves out your IPv6 address. It's still here and in the details." },
+                onChange: (checked) => {
+                    bar.v6 = checked;
+                    kitApi.setSettings({ barShowsIpv6: checked });
+                    drawBar(network.connection);
+                },
+            }),
+        };
+        $('network-bar-ipv4-switch').append(showSwitches.v4.element);
+        $('network-bar-ipv6-switch').append(showSwitches.v6.element);
+
+        /** The bar shown or hidden, as its switch is, and Show IPv4 and Show IPv6 greyed while it or the check is off. */
+        function drawBarSwitches() {
+            shell.statusBar.show(bar.on);
+            const checkOn = externalIpSwitch ? externalIpSwitch.input.checked : settings.externalIpCheck === true;
+            for (const shown of Object.values(showSwitches)) shown.input.disabled = !bar.on || !checkOn;
+        }
+
         $('network-interface-note').textContent = `Update checks go through the chosen adapter too. Direct transfers can't be held to one adapter, so they're off while one is chosen. Choosing one also sets aside ${OS === 'Windows' ? "Windows'" : "Linux's"} proxy settings for Dropgate.`;
 
         interfaceSelect.addEventListener('change', async () => {
@@ -1675,6 +1859,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
 
         // The network service lists the adapters only while this tab shows: with none chosen, it isn't started before then.
+        // The observer's first word, as the page sets itself up, is that it doesn't: main's answer is the state the
+        // bottom bar is first drawn from, with nothing started for it.
         drawConnection(network.connection);
         api.onNetworkChanged(drawNetwork);
         new IntersectionObserver(([entry]) => {

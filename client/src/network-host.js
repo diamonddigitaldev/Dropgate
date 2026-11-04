@@ -19,7 +19,8 @@ const { ExternalIp, healthOf } = require('./core/external-ip');
 //   here, in memory, with the country and ISP the service looked up on the machine,
 //   in the location data it's told of as it's started. So does the connection's
 //   health, from it, the adapter and the OS's word on being online (net.isOnline(),
-//   which has no event, so it's read every NETWORK.ONLINE_MS while the service runs).
+//   which has no event, so it's read every NETWORK.ONLINE_MS while the service runs,
+//   and while the bottom bar shows in a window: the bar alone starts nothing else).
 // - With an adapter chosen, the transfer session has one proxy, with no DIRECT
 //   and loopback sent to it too, so nothing can connect but through it. Until
 //   the service says where it listens, and from the moment it exits, the
@@ -85,6 +86,8 @@ function createNetworkHost({
     /** Whether the External IP check's switch is on, and whether the app has had a window: a share's launch alone asks nothing. */
     let checkWanted = kit.settings.get().externalIpCheck === true;
     let windowed = false;
+    /** Whether the bottom bar is on (networkBar): it shows the health, so the OS's word on being online is read for it. */
+    let barOn = kit.settings.get().networkBar === true;
     /** The OS's word on being online, as last read. */
     let online = net.isOnline();
     let onlineTimer = null;
@@ -229,6 +232,18 @@ function createNetworkHost({
         onChanged(state());
     }
 
+    /** Read it while the service runs, or the bottom bar shows in a window; not otherwise. */
+    function followOnline() {
+        const wanted = !closing && (child !== null || (barOn && windowed));
+        if (wanted && !onlineTimer) {
+            onlineTimer = setInterval(readOnline, NETWORK.ONLINE_MS);
+            onlineTimer.unref?.();
+        } else if (!wanted && onlineTimer) {
+            clearInterval(onlineTimer);
+            onlineTimer = null;
+        }
+    }
+
     /** Start the service, if it's needed, or asked for: a name can't be checked without its list. */
     function startService(asked = false) {
         clearTimeout(restartTimer);
@@ -245,8 +260,7 @@ function createNetworkHost({
         started.on('exit', () => {
             if (child === started) exited();
         });
-        onlineTimer = setInterval(readOnline, NETWORK.ONLINE_MS);
-        onlineTimer.unref?.();
+        followOnline();
     }
 
     /** The service has exited: by itself, nothing connects until it's back. */
@@ -254,10 +268,9 @@ function createNetworkHost({
         const told = stopping;
         clearTimeout(stopTimer);
         stopTimer = null;
-        clearInterval(onlineTimer);
-        onlineTimer = null;
         stopping = false;
         child = null;
+        followOnline();
         port = null;
         proxyHost = null;
         adapters = null;
@@ -377,7 +390,18 @@ function createNetworkHost({
         windowOpened() {
             if (windowed) return;
             windowed = true;
+            followOnline();
             applyCheck();
+        },
+
+        /**
+         * The bottom bar, on or off, as its switch is now: nothing but the OS's word
+         * on being online is read for it, and nothing is started.
+         * @param {boolean} on
+         */
+        setBar(on) {
+            barOn = on;
+            followOnline();
         },
 
         /**

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { bindingResponse, startStunServer } from '../../tests/integration/helpers/stun.mjs';
 
 const require = createRequire(import.meta.url);
-const { ExternalIp, countryWarningOf, healthOf, placeFrom, stunSourceOf } = require('../src/core/external-ip.js');
+const { ExternalIp, countryWarningOf, healthOf, monthFrom, placeFrom, stunSourceOf } = require('../src/core/external-ip.js');
 const { addressesOf, hasIpv6 } = require('../src/core/adapters.js');
 const { STUN_PORT, askBinding, bindingRequest, firstStunUrl, mappedAddress, stunTargetOf } = require('../src/core/stun.js');
 
@@ -113,18 +113,39 @@ test('18.13: health is green, yellow and red exactly as the design has it', () =
     assert.equal(tone({ name: 'wg0', present: null }), 'running');
 });
 
-test('18.13: each state says what it means, naming the OS and the adapter', () => {
+test('18.13 and 18.15: each state says what it means, naming the OS and the adapter, at length and in the bottom bar\'s short form', () => {
     const base = { online: true, name: null, present: null, on: false, checking: false, result: null };
-    assert.deepEqual(healthOf({ ...base, online: false }, 'Linux'), { tone: 'danger', text: 'Offline', title: 'Linux says this computer has no network connection.' });
+    assert.deepEqual(healthOf({ ...base, online: false }, 'Linux'), { tone: 'danger', text: 'Offline', short: 'Offline', title: 'Linux says this computer has no network connection.' });
     assert.deepEqual(healthOf({ ...base, name: 'wg0', present: false }, 'Windows'), {
-        tone: 'danger', text: "wg0 isn't connected", title: "Dropgate is set to use only wg0 (Settings > Network), so it connects through nothing until it's back.",
+        tone: 'danger', text: "wg0 isn't connected", short: "wg0 isn't connected", title: "Dropgate is set to use only wg0 (Settings > Network), so it connects through nothing until it's back.",
     });
-    assert.deepEqual(healthOf(base, 'Linux'), { tone: 'success', text: 'Connected', title: 'Connected, through whichever adapter Linux chooses.' });
-    assert.deepEqual(healthOf(base, 'Windows'), { tone: 'success', text: 'Connected', title: 'Connected, through whichever adapter Windows chooses.' });
-    assert.deepEqual(healthOf({ ...base, name: 'wg0', present: true }, 'Windows'), { tone: 'success', text: 'Connected through wg0', title: 'Connected. Dropgate uses only wg0.' });
-    assert.deepEqual(healthOf({ ...base, on: true }, 'Windows'), { tone: 'warning', text: 'Connected · External IP Not Checked Yet', title: "Your External IP hasn't been checked since the app started." });
-    assert.deepEqual(healthOf({ ...base, on: true, result: { ok: false, reason: 'Why.' } }, 'Windows'), { tone: 'warning', text: 'Connected · External IP Unavailable', title: 'Why.' });
-    assert.equal(healthOf({ ...base, on: true, checking: true, stun: 'stun.example' }, 'Windows').title, 'Asking stun.example for your address.');
+    assert.deepEqual(healthOf(base, 'Linux'), { tone: 'success', text: 'Connected', short: 'Connected', title: 'Connected, through whichever adapter Linux chooses.' });
+    assert.deepEqual(healthOf(base, 'Windows'), { tone: 'success', text: 'Connected', short: 'Connected', title: 'Connected, through whichever adapter Windows chooses.' });
+    assert.deepEqual(healthOf({ ...base, name: 'wg0', present: true }, 'Windows'), { tone: 'success', text: 'Connected through wg0', short: 'wg0', title: 'Connected. Dropgate uses only wg0.' });
+    assert.deepEqual(healthOf({ ...base, name: 'wg0', present: null }, 'Windows'), { tone: 'running', text: 'Checking…', short: 'Checking…', title: 'Finding out whether wg0 is connected.' });
+    assert.deepEqual(healthOf({ ...base, on: true }, 'Windows'), { tone: 'warning', text: 'Connected · External IP Not Checked Yet', short: 'Not checked yet', title: "Your External IP hasn't been checked since the app started." });
+    assert.deepEqual(healthOf({ ...base, on: true, result: { ok: false, reason: 'Why.' } }, 'Windows'), { tone: 'warning', text: 'Connected · External IP Unavailable', short: 'External IP unavailable', title: 'Why.' });
+    assert.deepEqual(healthOf({ ...base, on: true, checking: true, stun: 'stun.example' }, 'Windows'), { tone: 'running', text: 'Checking your External IP…', short: 'Checking…', title: 'Asking stun.example for your address.' });
+    assert.deepEqual(healthOf({ ...base, name: 'wg0', present: true, on: true, result: { ok: true } }, 'Linux'), { tone: 'success', text: 'Connected through wg0', short: 'wg0', title: 'Connected. Dropgate uses only wg0.' });
+});
+
+test('18.15: the month of the location data a check was looked up in is kept with its result, only as a month', () => {
+    assert.equal(monthFrom('2026-11'), '2026-11');
+    assert.equal(monthFrom('2026-01'), '2026-01');
+    for (const bad of ['2026-13', '2026-00', '2026-1', '26-11', '2026-11-01', 'November 2026', 202611, null, undefined, {}]) assert.equal(monthFrom(bad), null, String(bad));
+    let sent;
+    const external = new ExternalIp({ source: () => ({ url: 'stun:stun.test', stun: 'stun.test', server: 'Share' }), isOnline: () => true, via: () => null, send: (request) => { sent = request; }, settleMs: 0 });
+    external.networkIs('a network');
+    external.setOn(true);
+    external.heard({ id: sent.id, v4: '203.0.113.42', latency: 18, location: { month: '2026-11', v4: null, v6: null } });
+    assert.equal(external.view().result.month, '2026-11');
+    external.checkAgain();
+    external.heard({ id: sent.id, v4: '203.0.113.42', latency: 18 });
+    assert.equal(external.view().result.month, null, 'no data looked in');
+    external.checkAgain();
+    external.heard({ id: sent.id, v4: '203.0.113.42', latency: 18, location: { month: '../2026-11', v4: null, v6: null } });
+    assert.equal(external.view().result.month, null, 'anything else');
+    external.stop();
 });
 
 test('18.11: the source is the default server\'s first stun: URL, from its last check, or why there\'s none', () => {

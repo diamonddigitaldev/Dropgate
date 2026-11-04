@@ -21,8 +21,9 @@
 
     <!-- kit.ui.mountShell() (renderer.js) builds the frame around what's here:
          the nav rail (Upload and Download, then Settings and Collapse), the
-         header with Add Files, and the Settings view, with Dropgate's Servers,
-         Transfers and Privacy tabs, then Update, then Credits. -->
+         header with Add Files, the Settings view, with Dropgate's Servers,
+         Transfers, Privacy and Network tabs, then Update, then Credits, and the
+         bottom bar, hidden unless it's turned on in Settings > Network. -->
 
     <!-- Add Files, in the header while a section shows: the files picked are an upload, on Upload. -->
     <div id="toolbar" class="d-flex gap-2">
@@ -109,7 +110,8 @@
     <!-- Settings > Network, moved into its tab by renderer.js: the Update tab's cards, filling the pane.
          Connection is the health and the External IPs, as main last said. Network interface is the adapter
          every connection is held to, chosen through main; the options, the help line and the note are drawn
-         by renderer.js, naming the OS it runs on. External IP holds the switch that lets it be asked at all. -->
+         by renderer.js, naming the OS it runs on. External IP holds the switch that lets it be asked at all, and the
+         bottom bar's Show IPv4 and Show IPv6; the bar's own switch is the Connection card's. -->
     <div id="network-settings" class="network-tab">
         <section class="card update-card">
             <div class="card-body">
@@ -118,13 +120,10 @@
                 <div id="connection-ips" class="network-ips"></div>
                 <p id="connection-meta" class="network-meta"></p>
                 <p id="connection-checked" class="network-meta" hidden></p>
-                <div id="connection-warning" class="network-warning" hidden>
-                    <span class="material-icons-round" aria-hidden="true">warning</span>
-                    <span id="connection-warning-text"></span>
-                </div>
                 <div id="connection-actions" class="network-actions" hidden>
                     <button type="button" id="connection-check" class="btn btn-outline-secondary btn-sm">Check Again</button>
                 </div>
+                <div id="network-bar-switch"></div>
             </div>
         </section>
         <section class="card update-card">
@@ -142,8 +141,27 @@
             <div class="card-body">
                 <h3 class="update-card-title">External IP</h3>
                 <div id="external-ip-switch"></div>
+                <div id="network-bar-ipv4-switch"></div>
+                <div id="network-bar-ipv6-switch"></div>
             </div>
         </section>
+    </div>
+
+    <!-- The connection's details, moved into the bottom bar's panel by renderer.js (the kit's, with its Close): the
+         health line, then what's known (drawn by renderer.js), the IPv4/IPv6 country warning, and Check Again,
+         Network Settings and the location data's month on one line. -->
+    <div id="connection-details" hidden>
+        <div id="details-status"></div>
+        <dl id="details-facts" class="network-facts"></dl>
+        <div id="details-warning" class="network-warning" hidden>
+            <span class="material-icons-round" aria-hidden="true">warning_amber</span>
+            <span id="details-warning-text"></span>
+        </div>
+        <div class="network-details-foot">
+            <button type="button" id="details-check" class="btn btn-outline-secondary btn-sm">Check Again</button>
+            <button type="button" id="details-settings" class="btn btn-outline-secondary btn-sm">Network Settings</button>
+            <span id="details-data" class="network-details-data" hidden></span>
+        </div>
     </div>
 
     <!-- Add Files' and the drop zone's picker: the files picked together make one upload. -->

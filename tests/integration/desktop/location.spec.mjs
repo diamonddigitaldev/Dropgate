@@ -2,7 +2,8 @@
 // its flag, a bundled SVG with the country code as its tooltip, and the Connection
 // card says "<Country> · <ISP> (<ASN>) · Latency 18 ms", all looked up on the machine
 // in the location data: here, a small test database of the test's own, holding the
-// made-up answers the STUN responder gives. Everything the network service tries to
+// made-up answers the STUN responder gives. The IPv4/IPv6 country warning is the
+// details' (the bottom bar's panel), never the card's. Everything the network service tries to
 // send is written down (network-stand-in.cjs), so a lookup is seen to send nothing,
 // and what it finds is looked for in the profile and the log.
 //
@@ -30,8 +31,12 @@ const ips = (window) => window.locator('#connection-ips');
 const ip = (window, nth) => window.locator('#connection-ips .network-ip').nth(nth);
 const flags = (window) => window.locator('#connection-ips img');
 const meta = (window) => window.locator('#connection-meta');
-const warning = (window) => window.locator('#connection-warning');
 const checkAgain = (window) => window.locator('#connection-check');
+// The warning is the details' (the bottom bar's panel), and the Connection card has none.
+const details = (window) => window.getByRole('dialog', { name: 'Connection Details' });
+const warning = (window) => details(window).locator('#details-warning');
+const detailsCheck = (window) => details(window).getByRole('button', { name: 'Check Again' });
+const detailsIp = (window, nth) => details(window).locator('#details-facts .network-addr').nth(nth);
 const toggle = (window) => window.getByRole('switch', { name: 'Check my External IP' });
 
 async function openNetwork(window) {
@@ -70,7 +75,7 @@ test.describe('with no adapter chosen, on IPv4', () => {
         await expectFlag(flags(window), 'NL');
         await expect(meta(window)).toHaveText(/^Netherlands · Example Hosting B\.V\. \(AS64500\) · Latency \d+ ms$/);
         await expect(window.locator('#external-ip-check-help')).toHaveText(/That server sees your IP address\. Country and ISP are looked up on this computer\.$/);
-        await expect(warning(window), 'one address, so no second country').toBeHidden();
+        await expect(window.locator('#connection-warning'), 'on the card: none').toHaveCount(0);
 
         // Nothing but the binding request left the service: no connection, no name, no request for the lookup.
         expect(stun.requests.length, 'what the STUN server heard').toBe(1);
@@ -149,41 +154,52 @@ test.describe('with both addresses', () => {
             await desktop.setUp(window);
             await openNetwork(window);
             await toggle(window).check();
+            await window.getByRole('switch', { name: 'Show the connection in the bottom bar' }).check();
 
-            // The same country: a flag each, and no warning.
+            // The same country: a flag each, and no warning, in the details, which stay open from here on.
             await expect(ip(window, 0)).toHaveText(V4);
             await expect(ip(window, 1)).toHaveText(V6);
             await expectFlag(ip(window, 0).locator('img'), 'NL');
             await expectFlag(ip(window, 1).locator('img'), 'NL');
             await expect(meta(window)).toHaveText(/^Netherlands · Example Hosting B\.V\. \(AS64500\) · Latency \d+ ms$/);
+            await window.locator('#kit-statusbar-connection').click();
+            await expect(details(window)).toBeVisible();
+            await expect(detailsIp(window, 1)).toHaveText(V6);
             await expect(warning(window)).toBeHidden();
             const names = () => dns.queries.filter(({ name }) => name === 'stun.test').length;
             const asked = stun.requests.length;
             const askedNames = names();
 
-            // Different countries: a flag each, and the warning, in the order of the addresses.
+            // Different countries: a flag each, the Country row listing both, and the warning, in the order of the addresses.
             stun.mapped.v6 = V6_ELSEWHERE;
-            await checkAgain(window).click();
+            await detailsCheck(window).click();
+            await expect(detailsIp(window, 1)).toHaveText(V6_ELSEWHERE);
             await expect(ip(window, 1)).toHaveText(V6_ELSEWHERE);
             await expectFlag(ip(window, 0).locator('img'), 'NL');
             await expectFlag(ip(window, 1).locator('img'), 'GB');
+            await expectFlag(detailsIp(window, 1).locator('img'), 'GB');
             await expect(warning(window)).toBeVisible();
-            await expect(window.locator('#connection-warning-text')).toHaveText('Your IPv4 and IPv6 addresses are in different countries (NL and GB), so one of them may not be going through your VPN.');
+            await expect(details(window).locator('#details-warning-text')).toHaveText('Your IPv4 and IPv6 addresses are in different countries (NL and GB), so one of them may not be going through your VPN.');
+            await expect(details(window).locator('#details-facts dt:text-is("Country") + dd > div')).toHaveText(['IPv4: Netherlands (NL)', 'IPv6: United Kingdom (GB)']);
+            await expect(details(window).locator('#details-facts dt:text-is("ISP") + dd > div')).toHaveText(['IPv4: Example Hosting B.V. (AS64500)', 'IPv6: Example Broadband Ltd (AS64511)']);
+            await expect(window.locator('#connection-warning'), 'on the card: none').toHaveCount(0);
             expect(stun.requests.length - asked, 'one request a family, and none more for the lookups').toBe(2);
             expect(names() - askedNames, 'the STUN server\'s name, for each request').toBeLessThanOrEqual(2);
             expect(dns.queries.filter(({ name }) => name !== 'stun.test'), 'nothing asked of the DNS server for a lookup').toEqual([]);
 
             // Back the same: it goes.
             stun.mapped.v6 = V6;
-            await checkAgain(window).click();
-            await expect(ip(window, 1)).toHaveText(V6);
+            await detailsCheck(window).click();
+            await expect(detailsIp(window, 1)).toHaveText(V6);
+            await expect(details(window)).toBeVisible();
             await expect(warning(window)).toBeHidden();
 
             // Offline: what was found is kept, but nothing shows, the warning least of all; back, it's as it was.
             stun.mapped.v6 = V6_ELSEWHERE;
-            await checkAgain(window).click();
+            await detailsCheck(window).click();
             await expect(warning(window)).toBeVisible();
             await app.app.evaluate(() => { globalThis.__dropgateOnline = false; });
+            await expect(details(window)).toBeVisible();
             await expect(warning(window)).toBeHidden();
             await expect(flags(window)).toHaveCount(0);
             await app.app.evaluate(() => { globalThis.__dropgateOnline = true; });
@@ -191,6 +207,8 @@ test.describe('with both addresses', () => {
 
             // Gone: nothing shows, and nothing's kept.
             desktop.setAdapters({});
+            await expect(details(window).locator('#details-status')).toHaveText(`${STAND_IN} isn't connected`);
+            await expect(details(window)).toBeVisible();
             await expect(warning(window)).toBeHidden();
             await expect(flags(window)).toHaveCount(0);
         } finally {

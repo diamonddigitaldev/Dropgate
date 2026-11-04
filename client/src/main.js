@@ -122,6 +122,8 @@ const { answerWindowChannels } = require('./window-channels');
 //   the default server's STUN server, from its last check this run
 //   (core/external-ip.js). What it finds stays in memory, never written or logged,
 //   and so do its country and ISP, looked up on the machine (core/location.js).
+//   The bottom bar (networkBar, off by default) draws the same health and
+//   addresses: it starts nothing and asks nothing of its own.
 // Share with Dropgate (Windows' context menu) launches the app with a file's
 // path and --upload. Main makes the upload itself, with no window: to the
 // default server, checked by the transfer window, with its settings for new
@@ -178,6 +180,7 @@ function atOnceSetting() {
 kit.settings.onChange((changes) => {
     if (Object.hasOwn(changes, 'transfersAtOnce')) transfers.setAtOnce(atOnceSetting());
     if (Object.hasOwn(changes, 'externalIpCheck')) network?.setCheck(changes.externalIpCheck === true);
+    if (Object.hasOwn(changes, 'networkBar')) network?.setBar(changes.networkBar === true);
 });
 
 // The saved servers, and the default, in the settings: main's alone. What

@@ -106,7 +106,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onUploadStatus: (callback) => on(CH.UPLOAD_STATUS, callback),
     // A saved server checked by main itself (a fallback trying it): the list, and what each one's last check found.
     onServersChanged: (callback) => on(CH.SERVERS_CHANGED, callback),
-    // Settings > Network: main holds the adapter, and asks the network service which there are. The page holds neither.
+    // Settings > Network and the bottom bar: main holds the adapter, and asks the network service which there are. The page holds neither.
     watchNetwork: (on) => ipcRenderer.invoke(CH.NETWORK_WATCH, { on }),
     setNetworkInterface: (name) => ipcRenderer.invoke(CH.NETWORK_SET_INTERFACE, { name }),
     checkExternalIp: () => ipcRenderer.invoke(CH.NETWORK_CHECK_IP),

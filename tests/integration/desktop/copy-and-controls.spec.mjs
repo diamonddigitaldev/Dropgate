@@ -9,7 +9,7 @@
 //   its source (client/test/copy.test.mjs: one-character ellipses, no "card",
 //   a capital after a colon, bullet-separated items in Title Case), file names
 //   and the server's address as they are.
-import { copySlips } from '../../../client/test/helpers/copy.mjs';
+import { copySlipsShown } from '../helpers/copy-shown.mjs';
 import { madeUpFile } from '../helpers/files.mjs';
 import { cardButton, expect, holdChunks, openServers, serverRow, serverStatus, test, uploadCard, uploadCards } from '../helpers/desktop.mjs';
 
@@ -50,27 +50,6 @@ const cardButtonSizes = (window) => window.evaluate(() => [...document.querySele
         size: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft, style.fontSize, style.lineHeight, style.borderTopWidth, `${button.getBoundingClientRect().height}px`].join(' '),
     };
 }));
-
-/** The words the window shows now: each visible element's own text, and its aria-label, title and placeholder. */
-const shownWords = (window) => window.evaluate(() => {
-    const words = [];
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-    for (let element = walker.currentNode; element; element = walker.nextNode()) {
-        if (!(element instanceof HTMLElement) || !element.checkVisibility()) continue;
-        if (element.classList.contains('material-icons-round')) continue;
-        const own = [...element.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join('').trim();
-        if (own) words.push(own);
-        for (const attribute of ['aria-label', 'title', 'placeholder']) {
-            if (element.getAttribute(attribute)) words.push(element.getAttribute(attribute));
-        }
-    }
-    return words;
-});
-
-/** What a screen shows that breaks the copy rules, the names given read as names. */
-async function copySlipsShown(window, names, where) {
-    return (await shownWords(window)).flatMap((text) => copySlips(text, { names }).map((reason) => `${where}: ${reason} in "${text}"`));
-}
 
 test('every card button is one size, busy or not; every button that says it\'s doing something is disabled with the kit\'s spinner; and the screens keep the copy rules', async ({ desktop }) => {
     const app = await desktop.launch();

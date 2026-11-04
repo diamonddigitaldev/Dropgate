@@ -417,3 +417,80 @@ textarea,
 .server-found[hidden] {
     display: none;
 }
+
+/* ── The bottom bar's item and its details ───────────────────────────────── */
+
+/* The kit's bar and panel; these are only Dropgate's own parts in them, as the mockup draws them. */
+.network-bar-sep {
+    width: 1px;
+    height: 12px;
+    flex-shrink: 0;
+    background: var(--bs-border-color);
+}
+
+/* An External IP in the bar and the details: smaller, its flag 16 by 12. */
+.network-addr {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-family: var(--bs-font-monospace);
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.network-addr .network-flag {
+    width: 16px;
+    height: 12px;
+}
+
+.network-facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0.35rem 0.85rem;
+    margin: 0;
+    font-size: 0.8rem;
+}
+
+.network-facts dt {
+    font-weight: 400;
+    color: var(--bs-secondary-color);
+}
+
+.network-facts dd {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+.network-facts dd .network-addr {
+    font-size: 0.78rem;
+}
+
+.network-facts dd > div + div {
+    margin-top: 0.15rem;
+}
+
+/* Check Again, Network Settings and the data's month, on one line. */
+.network-details-foot {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.network-details-foot .btn {
+    --bs-btn-padding-y: 0.15rem;
+    --bs-btn-padding-x: 0.55rem;
+    --bs-btn-font-size: 0.78rem;
+}
+
+.network-details-data {
+    margin-left: auto;
+    font-size: 0.7rem;
+    color: var(--bs-secondary-color);
+    white-space: nowrap;
+}
+
+.network-details-data[hidden] {
+    display: none;
+}

@@ -30,8 +30,8 @@ const settled = async () => {
 /** A default server's STUN server, as main reads it from its last check. */
 const STUN = { url: 'stun:stun.example:3478', stun: 'stun.example', server: 'Share Space' };
 
-function setUp({ name = null, commandLine = {}, updaterRefuses = false, check = false, source = STUN, isPackaged = false } = {}) {
-    const main = fakeMain({ settings: { networkInterface: name, externalIpCheck: check } });
+function setUp({ name = null, commandLine = {}, updaterRefuses = false, check = false, bar = false, source = STUN, isPackaged = false } = {}) {
+    const main = fakeMain({ settings: { networkInterface: name, externalIpCheck: check, networkBar: bar } });
     main.electron.app.commandLine = { hasSwitch: (which) => commandLine[which] === true };
     main.electron.app.isPackaged = isPackaged;
     let online = true;
@@ -453,7 +453,7 @@ test('on, it asks once at launch and never on a timer; once when the network cha
     assert.equal(askedOf(child).length, 1, 'at launch');
     await answer(1);
     const { result, health } = network.state().connection;
-    assert.deepEqual({ ...result, at: 0 }, { ok: true, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18, at: 0, via: null, stun: STUN.stun, places: { v4: null, v6: null } });
+    assert.deepEqual({ ...result, at: 0 }, { ok: true, v4: '203.0.113.42', v6: '2001:db8:5:12::42', latency: 18, at: 0, via: null, stun: STUN.stun, places: { v4: null, v6: null }, month: null });
     assert.equal(health.tone, 'success');
     assert.deepEqual(changes.at(-1).connection.result, result, 'pushed');
 
@@ -624,6 +624,37 @@ test('offline, nothing is asked; the OS\'s word is read as the service runs, and
     setOnline(true);
     mock.timers.tick(NETWORK.ONLINE_MS);
     assert.notEqual(changes.at(-1).connection.health.tone, 'danger');
+});
+
+test('18.15: the bottom bar starts nothing: with no adapter and the check off, only the OS\'s word on being online is read for it, and only while a window has it', async (t) => {
+    timers(t, ['setTimeout', 'setInterval']);
+    const { main, network, setOnline, changes } = setUp({ bar: true });
+    // On, even as its switch is given again, a launch only to share has no bar to draw.
+    network.setBar(true);
+    setOnline(false);
+    mock.timers.tick(NETWORK.ONLINE_MS * 3);
+    assert.equal(changes.length, 0, 'a launch only to share has no bar to draw');
+
+    network.windowOpened();
+    mock.timers.tick(NETWORK.ONLINE_MS);
+    assert.equal(changes.at(-1).connection.health.short, 'Offline');
+    setOnline(true);
+    mock.timers.tick(NETWORK.ONLINE_MS);
+    assert.equal(changes.at(-1).connection.health.short, 'Connected');
+    assert.equal(main.processes.length, 0, 'no service, and so nothing sent');
+
+    // Off: read no more.
+    network.setBar(false);
+    const told = changes.length;
+    setOnline(false);
+    mock.timers.tick(NETWORK.ONLINE_MS * 3);
+    assert.equal(changes.length, told);
+    // On again, from the switch.
+    network.setBar(true);
+    mock.timers.tick(NETWORK.ONLINE_MS);
+    assert.equal(changes.at(-1).connection.health.short, 'Offline');
+    assert.equal(main.processes.length, 0);
+    network.close();
 });
 
 test('the switch turned on asks at once, the service started for it; off, what was known goes, and with nothing else needing it the service stops', async (t) => {
