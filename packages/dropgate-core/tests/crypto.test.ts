@@ -2,15 +2,17 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { inspect } from 'node:util';
-import { createCipheriv, createHmac } from 'node:crypto';
+import { createCipheriv, createHash, createHmac, createPrivateKey, createPublicKey, diffieHellman, hkdfSync } from 'node:crypto';
+import * as ed25519 from '@noble/curves/ed25519.js';
 import { DropgateClient, codes } from '../src/index.js';
 import { cryptoProvider, webCryptoProvider } from '../src/crypto/index.js';
 import { newOperationId } from '../src/operation.js';
 import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
+import { providerVectorChecks } from './helpers/provider-vectors.js';
 
 // The crypto provider: every encrypt, decrypt, key, hash and random number
-// core uses goes through it. WebCrypto today; phase 11 adds the audited
-// JavaScript one where crypto.subtle is missing.
+// core uses goes through it. WebCrypto today; the audited JavaScript one
+// (@noble) follows, for where crypto.subtle is missing or has no X25519.
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -126,6 +128,199 @@ describe('The WebCrypto provider', () => {
   });
 });
 
+describe("The WebCrypto provider's operations for direct transfers", async () => {
+  const provider = cryptoProvider();
+  const x25519Pkcs8 = (scalar: Uint8Array) => Buffer.concat([Buffer.from('302e020100300506032b656e04220420', 'hex'), scalar]);
+  const nodeX25519 = (scalar: Uint8Array, u: Uint8Array) => new Uint8Array(diffieHellman({
+    privateKey: createPrivateKey({ key: x25519Pkcs8(scalar), format: 'der', type: 'pkcs8' }),
+    publicKey: createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b656e032100', 'hex'), u]), format: 'der', type: 'spki' }),
+  }));
+
+  // The same known answers the integration suite runs in Chromium, Firefox and WebKit.
+  for (const { name, expected, actual } of await providerVectorChecks(provider)) {
+    it(`known answer: ${name}`, () => { expect(actual).toBe(expected); });
+  }
+
+  it('hashes SHA-512, HMACs with SHA-256 and SHA-512 and derives HKDF bytes as node:crypto does, on random inputs', async () => {
+    for (let round = 0; round < 20; round++) {
+      const key = provider.randomBytes(1 + round * 7);
+      const data = provider.randomBytes(round * 37);
+      const salt = provider.randomBytes(round % 3 === 0 ? 0 : 32);
+      expect(hex(await provider.sha512(data))).toBe(createHash('sha512').update(data).digest('hex'));
+      expect(hex(await provider.hmac('SHA-256', key, data))).toBe(createHmac('sha256', key).update(data).digest('hex'));
+      expect(hex(await provider.hmac('SHA-512', key, data))).toBe(createHmac('sha512', key).update(data).digest('hex'));
+      expect(hex(await provider.hkdf(key, salt, data, 16 + round))).toBe(Buffer.from(hkdfSync('sha256', key, salt, data, 16 + round)).toString('hex'));
+    }
+    await expect(provider.hmac('SHA-1' as never, new Uint8Array(1), new Uint8Array(0))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(provider.hmac('SHA-256', new Uint8Array(0), new Uint8Array(0))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    for (const length of [0, 8161, 1.5]) {
+      await expect(provider.hkdf(new Uint8Array(32), new Uint8Array(0), new Uint8Array(0), length)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    }
+    expect((await provider.hkdf(new Uint8Array(32), new Uint8Array(0), new Uint8Array(0), 8160)).byteLength).toBe(8160);
+  });
+
+  it('seals with associated data as node:crypto does, and with none exactly as before', async () => {
+    const raw = provider.randomBytes(32);
+    const key = await provider.importKey(raw);
+    const nonce = provider.randomBytes(12);
+    const plaintext = provider.randomBytes(100);
+    const ad = provider.randomBytes(23);
+    const cipher = createCipheriv('aes-256-gcm', raw, nonce).setAAD(ad);
+    const expected = Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]).toString('hex');
+    const sealed = await provider.encryptWithNonce(key, nonce, plaintext, ad);
+    expect(hex(sealed)).toBe(expected);
+    expect(hex(await provider.decryptWithNonce(key, nonce, sealed, ad))).toBe(hex(plaintext));
+    // Without the associated data, or with none, it doesn't open; an empty one is no associated data.
+    await expect(provider.decryptWithNonce(key, nonce, sealed)).rejects.toThrow();
+    const plain = createCipheriv('aes-256-gcm', raw, nonce);
+    const withNone = Buffer.concat([plain.update(plaintext), plain.final(), plain.getAuthTag()]).toString('hex');
+    expect(hex(await provider.encryptWithNonce(key, nonce, plaintext))).toBe(withNone);
+    expect(hex(await provider.encryptWithNonce(key, nonce, plaintext, new Uint8Array(0)))).toBe(withNone);
+  });
+
+  it('compares bytes: equal only when the same length and the same bytes', () => {
+    const a = provider.randomBytes(64);
+    expect(provider.equal(a, a.slice())).toBe(true);
+    expect(provider.equal(new Uint8Array(0), new Uint8Array(0))).toBe(true);
+    for (const at of [0, 31, 63]) {
+      const b = a.slice();
+      b[at] ^= 0x80;
+      expect(provider.equal(a, b)).toBe(false);
+    }
+    expect(provider.equal(a, a.subarray(0, 63))).toBe(false);
+  });
+
+  it('generates X25519 keys whose exchange agrees, and matches node:crypto for any point', async () => {
+    const alice = await provider.x25519Generate();
+    const bob = await provider.x25519Generate();
+    expect(alice.publicKey.byteLength).toBe(32);
+    expect(hex(await provider.x25519(alice.privateKey, bob.publicKey))).toBe(hex(await provider.x25519(bob.privateKey, alice.publicKey)));
+    for (let round = 0; round < 20; round++) {
+      const scalar = provider.randomBytes(32);
+      const u = provider.randomBytes(32);
+      const ours = await provider.x25519(await provider.x25519FromScalar(scalar), u).then(hex, (err) => err.code);
+      let theirs: string;
+      try {
+        theirs = hex(nodeX25519(scalar, u));
+      } catch {
+        theirs = 'INVALID_ARGUMENT';
+      }
+      expect(ours).toBe(theirs);
+    }
+  });
+
+  it('keeps an X25519 private key to itself: printed, logged or serialised, it shows no bytes', async () => {
+    const { privateKey } = await provider.x25519Generate();
+    const fixed = await provider.x25519FromScalar(provider.randomBytes(32));
+    for (const key of [privateKey, fixed]) {
+      expect(JSON.stringify({ key })).toBe('{"key":"[X25519Key]"}');
+      expect(`${String(key)} ${inspect(key)}`).toBe('[X25519Key] [X25519Key]');
+      expect(Object.keys(key)).toEqual([]);
+    }
+    const contentKey = await provider.generateKey();
+    await expect(provider.x25519(contentKey as never, new Uint8Array(32).fill(9))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(provider.encryptWithNonce(privateKey as never, new Uint8Array(12), new Uint8Array(1))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('refuses an X25519 point or scalar of the wrong length, and an all-zero result', async () => {
+    const { privateKey } = await provider.x25519Generate();
+    for (const length of [0, 31, 33]) {
+      await expect(provider.x25519(privateKey, new Uint8Array(length))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+      await expect(provider.x25519FromScalar(new Uint8Array(length))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    }
+    // u = 0 and u = 1 are low-order points (CPace's B.1.10 has the rest).
+    await expect(provider.x25519(privateKey, new Uint8Array(32))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT', message: expect.stringContaining('low-order') });
+    await expect(provider.x25519(privateKey, Uint8Array.of(1, ...new Uint8Array(31)))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it("refuses an all-zero result itself, whether an engine's WebCrypto hands one back or refuses it", async () => {
+    // The low-order points are refused before WebCrypto sees them, so these
+    // engines are made up: one handing back zeros, one refusing as WebCrypto does.
+    const subtle = globalThis.crypto.subtle;
+    const withDeriveBits = (deriveBits: SubtleCrypto['deriveBits']) => webCryptoProvider({
+      getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto),
+      subtle: new Proxy(subtle, { get: (target, prop) => (prop === 'deriveBits' ? deriveBits : Reflect.get(target, prop, target).bind(target)) }),
+    });
+    for (const deriveBits of [
+      async () => new ArrayBuffer(32),
+      async () => { throw new DOMException('The operation failed for an operation-specific reason', 'OperationError'); },
+    ]) {
+      const engine = withDeriveBits(deriveBits);
+      const { privateKey } = await engine.x25519Generate();
+      await expect(engine.x25519(privateKey, new Uint8Array(32).fill(9))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT', message: expect.stringContaining('low-order') });
+    }
+    // Any other refusal is passed on as it is.
+    const other = withDeriveBits(async () => { throw new DOMException('Not supported', 'NotSupportedError'); });
+    const { privateKey } = await other.x25519Generate();
+    await expect(other.x25519(privateKey, new Uint8Array(32).fill(9))).rejects.toMatchObject({ name: 'NotSupportedError' });
+  });
+
+  it('reads a u-coordinate as RFC 7748 says (bit 255 ignored, reduced mod p) before WebCrypto sees it', async () => {
+    const seen: Uint8Array[] = [];
+    const subtle = globalThis.crypto.subtle;
+    const watched = webCryptoProvider({
+      getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto),
+      subtle: new Proxy(subtle, {
+        get: (target, prop) => (prop === 'importKey'
+          ? (format: string, data: BufferSource, ...rest: unknown[]) => {
+            if (format === 'raw') seen.push(new Uint8Array(data as ArrayBuffer));
+            return (target.importKey as (...args: unknown[]) => Promise<CryptoKey>)(format, data, ...rest);
+          }
+          : Reflect.get(target, prop, target).bind(target)),
+      }),
+    });
+    const scalar = await watched.x25519FromScalar(provider.randomBytes(32));
+    const p = Uint8Array.of(0xed, ...new Uint8Array(30).fill(0xff), 0x7f);
+    // p + 9, and 9 with bit 255 set, are both 9.
+    const plus9 = p.slice();
+    plus9[0] += 9;
+    const high9 = Uint8Array.of(9, ...new Uint8Array(30), 0x80);
+    const nine = hex(await watched.x25519(scalar, Uint8Array.of(9, ...new Uint8Array(31))));
+    expect(hex(await watched.x25519(scalar, plus9))).toBe(nine);
+    expect(hex(await watched.x25519(scalar, high9))).toBe(nine);
+    expect(seen.map(hex)).toEqual(Array(3).fill(hex(Uint8Array.of(9, ...new Uint8Array(31)))));
+  });
+
+  it("maps with @noble/curves' Elligator 2, whose pinned version still exports it by that name", async () => {
+    // An "experimental" name in @noble/curves 2.4.0. If a package sweep finds it
+    // renamed, src/crypto/elligator.ts's import changes with it.
+    expect(typeof ed25519._map_to_curve_elligator2_curve25519).toBe('function');
+
+    // The same as the CPace draft's own reference map (Appendix A.5), written
+    // here in plain BigInt arithmetic from the draft and not from @noble.
+    const p = (1n << 255n) - 19n;
+    const A = 486662n;
+    const modP = (n: bigint) => ((n % p) + p) % p;
+    const pow = (base: bigint, exp: bigint) => {
+      let result = 1n;
+      for (base = modP(base); exp > 0n; exp >>= 1n, base = modP(base * base)) if (exp & 1n) result = modP(result * base);
+      return result;
+    };
+    const inv = (n: bigint) => pow(n, p - 2n);
+    const reference = (bytes: Uint8Array) => {
+      const r = BigInt(`0x${hex(bytes.slice().reverse())}`) & ((1n << 255n) - 1n);
+      const v = modP(-A * inv(1n + 2n * r * r));
+      const epsilon = pow(v * v * v + A * v * v + v, (p - 1n) / 2n);
+      const x = modP(epsilon * v - (1n - epsilon) * A * inv(2n));
+      return x.toString(16).padStart(64, '0').match(/../g)!.reverse().join('');
+    };
+    for (let round = 0; round < 50; round++) {
+      const u = provider.randomBytes(32);
+      expect(hex(provider.elligator2(u))).toBe(reference(u));
+    }
+    for (const u of [new Uint8Array(32), new Uint8Array(32).fill(0xff), Uint8Array.of(1, ...new Uint8Array(31))]) {
+      expect(hex(provider.elligator2(u))).toBe(reference(u));
+    }
+    // Bit 255 is ignored, as RFC 7748 decodes a u-coordinate.
+    const u = provider.randomBytes(32);
+    const high = u.slice();
+    high[31] |= 0x80;
+    u[31] &= 0x7f;
+    expect(hex(provider.elligator2(high))).toBe(hex(provider.elligator2(u)));
+    expect(() => provider.elligator2(new Uint8Array(31))).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+  });
+});
+
 describe('On a page served over plain HTTP (no crypto.subtle, no randomUUID)', () => {
   const provider = webCryptoProvider(plainHttpCrypto());
 
@@ -140,6 +335,18 @@ describe('On a page served over plain HTTP (no crypto.subtle, no randomUUID)', (
     await expect(provider.generateKey()).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });
     await expect(provider.deriveContentKey(new Uint8Array(32), new Uint8Array(16), new Uint8Array(1))).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });
     await expect(provider.deriveMacKey(new Uint8Array(32), new Uint8Array(16), new Uint8Array(1))).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });
+  });
+
+  it("can't do a direct transfer's crypto either (until the JavaScript provider), but the map is JavaScript and works", async () => {
+    const none = new Uint8Array(32);
+    for (const run of [
+      () => provider.sha512(none), () => provider.hmac('SHA-512', none, none), () => provider.hkdf(none, none, none, 32),
+      () => provider.x25519Generate(),
+    ]) {
+      await expect(run()).rejects.toMatchObject({ code: 'RUNTIME_UNSUPPORTED' });
+    }
+    expect(provider.equal(none, none)).toBe(true);
+    expect(hex(provider.elligator2(none))).toBe(hex(cryptoProvider().elligator2(none)));
   });
 
   it('codes, operation IDs and an unencrypted upload work; an encrypted one fails RUNTIME_UNSUPPORTED', async () => {
@@ -198,5 +405,11 @@ describe('One provider', () => {
       .filter((path) => readFileSync(path, 'utf8').split('\n').some((line) => !/^\s*(\/\/|\*|\/\*)/.test(line) && direct.test(line)))
       .map((path) => relative(root, path));
     expect(offenders).toEqual([]);
+
+    // And @noble/curves comes in through one file, so a rename touches only it.
+    const noble = files
+      .filter((path) => /from\s+['"]@noble\//.test(readFileSync(path, 'utf8')))
+      .map((path) => relative(root, path).replace(/\\/g, '/'));
+    expect(noble).toEqual(['crypto/elligator.ts']);
   });
 });

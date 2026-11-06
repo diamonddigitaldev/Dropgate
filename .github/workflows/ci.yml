@@ -234,6 +234,7 @@ jobs:
           cache: npm
           cache-dependency-path: |
             server/package-lock.json
+            packages/dropgate-core/package-lock.json
             tests/integration/package-lock.json
 
       # npm 12 is what applies the allowScripts approvals in package.json.
@@ -246,6 +247,12 @@ jobs:
         run: |
           npm --version
           npm ci
+
+      # core/crypto-vectors.spec.mjs bundles core's crypto checks with core's
+      # esbuild, @noble included, so it needs core's dependencies.
+      - name: Install core's dependencies
+        working-directory: packages/dropgate-core
+        run: npm ci
 
       - name: Install dependencies
         run: |

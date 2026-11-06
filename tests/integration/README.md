@@ -21,6 +21,8 @@ Each test sends files through the web UI the way a person would, then receives t
 
 For encrypted uploads, they also check that the files the server stores hold none of the plaintext and none of the file names.
 
+They also check core's crypto in each browser engine ([`core/crypto-vectors.spec.mjs`](core/crypto-vectors.spec.mjs)): the same known answers core's own tests check in Node, on core's Web Crypto provider, byte for byte. They're CPace's test vectors (draft-irtf-cfrg-cpace-21's A.1, A.3, B.1 and B.1.10: the generator, both shares, the shared point, both session keys and the session-ID output), and X25519's, SHA-512's, HMAC's, HKDF's and AES-GCM's with associated data from their standards; and each engine's own Web Crypto refuses CPace's seven low-order points itself (Chromium as it derives, Firefox as it imports the point). Playwright's WebKit on Windows has no X25519 in Web Crypto, so there the X25519 half is skipped. The checks are core's own test code, bundled for the page with core's esbuild, and they run on a page from a small server of the test's own on `127.0.0.1`.
+
 They also check the web UI's look, as the desktop app's own electron-kit has it:
 
 * **The modals and Escape.** The Upload Security Warning, Delete This Upload? and the QR code each close on Escape as Cancel, with the focus on the page, on the modal or on any of its buttons (Upload Anyway and Delete too), as their close button and backdrop do, and the focus goes back to the button that opened them. Nothing is uploaded or deleted, and the page behind stays as it was; a direct transfer's QR code closes even on an Escape pressed while it's still opening, and the transfer still waits for its receiver. Without a modal, Escape leaves an upload under way on its card.
@@ -76,14 +78,16 @@ Pasting an end-to-end encrypted link into "Enter Sharing Code" used to send its 
 
 ## Running the Tests
 
-Requires Node.js 24 or later. The tests start the server from `server/` and the desktop app from `client/`, so install their dependencies first. From the repository root:
+Requires Node.js 24 or later. The tests start the server from `server/` and the desktop app from `client/`, and bundle core's crypto checks from `packages/dropgate-core/`, so install their dependencies first. From the repository root:
 
 ```bash
 cd server
 npm ci
 cd ../client
 npm ci
-cd ../tests/integration
+cd ../packages/dropgate-core
+npm ci
+cd ../../tests/integration
 npm ci
 npx playwright install chromium firefox webkit
 npm test
