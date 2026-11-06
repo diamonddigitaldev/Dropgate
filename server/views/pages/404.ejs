@@ -7,6 +7,7 @@
 
   <script src="/js/theme.js" defer></script>
   <script type="module" src="/js/page-common.js"></script>
+  <script type="module" src="/js/not-found.js"></script>
 </head>
 
 <body>
@@ -15,24 +16,31 @@
       <%- include('../partials/header') %>
       <p class="lead mb-4">A lightweight, open-source, privacy-focused file sharing tool.</p>
 
-      <div id="status-card" class="card shadow-sm border-warning">
-        <div class="card-body p-4">
-          <div id="icon-container" class="mb-3 text-warning">
-            <span class="material-icons-round">report_problem</span>
-          </div>
+      <div id="not-found">
+        <div id="status-card" class="card shadow-sm border-warning">
+          <div class="card-body p-4">
+            <div id="icon-container" class="mb-3 text-warning">
+              <span class="material-icons-round">report_problem</span>
+            </div>
 
-          <h5 class="card-title mb-2" id="status-title">File Not Found</h5>
-          <p class="card-text text-body-secondary" id="status-message">
-            The file you are trying to access does not exist, has expired, or has already been downloaded.
-          </p>
+            <h5 class="card-title mb-2" id="status-title">File Not Found</h5>
+            <p class="card-text text-body-secondary" id="status-message">
+              The file you are trying to access does not exist, has expired, or has already been downloaded.
+            </p>
+          </div>
+        </div>
+
+        <div id="help-statement" class="text-body-secondary mt-4">
+          <strong>What do I do now?</strong><br>
+          <p>Ensure that the file link is correct and try again. Otherwise, ask the person who shared the file with you
+            for assistance.</p>
         </div>
       </div>
 
-      <div id="help-statement" class="text-body-secondary mt-4">
-        <strong>What do I do now?</strong><br>
-        <p>Ensure that the file link is correct and try again. Otherwise, ask the person who shared the file with you
-          for assistance.</p>
-      </div>
+      <%# A Dropgate 3 link names an upload this server never has; not-found.js shows this in its place. %>
+      <template id="older-version">
+        <%- include('../partials/older-version') %>
+      </template>
     </div>
   </main>
 

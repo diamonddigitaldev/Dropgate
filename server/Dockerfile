@@ -1,19 +1,23 @@
 # Use an official Node.js runtime as a parent image
 FROM node:24-alpine
 
+# The server's license, as package.json gives it
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
+
 # Set the working directory in the container
-WORKDIR /usr/src/app
+WORKDIR /app
 
 # Copy package.json and package-lock.json
 COPY package*.json ./
 
 # Install app dependencies
-RUN npm install
+RUN npm ci
 
-# Copy application source
+# Copy application source, and its license
 COPY server.js ./
 COPY views/ ./views/
 COPY public/ ./public/
+COPY LICENSE ./
 
 # Expose the port the app runs on
 EXPOSE 52443
@@ -25,9 +29,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # Install su-exec for dropping privileges and add a non-root user
 RUN apk add --no-cache su-exec && \
     addgroup -S dropgate && adduser -S dropgate -G dropgate && \
-    chown -R dropgate:dropgate /usr/src/app
+    chown -R dropgate:dropgate /app
 
-# Entrypoint creates uploads dir at runtime then drops to dropgate
+# Entrypoint creates the data folders at runtime then drops to dropgate
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

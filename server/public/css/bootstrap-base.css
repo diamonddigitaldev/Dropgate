@@ -52,6 +52,74 @@ main {
   text-decoration: underline;
 }
 
+/* -- AA, as electron-kit has it ------------------------------------------------
+   The web UI can't load electron-kit (it isn't Electron), so it copies the
+   kit's values. Every pairing meets WCAG 2.2 AA in both themes: 4.5:1 for
+   text, 3:1 for focus rings. The accent is Bootstrap's blue, as the kit's demo
+   accent is, so its text shades are the demo's: #0a58ca on light and #8bb9fe on
+   dark, each over 4.5:1 on the page. The bare :root covers a page whose theme
+   isn't set yet. */
+:root,
+[data-bs-theme="light"] {
+  --accent-text: #0a58ca;
+}
+
+[data-bs-theme="dark"] {
+  --accent-text: #8bb9fe;
+}
+
+/* Bootstrap draws focus as a soft glow, a quarter-opaque ring, well under the
+   3:1 a focus indicator needs. The kit's ring is solid, in the accent's text
+   shade, for keyboard focus (:focus-visible), and in a text field or a select
+   however it was focused, since they show where typing goes. */
+.btn {
+  --bs-btn-focus-box-shadow: none;
+}
+
+:focus-visible,
+.btn:focus-visible,
+.form-check-input:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+.form-control:focus,
+.form-select:focus {
+  border-color: var(--accent-text);
+  outline: 2px solid var(--accent-text);
+  outline-offset: 0;
+  box-shadow: none;
+}
+
+.btn-close {
+  --bs-btn-close-focus-shadow: none;
+}
+
+.btn-close:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+/* Bootstrap's outline buttons keep their light theme's text colours on dark,
+   each under 4.5:1 on the page there: the secondary grey (#6c757d, 3.28:1),
+   the blue (#0d6efd, 3.42:1) and the red (#dc3545, 3.4:1). On dark, their text
+   takes the theme's secondary colour, the accent's text shade and the danger
+   emphasis shade instead; their borders, and their fills when hovered, stay
+   Bootstrap's. */
+[data-bs-theme="dark"] .btn-outline-secondary {
+  --bs-btn-color: var(--bs-secondary-color);
+}
+
+[data-bs-theme="dark"] .btn-outline-primary {
+  --bs-btn-color: var(--accent-text);
+}
+
+[data-bs-theme="dark"] .btn-outline-danger {
+  --bs-btn-color: var(--bs-danger-text-emphasis);
+}
+
 @keyframes fadeIn {
   from {
     opacity: 0;

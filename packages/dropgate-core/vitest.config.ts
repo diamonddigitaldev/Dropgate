@@ -1,13 +1,17 @@
 import { defineConfig } from 'vitest/config';
+import { versionDefine } from './scripts/version-define.mjs';
 
 export default defineConfig({
+  define: versionDefine,
   test: {
-    environment: 'happy-dom',
+    // Plain Node, with no browser environment. The web UI and the desktop app are
+    // tested in real browsers and Electron by the integration tests.
+    environment: 'node',
     globals: true,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
-      exclude: ['**/node_modules/**', '**/dist/**', '**/tests/**', '**/*.config.*'],
+      exclude: ['**/node_modules/**', '**/dist/**', '**/tests/**', '**/scripts/**', '**/*.config.*'],
     },
   },
 });
