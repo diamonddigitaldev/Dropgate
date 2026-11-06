@@ -195,11 +195,26 @@ If clients see “Too many requests”:
 - **"That link was made with an older version of Dropgate, which this app can't download."** A link from Dropgate 3: a bundle's (`/b/<id>`), or a single file's whose key after the `#` is 44 characters ending in `=`. Ask its sender to update and send the files again.
 - **"That isn't a Dropgate link."** Anything else, such as a link with a query, or one to a page that isn't an upload's.
 
-**"External IP Unavailable" in Settings, under Network**
+**"<adapter> isn't connected", or "Failed: <adapter> isn't connected."**
+- Dropgate is held to that adapter (**Settings**, under **Network**: **Network interface**), and it isn't there: a VPN that has disconnected, say. Nothing connects until it's back, and nothing goes out through another adapter: uploads and downloads that were running fail, one queued fails at its turn, a paused one's **Resume** is refused, a server's **Test** says **Can't connect**, and update checks fail ([an upload running fails at once, one queued at its turn, nothing moves to the next server…](../tests/integration/desktop/network.spec.mjs)).
+- Connect it again, then choose **Retry**. Nothing starts again by itself. Or choose another adapter, or **Any interface**, under **Network interface**.
+- An adapter is chosen by its name, so one renamed or reinstalled reads as not connected. A VPN that gives its adapter a new name each time it connects does too: choose it again once it's connected.
+
+**A server on your own network says "Can't connect" with a VPN's adapter chosen**
+- With an adapter chosen, Dropgate connects only through it, and a VPN's adapter usually can't reach the devices on your own network (your home server or NAS, at an address such as `192.168.1.20`). Choose **Any interface**, or the adapter of your own network (its Wi-Fi or Ethernet), under **Network interface**, to reach it. A server reached through the VPN itself (such as a Tailscale address) works through the VPN's adapter.
+
+**"External IP Unavailable" in Settings, under Network, or "External IP unavailable" in the bottom bar**
 - The dot is yellow, and what's wrong is under it and in its tooltip. Your connection may be fine: this only means your External IP couldn't be found.
 - **"… lists no STUN server."** Your default saved server gives none to ask, perhaps as it has direct transfers off. Choose another as your default, or ask its operator.
+- **"There's no saved server, so there's no STUN server to ask."** Add one in **Settings**, under **Servers**: the check goes once it's been found.
 - **"… couldn't be reached, so its STUN server isn't known."** Check Again asks your default server again first.
-- **"… didn't answer within 5 seconds."** or **"… couldn't be reached."** The STUN server didn't answer from this network: a firewall or a VPN may be blocking UDP. It's asked again when your network changes, and on Check Again, never by itself in between.
+- **"… didn't answer within 5 seconds."** or **"… couldn't be reached."** The STUN server didn't answer from this network: a firewall or a VPN may be blocking UDP. With an adapter chosen, it's asked through that adapter only. It's asked again when your network changes, and on Check Again, never by itself in between.
+
+**The location data's month doesn't change, with Refresh location data monthly on**
+- It's refreshed as you open Dropgate (not when it starts for **Share with Dropgate**), once the month has turned, by the UTC clock: DB-IP's files for a month come out in the first hours of the 1st. With an adapter chosen, it waits until that adapter is connected.
+- If db-ip.com couldn't be reached, or what it sent wasn't DB-IP's location data, nothing is kept: the data you had is still used, and it's tried again the next time you open Dropgate, never sooner (turning the switch off and on doesn't). With **Keep log on disk for troubleshooting** on, the log says which: "The location data couldn't be refreshed (DB-IP couldn't be reached). It's tried again at the next launch." ([on, with the data from an earlier month: a failure waits for the next launch…](../tests/integration/desktop/location-refresh.spec.mjs)).
+- A firewall that blocks `download.db-ip.com`, or a VPN's adapter that can't reach it, keeps it from refreshing. The data that came with your version of Dropgate is used meanwhile, and a newer version brings newer data.
+- **"This copy of Dropgate has no location data, so country and ISP aren't shown."** A copy run from source without it: run `npm run location-data` in `client/` ([Building](../client/README.md#building)).
 
 **A `.*` key left in the registry after upgrading from version 3 (Windows)**
 - Version 3, installed for all users, registered an association for a literal `.*` extension, which never did anything, and its uninstaller leaves that key behind. Nothing reads it. To remove it, from a Command Prompt run as administrator:

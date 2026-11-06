@@ -20,11 +20,11 @@ export const fileOf = (kind, month) => `dbip-${kind}-lite-${month}.mmdb.gz`;
 export async function startDbIp(address = '127.0.0.2') {
     /** What it serves, by file name, packed. */
     const files = new Map();
-    /** Every request: its path, the address it came from, and the host it named. */
+    /** Every request: its path, the address it came from, the host it named, and its headers' names. */
     const requests = [];
     const open = new Set();
     const server = http.createServer((request, response) => {
-        requests.push({ path: request.url, from: request.socket.remoteAddress, host: request.headers.host });
+        requests.push({ path: request.url, from: request.socket.remoteAddress, host: request.headers.host, headers: Object.keys(request.headers).sort() });
         const body = files.get(request.url.replace(/^\/free\//, ''));
         if (!body) {
             response.writeHead(404, { 'Content-Type': 'text/plain' }).end('Not found');

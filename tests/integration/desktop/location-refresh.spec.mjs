@@ -136,6 +136,8 @@ test.describe('the Location Data card and the monthly refresh', () => {
             expect(dbip.asked().slice(1)).toEqual(filesOf(THIS_MONTH));
             expect(dbip.requests.map(({ from }) => from), 'from the stand-in adapter alone').toEqual([STAND_IN_ADDRESS, STAND_IN_ADDRESS, STAND_IN_ADDRESS]);
             expect(dbip.requests.map(({ host }) => host)).toEqual(Array(3).fill('download.db-ip.com'));
+            // Nothing sent but what a download needs: no user agent, no cookie, nothing of the installation.
+            expect(dbip.requests.map(({ headers }) => headers), "each request's headers").toEqual(Array(3).fill(['accept-encoding', 'connection', 'host']));
             expect(dns.queries.filter(({ name }) => name === 'download.db-ip.com').length, "DB-IP's name, asked through the adapter").toBeGreaterThan(0);
             expect(toDbIp(second).map((tried) => tried.replace(/:\d+$/, ':<port>')), 'all the service tried for it').toEqual(filesOf(THIS_MONTH).flatMap((file) => [
                 'dns download.db-ip.com',

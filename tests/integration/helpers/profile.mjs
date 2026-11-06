@@ -2,8 +2,9 @@
 // for a text in each way the app or Chromium would write it, for any part of
 // a file's bytes, and for a 32-byte secret known only by its hash (an
 // upload's manage token). desktop/profile.spec.mjs, desktop/tray.spec.mjs,
-// desktop/delete-upload.spec.mjs, desktop/nothing-kept.spec.mjs and
-// desktop/servers.spec.mjs scan the whole profile with it after a run.
+// desktop/delete-upload.spec.mjs, desktop/nothing-kept.spec.mjs,
+// desktop/servers.spec.mjs and desktop/network-kept.spec.mjs scan the whole
+// profile with it after a run.
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,13 +27,16 @@ function forms(text) {
 /**
  * The files in the profile holding any of the texts, or any part of the bytes.
  * @param {string} profile
- * @param {{ texts: string[], bytes: Buffer[] }} what
+ * @param {{ texts: string[], bytes: Buffer[], except?: string[] }} what - `except`: files left
+ *   out, relative to the profile, which the caller checks itself (public data the app keeps).
  * @returns {string[]} each file, relative to the profile, and what it holds
  */
-export function heldIn(profile, { texts, bytes }) {
+export function heldIn(profile, { texts, bytes, except = [] }) {
     const found = [];
+    const skipped = new Set(except.map((file) => path.normalize(file)));
     for (const { file, bytes: held } of filesUnder(profile)) {
         const name = path.relative(profile, file);
+        if (skipped.has(name)) continue;
         for (const text of texts) {
             if (forms(text).some((form) => held.includes(form))) found.push(`${name}: "${text}"`);
         }
