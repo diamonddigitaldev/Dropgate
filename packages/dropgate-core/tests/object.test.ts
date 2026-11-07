@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createDecipheriv, createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { inspect } from 'node:util';
-import { cryptoProvider, type CryptoProvider } from '../src/crypto/index.js';
+import { cryptoProvider, nobleProvider, webCryptoProvider, type CryptoProvider } from '../src/crypto/index.js';
 import {
   ObjectLayout, padme, paddedLength, encryptedSize, chunkNonce, bucketFor, encodeManifest, sealMeta, deriveObjectKeys,
   createObject, openObject, type ObjectWriter, type OpenedObject,
@@ -28,9 +28,15 @@ interface TestFile { name: string; bytes: Uint8Array }
 
 const fileOf = (name: string, size: number, index = 0): TestFile => ({ name, bytes: new Uint8Array(reference.vectorFileBytes(index, size)) });
 
+/** Both crypto providers: the object's bytes are the same on each (09 7.1.9, 7.1.10). */
+const PROVIDERS: Array<[string, CryptoProvider]> = [
+  ['WebCrypto', webCryptoProvider(globalThis.crypto)],
+  ['@noble', nobleProvider(globalThis.crypto)],
+];
+
 /** A provider whose meta nonce is fixed, so a meta can be pinned. */
-const withMetaNonce = (nonce: Uint8Array): CryptoProvider =>
-  ({ ...provider, randomBytes: (n: number) => (n === 12 ? nonce.slice() : provider.randomBytes(n)) });
+const withMetaNonce = (nonce: Uint8Array, base: CryptoProvider = provider): CryptoProvider =>
+  ({ ...base, randomBytes: (n: number) => (n === 12 ? nonce.slice() : base.randomBytes(n)) });
 
 interface Built { writer: ObjectWriter; chunks: Uint8Array[]; object: Uint8Array; files: TestFile[] }
 
@@ -61,8 +67,8 @@ async function build(
 }
 
 /** Opens a built object as a download would: its metadata first, then its bytes. */
-const open = (built: Built, overrides: { header?: Uint8Array; meta?: Uint8Array; size?: number; secret?: Uint8Array } = {}) =>
-  openObject(provider, {
+const open = (built: Built, overrides: { header?: Uint8Array; meta?: Uint8Array; size?: number; secret?: Uint8Array; using?: CryptoProvider } = {}) =>
+  openObject(overrides.using ?? provider, {
     secret: overrides.secret ?? built.writer.secret(),
     header: overrides.header ?? built.writer.header,
     meta: overrides.meta ?? built.writer.meta,
@@ -394,14 +400,14 @@ describe('Members and resume points', () => {
 });
 
 describe("The object's exact bytes, against fixed vectors", () => {
-  for (const vector of vectors) {
-    it(`makes the pinned bytes: ${vector.name}`, async () => {
+  for (const [label, using] of PROVIDERS) for (const vector of vectors) {
+    it(`makes the pinned bytes on ${label}: ${vector.name}`, async () => {
       const { input, output } = vector;
       const files = input.files.map((file, k) => fileOf(file.name, file.size, k));
       const secret = fromHex(input.secret);
       const salt = fromHex(input.salt);
       const built = await build(files, {
-        chunkSize: input.chunkSize, maxBytes: input.maxBytes, secret, salt, using: withMetaNonce(fromHex(input.metaNonce)),
+        chunkSize: input.chunkSize, maxBytes: input.maxBytes, secret, salt, using: withMetaNonce(fromHex(input.metaNonce), using),
       });
 
       // The keys can't leave the provider, so they're checked by what they make:
@@ -424,13 +430,35 @@ describe("The object's exact bytes, against fixed vectors", () => {
       expect(sha256(second.object)).toBe(output.object.sha256);
       expect(sha256(second.meta)).toBe(output.meta.sha256);
 
-      // And it opens again to its files.
-      const opened = await open(built);
-      expect(opened.files.map(({ name, size }) => ({ name, size }))).toEqual(input.files);
-      const plaintext = await readAll(opened, built.object);
-      expect(sha256(plaintext.subarray(0, opened.totalSize))).toBe(sha256(concat(...files.map((f) => f.bytes))));
+      // And it opens again to its files, on this provider and on the other (09 7.1.10).
+      for (const [, opener] of PROVIDERS) {
+        const opened = await open(built, { using: opener });
+        expect(opened.files.map(({ name, size }) => ({ name, size }))).toEqual(input.files);
+        const plaintext = await readAll(opened, built.object);
+        expect(sha256(plaintext.subarray(0, opened.totalSize))).toBe(sha256(concat(...files.map((f) => f.bytes))));
+      }
     });
   }
+
+  it('09 7.1.10: an object sealed on either provider opens on the other, and a changed one is refused the same way on both', async () => {
+    for (const [, sealer] of PROVIDERS) {
+      const files = [fileOf('Tax return 2025.xlsx', 3 * C + 17, 0), fileOf('notes.txt', 900, 1)];
+      const built = await build(files, { using: sealer });
+      for (const [, opener] of PROVIDERS) {
+        const opened = await open(built, { using: opener });
+        expect(sha256((await readAll(opened, built.object)).subarray(0, opened.totalSize))).toBe(sha256(concat(...files.map((f) => f.bytes))));
+        const changed = built.object.slice();
+        changed[built.writer.header.byteLength + C + 5] ^= 1;
+        await expectCode(readAll(await open(built, { using: opener }), changed), 'INTEGRITY_FAILED');
+        const wrong = built.writer.secret();
+        wrong[0] ^= 1;
+        await expectCode(open(built, { secret: wrong, using: opener }), 'DECRYPT_FAILED');
+        const meta = built.writer.meta.slice();
+        meta[100] ^= 1;
+        await expectCode(open(built, { meta, using: opener }), 'INTEGRITY_FAILED');
+      }
+    }
+  });
 
   it("refuses a changed magic, version, suite, reserved byte or out-of-range chunk size before any key is made", async () => {
     const built = await build([fileOf('a.txt', 1)]);

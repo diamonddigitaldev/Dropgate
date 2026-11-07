@@ -19,6 +19,7 @@ This package is **headless** and **environment-agnostic** — it contains no DOM
 * [Errors](errors.md): the one error class, and the codes it carries.
 * [Browser Usage](browser-usage.md): loading core with a `<script>` tag or as an ES module.
 * [P2P Consumer Responsibilities](p2p.md): what your code has to do for P2P transfers, and the behaviour to account for.
+* [Crypto](crypto.md): which crypto provider core uses where (Web Crypto, or `@noble` in JavaScript), the `@noble` packages compiled into it, their audits and their licences.
 * [Building and Testing](building-and-testing.md): building core, its tests, the copies the server and the client load, and how it's released.
 
 

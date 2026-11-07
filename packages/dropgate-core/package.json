@@ -31,7 +31,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "build": "tsup && node scripts/copy-build.mjs",
@@ -40,6 +41,7 @@
     "test:coverage": "vitest --coverage",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
+    "notices": "node scripts/write-notices.mjs",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {

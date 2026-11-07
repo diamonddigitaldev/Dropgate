@@ -63,6 +63,8 @@ The full documentation, with the Quick Start, the API reference and the error co
 Licensed under the **Apache-2.0 License**.
 See the [LICENSE](https://github.com/diamonddigitaldev/Dropgate/blob/master/packages/dropgate-core/LICENSE) file for details.
 
+Its builds have `@noble/curves`, `@noble/hashes` and `@noble/ciphers` compiled into them, under the MIT License: see [THIRD-PARTY-NOTICES.md](https://github.com/diamonddigitaldev/Dropgate/blob/master/packages/dropgate-core/THIRD-PARTY-NOTICES.md), which is in the package too.
+
 
 ## Acknowledgements
 

@@ -1,9 +1,12 @@
 // Core's crypto in each browser engine: CPace's known answers
 // (draft-irtf-cfrg-cpace-21's Appendix A.1, A.3, B.1 and B.1.10) and the
 // standards' answers for the crypto provider's X25519, SHA-512, HMAC, HKDF and
-// AES-GCM with associated data, on core's own WebCrypto provider, byte for
-// byte as core's tests have them in Node. Each engine's WebCrypto must also
-// refuse CPace's low-order points itself, as Node's does.
+// AES-GCM with associated data, byte for byte as core's tests have them in
+// Node: on the provider core chooses in that engine (WebCrypto, where it can
+// make an X25519 key; @noble, in JavaScript, where it can't, as in Playwright's
+// WebKit on Windows), and on @noble in every engine. Where WebCrypto is chosen,
+// the engine's own WebCrypto must also refuse CPace's low-order points itself,
+// as Node's does. Each test records the provider chosen as an annotation.
 //
 // The checks are core's own test code (packages/dropgate-core/tests/browser/
 // vectors-entry.ts and the helpers it imports), bundled here with core's
@@ -69,28 +72,56 @@ async function open(page, context) {
 /** Each check whose value isn't the known answer, so a failure names them all. */
 const wrong = (checks) => checks.filter(({ expected, actual }) => actual !== expected);
 
-test("CPace's generator, transcripts and session-ID output, SHA-512, HMAC, HKDF and AES-GCM with associated data", async ({ page, context }) => {
+/** The checks of the engine's own WebCrypto refusing CPace's low-order points. */
+const engineRefusals = (cpace) => cpace.filter(({ name }) => /^B\.1\.10 the engine's WebCrypto refuses u[0-7]$/.test(name));
+
+/**
+ * The provider core should choose in this engine: WebCrypto where it can make
+ * an X25519 key (Chromium, Firefox, and WebKit on macOS, iOS and CI's Linux),
+ * else @noble (Playwright's WebKit on Windows). Recorded on the test.
+ */
+async function expectedProvider(page, browserName) {
+    const hasX25519 = await page.evaluate(() => window.webCryptoHasX25519());
+    // Only WebKit may lack it: Chromium's and Firefox's WebCrypto have X25519.
+    if (browserName !== 'webkit') expect(hasX25519, 'X25519 in WebCrypto').toBe('yes');
+    const name = hasX25519 === 'yes' ? 'webcrypto' : 'noble';
+    test.info().annotations.push({
+        type: 'crypto provider',
+        description: `${browserName}: ${name}${hasX25519 === 'yes' ? '' : ` (no X25519 in WebCrypto: ${hasX25519})`}`,
+    });
+    return name;
+}
+
+test("CPace's generator, transcripts and session-ID output, SHA-512, HMAC, HKDF and AES-GCM with associated data, on the provider core chooses", async ({ page, context, browserName }) => {
     const nothingElsewhere = await open(page, context);
-    const { cpace, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: false }));
+    const expected = await expectedProvider(page, browserName);
+    const { name, cpace, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: false, provider: 'chosen' }));
+    expect(name, 'the provider core chose').toBe(expected);
     expect(wrong([...cpace, ...provider]), 'checks whose value differs from the known answer').toEqual([]);
     expect(cpace.length, "CPace's checks").toBe(31);
     expect(provider.length, "the provider's checks").toBe(8);
     nothingElsewhere();
 });
 
-test("X25519, CPace's shares, K and ISK, and B.1.10's points, with WebCrypto refusing the low-order ones itself", async ({ page, context, browserName }) => {
+test("X25519, CPace's shares, K and ISK, and B.1.10's points, on the provider core chooses, WebCrypto refusing the low-order ones itself where it's chosen", async ({ page, context, browserName }) => {
     const nothingElsewhere = await open(page, context);
-    // Chromium and Firefox have X25519 in WebCrypto. WebKit has it on macOS
-    // and iOS; Playwright's WebKit on Windows doesn't, and there core takes its
-    // JavaScript provider instead, whose own run of these comes with it.
-    const hasX25519 = await page.evaluate(() => window.webCryptoHasX25519());
-    test.skip(browserName === 'webkit' && hasX25519 !== 'yes', `This WebKit's WebCrypto has no X25519 (${hasX25519}).`);
-    expect(hasX25519, 'X25519 in WebCrypto').toBe('yes');
-
-    const { cpace, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: true }));
+    const expected = await expectedProvider(page, browserName);
+    const { name, cpace, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'chosen' }));
+    expect(name, 'the provider core chose').toBe(expected);
     expect(wrong([...cpace, ...provider]), 'checks whose value differs from the known answer').toEqual([]);
-    expect(cpace.length, "CPace's checks").toBe(65);
+    // With WebCrypto, 7 more: the engine's own refusal of each low-order point.
+    expect(cpace.length, "CPace's checks").toBe(name === 'webcrypto' ? 65 : 58);
     expect(provider.length, "the provider's checks").toBe(14);
-    expect(cpace.filter(({ name }) => /^B\.1\.10 the engine's WebCrypto refuses u[0-7]$/.test(name))).toHaveLength(7);
+    expect(engineRefusals(cpace)).toHaveLength(name === 'webcrypto' ? 7 : 0);
+    nothingElsewhere();
+});
+
+test('every check on @noble, in this engine', async ({ page, context }) => {
+    const nothingElsewhere = await open(page, context);
+    const { name, cpace, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'noble' }));
+    expect(name).toBe('noble');
+    expect(wrong([...cpace, ...provider]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(cpace.length, "CPace's checks").toBe(58);
+    expect(provider.length, "the provider's checks").toBe(14);
     nothingElsewhere();
 });

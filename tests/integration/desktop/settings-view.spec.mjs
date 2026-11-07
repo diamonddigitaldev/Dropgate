@@ -35,6 +35,9 @@ test('Settings has Dropgate\'s Servers tab, then Update, then Credits, last, wit
     const credits = await openSettings(window, 'Credits');
     await expect(credits).toContainText('Dropgate Client');
     await expect(credits).toContainText('Logo designed by TheFuturisticIdiot.');
+    // The crypto compiled into core: noble's packages, under the MIT License, linked.
+    await expect(credits).toContainText('Cryptography from noble (@noble/curves, @noble/hashes and @noble/ciphers), licensed under the MIT License.');
+    await expect(credits.getByRole('link', { name: 'noble', exact: true })).toBeVisible();
     const logo = credits.locator('img');
     await expect(logo).toBeVisible();
     // v3's Credits window pointed at an icons folder that wasn't there.

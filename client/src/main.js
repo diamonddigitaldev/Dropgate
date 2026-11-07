@@ -160,6 +160,8 @@ const kit = require('@diamonddigitaldev/electron-kit/main').start({
             'This software is licensed under the GNU General Public License v3.0.',
             'Dropgate Server is licensed under the GNU Affero General Public License v3.0.',
             '@dropgate/core is licensed under the Apache License v2.0.',
+            // Compiled into core's copy, which this app loads; MIT asks for the notice, which that copy starts with.
+            ['Cryptography from ', { text: 'noble', href: 'https://paulmillr.com/noble/' }, ' (@noble/curves, @noble/hashes and @noble/ciphers), licensed under the MIT License.'],
             // CC BY 4.0 asks for the credit and a link to the licence itself.
             ['Location data: ', { text: 'IP Geolocation by DB-IP', href: 'https://db-ip.com' }, ', licensed under the ', { text: 'Creative Commons Attribution 4.0 International License', href: 'https://creativecommons.org/licenses/by/4.0/' }, '.'],
             ['Country flags from ', { text: 'flag-icons', href: 'https://github.com/lipis/flag-icons' }, ', licensed under the MIT License.'],

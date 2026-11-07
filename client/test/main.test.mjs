@@ -58,6 +58,16 @@ test('the main process is the kit\'s: its name, settings, memory log, files, cre
     assert.match(options, /donate: 'https:\/\/buymeacoff\.ee\/willtda'/);
 });
 
+test('Credits names noble\'s three packages, linked, under the MIT License, and the copy of core the app loads carries their notice', () => {
+    assert.ok(startOptions().includes("['Cryptography from ', { text: 'noble', href: 'https://paulmillr.com/noble/' }, ' (@noble/curves, @noble/hashes and @noble/ciphers), licensed under the MIT License.']"));
+    const core = fs.readFileSync(new URL('dropgate-core.js', SRC), 'utf8');
+    const notice = core.slice(0, core.indexOf(' */') + 3);
+    for (const text of ['@noble/curves', '@noble/hashes', '@noble/ciphers', 'licensed under the MIT License', 'Copyright (c) 2022 Paul Miller (https://paulmillr.com)',
+        'Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>', 'The above copyright notice and this permission notice shall be included in']) {
+        assert.ok(notice.includes(text), text);
+    }
+});
+
 test('a link is copied kept out of the clipboard\'s history and sync, and notifications and the log never name a file', () => {
     assert.doesNotMatch(main + renderer, /writeText\(|execCommand\('copy'\)/, 'every copy goes through copyPrivately()');
     for (const format of ['CanIncludeInClipboardHistory', 'CanUploadToCloudClipboard', 'ExcludeClipboardContentFromMonitorProcessing', 'x-kde-passwordManagerHint']) {

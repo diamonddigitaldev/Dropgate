@@ -40,13 +40,14 @@ async function outcome(run: () => Promise<Uint8Array>): Promise<string> {
 }
 
 /**
- * Every check, run on `provider`. `subtle` is the engine's own WebCrypto, to
- * show that it refuses B.1.10's low-order points itself, not only core's check
- * before it. With `x25519: false`, only the checks that need no X25519: for an
- * engine whose WebCrypto has none.
+ * Every check, run on `provider`. `subtle`, given with the WebCrypto provider,
+ * is the engine's own WebCrypto, to show that it refuses B.1.10's low-order
+ * points itself, not only core's check before it; without it (@noble's run)
+ * those 7 checks are left out. With `x25519: false`, only the checks that need
+ * no X25519.
  */
 export async function cpaceVectorChecks(
-  provider: CryptoProvider, subtle: SubtleCrypto, { x25519 = true }: { x25519?: boolean } = {},
+  provider: CryptoProvider, subtle?: SubtleCrypto, { x25519 = true }: { x25519?: boolean } = {},
 ): Promise<VectorCheck[]> {
   const checks: VectorCheck[] = [];
   // The draft's JSON writes hex in upper case, its text in lower.
@@ -132,14 +133,16 @@ export async function cpaceVectorChecks(
       // In a message, it aborts the exchange.
       check(`B.1.10 ${name} as the other side's share aborts`, ABORT,
         await outcome(() => deriveIsk(provider, { scalar: s, peerShare: u, sid: sidB, transcript: ir })));
+      if (!subtle) continue;
       // And the engine's WebCrypto refuses it itself, never giving a result:
       // Node's and Chromium's as they derive (OperationError), Firefox's as it
       // imports the value (DataError).
+      const own: SubtleCrypto = subtle;
       let engine: string;
       try {
-        const priv = await subtle.importKey('pkcs8', sPkcs8, { name: 'X25519' }, false, ['deriveBits']);
-        const pub = await subtle.importKey('raw', u, { name: 'X25519' }, true, []);
-        engine = `gave ${hex(new Uint8Array(await subtle.deriveBits({ name: 'X25519', public: pub }, priv, 256)))}`;
+        const priv = await own.importKey('pkcs8', sPkcs8, { name: 'X25519' }, false, ['deriveBits']);
+        const pub = await own.importKey('raw', u, { name: 'X25519' }, true, []);
+        engine = `gave ${hex(new Uint8Array(await own.deriveBits({ name: 'X25519', public: pub }, priv, 256)))}`;
       } catch (err) {
         const errorName = (err as { name?: string }).name;
         engine = errorName === 'OperationError' || errorName === 'DataError' ? 'refused' : `threw ${errorName}`;

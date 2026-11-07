@@ -20,7 +20,7 @@ The client for one Dropgate server.
 
 The constructor throws a [`DropgateError`](errors.md): `INVALID_ARGUMENT` for a missing or invalid `server`, `appInfo` or `auth`, `INSECURE_TRANSPORT_NOT_ALLOWED` for an insecure server without `allowInsecure`, and `RUNTIME_UNSUPPORTED` where there's no `fetch()` or no secure random numbers (`crypto.getRandomValues()`).
 
-Core does its own encryption, with the Web Crypto API: there's no option for it. Where a page has no `crypto.subtle` (one served over plain HTTP from another machine), random numbers and hashing still work, so unencrypted uploads and direct transfer codes do, but encrypting or decrypting fails with `RUNTIME_UNSUPPORTED`.
+Core does its own encryption: there's no option for it. It uses the Web Crypto API wherever that can do everything core needs, and its own JavaScript crypto, on `@noble`, where it can't: a page with no `crypto.subtle` (one served over plain HTTP from another machine), or a Web Crypto with no X25519. Both give the same bytes, so encrypting and decrypting work in both ([Crypto](crypto.md)).
 
 ### Members
 
@@ -324,7 +324,7 @@ Every download, one file or several, a ZIP or not, is one download against the u
 
 `client.hosted.metadata({ id, secret })` gives an `UploadMetadata`, the same shape for one file or several: `kind` (`file` for one, `bundle` for several), `id`, `encrypted`, `files` (each `name` and `size`, in order), `totalSize` and `transport`. Asking takes no lease and counts nothing, so a page can show what's there before anyone downloads it. It never says when the upload expires or how many downloads it has left: the server doesn't give that.
 
-Names are decrypted, and sizes are the files' as they'll be downloaded, so neither needs any crypto of your own. An encrypted upload needs its `secret`: without it, `metadata()` throws `KEY_REQUIRED`, and with one that doesn't open it, or isn't 32 bytes, `DECRYPT_FAILED`. The upload's header is checked before any of it is downloaded: an upload whose list of files or header was changed throws `INTEGRITY_FAILED`, and one made in a format this version can't read, `VERSION_UNSUPPORTED`. A name that breaks the [file name rule](quick-start.md#file-names) throws `INVALID_FILENAME`, without the name. Where there's no Web Crypto (a page served over plain HTTP from another machine), an encrypted upload throws `RUNTIME_UNSUPPORTED`. An encrypted upload's list of files is sealed too, so only the secret's holder can read its names and sizes.
+Names are decrypted, and sizes are the files' as they'll be downloaded, so neither needs any crypto of your own. An encrypted upload needs its `secret`: without it, `metadata()` throws `KEY_REQUIRED`, and with one that doesn't open it, or isn't 32 bytes, `DECRYPT_FAILED`. The upload's header is checked before any of it is downloaded: an upload whose list of files or header was changed throws `INTEGRITY_FAILED`, and one made in a format this version can't read, `VERSION_UNSUPPORTED`. A name that breaks the [file name rule](quick-start.md#file-names) throws `INVALID_FILENAME`, without the name. An encrypted upload's list of files is sealed too, so only the secret's holder can read its names and sizes.
 
 ## File Sources
 

@@ -181,7 +181,7 @@ The client makes 32 more random bytes for each upload. Only their SHA-256 goes w
 
 ### 4.10 Secure Context Requirement
 
-Encrypting and decrypting need the Web Crypto API, which a browser only gives a secure context (HTTPS, or `localhost`). A client that can't get one can't encrypt: the Web UI then says so, with its server's address ("Not encrypted: drop.example.com is plain HTTP, so the server can read your files."), and asks before it sends anything (the Upload Security Warning); its download page says an encrypted upload can't be downloaded there ([§9.2](#92-the-download-page)).
+The Web UI only encrypts and decrypts in a secure context (HTTPS, or `localhost`), where the browser gives it the Web Crypto API. (Core itself can do both without it, with its own JavaScript crypto: [Crypto](../core/crypto.md).) On a page that isn't one, the Web UI doesn't encrypt, and says so, with its server's address ("Not encrypted: drop.example.com is plain HTTP, so the server can read your files."), and asks before it sends anything (the Upload Security Warning); its download page says an encrypted upload can't be downloaded there ([§9.2](#92-the-download-page)).
 
 ---
 
@@ -716,7 +716,7 @@ Dropgate 4 works with no Dropgate 3 client, link or upload. Each gets a clear "u
 
 ### 15.1 Server Deployment
 
-- **Always deploy behind a reverse proxy that terminates TLS.** A browser only encrypts and decrypts in a secure context. Self-signed certificates are acceptable for private deployments but reduce trust for external users.
+- **Always deploy behind a reverse proxy that terminates TLS.** The Web UI only encrypts and decrypts in a secure context. Self-signed certificates are acceptable for private deployments but reduce trust for external users.
 - **Set `UPLOAD_MAX_FILE_SIZE_MB` and `UPLOAD_MAX_STORAGE_GB` to sensible values.** Unbounded storage invites abuse.
 - **Set `UPLOAD_MAX_FILE_LIFETIME_HOURS` conservatively.** Shorter lifetimes reduce exposure if a server is compromised.
 - **Keep `UPLOAD_PRESERVE_UPLOADS=false` unless persistence is specifically required.** Default mode starts clean at each restart, minimising the time uploaded data is at rest.
