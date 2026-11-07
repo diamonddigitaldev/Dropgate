@@ -1,10 +1,14 @@
 import { defineConfig } from 'tsup';
 import { buildBanner } from './scripts/third-party.mjs';
+import { testBuildDefine } from './scripts/test-build-define.mjs';
 import { versionDefine } from './scripts/version-define.mjs';
 
 // @noble's MIT notice, at the top of every build, as its licence asks
 // (scripts/third-party.mjs); THIRD-PARTY-NOTICES.md has each licence in full.
 const banner = { js: buildBanner() };
+
+// Never a test build (scripts/test-build-define.mjs).
+const define = { ...versionDefine, ...testBuildDefine(false) };
 
 export default defineConfig([
   // Main entry - ESM and CJS
@@ -18,7 +22,7 @@ export default defineConfig([
     splitting: false,
     external: ['peerjs'],
     platform: 'browser',
-    define: versionDefine,
+    define,
     banner,
   },
   // P2P submodule - ESM and CJS
@@ -31,7 +35,7 @@ export default defineConfig([
     splitting: false,
     external: ['peerjs'],
     platform: 'browser',
-    define: versionDefine,
+    define,
     banner,
   },
   // Browser bundle (IIFE)
@@ -42,7 +46,7 @@ export default defineConfig([
     outDir: 'dist',
     outExtension: () => ({ js: '.browser.js' }),
     minify: true,
-    define: versionDefine,
+    define,
     banner,
     sourcemap: true,
     target: 'es2020',

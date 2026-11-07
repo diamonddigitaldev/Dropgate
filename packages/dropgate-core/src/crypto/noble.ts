@@ -68,13 +68,13 @@ export function nobleProvider(source: RandomSource): NamedCryptoProvider {
     async generateKey() {
       return contentKey(randomBytes(CONTENT_KEY_BYTES), true);
     },
-    async importKey(raw) {
+    async importKey(raw, exportable = true) {
       checkContentKey(raw);
-      return contentKey(own(raw), true);
+      return contentKey(own(raw), exportable);
     },
     async exportKey(key) {
       const held = ContentKey.handle(key, name) as HeldContentKey;
-      if (!held.exportable) throw new DropgateError({ code: 'INVALID_ARGUMENT', message: "A derived key can't be exported." });
+      if (!held.exportable) throw new DropgateError({ code: 'INVALID_ARGUMENT', message: "That key can't be exported." });
       return own(held.bytes);
     },
     async encrypt(key, plaintext) {

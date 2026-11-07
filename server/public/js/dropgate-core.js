@@ -84,6 +84,7 @@ var ERROR_CODES = {
   SERVER_UNREACHABLE: { origin: "network", retryable: true, message: "The server couldn't be reached." },
   TIMED_OUT: { origin: "network", retryable: true, message: "The server took too long to answer." },
   CONNECTION_LOST: { origin: "network", retryable: true, message: "The connection was lost." },
+  SECURITY_POLICY_MISMATCH: { origin: "peer", retryable: false, message: "The connection couldn't be secured, so it was closed." },
   PEER_FAILED: { origin: "peer", retryable: false, message: "The other device reported an error." },
   UNEXPECTED_ERROR: { origin: "local", retryable: false, message: "Something unexpected went wrong." }
 };
@@ -3318,13 +3319,13 @@ function nobleProvider(source) {
     async generateKey() {
       return contentKey(randomBytes3(CONTENT_KEY_BYTES), true);
     },
-    async importKey(raw) {
+    async importKey(raw, exportable = true) {
       checkContentKey(raw);
-      return contentKey(own(raw), true);
+      return contentKey(own(raw), exportable);
     },
     async exportKey(key) {
       const held = ContentKey.handle(key, name);
-      if (!held.exportable) throw new DropgateError({ code: "INVALID_ARGUMENT", message: "A derived key can't be exported." });
+      if (!held.exportable) throw new DropgateError({ code: "INVALID_ARGUMENT", message: "That key can't be exported." });
       return own(held.bytes);
     },
     async encrypt(key, plaintext) {
@@ -3439,9 +3440,9 @@ function webCryptoProvider(webCrypto) {
       const key = await needSubtle().generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
       return new ContentKey(name, key);
     },
-    async importKey(raw) {
+    async importKey(raw, exportable = true) {
       checkContentKey(raw);
-      const key = await needSubtle().importKey("raw", own(raw), { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+      const key = await needSubtle().importKey("raw", own(raw), { name: "AES-GCM" }, exportable, ["encrypt", "decrypt"]);
       return new ContentKey(name, key);
     },
     async exportKey(key) {

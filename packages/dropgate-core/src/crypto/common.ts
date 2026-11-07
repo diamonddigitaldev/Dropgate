@@ -86,8 +86,11 @@ export interface CryptoProvider {
   randomUUID(): string;
   /** A new random AES-256-GCM key. */
   generateKey(): Promise<ContentKey>;
-  /** A key from its 32 raw bytes. */
-  importKey(raw: Uint8Array): Promise<ContentKey>;
+  /**
+   * A key from its 32 raw bytes, which `exportKey()` can give back unless
+   * `exportable` is false (Noise's keys, which nothing reads again).
+   */
+  importKey(raw: Uint8Array, exportable?: boolean): Promise<ContentKey>;
   /** A key's 32 raw bytes. */
   exportKey(key: ContentKey): Promise<Uint8Array<ArrayBuffer>>;
   /** Seals `plaintext` under a fresh random IV: `[IV (12 bytes)][ciphertext + tag]`. */

@@ -80,9 +80,9 @@ export function webCryptoProvider(webCrypto: WebCryptoLike): NamedCryptoProvider
       const key = await needSubtle().generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
       return new ContentKey(name, key);
     },
-    async importKey(raw) {
+    async importKey(raw, exportable = true) {
       checkContentKey(raw);
-      const key = await needSubtle().importKey('raw', own(raw), { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
+      const key = await needSubtle().importKey('raw', own(raw), { name: 'AES-GCM' }, exportable, ['encrypt', 'decrypt']);
       return new ContentKey(name, key);
     },
     async exportKey(key) {

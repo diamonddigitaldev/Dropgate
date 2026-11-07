@@ -52,6 +52,7 @@ export const ERROR_CODES = {
   SERVER_UNREACHABLE: { origin: 'network', retryable: true, message: "The server couldn't be reached." },
   TIMED_OUT: { origin: 'network', retryable: true, message: 'The server took too long to answer.' },
   CONNECTION_LOST: { origin: 'network', retryable: true, message: 'The connection was lost.' },
+  SECURITY_POLICY_MISMATCH: { origin: 'peer', retryable: false, message: "The connection couldn't be secured, so it was closed." },
   PEER_FAILED: { origin: 'peer', retryable: false, message: 'The other device reported an error.' },
   UNEXPECTED_ERROR: { origin: 'local', retryable: false, message: 'Something unexpected went wrong.' },
 } as const satisfies Record<string, ErrorCodeInfo>;

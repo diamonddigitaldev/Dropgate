@@ -95,6 +95,16 @@ for (const [label, provider] of PROVIDERS) {
       await expect(provider.importKey(new Uint8Array(16))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
     });
 
+    it("imports a key that can't be exported when asked (Noise's), which still seals and opens as the bytes say", async () => {
+      const raw = provider.randomBytes(32);
+      const key = await provider.importKey(raw, false);
+      await expect(provider.exportKey(key)).rejects.toThrow();
+      const nonce = provider.randomBytes(12);
+      const sealed = await provider.encryptWithNonce(key, nonce, Uint8Array.of(1, 2, 3));
+      expect(hex(sealed)).toBe(hex(await provider.encryptWithNonce(await provider.importKey(raw), nonce, Uint8Array.of(1, 2, 3))));
+      expect(hex(await provider.decryptWithNonce(key, nonce, sealed))).toBe('010203');
+    });
+
     it("keeps a key to itself, and it's a copy: printed, logged or serialised, it shows no bytes", async () => {
       const key = await provider.generateKey();
       expect(JSON.stringify({ key })).toBe('{"key":"[ContentKey]"}');

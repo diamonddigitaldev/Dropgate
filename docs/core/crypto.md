@@ -10,9 +10,9 @@ Every encryption, decryption, key, hash and random number core uses goes through
 
 Core chooses once per runtime, the first time it needs to: it tries to make an X25519 key with `crypto.subtle`, and takes Web Crypto if that works. The chosen provider then does every operation. Core never uses Web Crypto for some and `@noble` for others. Random numbers always come from `crypto.getRandomValues()`, with either provider, and core refuses to run without it. It never falls back to `Math.random()`.
 
-Both providers give exactly the same bytes for every input. Core's tests run both on the same published known answers (FIPS 180-4, RFC 4231, RFC 5869, RFC 7748, the GCM specification's test cases, NIST's and [Project Wycheproof](https://github.com/C2SP/wycheproof)'s AES-256-GCM tests, and CPace's own vectors), on random inputs, and on DGUP 4's object vectors. An upload encrypted on one opens on the other. The integration tests also run them in Chromium, Firefox and WebKit, on the provider core chooses in each and on `@noble` in all three ([Building and Testing](building-and-testing.md)).
+Both providers give exactly the same bytes for every input. Core's tests run both on the same published known answers (FIPS 180-4, RFC 4231, RFC 5869, RFC 7748, the GCM specification's test cases, NIST's and [Project Wycheproof](https://github.com/C2SP/wycheproof)'s AES-256-GCM tests, CPace's own vectors, and cacophony's Noise vector), on random inputs, and on DGUP 4's object vectors. An upload encrypted on one opens on the other. The integration tests also run them in Chromium, Firefox and WebKit, on the provider core chooses in each and on `@noble` in all three ([Building and Testing](building-and-testing.md)).
 
-With either provider, keys stay inside it. Printed, logged or serialised, a key shows only its label, such as `[ContentKey]`, and a key derived from another can't be exported.
+With either provider, keys stay inside it. Printed, logged or serialised, a key shows only its label, such as `[ContentKey]`, and a key derived from another can't be exported, nor can the keys of Noise, the encrypted handshake and records a direct transfer will run over its connection.
 
 The Elligator 2 map that CPace (the exchange a typed code will run) needs is `@noble/curves`' with both providers, because Web Crypto has none.
 

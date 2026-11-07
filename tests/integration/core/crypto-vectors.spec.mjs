@@ -1,7 +1,9 @@
 // Core's crypto in each browser engine: CPace's known answers
-// (draft-irtf-cfrg-cpace-21's Appendix A.1, A.3, B.1 and B.1.10) and the
-// standards' answers for the crypto provider's X25519, SHA-512, HMAC, HKDF and
-// AES-GCM with associated data, byte for byte as core's tests have them in
+// (draft-irtf-cfrg-cpace-21's Appendix A.1, A.3, B.1 and B.1.10), cacophony's
+// Noise_NNpsk0_25519_AESGCM_SHA256 vector (the handshake, its hash and four
+// transport messages, and a flipped bit refused in each kind of message), and
+// the standards' answers for the crypto provider's X25519, SHA-512, HMAC, HKDF
+// and AES-GCM with associated data, byte for byte as core's tests have them in
 // Node: on the provider core chooses in that engine (WebCrypto, where it can
 // make an X25519 key; @noble, in JavaScript, where it can't, as in Playwright's
 // WebKit on Windows), and on @noble in every engine. Where WebCrypto is chosen,
@@ -10,13 +12,16 @@
 //
 // The checks are core's own test code (packages/dropgate-core/tests/browser/
 // vectors-entry.ts and the helpers it imports), bundled here with core's
-// esbuild, so core's dependencies need installing first. They run on a page
+// esbuild as a test build (core's scripts/test-build-define.mjs: Noise's
+// vector pins its ephemeral keys, which core's own builds refuse), so core's
+// dependencies need installing first. They run on a page
 // served from 127.0.0.1, which browsers treat as a secure context, by a
 // server of this file's own: the Dropgate server plays no part.
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
+import { testBuildDefine } from '../../../packages/dropgate-core/scripts/test-build-define.mjs';
 
 const CORE = new URL('../../../packages/dropgate-core/', import.meta.url);
 const ENTRY = fileURLToPath(new URL('tests/browser/vectors-entry.ts', CORE));
@@ -32,6 +37,7 @@ async function bundle() {
         target: 'es2020',
         write: false,
         logLevel: 'silent',
+        define: testBuildDefine(true),
     });
     return outputFiles[0].text;
 }
@@ -103,25 +109,27 @@ test("CPace's generator, transcripts and session-ID output, SHA-512, HMAC, HKDF 
     nothingElsewhere();
 });
 
-test("X25519, CPace's shares, K and ISK, and B.1.10's points, on the provider core chooses, WebCrypto refusing the low-order ones itself where it's chosen", async ({ page, context, browserName }) => {
+test("X25519, CPace's shares, K and ISK, B.1.10's points and cacophony's Noise vector, on the provider core chooses, WebCrypto refusing the low-order ones itself where it's chosen", async ({ page, context, browserName }) => {
     const nothingElsewhere = await open(page, context);
     const expected = await expectedProvider(page, browserName);
-    const { name, cpace, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'chosen' }));
+    const { name, cpace, provider, noise } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'chosen' }));
     expect(name, 'the provider core chose').toBe(expected);
-    expect(wrong([...cpace, ...provider]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(wrong([...cpace, ...provider, ...noise]), 'checks whose value differs from the known answer').toEqual([]);
     // With WebCrypto, 7 more: the engine's own refusal of each low-order point.
     expect(cpace.length, "CPace's checks").toBe(name === 'webcrypto' ? 65 : 58);
     expect(provider.length, "the provider's checks").toBe(14);
     expect(engineRefusals(cpace)).toHaveLength(name === 'webcrypto' ? 7 : 0);
+    expect(noise.length, "Noise's checks").toBe(18);
     nothingElsewhere();
 });
 
 test('every check on @noble, in this engine', async ({ page, context }) => {
     const nothingElsewhere = await open(page, context);
-    const { name, cpace, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'noble' }));
+    const { name, cpace, provider, noise } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'noble' }));
     expect(name).toBe('noble');
-    expect(wrong([...cpace, ...provider]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(wrong([...cpace, ...provider, ...noise]), 'checks whose value differs from the known answer').toEqual([]);
     expect(cpace.length, "CPace's checks").toBe(58);
     expect(provider.length, "the provider's checks").toBe(14);
+    expect(noise.length, "Noise's checks").toBe(18);
     nothingElsewhere();
 });
