@@ -1,6 +1,6 @@
 'use strict';
 
-// What a notification says when transfers end (17 §4): transfers ending
+// What a notification says when transfers end: transfers ending
 // within a few seconds of each other are told of in one, with counts and
 // Title Case titles, never a file's name, nor a folder's. One on its own is
 // told of as before: "Upload Successful", or "Upload Failed" with core's

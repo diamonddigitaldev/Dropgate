@@ -1,4 +1,4 @@
-// The fallback (phase 14). With Allow Fallback on (each server's, for new
+// The fallback. With Allow Fallback on (each server's, for new
 // uploads to it, and each upload's own, in Advanced Options), an upload its
 // server can't take before any byte is sent moves to the next saved server
 // below it, which is checked only then, and says which took it. A server

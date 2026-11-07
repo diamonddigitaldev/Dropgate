@@ -4,7 +4,7 @@ import { nobleProvider } from '../src/crypto/noble.js';
 import { createObject, openObject } from '../src/object/index.js';
 import { calculateGenerator, deriveIsk, newShare, transcriptIr } from '../src/dgdtp/cpace.js';
 
-// 09 7.1.11: core chooses its crypto provider once per runtime: WebCrypto when
+// Core chooses its crypto provider once per runtime: WebCrypto when
 // crypto.subtle exists and makes an X25519 key, else @noble, for every
 // operation, never a mix. In Node (and a secure page in the supported
 // browsers) that's always WebCrypto, which spies on crypto.subtle and on
@@ -76,7 +76,7 @@ async function everything(provider: CryptoProvider) {
 beforeEach(() => { made.mockClear(); });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-describe('09 7.1.11: choosing the provider', () => {
+describe('Choosing the provider', () => {
   it('in Node, chooses WebCrypto, and every operation is WebCrypto: never @noble', async () => {
     const provider = cryptoProvider();
     expect((await provider.chosen()).name).toBe('webcrypto');

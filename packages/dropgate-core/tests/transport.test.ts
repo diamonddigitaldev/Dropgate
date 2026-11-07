@@ -4,7 +4,7 @@ import type { DownloadSink, PeerConstructor } from '../src/index.js';
 import { FakePeer } from './helpers/fake-peer.js';
 import { CHUNK_SIZE, MANAGE_TOKEN_HASH, MANAGE_TOKEN, fakeV4 } from './helpers/fake-v4.js';
 
-// The insecure-transport policy (`09` 7.1.1–7.1.6): no automatic fallback to
+// The insecure-transport policy: no automatic fallback to
 // plain HTTP, no redirect followed, an insecure server only with
 // `allowInsecure`, loopback counted as secure, and `transport.secure` on every
 // snapshot, result and error. Against a fake server through `fetchFn`: no network.

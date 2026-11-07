@@ -4,8 +4,8 @@ const { Menu, Tray, nativeImage } = require('electron');
 const { APP_NAME } = require('./constants');
 const { countsLine } = require('./core/notices');
 
-// Dropgate's own tray icon (17 §5: "Dropgate first; kit if a second app wants
-// it"): shown while the main window is closed with transfers running, paused
+// Dropgate's own tray icon (Dropgate's first; the kit's if a second app wants
+// one): shown while the main window is closed with transfers running, paused
 // or queued, so they go on out of sight. Its menu opens the window, says how
 // many are going (counts only, never a name), and quits. Windows shows it in
 // the notification area; Linux where the desktop has a tray.

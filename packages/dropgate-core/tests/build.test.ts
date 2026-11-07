@@ -10,7 +10,7 @@ import { NOBLE, buildBanner, licenceOf, noticesFile } from '../scripts/third-par
 // These fail if a build file still imports @noble/ (it would break those
 // copies, and unpin it), if a build or the notices file lacks the licence, if
 // the pins or the package's empty dependencies change, or if the audit note in
-// docs/core/crypto.md names another version than the lockfile's (09 7.1.12).
+// docs/core/crypto.md names another version than the lockfile's.
 // CI builds before it tests; locally, run npm run build first.
 
 const PACKAGE = new URL('../package.json', import.meta.url);
@@ -94,7 +94,7 @@ function auditRows(note: string) {
     .map(([, name, version, checked]) => ({ name, version, checked }));
 }
 
-describe.runIf(inRepository())('09 7.1.12: the audit note in docs/core/crypto.md', () => {
+describe.runIf(inRepository())('The audit note in docs/core/crypto.md', () => {
   const note = readFileSync(AUDIT_NOTE, 'utf8').replace(/\r\n/g, '\n');
 
   it("names each @noble package once, at the version the lockfile installs, with the date it was checked", () => {

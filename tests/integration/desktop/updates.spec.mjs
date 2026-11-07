@@ -333,7 +333,7 @@ test('a saved adapter that is not there: the check at launch reaches nothing, an
 });
 
 // The same build carries DB-IP's real files in its resources, and flag-icons' flags in
-// app.asar, as a person's would (`09` 18.14). A real address, so a real record: what
+// app.asar, as a person's would. A real address, so a real record: what
 // it says is DB-IP's to change, bar Cloudflare's AS number and the shape of the line.
 test.describe('the location data the build put in it', () => {
     test.use({ localStun: { address: '127.0.0.2', mapped: { v4: '1.1.1.1' } } });

@@ -1,5 +1,5 @@
 // A stand-in for db-ip.com's downloads, on this machine, for the location data's
-// monthly refresh (`09` 18.16): the network service's requests to
+// monthly refresh: the network service's requests to
 // download.db-ip.com are sent here instead (network-stand-in.cjs), over plain
 // HTTP, with everything else about them as the service made them (the address
 // it bound to, and with an adapter chosen, the address it looked the name up as).

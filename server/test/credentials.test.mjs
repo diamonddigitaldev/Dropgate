@@ -1,5 +1,5 @@
 // The credential boundary against the real server: until accounts
-// come (#91, phase 12), the server asks no credential for anything, so a
+// come (#91), the server asks no credential for anything, so a
 // client with an auth provider is never asked for one and sends none, and no
 // credential reaches the server's output or storage (the privacy tests check
 // the fixture's token with its other secrets).

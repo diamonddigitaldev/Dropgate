@@ -1,4 +1,4 @@
-// Country, ISP and flags, in the app (phase 19, `09` 18.14). Each External IP has
+// Country, ISP and flags, in the app. Each External IP has
 // its flag, a bundled SVG with the country code as its tooltip, and the Connection
 // card says "<Country> · <ISP> (<ASN>) · Latency 18 ms", all looked up on the machine
 // in the location data: here, a small test database of the test's own, holding the

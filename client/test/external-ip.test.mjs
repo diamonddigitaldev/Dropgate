@@ -1,4 +1,4 @@
-// The External IP's source and the connection's health (`09` 18.11, 18.13), and
+// The External IP's source and the connection's health, and
 // its binding request on the wire, with nothing leaving the machine. When it's
 // asked is network-host.test.mjs's, and the request held to an adapter is
 // network-service.test.mjs's.

@@ -1,4 +1,4 @@
-// A chosen adapter, in the app (phase 19, `09` 18.5-18.9). With one chosen in
+// A chosen adapter, in the app. With one chosen in
 // Settings > Network, every request the transfer session makes goes through the
 // network service, bound to it, and names are looked up through it. The moment
 // it goes, what's running fails, nothing moves anywhere, and nothing connects

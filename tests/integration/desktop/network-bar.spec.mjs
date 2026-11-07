@@ -1,5 +1,5 @@
-// The bottom bar and the connection's details, in the app (phase 19, `09` 18.15),
-// and the OS named in every sentence that names one (18.17).
+// The bottom bar and the connection's details, in the app,
+// and the OS named in every sentence that names one.
 //
 // The bar is the kit's (mountShell's statusBar), off by default, with Dropgate's
 // one item: the health's dot and its short words (the adapter's name where it's

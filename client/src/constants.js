@@ -299,7 +299,7 @@ const WINDOW = Object.freeze({ WIDTH: 900, HEIGHT: 900, MIN_WIDTH: 720, MIN_HEIG
 const BATCH_DEBOUNCE_MS = 500;
 
 /**
- * How main's registry runs transfers, and how it tells of them (17 §4, §5):
+ * How main's registry runs transfers, and how it tells of them:
  * - up to TRANSFERS_AT_ONCE run at once, uploads and downloads together; the
  *   rest wait as queued, in the order added, and a paused one takes no place
  *   (AT_ONCE until the settings are read: Settings > Transfers' transfersAtOnce);

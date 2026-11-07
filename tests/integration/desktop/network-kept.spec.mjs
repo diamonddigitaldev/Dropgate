@@ -1,4 +1,4 @@
-// What Settings > Network leaves in the profile (phase 19, `09` 18.19): the
+// What Settings > Network leaves in the profile: the
 // adapter's name and the switches, in config.json, and DB-IP's public files in
 // Location Data, and nothing more. After choosing an adapter, refreshing the
 // location data through it and checking the External IP, with the bar and its

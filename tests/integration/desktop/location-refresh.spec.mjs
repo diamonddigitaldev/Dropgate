@@ -1,5 +1,5 @@
-// The location data's month and its monthly refresh, in the app (phase 19, `09`
-// 18.16). Settings > Network's Location Data card says where country and ISP come
+// The location data's month and its monthly refresh, in the app.
+// Settings > Network's Location Data card says where country and ISP come
 // from and the month (the mockup's line for each state of the switch), and the
 // details say the month too, with nothing checked and nothing started: main reads
 // it from the files themselves. "Refresh location data monthly" is off by default,

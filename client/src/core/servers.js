@@ -3,8 +3,8 @@
 const { randomUUID } = require('crypto');
 const { countOf } = require('@diamonddigitaldev/electron-kit/format');
 
-// The saved servers (17 §8, §9): the list uploads go to, in order (the order a
-// fallback tries them in, phase 14's piece 4), and which one is the default,
+// The saved servers: the list uploads go to, in order (the order a fallback
+// tries them in), and which one is the default,
 // which a new upload and Share with Dropgate start on. Each is kept in the
 // kit's settings as { id, url, name, lifetime: { value, unit }, maxDownloads,
 // allowFallback }: its ID (a UUID made here), its address as the client reads
@@ -236,7 +236,7 @@ const uploadServerOf = (server) => ({ id: server.id, name: server.name, host: ho
 /** Whether uploads go end-to-end encrypted to a server, as a check found it: it has it, and was reached over HTTPS. */
 const encryptsBy = (check) => Boolean(check?.ok && check.serverInfo?.capabilities?.upload?.e2ee) && typeof check.baseUrl === 'string' && check.baseUrl.startsWith('https://');
 
-// --- The fallback (phase 14) ---
+// --- The fallback ---
 // An upload that allows it (its Allow Fallback, from its server's) and that
 // its server can't take before any byte is sent moves to the next saved
 // server below, in the saved order, checked only then. A server that would be

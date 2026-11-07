@@ -1,5 +1,5 @@
-// The External IP and the connection's health, in the app (phase 19, `09`
-// 18.11-18.13). Off by default, and then nothing is asked of anyone. Once on,
+// The External IP and the connection's health, in the app.
+// Off by default, and then nothing is asked of anyone. Once on,
 // one binding request a family to the default server's STUN server, at launch,
 // when the network changes and on Check Again, and never on a timer, from the
 // chosen adapter's address; what comes back stays in main's memory.

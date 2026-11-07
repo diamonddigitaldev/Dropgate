@@ -81,7 +81,7 @@ afterEach(async () => {
     await Promise.all([peer.close(), ownDns.close(), systemDns.close()]);
 });
 
-// --- The External IP (`09` 18.11): one binding request a family, held as a connection is ---
+// --- The External IP: one binding request a family, held as a connection is ---
 
 /** What main heard of the External IP, once it has. */
 async function ipResult() {
@@ -181,7 +181,7 @@ test('18.14: an answer for a check called off while its data is read isn\'t told
     }
 });
 
-// --- The location data's monthly refresh (`09` 18.16): held as a connection is ---
+// --- The location data's monthly refresh: held as a connection is ---
 
 /** DB-IP's files, as whole as its own (WHOLE nodes), packed, made once a month. */
 const packedMonths = new Map();

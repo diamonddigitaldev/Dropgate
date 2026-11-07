@@ -411,7 +411,7 @@ test('a state for an adapter since changed is ignored', async (t) => {
     assert.equal(network.refusal(), null);
 });
 
-// --- The External IP (`09` 18.11, 18.12): when it's asked, as main decides ---
+// --- The External IP: when it's asked, as main decides ---
 
 test('with the check off (the default), the service never starts for it and nothing is asked, whatever the network does', async (t) => {
     timers(t);
@@ -749,7 +749,7 @@ test('18.14, 18.16: the service is told where the location data is, as its two a
     assert.deepEqual(packaged.main.processes[0].args, [path.join(resources, 'location-data'), path.join(profile, 'Location Data')]);
 });
 
-// --- The location data's month and its monthly refresh (`09` 18.16) ---
+// --- The location data's month and its monthly refresh ---
 
 const PLACES = { '203.0.113.42': { code: 'NL', country: 'Netherlands', isp: 'Example Hosting B.V.', asn: 64500 } };
 const THIS_MONTH = monthFromNow(0);

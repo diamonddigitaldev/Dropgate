@@ -1,4 +1,4 @@
-// The fallback (phase 14): an upload that allows it (its Allow Fallback, from
+// The fallback: an upload that allows it (its Allow Fallback, from
 // its server's), and that its server can't take before any byte is sent,
 // moves to the next saved server below it, never to a less private one (plain
 // HTTP after HTTPS, not encrypted where it would have been, smaller limits)

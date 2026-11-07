@@ -2,7 +2,7 @@
 
 const { randomUUID } = require('crypto');
 
-// Main's registry of transfers (17 §4): every upload the app makes, a
+// Main's registry of transfers: every upload the app makes, a
 // window's own or Share with Dropgate's, and every download, by the ID main
 // made, in the order added, in memory only. Up to `atOnce` run at once,
 // uploads and downloads together; the rest wait as queued, and start in the

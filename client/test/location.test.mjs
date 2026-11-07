@@ -1,4 +1,4 @@
-// Country and ISP, looked up on the machine (`09` 18.14): in a small test database
+// Country and ISP, looked up on the machine: in a small test database
 // of the tests' own, with every way off the machine watched; and the build that
 // fetches DB-IP's two files, from a stand-in for db-ip.com on this machine, taking
 // only what opens as DB-IP's; and the month held, read from each file's end, the

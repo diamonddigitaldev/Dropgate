@@ -11,8 +11,8 @@ import * as reference from './helpers/reference-object.mjs';
 
 // DGUP 4's object format, in core's src/object/: the
 // header, the keys, STREAM chunks, Padmé and its clamp, the manifest and its
-// buckets, the meta, and the offsets. Nothing calls it yet; hosted uploads and
-// downloads move onto it in phase 6's later pieces.
+// buckets, the meta, and the offsets. Hosted uploads and downloads are built on
+// it.
 
 const provider = cryptoProvider();
 const KiB = 1024;
@@ -28,7 +28,7 @@ interface TestFile { name: string; bytes: Uint8Array }
 
 const fileOf = (name: string, size: number, index = 0): TestFile => ({ name, bytes: new Uint8Array(reference.vectorFileBytes(index, size)) });
 
-/** Both crypto providers: the object's bytes are the same on each (09 7.1.9, 7.1.10). */
+/** Both crypto providers: the object's bytes are the same on each. */
 const PROVIDERS: Array<[string, CryptoProvider]> = [
   ['WebCrypto', webCryptoProvider(globalThis.crypto)],
   ['@noble', nobleProvider(globalThis.crypto)],
@@ -430,7 +430,7 @@ describe("The object's exact bytes, against fixed vectors", () => {
       expect(sha256(second.object)).toBe(output.object.sha256);
       expect(sha256(second.meta)).toBe(output.meta.sha256);
 
-      // And it opens again to its files, on this provider and on the other (09 7.1.10).
+      // And it opens again to its files, on this provider and on the other.
       for (const [, opener] of PROVIDERS) {
         const opened = await open(built, { using: opener });
         expect(opened.files.map(({ name, size }) => ({ name, size }))).toEqual(input.files);
@@ -440,7 +440,7 @@ describe("The object's exact bytes, against fixed vectors", () => {
     });
   }
 
-  it('09 7.1.10: an object sealed on either provider opens on the other, and a changed one is refused the same way on both', async () => {
+  it('An object sealed on either provider opens on the other, and a changed one is refused the same way on both', async () => {
     for (const [, sealer] of PROVIDERS) {
       const files = [fileOf('Tax return 2025.xlsx', 3 * C + 17, 0), fileOf('notes.txt', 900, 1)];
       const built = await build(files, { using: sealer });

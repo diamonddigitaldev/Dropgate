@@ -13,7 +13,7 @@ import { providerVectorChecks } from './helpers/provider-vectors.js';
 // The crypto provider: every encrypt, decrypt, key, hash and random number
 // core uses goes through it. There are two, WebCrypto's and @noble's (in
 // JavaScript, for where WebCrypto has no X25519), and every check here runs on
-// each: they must give the same bytes for every input (09 7.1.9). Which one
+// each: they must give the same bytes for every input. Which one
 // core chooses, and that it never mixes them, is tests/provider-choice.test.ts'.
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -337,7 +337,7 @@ for (const [label, provider] of PROVIDERS) {
   });
 }
 
-describe('09 7.1.9: the two providers give the same bytes', () => {
+describe('The two providers give the same bytes', () => {
   const [webCrypto, noble] = PROVIDERS.map(([, provider]) => provider);
   const both = async (run: (provider: NamedCryptoProvider) => Promise<Uint8Array | boolean | string>) => {
     const [a, b] = await Promise.all([webCrypto, noble].map((provider) => run(provider).then(
@@ -517,7 +517,7 @@ describe('On a page served over plain HTTP (no crypto.subtle, no randomUUID)', (
     expect(hex(provider.elligator2(none))).toBe(hex(nobleProvider(plainHttpCrypto()).elligator2(none)));
   });
 
-  it('codes, operation IDs and uploads work; an encrypted upload is sealed on @noble and opens with WebCrypto (09 7.1.10)', async () => {
+  it('codes, operation IDs and uploads work; an encrypted upload is sealed on @noble and opens with WebCrypto', async () => {
     vi.stubGlobal('crypto', plainHttpCrypto());
     expect(codes.generate()).toMatch(/^[A-Z]{4}-\d{4}$/);
     expect(newOperationId()).toMatch(UUID_V4);
