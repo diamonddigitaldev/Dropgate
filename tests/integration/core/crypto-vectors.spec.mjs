@@ -3,7 +3,10 @@
 // exchange a typed code runs (the same code, a wrong one, each low-order share
 // and each confirmation that doesn't match, ending both sides), cacophony's
 // Noise_NNpsk0_25519_AESGCM_SHA256 vector (the handshake, its hash and four
-// transport messages, and a flipped bit refused in each kind of message), and
+// transport messages, and a flipped bit refused in each kind of message), the
+// key schedule and sealed signalling frames against the second implementation's
+// vectors (every output in each mode, each kind of frame and bucket, and a
+// flipped bit, a replay, a reorder or a reflected frame ending the attempt), and
 // the standards' answers for the crypto provider's X25519, SHA-512, HMAC, HKDF
 // and AES-GCM with associated data, byte for byte as core's tests have them in
 // Node: on the provider core chooses in that engine (WebCrypto, where it can
@@ -100,41 +103,44 @@ async function expectedProvider(page, browserName) {
     return name;
 }
 
-test("CPace's generator, transcripts and session-ID output, SHA-512, HMAC, HKDF and AES-GCM with associated data, on the provider core chooses", async ({ page, context, browserName }) => {
+test("CPace's generator, transcripts and session-ID output, SHA-512, HMAC, HKDF, AES-GCM with associated data, the key schedule and sealed frames, on the provider core chooses", async ({ page, context, browserName }) => {
     const nothingElsewhere = await open(page, context);
     const expected = await expectedProvider(page, browserName);
-    const { name, cpace, exchange, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: false, provider: 'chosen' }));
+    const { name, cpace, exchange, provider, signal } = await page.evaluate(() => window.runCryptoVectors({ x25519: false, provider: 'chosen' }));
     expect(name, 'the provider core chose').toBe(expected);
-    expect(wrong([...cpace, ...provider]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(wrong([...cpace, ...provider, ...signal]), 'checks whose value differs from the known answer').toEqual([]);
     expect(exchange, 'no exchange without X25519').toEqual([]);
     expect(cpace.length, "CPace's checks").toBe(31);
     expect(provider.length, "the provider's checks").toBe(8);
+    expect(signal.length, "the key schedule's and sealed frames' checks").toBe(28);
     nothingElsewhere();
 });
 
-test("X25519, CPace's shares, K and ISK, B.1.10's points, the CPace exchange and cacophony's Noise vector, on the provider core chooses, WebCrypto refusing the low-order ones itself where it's chosen", async ({ page, context, browserName }) => {
+test("X25519, CPace's shares, K and ISK, B.1.10's points, the CPace exchange, cacophony's Noise vector and the sealed frames, on the provider core chooses, WebCrypto refusing the low-order ones itself where it's chosen", async ({ page, context, browserName }) => {
     const nothingElsewhere = await open(page, context);
     const expected = await expectedProvider(page, browserName);
-    const { name, cpace, exchange, provider, noise } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'chosen' }));
+    const { name, cpace, exchange, provider, noise, signal } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'chosen' }));
     expect(name, 'the provider core chose').toBe(expected);
-    expect(wrong([...cpace, ...exchange, ...provider, ...noise]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(wrong([...cpace, ...exchange, ...provider, ...noise, ...signal]), 'checks whose value differs from the known answer').toEqual([]);
     // With WebCrypto, 7 more: the engine's own refusal of each low-order point.
     expect(cpace.length, "CPace's checks").toBe(name === 'webcrypto' ? 65 : 58);
     expect(exchange.length, "the CPace exchange's checks").toBe(18);
     expect(provider.length, "the provider's checks").toBe(14);
     expect(engineRefusals(cpace)).toHaveLength(name === 'webcrypto' ? 7 : 0);
     expect(noise.length, "Noise's checks").toBe(18);
+    expect(signal.length, "the key schedule's and sealed frames' checks").toBe(28);
     nothingElsewhere();
 });
 
 test('every check on @noble, in this engine', async ({ page, context }) => {
     const nothingElsewhere = await open(page, context);
-    const { name, cpace, exchange, provider, noise } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'noble' }));
+    const { name, cpace, exchange, provider, noise, signal } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'noble' }));
     expect(name).toBe('noble');
-    expect(wrong([...cpace, ...exchange, ...provider, ...noise]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(wrong([...cpace, ...exchange, ...provider, ...noise, ...signal]), 'checks whose value differs from the known answer').toEqual([]);
     expect(cpace.length, "CPace's checks").toBe(58);
     expect(exchange.length, "the CPace exchange's checks").toBe(18);
     expect(provider.length, "the provider's checks").toBe(14);
     expect(noise.length, "Noise's checks").toBe(18);
+    expect(signal.length, "the key schedule's and sealed frames' checks").toBe(28);
     nothingElsewhere();
 });
