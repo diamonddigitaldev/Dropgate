@@ -29,7 +29,7 @@ The Elligator 2 map that CPace (the exchange a typed code will run) needs is `@n
 | `@noble/hashes` | 2.4.0 | Cure53, January 2022, of version 1.0.0: everything but blake3, sha3-addons, sha1 and argon2 ([report](https://cure53.de/pentest-report_hashing-libs.pdf)). | 2026-11-07 |
 | `@noble/ciphers` | 2.4.0 | Cure53, September 2024, of version 1.0.0: everything ([report](https://cure53.de/audit-report_noble-crypto-libs.pdf)). | 2026-11-07 |
 
-Each audit is as the package's own README lists it on the date checked. The version core uses is newer than every audited one, so the changes since each audit haven't been audited independently. Dropgate's own external crypto review covers core's use of them.
+Each audit is as the package's own README lists it on the date checked. The version core uses is newer than every audited one, so the changes since each audit haven't been audited independently.
 
 When a dependency update moves one of these packages, its row here changes with it: the version, the audits as the package's README then lists them, and the date checked. Core's [`tests/build.test.ts`](../../packages/dropgate-core/tests/build.test.ts) fails if a version here isn't the one core's lockfile installs.
 

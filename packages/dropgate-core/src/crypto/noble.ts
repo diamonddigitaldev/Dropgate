@@ -15,7 +15,7 @@
 // Keys are held privately, as WebCrypto's are: a key's bytes sit in its handle
 // and are never printed, logged or serialised (only its label shows), and a
 // derived key can't be exported. JavaScript makes no promise of constant time
-// or of erasing memory; that's a stated limit for the external review.
+// or of erasing memory; that's a stated limit.
 import { gcm } from '@noble/ciphers/aes.js';
 import { x25519 as curve25519 } from '@noble/curves/ed25519.js';
 import { hkdf as nobleHkdf } from '@noble/hashes/hkdf.js';

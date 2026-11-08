@@ -8,8 +8,7 @@
 // package sweep that finds it renamed changes the import here, and nothing else.
 //
 // It runs in JavaScript, whose BigInt arithmetic makes no promise of constant
-// time; the map's input is a hash of the code. That's a stated limit, for the
-// external review.
+// time; the map's input is a hash of the code. That's a stated limit.
 import { _map_to_curve_elligator2_curve25519 as mapToCurve } from '@noble/curves/ed25519.js';
 import { invertCt, mod } from '@noble/curves/abstract/modular.js';
 import { DropgateError } from '../errors.js';
