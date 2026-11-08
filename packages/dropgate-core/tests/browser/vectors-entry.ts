@@ -2,12 +2,14 @@
 // core/crypto-vectors.spec.mjs bundles this file with esbuild, loads it on a
 // page from 127.0.0.1 (a secure context) in Chromium, Firefox and WebKit, and
 // calls runCryptoVectors(). The checks are the ones core's vitest runs in
-// Node (tests/cpace.test.ts, tests/crypto.test.ts and tests/noise.test.ts), on
+// Node (tests/cpace.test.ts, tests/cpace-exchange.test.ts, tests/crypto.test.ts
+// and tests/noise.test.ts), on
 // the provider core chooses in that engine (WebCrypto where it has X25519,
 // else @noble), or on @noble whatever the engine, so every engine is held to
 // the same bytes. The spec bundles it as a test build
 // (scripts/test-build-define.mjs), so Noise's vector can pin its ephemerals.
 import { cryptoProvider, nobleProvider } from '../../src/crypto/index.js';
+import { cpaceExchangeChecks } from '../helpers/cpace-exchange-checks.js';
 import { cpaceVectorChecks } from '../helpers/cpace-vectors.js';
 import { noiseVectorChecks } from '../helpers/noise-vectors.js';
 import { providerVectorChecks } from '../helpers/provider-vectors.js';
@@ -16,7 +18,7 @@ type Which = 'chosen' | 'noble';
 
 declare global {
   // eslint-disable-next-line no-var
-  var runCryptoVectors: (options: { x25519: boolean; provider: Which }) => Promise<{ name: string; cpace: unknown[]; provider: unknown[]; noise: unknown[] }>;
+  var runCryptoVectors: (options: { x25519: boolean; provider: Which }) => Promise<{ name: string; cpace: unknown[]; exchange: unknown[]; provider: unknown[]; noise: unknown[] }>;
   // eslint-disable-next-line no-var
   var webCryptoHasX25519: () => Promise<string>;
 }
@@ -28,6 +30,8 @@ globalThis.runCryptoVectors = async ({ x25519, provider: which }) => {
   return {
     name: provider.name,
     cpace: await cpaceVectorChecks(provider, subtle, { x25519 }),
+    // The exchange runs X25519 throughout.
+    exchange: x25519 ? await cpaceExchangeChecks(provider) : [],
     provider: await providerVectorChecks(provider, { x25519 }),
     // Cacophony's Noise vector needs X25519 throughout.
     noise: x25519 ? await noiseVectorChecks(provider) : [],

@@ -127,11 +127,18 @@ describe('P2P utilities', () => {
       expect(isP2PCodeLike('WXYZ-9876')).toBe(true);
     });
 
+    it('takes a code as someone might type it: lower case, spaces and no dash', () => {
+      expect(isP2PCodeLike('abcd-1234')).toBe(true);
+      expect(isP2PCodeLike('ABCD1234')).toBe(true);
+      expect(isP2PCodeLike(' ab cd 12 34 ')).toBe(true);
+    });
+
     it('rejects invalid codes', () => {
       expect(isP2PCodeLike('ABC-1234')).toBe(false);  // Too short
       expect(isP2PCodeLike('ABCD-123')).toBe(false);  // Too short
-      expect(isP2PCodeLike('abcd-1234')).toBe(false); // Lowercase
-      expect(isP2PCodeLike('ABCD1234')).toBe(false);  // No dash
+      expect(isP2PCodeLike('ABCI-1234')).toBe(false); // No I
+      expect(isP2PCodeLike('OBCD-1234')).toBe(false); // No O
+      expect(isP2PCodeLike('ABCD--1234')).toBe(false);
       expect(isP2PCodeLike('')).toBe(false);
     });
   });

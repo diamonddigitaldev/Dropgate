@@ -1,5 +1,7 @@
 // Core's crypto in each browser engine: CPace's known answers
-// (draft-irtf-cfrg-cpace-21's Appendix A.1, A.3, B.1 and B.1.10), cacophony's
+// (draft-irtf-cfrg-cpace-21's Appendix A.1, A.3, B.1 and B.1.10), the CPace
+// exchange a typed code runs (the same code, a wrong one, each low-order share
+// and each confirmation that doesn't match, ending both sides), cacophony's
 // Noise_NNpsk0_25519_AESGCM_SHA256 vector (the handshake, its hash and four
 // transport messages, and a flipped bit refused in each kind of message), and
 // the standards' answers for the crypto provider's X25519, SHA-512, HMAC, HKDF
@@ -101,22 +103,24 @@ async function expectedProvider(page, browserName) {
 test("CPace's generator, transcripts and session-ID output, SHA-512, HMAC, HKDF and AES-GCM with associated data, on the provider core chooses", async ({ page, context, browserName }) => {
     const nothingElsewhere = await open(page, context);
     const expected = await expectedProvider(page, browserName);
-    const { name, cpace, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: false, provider: 'chosen' }));
+    const { name, cpace, exchange, provider } = await page.evaluate(() => window.runCryptoVectors({ x25519: false, provider: 'chosen' }));
     expect(name, 'the provider core chose').toBe(expected);
     expect(wrong([...cpace, ...provider]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(exchange, 'no exchange without X25519').toEqual([]);
     expect(cpace.length, "CPace's checks").toBe(31);
     expect(provider.length, "the provider's checks").toBe(8);
     nothingElsewhere();
 });
 
-test("X25519, CPace's shares, K and ISK, B.1.10's points and cacophony's Noise vector, on the provider core chooses, WebCrypto refusing the low-order ones itself where it's chosen", async ({ page, context, browserName }) => {
+test("X25519, CPace's shares, K and ISK, B.1.10's points, the CPace exchange and cacophony's Noise vector, on the provider core chooses, WebCrypto refusing the low-order ones itself where it's chosen", async ({ page, context, browserName }) => {
     const nothingElsewhere = await open(page, context);
     const expected = await expectedProvider(page, browserName);
-    const { name, cpace, provider, noise } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'chosen' }));
+    const { name, cpace, exchange, provider, noise } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'chosen' }));
     expect(name, 'the provider core chose').toBe(expected);
-    expect(wrong([...cpace, ...provider, ...noise]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(wrong([...cpace, ...exchange, ...provider, ...noise]), 'checks whose value differs from the known answer').toEqual([]);
     // With WebCrypto, 7 more: the engine's own refusal of each low-order point.
     expect(cpace.length, "CPace's checks").toBe(name === 'webcrypto' ? 65 : 58);
+    expect(exchange.length, "the CPace exchange's checks").toBe(18);
     expect(provider.length, "the provider's checks").toBe(14);
     expect(engineRefusals(cpace)).toHaveLength(name === 'webcrypto' ? 7 : 0);
     expect(noise.length, "Noise's checks").toBe(18);
@@ -125,10 +129,11 @@ test("X25519, CPace's shares, K and ISK, B.1.10's points and cacophony's Noise v
 
 test('every check on @noble, in this engine', async ({ page, context }) => {
     const nothingElsewhere = await open(page, context);
-    const { name, cpace, provider, noise } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'noble' }));
+    const { name, cpace, exchange, provider, noise } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'noble' }));
     expect(name).toBe('noble');
-    expect(wrong([...cpace, ...provider, ...noise]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(wrong([...cpace, ...exchange, ...provider, ...noise]), 'checks whose value differs from the known answer').toEqual([]);
     expect(cpace.length, "CPace's checks").toBe(58);
+    expect(exchange.length, "the CPace exchange's checks").toBe(18);
     expect(provider.length, "the provider's checks").toBe(14);
     expect(noise.length, "Noise's checks").toBe(18);
     nothingElsewhere();

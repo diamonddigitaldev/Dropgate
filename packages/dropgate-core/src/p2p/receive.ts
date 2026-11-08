@@ -2,7 +2,7 @@ import { DropgateError, directTransferDisabled } from '../errors.js';
 import { sleep } from '../utils/network.js';
 import { validateFilename } from '../utils/filename.js';
 import type { P2PReceiveOptions, P2PReceiveSession, P2PReceiveState, DataConnection } from './types.js';
-import { isP2PCodeLike } from './utils.js';
+import { normalizeCode } from '../dgdtp/codes.js';
 import { buildPeerOptions, resolvePeerConfig } from './helpers.js';
 import {
   P2P_PROTOCOL_VERSION,
@@ -105,9 +105,11 @@ export async function startP2PReceive(opts: P2PReceiveOptions): Promise<P2PRecei
   const p2pCaps = serverInfo?.capabilities?.p2p;
   if (serverInfo && !p2pCaps?.enabled) throw directTransferDisabled();
 
-  // Validate and normalize code
-  const normalizedCode = String(code).trim().replace(/\s+/g, '').toUpperCase();
-  if (!isP2PCodeLike(normalizedCode)) {
+  // The code in its one form, ABCD-1234, however it was typed
+  let normalizedCode: string;
+  try {
+    normalizedCode = normalizeCode(String(code));
+  } catch {
     throw new DropgateError({ code: 'INVALID_CODE', message: 'Invalid direct transfer code.' });
   }
 

@@ -54,11 +54,11 @@ Codes follow the pattern `XXXX-0000`:
 
 ### 3.3 Generation
 
-Codes are generated from secure random numbers (`crypto.getRandomValues()`, which every browser has, even on a page served over plain HTTP), and never from anything weaker: where there are none, no code is made. The sender attempts code registration with the signalling server up to **4 times** (configurable), regenerating on collision.
+Codes are generated from secure random numbers (`crypto.getRandomValues()`, which every browser has, even on a page served over plain HTTP), and never from anything weaker: where there are none, no code is made. Each character comes from one random byte by rejection sampling, so every letter and every digit is equally likely: a letter from a byte under 240, taken mod 24, and a digit from a byte under 250, taken mod 10; a byte at or over the limit is thrown away and another drawn. The sender attempts code registration with the signalling server up to **4 times** (configurable), regenerating on collision.
 
 ### 3.4 Validation
 
-Codes are normalised before use: trimmed, converted to uppercase, and whitespace is removed. The canonical pattern is `^[A-Z]{4}-\d{4}$`.
+Codes are normalised before use: whitespace anywhere is removed, letters are converted to uppercase, and the dash may be left out. Anything else, including an `I` or an `O`, isn't a code, and is refused before anything is sent. The canonical form is `^[A-HJ-NP-Z]{4}-[0-9]{4}$`.
 
 ---
 

@@ -85,6 +85,7 @@ var ERROR_CODES = {
   TIMED_OUT: { origin: "network", retryable: true, message: "The server took too long to answer." },
   CONNECTION_LOST: { origin: "network", retryable: true, message: "The connection was lost." },
   SECURITY_POLICY_MISMATCH: { origin: "peer", retryable: false, message: "The connection couldn't be secured, so it was closed." },
+  CODE_MISMATCH: { origin: "peer", retryable: false, message: "The code didn't match, so the connection was closed." },
   PEER_FAILED: { origin: "peer", retryable: false, message: "The other device reported an error." },
   UNEXPECTED_ERROR: { origin: "local", retryable: false, message: "Something unexpected went wrong." }
 };
@@ -3600,6 +3601,80 @@ function cryptoProvider() {
   return runtime;
 }
 
+// src/dgdtp/codes.ts
+var CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+var CODE_DIGITS = "0123456789";
+var CODE_LETTER_COUNT = 4;
+var CODE_DIGIT_COUNT = 4;
+var LETTER_BYTE_LIMIT = 240;
+var DIGIT_BYTE_LIMIT = 250;
+var TYPED_CODE = /^([A-HJ-NP-Za-hj-np-z]{4})-?([0-9]{4})$/;
+var ascii = (text) => new TextEncoder().encode(text);
+var invalidCode = () => new DropgateError({ code: "INVALID_CODE" });
+var _bytes;
+var _CodePassword = class _CodePassword {
+  constructor(bytes) {
+    __privateAdd(this, _bytes);
+    __privateSet(this, _bytes, bytes);
+    Object.freeze(this);
+  }
+  /** A password of these characters. */
+  static of(characters) {
+    return new _CodePassword(ascii(characters));
+  }
+  /**
+   * The password's bytes, for the one CPace exchange that uses it: the caller
+   * overwrites them once used. Undefined if it was spent or forgotten.
+   */
+  static spend(password) {
+    if (!(password instanceof _CodePassword)) return void 0;
+    const bytes = __privateGet(password, _bytes);
+    __privateSet(password, _bytes, void 0);
+    return bytes;
+  }
+  /** Overwrites the bytes, if they weren't spent. */
+  forget() {
+    __privateGet(this, _bytes)?.fill(0);
+    __privateSet(this, _bytes, void 0);
+  }
+  toJSON() {
+    return "[CodePassword]";
+  }
+  toString() {
+    return "[CodePassword]";
+  }
+  [/* @__PURE__ */ Symbol.for("nodejs.util.inspect.custom")]() {
+    return "[CodePassword]";
+  }
+};
+_bytes = new WeakMap();
+var CodePassword = _CodePassword;
+function draw(provider, alphabet, limit, count) {
+  let out = "";
+  while (out.length < count) {
+    const bytes = provider.randomBytes(count - out.length);
+    for (const byte of bytes) {
+      if (byte < limit) out += alphabet[byte % alphabet.length];
+    }
+    bytes.fill(0);
+  }
+  return out;
+}
+var drawLetters = (provider, count) => draw(provider, CODE_LETTERS, LETTER_BYTE_LIMIT, count);
+var drawDigits = (provider, count) => draw(provider, CODE_DIGITS, DIGIT_BYTE_LIMIT, count);
+var codeOf = (letters, digits) => `${letters}-${digits}`;
+function generateCode(provider) {
+  return codeOf(drawLetters(provider, CODE_LETTER_COUNT), drawDigits(provider, CODE_DIGIT_COUNT));
+}
+function normalizeCode(value) {
+  const match = typeof value === "string" ? TYPED_CODE.exec(value.replace(/\s+/g, "")) : null;
+  if (!match) throw invalidCode();
+  return codeOf(match[1].toUpperCase(), match[2]);
+}
+function isCodeLike(value) {
+  return typeof value === "string" && TYPED_CODE.test(value.replace(/\s+/g, ""));
+}
+
 // src/p2p/utils.ts
 function isLocalhostHostname(hostname) {
   const host = String(hostname || "").toLowerCase();
@@ -3609,20 +3684,10 @@ function isSecureContextForP2P(hostname, isSecureContext) {
   return Boolean(isSecureContext) || isLocalhostHostname(hostname || "");
 }
 function generateP2PCode(provider = cryptoProvider()) {
-  const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
-  const randomBytes3 = provider.randomBytes(8);
-  let letterPart = "";
-  for (let i = 0; i < 4; i++) {
-    letterPart += letters[randomBytes3[i] % letters.length];
-  }
-  let numberPart = "";
-  for (let i = 4; i < 8; i++) {
-    numberPart += (randomBytes3[i] % 10).toString();
-  }
-  return `${letterPart}-${numberPart}`;
+  return generateCode(provider);
 }
 function isP2PCodeLike(code) {
-  return /^[A-Z]{4}-\d{4}$/.test(String(code || "").trim());
+  return isCodeLike(code);
 }
 
 // src/transport.ts
@@ -5555,8 +5620,10 @@ async function startP2PReceive(opts) {
   }
   const p2pCaps = serverInfo?.capabilities?.p2p;
   if (serverInfo && !p2pCaps?.enabled) throw directTransferDisabled();
-  const normalizedCode = String(code).trim().replace(/\s+/g, "").toUpperCase();
-  if (!isP2PCodeLike(normalizedCode)) {
+  let normalizedCode;
+  try {
+    normalizedCode = normalizeCode(String(code));
+  } catch {
     throw new DropgateError({ code: "INVALID_CODE", message: "Invalid direct transfer code." });
   }
   const { path: finalPath, iceServers: finalIceServers } = resolvePeerConfig(
@@ -8296,11 +8363,16 @@ var filenames = Object.freeze({
 });
 var codes = Object.freeze({
   /**
-   * A new random code, from secure random numbers only.
+   * A new random code, every letter and digit equally likely, from secure
+   * random numbers only.
    * @throws {DropgateError} RUNTIME_UNSUPPORTED if there are none here (no `crypto.getRandomValues()`).
    */
   generate: () => generateP2PCode(),
-  /** Whether a value is shaped like a code. */
+  /**
+   * Whether a value is a code as someone might type it: four of the letters
+   * A–Z without I and O, then four digits. Spaces and lower case are fine,
+   * and the dash may be left out.
+   */
   isLike: isP2PCodeLike
 });
 var hosts = Object.freeze({
