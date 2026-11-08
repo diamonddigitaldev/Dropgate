@@ -1,0 +1,143 @@
+{
+  "about": "DGDTP 4's DTLS binding, made by tests/helpers/reference-prologue.mjs, a second implementation on node:crypto written from the format (its header comment), not from core. fingerprints: what the fingerprint rule makes of each SDP (the fingerprint as hex, or null where it is refused). prologues: the 131-byte prologue in each mode and at the generation edges from inputs. handshake: link mode end to end from an offer and an answer: the prologue from their fingerprints, the key schedule's PSK, then Noise's two messages (fixed ephemerals, the sender's hello as message 2's payload) and the handshake hash, from tests/helpers/reference-noise.mjs and reference-signal.mjs.",
+  "inputs": {
+    "roomNonce": "ffcb04a7d24826adf722372b49cf6123",
+    "attemptId": "60aa25e69c9e4d0c465f18fc924c9282",
+    "linkSecret": "c0f2cf6be65482aa22703b8bea78ed475d56100644f675c7a26a8a3ca0a7e1a4",
+    "isk": "4541c1da4bb5295902e59fc8f1f765fed2561f22c04d6c146db837e2dabd84c9d4bea608bde451e4b89cfd4c4f19c9d5aa8e06ecedda9846caaffe7f0a406fb0",
+    "resumeSecret": "a5adbe01b830583b72c84cf2c24b8bb01abbdba1debc19cbf5d62826dda7ec50",
+    "receiverFingerprint": "4a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb9",
+    "senderFingerprint": "79c67f6fd25f1d1ac74c83325d97b6df4a4a79672b206893b1eb5975eaed3754",
+    "otherFingerprint": "120dd11bc308763be9d4c5af8eaeda902fe6b69d5e0de49c2184315e0d7e892f",
+    "receiverEphemeral": "5caa19321fa01c7ea625509a163e14f5dc7e08f26c68536d433802ff49e7565d",
+    "senderEphemeral": "af826f07a028b5349309f49ba88dadc8605322e88048d37b171b7de12749ed0a",
+    "hello": "7468652073656e64657227732068656c6c6f"
+  },
+  "fingerprints": [
+    {
+      "name": "one sha-256 line at media level",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aaaa\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": "4a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb9"
+    },
+    {
+      "name": "one sha-256 line at session level",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\na=fingerprint:sha-256 4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aaab\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": "4a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb9"
+    },
+    {
+      "name": "the same value at session and media level, in different cases",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\na=fingerprint:sha-256 79:C6:7F:6F:D2:5F:1D:1A:C7:4C:83:32:5D:97:B6:DF:4A:4A:79:67:2B:20:68:93:B1:EB:59:75:EA:ED:37:54\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aaac\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 79:c6:7f:6f:d2:5f:1d:1a:c7:4c:83:32:5d:97:b6:df:4a:4a:79:67:2b:20:68:93:b1:eb:59:75:ea:ed:37:54\r\na=setup:active\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": "79c67f6fd25f1d1ac74c83325d97b6df4a4a79672b206893b1eb5975eaed3754"
+    },
+    {
+      "name": "the hash function named in upper case",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aaad\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:SHA-256 4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": "4a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb9"
+    },
+    {
+      "name": "sha-1 and sha-512 lines beside it, ignored",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aaae\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-1 4A:AD:B9:B1:3F:82:18:3B:54:02:12:DF:3E:5D:49:6B:19:E5:7C:AB\r\na=fingerprint:sha-256 79:C6:7F:6F:D2:5F:1D:1A:C7:4C:83:32:5D:97:B6:DF:4A:4A:79:67:2B:20:68:93:B1:EB:59:75:EA:ED:37:54\r\na=fingerprint:sha-512 A4:AB:D4:44:8C:49:56:2D:82:81:15:D1:3A:1F:CC:EA:92:7F:52:B4:D5:45:92:97:F8:B4:3E:42:DA:89:23:8B:C1:36:26:E4:3D:CB:38:DD:B0:82:48:89:27:EC:90:4F:B4:20:57:44:39:83:E8:85:85:17:9D:50:55:1A:FE:62\r\na=setup:active\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": "79c67f6fd25f1d1ac74c83325d97b6df4a4a79672b206893b1eb5975eaed3754"
+    },
+    {
+      "name": "lines ending in LF alone, with a tab and trailing spaces",
+      "sdp": "v=0\no=- 4611731400430051336 2 IN IP4 127.0.0.1\ns=-\nt=0 0\na=group:BUNDLE 0\na=extmap-allow-mixed\na=msid-semantic: WMS\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\nc=IN IP4 0.0.0.0\na=ice-ufrag:aaaf\na=ice-pwd:aaaabbbbccccddddeeeeffff\na=ice-options:trickle\na=fingerprint:sha-256\t4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9  \na=setup:actpass\na=mid:0\na=sctp-port:5000\na=max-message-size:262144\n",
+      "fingerprint": "4a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb9"
+    },
+    {
+      "name": "another hash function that would be malformed as sha-256, ignored",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aaag\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-384 not-hex\r\na=fingerprint:sha-256 4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": "4a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb9"
+    },
+    {
+      "name": "no fingerprint line",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aaba\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "only a sha-1 line",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabb\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-1 4A:AD:B9:B1:3F:82:18:3B:54:02:12:DF:3E:5D:49:6B:19:E5:7C:AB\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "two different sha-256 values",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabc\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9\r\na=fingerprint:sha-256 12:0D:D1:1B:C3:08:76:3B:E9:D4:C5:AF:8E:AE:DA:90:2F:E6:B6:9D:5E:0D:E4:9C:21:84:31:5E:0D:7E:89:2F\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "two different values, one at session level",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\na=fingerprint:sha-256 12:0D:D1:1B:C3:08:76:3B:E9:D4:C5:AF:8E:AE:DA:90:2F:E6:B6:9D:5E:0D:E4:9C:21:84:31:5E:0D:7E:89:2F\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabd\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 79:C6:7F:6F:D2:5F:1D:1A:C7:4C:83:32:5D:97:B6:DF:4A:4A:79:67:2B:20:68:93:B1:EB:59:75:EA:ED:37:54\r\na=setup:active\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "31 bytes",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabe\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "33 bytes",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabf\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9:AB\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "a character that isn't hex",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabg\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 G0:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "hex with no colons",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabh\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 4A6A438397AF7CE7E8967C122410637CC6917B7ADB2E1FECED1BF92A33927EB9\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "a pair of three digits",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabi\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 ABC:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "the name with no value",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabj\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    },
+    {
+      "name": "a good line, then a malformed sha-256 one",
+      "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:aabk\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9\r\na=fingerprint:sha-256 00:11\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+      "fingerprint": null
+    }
+  ],
+  "prologues": [
+    {
+      "name": "link mode, the first connection",
+      "mode": "link",
+      "generation": "0",
+      "prologue": "64726f70676174652f342064676474702070726f6c6f6775650401ffcb04a7d24826adf722372b49cf612360aa25e69c9e4d0c465f18fc924c928200000000000000004a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb979c67f6fd25f1d1ac74c83325d97b6df4a4a79672b206893b1eb5975eaed3754"
+    },
+    {
+      "name": "code mode, the first connection",
+      "mode": "code",
+      "generation": "0",
+      "prologue": "64726f70676174652f342064676474702070726f6c6f6775650402ffcb04a7d24826adf722372b49cf612360aa25e69c9e4d0c465f18fc924c928200000000000000004a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb979c67f6fd25f1d1ac74c83325d97b6df4a4a79672b206893b1eb5975eaed3754"
+    },
+    {
+      "name": "a resume, the second connection",
+      "mode": "resume",
+      "generation": "1",
+      "prologue": "64726f70676174652f342064676474702070726f6c6f6775650403ffcb04a7d24826adf722372b49cf612360aa25e69c9e4d0c465f18fc924c928200000000000000014a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb979c67f6fd25f1d1ac74c83325d97b6df4a4a79672b206893b1eb5975eaed3754"
+    },
+    {
+      "name": "a resume at the last generation",
+      "mode": "resume",
+      "generation": "18446744073709551615",
+      "prologue": "64726f70676174652f342064676474702070726f6c6f6775650403ffcb04a7d24826adf722372b49cf612360aa25e69c9e4d0c465f18fc924c9282ffffffffffffffff4a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb979c67f6fd25f1d1ac74c83325d97b6df4a4a79672b206893b1eb5975eaed3754"
+    }
+  ],
+  "handshake": {
+    "offer": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:rcv1\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 4A:6A:43:83:97:AF:7C:E7:E8:96:7C:12:24:10:63:7C:C6:91:7B:7A:DB:2E:1F:EC:ED:1B:F9:2A:33:92:7E:B9\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+    "answer": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\na=extmap-allow-mixed\r\na=msid-semantic: WMS\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:snd1\r\na=ice-pwd:aaaabbbbccccddddeeeeffff\r\na=ice-options:trickle\r\na=fingerprint:sha-256 79:C6:7F:6F:D2:5F:1D:1A:C7:4C:83:32:5D:97:B6:DF:4A:4A:79:67:2B:20:68:93:B1:EB:59:75:EA:ED:37:54\r\na=setup:active\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n",
+    "prologue": "64726f70676174652f342064676474702070726f6c6f6775650401ffcb04a7d24826adf722372b49cf612360aa25e69c9e4d0c465f18fc924c928200000000000000004a6a438397af7ce7e8967c122410637cc6917b7adb2e1feced1bf92a33927eb979c67f6fd25f1d1ac74c83325d97b6df4a4a79672b206893b1eb5975eaed3754",
+    "psk": "1fdb282a3d7d1c461cf9f6af3b6c23318c3118d313fa0a81b1a96376a0e34451",
+    "message1": "c7135e3acd47a5acf97a7c1d590ff6606a9a850a2fd222dff54911a7dec375080887231c211b42678f625b6f73afe104",
+    "message2": "150a149508fc87bbf068868dc6a8209d4dc2fee07d0286f67699fadcb48d2d35f6582d24c66c46ef02fec47392623850230099e2f34d91d08f5ab6c5837596e5e91a",
+    "handshakeHash": "4810fbda4731fe3fb3794d92f7dc2db37ffe5ca79b508654d88cb588702fb98a"
+  }
+}
