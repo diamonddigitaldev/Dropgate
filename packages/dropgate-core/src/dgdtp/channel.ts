@@ -6,7 +6,9 @@ import {
   AttemptKeys, CLOSE_SECRET_BYTES, LINK_SECRET_BYTES, RESUME_SECRET_BYTES, deriveAttemptKeys, deriveCloseKeys, deriveRoomId,
   type AttemptMode,
 } from './keys.js';
-import { NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES, noiseInitiator, noiseResponder, type NoiseTransport } from './noise.js';
+import {
+  NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES, NOISE_MAX_MESSAGE_BYTES, NOISE_TAG_BYTES, noiseInitiator, noiseResponder, type NoiseTransport,
+} from './noise.js';
 import { MAX_GENERATION, prologueFromSdp } from './prologue.js';
 import {
   CLOSE_KIND, FRAME_HEADER_BYTES, closeChannel, signalChannel, type CloseChannel, type SignalChannel, type SignalMessage, type SignalRole,
@@ -42,13 +44,27 @@ import {
 // own words); SECURITY_POLICY_MISMATCH for anything that doesn't open, isn't
 // the next message, or breaks the fingerprint rule; CONNECTION_LOST when the
 // rendezvous or the data channel goes before the channel is up. Whichever side
-// finds a fault in the handshake or after it sends an empty message on the
-// data channel before closing it, which the other side's Noise refuses in turn,
-// so both end with the same error; nothing after the handshake is sent. No
-// error carries anything from the other device, and nothing here logs.
+// finds a fault in the handshake or after it sends its abort, one zero byte,
+// on the data channel before closing it, which the other side's Noise refuses
+// in turn, so both end with the same error; nothing after the handshake is
+// sent. No error carries anything from the other device, and nothing here logs.
 
 /** The most the sender's hello (Noise message 2's payload) or the receiver's capabilities (in BIND) hold. */
 export const MAX_HELLO_BYTES = NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES;
+
+/**
+ * The smallest record a data channel must carry: one that can't take 16,384
+ * bytes (with Noise's tag) ends the attempt with CAPABILITY_UNSUPPORTED. The
+ * largest is Noise's 65,535.
+ */
+export const MIN_RECORD_BYTES = 16384;
+
+/**
+ * The abort on the data channel: one zero byte, too short for any handshake
+ * message or record, so the other side's Noise refuses it. Not an empty
+ * message, which some WebRTC stacks can't send.
+ */
+const DATA_ABORT = Uint8Array.of(0);
 
 /** BIND's type, the receiver's first record: then closeSecret (32), then its capabilities. */
 const BIND_TYPE = 0x01;
@@ -72,7 +88,18 @@ export interface MessagePipe {
   send(message: Uint8Array): void;
   /** The other side's next message, in order; rejects once the pipe is closed and every message sent before is taken. */
   receive(): Promise<Uint8Array>;
+  /**
+   * Resolves once the pipe can take more without piling up (at once for a
+   * path with no buffer to watch); rejects once the pipe is closed.
+   */
+  writable(): Promise<void>;
   close(): void;
+}
+
+/** The data channel's pipe: a message pipe that says the largest message it can send. */
+export interface DataChannelPipe extends MessagePipe {
+  /** The largest message `send()` can take, in bytes: the data channel's max-message-size. */
+  readonly maxMessageBytes: number;
 }
 
 /** An ICE candidate, as WebRTC gives and takes it. */
@@ -104,7 +131,7 @@ export interface PeerConnection {
   /** Calls `listener` with each local candidate as it's found, then null at the end of them. */
   onIceCandidate(listener: (candidate: IceCandidate | null) => void): void;
   /** The data channel, once it's open. */
-  dataChannel(): Promise<MessagePipe>;
+  dataChannel(): Promise<DataChannelPipe>;
   close(): void;
 }
 
@@ -133,10 +160,17 @@ export interface SecureChannel {
   readonly handshakeHash: Uint8Array<ArrayBuffer>;
   /** What the other side sent with the handshake: the sender's hello, or the receiver's capabilities. */
   readonly peerHello: Uint8Array<ArrayBuffer>;
-  /** One record to the other side, at most 65,519 bytes. */
+  /**
+   * The largest record this side can send, with Noise's 16-byte tag:
+   * min(65,535, the data channel's max-message-size), at least 16,384.
+   */
+  readonly maxRecordBytes: number;
+  /** One record to the other side, at most `maxRecordBytes` − 16 bytes. */
   send(plaintext: Uint8Array): Promise<void>;
   /** The other side's next record. */
   receive(): Promise<Uint8Array<ArrayBuffer>>;
+  /** Resolves once the data channel's buffer has room again (`MessagePipe.writable()`); rejects once the channel has ended. */
+  writable(): Promise<void>;
   /** This side's one out-of-band close, sealed, through the rendezvous: `body` at most 509 bytes. */
   sendClose(body: Uint8Array): Promise<void>;
   /** The other side's out-of-band close, when one comes: its body. */
@@ -192,7 +226,8 @@ class Attempt {
   #signal: SignalChannel | undefined;
   #close: CloseChannel | undefined;
   #transport: NoiseTransport | undefined;
-  #data: MessagePipe | undefined;
+  #data: DataChannelPipe | undefined;
+  #maxRecord = 0;
   #error: DropgateError | undefined;
   #ended = false;
   #outgoing: Promise<unknown> = Promise.resolve();
@@ -348,10 +383,17 @@ class Attempt {
     });
   }
 
-  /** The receiver's handshake and BIND, over the data channel. */
-  async receiverHandshake(capabilities: Uint8Array<ArrayBuffer>): Promise<SecureChannel> {
+  /** The data channel, once open, and the largest record it carries: CAPABILITY_UNSUPPORTED under 16,384 bytes. */
+  async #openData(): Promise<DataChannelPipe> {
     const data = await this.#race(this.#peer.dataChannel());
     this.#data = data;
+    this.#maxRecord = recordLimit(data);
+    return data;
+  }
+
+  /** The receiver's handshake and BIND, over the data channel. */
+  async receiverHandshake(capabilities: Uint8Array<ArrayBuffer>): Promise<SecureChannel> {
+    const data = await this.#openData();
     const prologue = this.#prologue();
     const keys = this.#keys as AttemptKeys;
     const initiator = await keys.usePsk((psk) => noiseInitiator(this.#provider, { prologue, psk }));
@@ -375,8 +417,7 @@ class Attempt {
 
   /** The sender's handshake, then the receiver's BIND, over the data channel. */
   async senderHandshake(hello: Uint8Array<ArrayBuffer>): Promise<SecureChannel> {
-    const data = await this.#race(this.#peer.dataChannel());
-    this.#data = data;
+    const data = await this.#openData();
     const prologue = this.#prologue();
     const keys = this.#keys as AttemptKeys;
     const responder = await keys.usePsk((psk) => noiseResponder(this.#provider, { prologue, psk }));
@@ -407,22 +448,29 @@ class Attempt {
     if (this.#ended) throw this.#error ?? insecure();
     const keys = this.#keys as AttemptKeys;
     const transport = this.#transport as NoiseTransport;
-    const data = this.#data as MessagePipe;
+    const data = this.#data as DataChannelPipe;
     const handshakeHash = transport.handshakeHash;
     const { roomNonce, attemptId } = keys;
     const generation = this.#generation;
+    const maxRecordBytes = this.#maxRecord;
+    const maxPlaintext = maxRecordBytes - NOISE_TAG_BYTES;
     const attempt = this;
     const ended = () => attempt.#error ?? insecure();
     return Object.freeze({
       role: this.#role,
       mode: keys.mode,
       generation,
+      maxRecordBytes,
       get roomNonce() { return new Uint8Array(roomNonce); },
       get attemptId() { return new Uint8Array(attemptId); },
       get handshakeHash() { return new Uint8Array(handshakeHash); },
       get peerHello() { return new Uint8Array(peerHello); },
       async send(plaintext: Uint8Array) {
         if (attempt.#ended) throw ended();
+        // Too long for this data channel: refused, nothing sent, the channel carries on.
+        if (plaintext instanceof Uint8Array && plaintext.byteLength > maxPlaintext) {
+          throw invalid(`A record here holds at most ${maxPlaintext} bytes.`);
+        }
         try {
           data.send(await transport.encrypt(plaintext));
         } catch (err) {
@@ -436,6 +484,14 @@ class Attempt {
           return await transport.decrypt(await attempt.#next(data));
         } catch (err) {
           throw attempt.end(err);
+        }
+      },
+      async writable() {
+        try {
+          await data.writable();
+        } catch {
+          // The data channel went, or the attempt ended and closed it: CONNECTION_LOST, or the error the attempt already ended with.
+          throw attempt.end(lost());
         }
       },
       async sendClose(body: Uint8Array) {
@@ -464,7 +520,7 @@ class Attempt {
     this.#error = error;
     if (this.#data && error.code === 'SECURITY_POLICY_MISMATCH') {
       try {
-        this.#data.send(new Uint8Array(0));
+        this.#data.send(DATA_ABORT);
       } catch {
         // Gone already.
       }
@@ -486,6 +542,22 @@ class Attempt {
     this.#fail(error);
     return error;
   }
+}
+
+/**
+ * The largest record `data` carries: min(65,535, its max-message-size), whole
+ * bytes. Under 16,384, or no number at all, is CAPABILITY_UNSUPPORTED: the
+ * other device's connection says it takes less than a direct transfer needs.
+ */
+function recordLimit(data: DataChannelPipe): number {
+  const max = Math.floor(Math.min(NOISE_MAX_MESSAGE_BYTES, data.maxMessageBytes));
+  if (!(max >= MIN_RECORD_BYTES)) {
+    throw new DropgateError({
+      code: 'CAPABILITY_UNSUPPORTED', origin: 'peer',
+      message: "The other device's connection can't take messages as large as a direct transfer needs.",
+    });
+  }
+  return max;
 }
 
 /** A candidate's four fields, nothing else. */

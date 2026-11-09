@@ -302,7 +302,7 @@ Each error is core's `DropgateError` with one of these codes ([Errors](../core/e
 **How both devices hear it:**
 
 - A wrong code ends both with `CODE_MISMATCH`, each in its own words, through CPace's abort.
-- In the handshake or after it, the device that finds a fault sends one empty message on the data channel, then closes it. The other device's Noise refuses that as too short, so both end with `SECURITY_POLICY_MISMATCH`.
+- In the handshake or after it, the device that finds a fault sends its abort on the data channel, one zero byte, then closes it. The other device's Noise refuses that as too short, so both end with `SECURITY_POLICY_MISMATCH`. (It isn't an empty message, which some WebRTC implementations can't send.)
 - A sealed set-up frame that doesn't open ends that device with `SECURITY_POLICY_MISMATCH`. The other, whose path through the rendezvous closes before any data channel is open, ends with `CONNECTION_LOST`: nothing can tell it securely.
 - The rendezvous going matters only until the data channel is open. The data channel closing during the handshake is `CONNECTION_LOST`.
 - Whatever ends an attempt, every key it made is let go, and the data channel, the path through the rendezvous and the peer connection are closed.
@@ -336,7 +336,14 @@ Core's tests also run the whole channel end to end, on each provider and with on
 
 ### 4.13 What the Rendezvous and the Engine Add
 
-Not built yet. What they need from the secure channel:
+Of these, only the connection itself is built: core runs the secure channel over a W3C `RTCPeerConnection` (the browser's own, or one an integrator passes in for Node).
+
+- **The data channel:** the receiver makes the one data channel, `dgdtp/4`, ordered and fully reliable, carrying bytes only; anything else on it is refused as a fault. The fingerprints come from the real SDP each device applied.
+- **Record size:** a device's largest record is the smaller of 65,535 bytes and its data channel's max-message-size. A data channel that can't take 16,384 bytes ends the attempt with `CAPABILITY_UNSUPPORTED`. How each device tells the other its size comes with the engine.
+- **Backpressure:** a device sends no more while over 256 KiB waits in the data channel's buffer, going on once it drains, whether or not the `bufferedamountlow` event comes.
+- **Ends:** ICE or the connection failing, or the data channel closing, ends it with `CONNECTION_LOST`.
+
+The rendezvous and the engine aren't built yet. What they need from the secure channel:
 
 - **In plain, as a room is created or joined:** the DGDTP major, so a mismatch is said before any cryptography.
 - **Creating a room:** the room ID, the room's nonce and whether the sender wants a code. The rendezvous gives a locator, or none when every one is taken, and the link still works.
@@ -344,7 +351,7 @@ Not built yet. What they need from the secure channel:
 - **CPace:** its three messages relayed as they are, and only the first message 1 for a locator. The locator is then used up, and a later message 1 for it is refused without reaching the sender, which can ask for a new code.
 - **Frames:** relayed whole and in order each way, never read, at most 8,230 bytes, only for the room's live attempts.
 - **Nothing kept or logged:** no room ID, room nonce, attempt ID, locator, share or frame, in any log or on disk.
-- **From the engine:** the layouts of the sender's hello, BIND, the receiver's acceptance (with the resume secret) and a close; records sent over the data channel strictly in order; real fingerprints from real SDP; and 15 seconds for each attempt.
+- **From the engine:** the layouts of the sender's hello, BIND, the receiver's acceptance (with the resume secret) and a close; records sent over the data channel strictly in order; and 15 seconds for each attempt.
 
 ### 4.14 Constants
 
@@ -368,6 +375,9 @@ Not built yet. What they need from the secure channel:
 | `NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES`, `MAX_HELLO_BYTES` | 1,024 | The sender's hello, and the receiver's capabilities in BIND. |
 | `NOISE_REKEY_INTERVAL` | 65,536 | Records under one key, each way. |
 | `MAX_GENERATION` | 2⁶⁴ − 1 | The last generation. |
+| `DATA_CHANNEL_LABEL` | `dgdtp/4` | The one data channel's name. |
+| `MIN_RECORD_BYTES` | 16,384 | A data channel that can't take a record of this size isn't used. |
+| `LOW_WATER_BYTES` | 262,144 | A device sends no more while more than this waits in the data channel's buffer. |
 
 ---
 

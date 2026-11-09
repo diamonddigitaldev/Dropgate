@@ -5,7 +5,7 @@
 // No WebRTC and no server. Nothing here uses Node, so the browser check runs
 // the same code.
 import type {
-  IceCandidate, IncomingAttempt, MessagePipe, PeerConnection, ReceiverRendezvous, SenderRendezvous, SessionDescription,
+  DataChannelPipe, IceCandidate, IncomingAttempt, MessagePipe, PeerConnection, ReceiverRendezvous, SenderRendezvous, SessionDescription,
 } from '../../src/dgdtp/channel.js';
 import { hex } from './cpace-vectors.js';
 
@@ -14,7 +14,14 @@ export type Side = 'receiver' | 'sender';
 /** What a relay does with one message on its way: the messages to deliver in its place (none drops it). */
 export type Relay = (from: Side, message: Uint8Array) => Uint8Array[] | Promise<Uint8Array[]>;
 
-class PipeEnd implements MessagePipe {
+/** A fake pipe's writable() resolves once its `bufferedAmount` is at or under this, as a data channel's does. */
+export const FAKE_LOW_WATER_BYTES = 256 * 1024;
+
+export class PipeEnd implements DataChannelPipe {
+  /** What a test says is waiting to go: writable() waits while it's over the low-water mark. */
+  bufferedAmount = 0;
+  /** The largest message, as a data channel's max-message-size: a test may lower it. */
+  maxMessageBytes = 262144;
   readonly #queue: Uint8Array[] = [];
   readonly #waiting: Array<{ resolve: (m: Uint8Array) => void; reject: (err: Error) => void }> = [];
   #closed = false;
@@ -36,6 +43,17 @@ class PipeEnd implements MessagePipe {
     if (this.#queue.length > 0) return Promise.resolve(this.#queue.shift() as Uint8Array);
     if (this.#closed || this.#remoteClosed) return Promise.reject(new Error('The pipe is closed.'));
     return new Promise((resolve, reject) => this.#waiting.push({ resolve, reject }));
+  }
+
+  writable(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        if (this.#closed || this.#remoteClosed) reject(new Error('The pipe is closed.'));
+        else if (this.bufferedAmount <= FAKE_LOW_WATER_BYTES) resolve();
+        else setTimeout(check, 1);
+      };
+      check();
+    });
   }
 
   close(): void {
@@ -62,9 +80,9 @@ class PipeEnd implements MessagePipe {
 }
 
 /** One pipe between the two sides: each side's end, and what each side sent (copies), in order. */
-export interface PipePair {
-  receiver: MessagePipe;
-  sender: MessagePipe;
+export interface PipePair<P extends MessagePipe = PipeEnd> {
+  receiver: P;
+  sender: P;
   /** Every message each side sent, as it sent it, before any relay. */
   sent: Record<Side, Uint8Array[]>;
 }
@@ -107,7 +125,7 @@ export interface RendezvousRecord {
  */
 export class MockRendezvous {
   readonly records: RendezvousRecord[] = [];
-  readonly pipes: PipePair[] = [];
+  readonly pipes: Array<PipePair<MessagePipe>> = [];
   readonly #rooms = new Map<string, { roomNonce: Uint8Array; incoming: IncomingAttempt[]; waiting: Array<(a: IncomingAttempt) => void> }>();
   /** The locator the next room with a code gets. */
   locator = 'AB';
@@ -153,13 +171,14 @@ export class MockRendezvous {
   }
 
   /** A pipe pair whose every send is recorded as a message to the rendezvous. */
-  #recorded(pair: PipePair): PipePair {
+  #recorded(pair: PipePair): PipePair<MessagePipe> {
     const wrap = (side: Side, end: MessagePipe): MessagePipe => ({
       send: (message) => {
         this.records.push({ from: side, what: 'message', bytes: new Uint8Array(message) });
         end.send(message);
       },
       receive: () => end.receive(),
+      writable: () => end.writable(),
       close: () => end.close(),
     });
     return { receiver: wrap('receiver', pair.receiver), sender: wrap('sender', pair.sender), sent: pair.sent };
@@ -258,7 +277,7 @@ export class FakePeer implements PeerConnection {
     this.#listener = listener;
   }
 
-  dataChannel(): Promise<MessagePipe> {
+  dataChannel(): Promise<DataChannelPipe> {
     return this.#pair.dataChannel(this.role);
   }
 
@@ -280,14 +299,17 @@ export class PeerPair {
   /** The data channel's pipe, once open: what each side sent on it. */
   data: PipePair | undefined;
   readonly #relay: Relay | undefined;
-  readonly #opened: Record<Side, { promise: Promise<MessagePipe>; resolve: (pipe: MessagePipe) => void; reject: (err: Error) => void }>;
+  readonly #maxMessageBytes: Partial<Record<Side, number>>;
+  readonly #opened: Record<Side, { promise: Promise<DataChannelPipe>; resolve: (pipe: DataChannelPipe) => void; reject: (err: Error) => void }>;
 
-  constructor(options: { dataRelay?: Relay } = {}) {
+  /** `maxMessageBytes`: each side's data channel's max-message-size, if a test sets one. */
+  constructor(options: { dataRelay?: Relay; maxMessageBytes?: Partial<Record<Side, number>> } = {}) {
     this.#relay = options.dataRelay;
+    this.#maxMessageBytes = options.maxMessageBytes ?? {};
     const deferred = () => {
-      let resolve!: (pipe: MessagePipe) => void;
+      let resolve!: (pipe: DataChannelPipe) => void;
       let reject!: (err: Error) => void;
-      const promise = new Promise<MessagePipe>((res, rej) => { resolve = res; reject = rej; });
+      const promise = new Promise<DataChannelPipe>((res, rej) => { resolve = res; reject = rej; });
       promise.catch(() => undefined);
       return { promise, resolve, reject };
     };
@@ -299,11 +321,15 @@ export class PeerPair {
   /** @internal */ check(): void {
     if (this.data || !this.receiver.ready || !this.sender.ready || this.receiver.closed || this.sender.closed) return;
     this.data = pipePair(this.#relay);
+    for (const side of ['receiver', 'sender'] as const) {
+      const max = this.#maxMessageBytes[side];
+      if (max !== undefined) this.data[side].maxMessageBytes = max;
+    }
     this.#opened.receiver.resolve(this.data.receiver);
     this.#opened.sender.resolve(this.data.sender);
   }
 
-  /** @internal */ dataChannel(side: Side): Promise<MessagePipe> {
+  /** @internal */ dataChannel(side: Side): Promise<DataChannelPipe> {
     return this.#opened[side].promise;
   }
 

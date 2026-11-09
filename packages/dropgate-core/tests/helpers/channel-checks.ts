@@ -54,6 +54,8 @@ export interface TransferOptions {
   senderProvider?: CryptoProvider;
   /** A relay on the attempt's rendezvous pipe, made once the room's values are known. */
   relay?: (room: SenderRoom) => Relay;
+  /** Each side's data channel's max-message-size, if not the fakes'. */
+  maxMessageBytes?: Partial<Record<'receiver' | 'sender', number>>;
   /** A relay on the data channel. */
   dataRelay?: Relay;
   /** Set up the peers before the attempt. */
@@ -65,7 +67,7 @@ export interface TransferOptions {
 /** One attempt by link, both sides at once, over a mock rendezvous and fake peers: how each side ended. */
 export async function transfer(provider: CryptoProvider, options: TransferOptions = {}): Promise<Transfer> {
   const rendezvous = new MockRendezvous();
-  const peers = new PeerPair({ dataRelay: options.dataRelay });
+  const peers = new PeerPair({ dataRelay: options.dataRelay, maxMessageBytes: options.maxMessageBytes });
   options.peers?.(peers);
   const room = await openRoom(options.senderProvider ?? provider, { rendezvous: rendezvous.sender });
   const relay = options.relay?.(room);
@@ -231,12 +233,12 @@ export async function channelChecks(provider: CryptoProvider): Promise<VectorChe
   await check('a wrong code (its last digit changed): CODE_MISMATCH on both sides, each in its own words', `${WRONG_CODE.receiver} / ${WRONG_CODE.sender}`, async () =>
     ending(await codeTransfer(provider, wrongDigit)));
   for (const [what, swap] of [['the offer', { offer: true }], ['the answer', { answer: true }], ['both', { offer: true, answer: true }]] as const) {
-    await check(`a fingerprint swapped in ${what}: SECURITY_POLICY_MISMATCH on both sides; nothing after Noise's message 1 but empty aborts`, 'SECURITY_POLICY_MISMATCH / SECURITY_POLICY_MISMATCH; 48 0', async () => {
+    await check(`a fingerprint swapped in ${what}: SECURITY_POLICY_MISMATCH on both sides; nothing after Noise's message 1 but aborts, one zero byte each`, 'SECURITY_POLICY_MISMATCH / SECURITY_POLICY_MISMATCH; 48 abort', async () => {
       const t = await transfer(provider, { relay: fingerprintSwapper(provider, swap), hello });
       const sent = t.peers.data?.sent ?? { receiver: [], sender: [] };
-      const sizes = [...new Set([...sent.receiver, ...sent.sender].map((m) => m.byteLength))].sort((a, b) => b - a);
+      const after = [...new Set([...sent.receiver.slice(1), ...sent.sender].map((m) => (m.byteLength === 1 && m[0] === 0 ? 'abort' : String(m.byteLength))))].sort();
       const codes = [t.receiver, t.sender].map((r) => (r.status === 'fulfilled' ? 'up' : codeOf(r.reason))).join(' / ');
-      return `${codes}; ${sent.receiver[0]?.byteLength} ${sizes.filter((n) => n !== 48).join(' ')}`;
+      return `${codes}; ${sent.receiver[0]?.byteLength} ${after.join(' ')}`;
     });
   }
   await check('a resume on R: both up, mode resume, generation 1, a handshake hash of its own', 'up / up, the same handshake hash; resume 1 1; new hash', async () => {
@@ -261,7 +263,7 @@ export async function channelChecks(provider: CryptoProvider): Promise<VectorChe
 /** One attempt by code, the receiver typing what `typed` makes of the sender's code. */
 export async function codeTransfer(provider: CryptoProvider, typed: (code: string) => string, options: Omit<TransferOptions, 'typed'> = {}): Promise<Transfer> {
   const rendezvous = new MockRendezvous();
-  const peers = new PeerPair({ dataRelay: options.dataRelay });
+  const peers = new PeerPair({ dataRelay: options.dataRelay, maxMessageBytes: options.maxMessageBytes });
   options.peers?.(peers);
   const room = await openRoom(options.senderProvider ?? provider, { rendezvous: rendezvous.sender, code: true });
   const relay = options.relay?.(room);

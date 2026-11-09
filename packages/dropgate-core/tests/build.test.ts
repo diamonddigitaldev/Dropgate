@@ -11,6 +11,8 @@ import { NOBLE, buildBanner, licenceOf, noticesFile } from '../scripts/third-par
 // copies, and unpin it), if a build or the notices file lacks the licence, if
 // the pins or the package's empty dependencies change, or if the audit note in
 // docs/core/crypto.md names another version than the lockfile's.
+// And no build imports werift or node-datachannel, the Node WebRTC libraries
+// core's tests run on: dev dependencies only, which an integrator passes in.
 // CI builds before it tests; locally, run npm run build first.
 
 const PACKAGE = new URL('../package.json', import.meta.url);
@@ -23,6 +25,16 @@ const COPIES = ['server/public/js/dropgate-core.js', 'client/src/dropgate-core.j
 
 /** An import or require of a @noble/ module: static, dynamic or CommonJS. */
 const IMPORTS_NOBLE = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["'`]@noble\//;
+
+/**
+ * The Node WebRTC libraries core's tests run on: dev dependencies only, never
+ * in a build. An integrator passes one in; the web UI and the desktop app use
+ * the browser's own.
+ */
+const NODE_WEBRTC = ['werift', 'node-datachannel'];
+
+/** An import or require of `name` or a path in it, static, dynamic or CommonJS. */
+const imports = (name: string) => new RegExp(`(?:\\bfrom\\s*|\\bimport\\s*\\(?\\s*|\\brequire\\s*\\(\\s*)["'\`]${name}(?:/[^"'\`]*)?["'\`]`);
 
 const pkg = JSON.parse(readFileSync(PACKAGE, 'utf8'));
 const lock = JSON.parse(readFileSync(LOCK, 'utf8'));
@@ -64,6 +76,45 @@ describe("Core's builds carry @noble compiled in", () => {
       expect(IMPORTS_NOBLE.test(line), line).toBe(true);
     }
     expect(IMPORTS_NOBLE.test('// node_modules/@noble/curves/ed25519.js')).toBe(false);
+  });
+});
+
+describe("Core's builds carry no Node WebRTC library", () => {
+  const files = [
+    ...BUILDS.map((name) => ({ name: `dist/${name}`, url: new URL(`../dist/${name}`, import.meta.url) })),
+    ...(inRepository() ? COPIES.map((name) => ({ name, url: new URL(name, ROOT) })) : []),
+  ];
+
+  for (const { name, url } of files) {
+    it(`${name} imports neither werift nor node-datachannel, nor holds their code`, () => {
+      expect(existsSync(url), `${name} is missing: run npm run build first`).toBe(true);
+      const build = readFileSync(url, 'utf8');
+      for (const library of NODE_WEBRTC) {
+        expect(imports(library).test(build), `${name} imports ${library}`).toBe(false);
+        expect(build.includes(`node_modules/${library}/`), `${name} holds ${library}'s code`).toBe(false);
+      }
+    });
+  }
+
+  it('the check itself finds each way of importing either', () => {
+    for (const library of NODE_WEBRTC) {
+      for (const line of [`import { RTCPeerConnection } from "${library}";`, `export * from '${library}/polyfill'`, `await import("${library}")`,
+        `const w = require("${library}")`, `import"${library}"`, `require( \`${library}/lib/index.js\` )`]) {
+        expect(imports(library).test(line), line).toBe(true);
+      }
+      expect(imports(library).test(`// tested on ${library} in Node`), library).toBe(false);
+      expect(imports(library).test(`import x from "${library}-other"`), library).toBe(false);
+    }
+  });
+
+  it('werift is a dev dependency only, pinned exactly at the version the lockfile installs', () => {
+    expect(pkg.devDependencies.werift).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(installed('werift')).toBe(pkg.devDependencies.werift);
+    for (const library of NODE_WEBRTC) {
+      expect(pkg.dependencies?.[library], library).toBeUndefined();
+      expect(pkg.peerDependencies?.[library], library).toBeUndefined();
+      expect(pkg.optionalDependencies?.[library], library).toBeUndefined();
+    }
   });
 });
 

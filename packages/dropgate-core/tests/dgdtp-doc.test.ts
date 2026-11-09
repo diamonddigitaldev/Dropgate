@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { ROOT, inRepository } from '../scripts/copy-contents.mjs';
-import { MAX_HELLO_BYTES } from '../src/dgdtp/channel.js';
+import { MAX_HELLO_BYTES, MIN_RECORD_BYTES } from '../src/dgdtp/channel.js';
 import {
   CPACE_ATTEMPT_ID_BYTES, CPACE_MESSAGE1_BYTES, CPACE_MESSAGE2_BYTES, CPACE_MESSAGE3_BYTES, CPACE_ROOM_NONCE_BYTES,
 } from '../src/dgdtp/cpace.js';
@@ -15,6 +15,7 @@ import {
   FRAME_HEADER_BYTES, LARGE_BUCKET_BYTES, MAX_CLOSE_BODY_BYTES, MAX_FRAMES_EACH_WAY, MAX_FRAME_BYTES, SDP_BUCKET_BYTES,
   SMALL_BUCKET_BYTES,
 } from '../src/dgdtp/seal.js';
+import { DATA_CHANNEL_LABEL, LOW_WATER_BYTES } from '../src/dgdtp/webrtc.js';
 
 // DGDTP.md's table of the secure channel's constants gives each one's value.
 // The docs checks read names, not values, so this holds the table to the code:
@@ -31,6 +32,7 @@ const CONSTANTS: Record<string, number | bigint | string> = {
   FRAME_HEADER_BYTES, SMALL_BUCKET_BYTES, SDP_BUCKET_BYTES, LARGE_BUCKET_BYTES, MAX_FRAME_BYTES, MAX_FRAMES_EACH_WAY,
   MAX_CLOSE_BODY_BYTES, PROLOGUE_BYTES, NOISE_MAX_MESSAGE_BYTES, NOISE_MAX_RECORD_PLAINTEXT_BYTES,
   NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES, MAX_HELLO_BYTES, NOISE_REKEY_INTERVAL, MAX_GENERATION,
+  DATA_CHANNEL_LABEL, MIN_RECORD_BYTES, LOW_WATER_BYTES,
 };
 
 /** A value as the table writes it: `a string`, 8,230, or 2⁶⁴ − 1. */

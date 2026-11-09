@@ -9,7 +9,7 @@ import { hex } from './helpers/cpace-vectors.js';
 import {
   WRONG_CODE, channelChecks, channels, codeTransfer, ending, transfer, wrongDigit, type Transfer,
 } from './helpers/channel-checks.js';
-import { MockRendezvous, PeerPair, pipePair, type Relay } from './helpers/fake-channel.js';
+import { FAKE_LOW_WATER_BYTES, MockRendezvous, PeerPair, pipePair, type Relay } from './helpers/fake-channel.js';
 // The second implementations: plain JavaScript on node:crypto, written from the formats.
 import * as referencePrologue from './helpers/reference-prologue.mjs';
 import * as referenceSignal from './helpers/reference-signal.mjs';
@@ -42,6 +42,8 @@ const codeOf = (err: unknown) => String((err as { code?: string })?.code ?? err)
 const outcomeOf = (result: PromiseSettledResult<unknown>) => (result.status === 'fulfilled' ? 'up' : codeOf(result.reason));
 const codes = (t: Pick<Transfer, 'receiver' | 'sender'>) => `${outcomeOf(t.receiver)} / ${outcomeOf(t.sender)}`;
 const allZero = (bytes: Uint8Array) => bytes.every((b) => b === 0);
+/** The data channel's abort: one zero byte. */
+const isAbort = (m: Uint8Array) => m.byteLength === 1 && m[0] === 0;
 const ascii = (text: string) => new TextEncoder().encode(text);
 
 /** Whether `needle`'s bytes appear anywhere in `haystack`. */
@@ -286,8 +288,8 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
       expect(codes(t)).toBe(`${MISMATCH} / ${MISMATCH}`);
       const data = t.peers.data as NonNullable<PeerPair['data']>;
       expect(data.sent.receiver[0].byteLength).toBe(48);
-      expect(data.sent.receiver.slice(1).every((m) => m.byteLength === 0)).toBe(true);
-      expect(data.sent.sender.every((m) => m.byteLength === 0)).toBe(true);
+      expect(data.sent.receiver.slice(1).every(isAbort)).toBe(true);
+      expect(data.sent.sender.length > 0 && data.sent.sender.every(isAbort)).toBe(true);
       // Each side built its prologue from what it applied, and they differ.
       expect(r.made.prologues).toHaveLength(1);
       expect(s.made.prologues).toHaveLength(1);
@@ -314,7 +316,7 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
     expect(codes(t)).toBe(`${MISMATCH} / ${MISMATCH}`);
     const data = t.peers.data as NonNullable<PeerPair['data']>;
     expect(data.sent.receiver[0].byteLength).toBe(49);
-    expect(data.sent.sender.every((m) => m.byteLength === 0)).toBe(true);
+    expect(data.sent.sender.length > 0 && data.sent.sender.every(isAbort)).toBe(true);
   });
 
   it("a BIND that isn't one ends the sender's attempt with SECURITY_POLICY_MISMATCH, and the receiver's channel with it", async () => {
@@ -666,5 +668,67 @@ describe("the secure channel's secrets and checks", () => {
       await expect(sender, `${length} bytes`).rejects.toMatchObject({ code: MISMATCH });
       expect(peers.sender.closed).toBe(true);
     }
+  });
+});
+
+describe("the secure channel's records and backpressure on its data channel", () => {
+  const sizes = (t: Transfer) => `${channels(t).receiver.maxRecordBytes} / ${channels(t).sender.maxRecordBytes}`;
+
+  it("the largest record is min(65,535, the data channel's max-message-size), each side its own", async () => {
+    expect(sizes(await transfer(webCrypto))).toBe('65535 / 65535');
+    const odd = await transfer(webCrypto, { maxMessageBytes: { receiver: 16384, sender: 40000.9 } });
+    expect(sizes(odd)).toBe('16384 / 40000');
+    expect(sizes(await transfer(webCrypto, { maxMessageBytes: { receiver: Infinity, sender: 65536 } }))).toBe('65535 / 65535');
+    // A record fits its side's limit with Noise's 16-byte tag; one byte more is refused, nothing sent, and the channel carries on.
+    const { receiver, sender } = channels(odd);
+    const data = odd.peers.data as NonNullable<PeerPair['data']>;
+    const before = data.sent.receiver.length;
+    await expect(receiver.send(new Uint8Array(16369))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(data.sent.receiver.length).toBe(before);
+    await receiver.send(new Uint8Array(16368).fill(1));
+    expect((await sender.receive()).byteLength).toBe(16368);
+    await expect(sender.send(new Uint8Array(40000 - 15))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await sender.send(new Uint8Array(40000 - 16));
+    expect((await receiver.receive()).byteLength).toBe(40000 - 16);
+  });
+
+  it("a data channel that can't take 16,384 bytes ends that side CAPABILITY_UNSUPPORTED, before any handshake message", async () => {
+    for (const [what, max] of [['16,383 bytes', 16383], ['no number', Number.NaN], ['not a number at all', 'large' as unknown as number]] as const) {
+      const t = await transfer(webCrypto, { maxMessageBytes: { receiver: max as number } });
+      expect(codes(t), what).toBe('CAPABILITY_UNSUPPORTED / CONNECTION_LOST');
+      const err = (t.receiver as PromiseRejectedResult).reason;
+      expect(err.origin, what).toBe('peer');
+      expect(err.message, what).toBe("The other device's connection can't take messages as large as a direct transfer needs.");
+      expect((t.peers.data as NonNullable<PeerPair['data']>).sent.receiver, what).toEqual([]);
+    }
+    const t = await transfer(webCrypto, { maxMessageBytes: { sender: 16383 } });
+    expect(codes(t)).toBe(`CONNECTION_LOST / CAPABILITY_UNSUPPORTED`);
+    const ok = await transfer(webCrypto, { maxMessageBytes: { receiver: 16384, sender: 16384 } });
+    expect(ending(ok)).toBe('up / up, the same handshake hash');
+  });
+
+  it("writable() waits while the data channel's buffer is over the low-water mark, and fails once the channel has ended", async () => {
+    const t = await transfer(webCrypto);
+    const { receiver, sender } = channels(t);
+    const data = t.peers.data as NonNullable<PeerPair['data']>;
+    await receiver.writable();
+    data.receiver.bufferedAmount = FAKE_LOW_WATER_BYTES + 1;
+    let ready = false;
+    const waiting = receiver.writable().then(() => { ready = true; });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ready).toBe(false);
+    data.receiver.bufferedAmount = FAKE_LOW_WATER_BYTES;
+    await waiting;
+    expect(ready).toBe(true);
+    // The data channel going while it waits: CONNECTION_LOST, and the channel has ended.
+    data.receiver.bufferedAmount = FAKE_LOW_WATER_BYTES + 1;
+    const lost = receiver.writable();
+    data.receiver.close();
+    await expect(lost).rejects.toMatchObject({ code: 'CONNECTION_LOST' });
+    await expect(receiver.send(Uint8Array.of(1))).rejects.toMatchObject({ code: 'CONNECTION_LOST' });
+    await expect(receiver.writable()).rejects.toMatchObject({ code: 'CONNECTION_LOST' });
+    // Closed by this side: OPERATION_CANCELLED.
+    sender.close();
+    await expect(sender.writable()).rejects.toMatchObject({ code: 'OPERATION_CANCELLED' });
   });
 });
