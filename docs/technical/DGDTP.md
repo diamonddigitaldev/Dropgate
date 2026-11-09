@@ -1,24 +1,35 @@
 # DGDTP — Dropgate Direct Transfer Protocol
 
-**Protocol Version:** 4.0, in development. Until it's finished, the messages below are version 3's, with `hello` carrying 4
+**Protocol Version:** 4.0, in development. Its secure channel ([§4](#4-the-secure-channel)) is built in the core library and tested, but no transfer runs over it yet: today's direct transfers use version 3's messages ([§5](#5-signalling-layer) to [§18](#18-error-model)), with `hello` carrying 4
 **Status:** In development
-**Last Updated:** October 2026
+**Last Updated:** November 2026
 
 ---
 
 ## 1. Overview
 
-The Dropgate Direct Transfer Protocol (DGDTP) defines the peer-to-peer (P2P) file transfer mechanism used by Dropgate. Unlike DGUP (which uploads files to a server for later retrieval), DGDTP streams file data directly from one peer to another over a WebRTC data channel. The Dropgate Server acts only as a signalling relay; it doesn't store or process the transferred file content, and it can't see it as long as it relays signalling honestly (see [§18.1](#181-transport-encryption)).
+The Dropgate Direct Transfer Protocol (DGDTP) defines the peer-to-peer (P2P) file transfer mechanism used by Dropgate. Unlike DGUP (which uploads files to a server for later retrieval), DGDTP streams file data directly from one peer to another over a WebRTC data channel. The Dropgate Server only puts the two devices in touch and relays the messages that set up their connection; it doesn't store or process the transferred file content.
 
-DGDTP supports single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§15](#15-resume-support)).
+DGDTP 4 has two layers:
 
-### 1.1 Design Goals
+- **The secure channel** ([§4](#4-the-secure-channel)). From a secret both devices hold, a link's or a typed code's, it makes an encrypted, authenticated channel over the connection the two devices set up. Everything that sets up that connection goes through the server sealed, and the connection's own certificates are tied into an encrypted handshake that runs over it, so a server that changes, replays or swaps anything makes the connection fail instead of reading it.
+- **The transfer messages** that run over it: the list of files, their data, flow control and the end of a transfer.
+
+### 1.1 What's Built Now
+
+The secure channel is built in `@dropgate/core` ([`packages/dropgate-core/src/dgdtp/`](../../packages/dropgate-core/src/dgdtp/)), and tested end to end over a stand-in server and stand-in connections, with no WebRTC ([§4.12](#412-test-vectors-and-tests)). Nothing in core's API uses it yet, and none of it is exported.
+
+Today's direct transfers still run version 3's transfer messages, with `hello` carrying 4, on PeerJS, protected by WebRTC's own DTLS encryption alone ([§5](#5-signalling-layer) to [§18](#18-error-model)). They support single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§16](#16-resume-support)). What DTLS alone does and doesn't protect against is in [§19.1](#191-transport-encryption).
+
+Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, and its transfer engine are still to come. They carry every direct transfer over the secure channel, and their messages replace §5 to §18. What they need from the secure channel is in [§4.13](#413-what-the-rendezvous-and-the-engine-add).
+
+### 1.2 Design Goals
 
 - **Zero server storage** — file data never touches the server's filesystem or memory.
-- **Transport encryption** — WebRTC data channels are encrypted via DTLS by default. No plaintext data traverses the network. The DTLS connection is authenticated through the signalling server, so this protects against network observers, not against a malicious signalling server (see [§18.1](#181-transport-encryption)).
+- **End-to-end security** — over the secure channel, only the two devices can read a transfer or the messages that set up its connection, and a server that tampers with either ends the connection instead of reading it. Today's transfers rely on DTLS alone, which a malicious signalling server can get between (see [§19.1](#191-transport-encryption)).
 - **Flow control** — chunk acknowledgements and buffer monitoring prevent fast senders from overwhelming slow receivers.
-- **Minimal signalling** — the server's role is limited to PeerJS signalling (peer discovery, ICE candidate relay, SDP exchange). Once the data channel is established, the server is no longer involved.
-- **Human-readable codes** — peers are identified by short, pronounceable codes rather than opaque UUIDs or IP addresses.
+- **Minimal signalling** — the server only relays what sets up the connection: today PeerJS's messages, and over the secure channel, sealed frames it can't read. Once the data channel is established, the server is no longer involved.
+- **Human-readable codes** — peers are identified by short, pronounceable codes rather than opaque UUIDs or IP addresses. Over the secure channel, only a code's first two letters ever reach the server.
 
 ---
 
@@ -28,16 +39,24 @@ DGDTP supports single-file transfers, multi-file transfers (streamed into a ZIP 
 |------|---------|
 | **Sender** | The peer that holds the file(s) and initiates the DGDTP session. |
 | **Receiver** | The peer that connects to the sender's code and receives file data. |
-| **Signalling Server** | The Dropgate Server component that relays WebRTC signalling messages (PeerJS). |
+| **Signalling Server** | The Dropgate Server component that relays WebRTC signalling messages (PeerJS, today). |
+| **Rendezvous** | Dropgate 4's signalling on the Dropgate Server, in place of PeerJS: it puts a sender and a receiver in touch and relays the sealed messages that set up their connection. |
 | **Data Channel** | The WebRTC RTCDataChannel over which DGDTP messages and binary data are sent. |
 | **P2P Code** | A human-readable identifier in the format `XXXX-0000` (4 letters + 4 digits). |
+| **Locator** | A code's first two letters (three on a server set for more rooms at once), which the rendezvous hands out and knows the sender's room by. The only part of a code that leaves the device. |
+| **Password** | The rest of a code, made on the sender's device. |
+| **Link Secret** | 32 random bytes made on the sender's device, carried after the `#` of a direct transfer's link. |
+| **Room** | A sender's place on the rendezvous, found by its link's secret or its code's locator. |
+| **Attempt** | One try at connecting to a room, with keys of its own: a receiver's, by link or by code, or a resume. |
+| **Generation** | Which connection of a transfer an attempt makes: 0 for the first, one more for each resume. |
+| **Crypto Provider** | What does core's cryptography: the platform's Web Crypto, or core's own JavaScript crypto on `@noble` ([Crypto](../core/crypto.md)). |
 | **Session ID** | A UUID identifying a specific transfer session, used to check that all file metadata in a transfer belongs to the same session. |
 | **Watchdog** | A receiver-side timer that detects stalled senders. |
 | **Heartbeat** | A sender-side periodic ping that prevents idle-timeout disconnections. |
 
 ---
 
-## 3. P2P Code Generation
+## 3. Codes and Links
 
 ### 3.1 Format
 
@@ -52,28 +71,320 @@ Codes follow the pattern `XXXX-0000`:
 - Digit space: 10⁴ = 10,000 combinations.
 - Total: ~3.3 × 10⁹ combinations.
 
+Over the secure channel, a code is two parts. The **locator**, its first two letters, is one of 576, which the rendezvous hands out so no two senders hold the same one at once. The **password**, its other two letters and its four digits, is one of 5.76 million (24² × 10⁴), made on the sender's device. A guess at the password can only be tried by connecting, and each code takes one try, right or wrong ([§4.3](#43-cpace-typed-codes)). Core also takes three-letter locators, for a server set for more rooms at once: the password is then one letter and four digits, and nothing else about the protocol changes.
+
 ### 3.3 Generation
 
-Codes are generated from secure random numbers (`crypto.getRandomValues()`, which every browser has, even on a page served over plain HTTP), and never from anything weaker: where there are none, no code is made. Each character comes from one random byte by rejection sampling, so every letter and every digit is equally likely: a letter from a byte under 240, taken mod 24, and a digit from a byte under 250, taken mod 10; a byte at or over the limit is thrown away and another drawn. The sender attempts code registration with the signalling server up to **4 times** (configurable), regenerating on collision.
+Codes are generated from secure random numbers (`crypto.getRandomValues()`, which every browser has, even on a page served over plain HTTP), and never from anything weaker: where there are none, no code is made. Each character comes from one random byte by rejection sampling, so every letter and every digit is equally likely: a letter from a byte under 240, taken mod 24, and a digit from a byte under 250, taken mod 10; a byte at or over the limit is thrown away and another drawn. Every random byte is overwritten once used.
+
+Today, the sender registers its whole code with PeerJS, up to **4 times** (configurable), drawing a new one when it's taken. Over the secure channel, the sender asks the rendezvous for a locator, and draws the password's letters and digits on its own device the same way.
 
 ### 3.4 Validation
 
-Codes are normalised before use: whitespace anywhere is removed, letters are converted to uppercase, and the dash may be left out. Anything else, including an `I` or an `O`, isn't a code, and is refused before anything is sent. The canonical form is `^[A-HJ-NP-Z]{4}-[0-9]{4}$`.
+Codes are normalised before use: whitespace anywhere is removed, letters are converted to uppercase, and the dash may be left out. Anything else, including an `I` or an `O`, isn't a code, and is refused before anything is sent. The canonical form is `^[A-HJ-NP-Z]{4}-[0-9]{4}$`. Letters are checked as ASCII before they're converted, so no other character can become one.
+
+### 3.5 What Leaves the Device
+
+Over the secure channel, only a code's locator is sent: the receiver joins the sender's room by it. The password goes only into CPace ([§4.3](#43-cpace-typed-codes)), on each device, and is never sent, logged or kept: its bytes can be read once, by the exchange that uses them, and are overwritten as soon as they've made CPace's generator. Core's tests search every byte both devices send, through the server and over the connection, for the code and its password in every form (with and without the dash, in either case, as UTF-8 and as UTF-16): neither is there.
+
+Today, the sender registers its whole code with PeerJS as its peer ID, so the server sees it ([§19.8](#198-code-brute-force-resistance)).
+
+### 3.6 Links
+
+A sender's room has a link as well as an optional code. The link carries the **link secret** after its `#`: 32 random bytes from the sender's crypto provider. A browser never sends what's after a `#`, so the server never sees it, and the receiver joins the room by a room ID derived from it ([§4.4](#44-the-key-schedule)), which tells the server nothing about it. The link is separate from the code, so a wrong code never breaks it, and it can't be guessed. In the link, the secret will be URL-safe base64 with no `=`, 43 characters.
+
+Today's links still carry the code itself, in the address's path ([§19.8](#198-code-brute-force-resistance)). The new links arrive with Dropgate 4's rendezvous.
 
 ---
 
-## 4. Signalling Layer
+## 4. The Secure Channel
 
-### 4.1 Architecture
+What every direct transfer will run over: built in core and tested, but not used by any transfer yet ([§1.1](#11-whats-built-now)). It's core's own code, in [`codes.ts`](../../packages/dropgate-core/src/dgdtp/codes.ts), [`cpace.ts`](../../packages/dropgate-core/src/dgdtp/cpace.ts), [`keys.ts`](../../packages/dropgate-core/src/dgdtp/keys.ts), [`seal.ts`](../../packages/dropgate-core/src/dgdtp/seal.ts), [`prologue.ts`](../../packages/dropgate-core/src/dgdtp/prologue.ts), [`noise.ts`](../../packages/dropgate-core/src/dgdtp/noise.ts) and [`channel.ts`](../../packages/dropgate-core/src/dgdtp/channel.ts), on core's crypto provider: Web Crypto where it can, and `@noble` where it can't, with the same bytes either way ([Crypto](../core/crypto.md)).
 
-DGDTP uses PeerJS as its signalling layer. The Dropgate Server mounts an ExpressPeerServer at the fixed path `/peerjs`. The signalling server handles:
+In what follows, `‖` joins bytes, and every number written into bytes is big-endian.
+
+### 4.1 What It Protects, and What It Doesn't
+
+**It protects:**
+
+- **The transfer:** file contents, names and sizes, the list of files, every message about the transfer and why it ended, from the network, from the rendezvous (the Dropgate Server) and from anything relaying packets between the devices.
+- **What sets up the connection:** each device's addresses, its ICE credentials and its certificate's fingerprint, from the rendezvous.
+- **A code, from guessing:** a guess can only be tried by connecting, once per code, and the sender sees it fail. Nothing anyone records, the server included, lets them test a guess afterwards.
+- **Against a server in the middle:** a swapped certificate, or a set-up message changed, injected, replayed or reordered, ends the attempt with `SECURITY_POLICY_MISMATCH`, never with a connection that quietly works.
+- **The sender's network, from a wrong code:** a wrong code is caught before either device opens anything the other sent to set up the connection, so someone guessing never learns the sender's addresses.
+
+**It doesn't protect:**
+
+- The timing and volume of traffic, or the public IP addresses the rendezvous and the STUN server see.
+- How many sealed messages each side sends, and when: their padding ([§4.5](#45-sealed-signalling)) hides only what kind each one is.
+- Who holds a link. A link is all anyone needs to connect, so the handshake proves the link or the code was known, not who knew it.
+- A link that leaks later. By link, the sealed set-up messages aren't forward secret: whoever recorded them (only the server could) and later gets the link can open them. They hold only the connection's set-up, never the transfer, which the handshake's one-time keys protect ([§4.7](#47-noise)).
+- A server that serves the Web UI tampered JavaScript: a web page's code comes from its server. The Dropgate Client runs only its own bundled code.
+- Code on the same device timing the cryptography that runs in JavaScript ([§4.11](#411-secrets-in-memory)).
+
+### 4.2 How a Connection Is Made
+
+1. **The room.** The sender makes its link's secret and the room's nonce (16 random bytes), and opens a room on the rendezvous under a room ID derived from the secret, asking for a code too if it wants one. The rendezvous gives the code's locator, and the sender draws the password.
+2. **The secret.** By link, the receiver derives the room ID from the link's secret and joins by it. By code, it joins by the locator, and the two devices run CPace through the rendezvous ([§4.3](#43-cpace-typed-codes)), which gives each the same 64-byte key, the ISK. On resume, they use the resume secret they already share ([§4.9](#49-the-resume-secret)). Either way, the rendezvous gives the receiver the room's nonce, and the receiver makes a new attempt ID, 16 random bytes.
+3. **The keys.** Each device derives the attempt's keys from that secret, the room's nonce and the attempt ID ([§4.4](#44-the-key-schedule)).
+4. **Sealed signalling.** Through the rendezvous, each sealed and padded: the receiver's offer, the sender's answer, each side's ICE candidates as they're found, and the end of them ([§4.5](#45-sealed-signalling)).
+5. **The handshake.** Once the data channel is open: Noise, the receiver first, under the attempt's pre-shared key, with both devices' certificate fingerprints in its prologue ([§4.6](#46-the-dtls-prologue), [§4.7](#47-noise)).
+6. **BIND.** The receiver's first encrypted record, with the secret for an out-of-band close ([§4.8](#48-bind-and-the-out-of-band-close)).
+
+Then the channel carries encrypted records each way until either side closes it.
+
+```
+Receiver                          Rendezvous                          Sender
+   │                                  │◄──────────── create room ────────│ room ID, room nonce
+   │──── join: room ID or locator ───►│                                  │
+   │◄─────────── room nonce ──────────│                                  │
+   │                                  │                                  │
+   │  [by code: CPace messages 1 to 3, relayed as they are]              │
+   │◄═════════════════════════════════╪═════════════════════════════════►│
+   │                                  │                                  │
+   │  [sealed: offer, answer, candidates, end of candidates]             │
+   │◄═════════════════════════════════╪═════════════════════════════════►│
+   │                                  │                                  │
+   │  [data channel open]                                                │
+   │  Noise message 1 (-> psk, e) ──────────────────────────────────────►│
+   │◄───────────────────────────────────── Noise message 2 (<- e, ee) ───│
+   │  BIND (first record) ──────────────────────────────────────────────►│
+   │◄═══════════════════════ encrypted records ═════════════════════════►│
+```
+
+### 4.3 CPace (Typed Codes)
+
+A typed code runs CPace, CPACE-X25519-SHA512 as [draft-irtf-cfrg-cpace-21](https://datatracker.ietf.org/doc/draft-irtf-cfrg-cpace/) specifies it, with the explicit key confirmation of its §10.4. Two devices that know the same short password end up with the same 64-byte ISK, and nobody watching, the server included, can test a guess at the password offline. The receiver is the initiator (A) and the sender the responder (B): a sender only ever answers for its own password, so a message of its own sent back to it can't complete.
+
+| Input | Value |
+|-------|-------|
+| `PRS` | The password's characters, in ASCII, upper case, without the dash: `CD1234` for `ABCD-1234` |
+| `CI` | `lv_cat("dropgate/4 dgdtp cpace", "receiver", "sender", locator)`: the roles and the locator, never sent |
+| `sid` | The room's nonce ‖ the attempt ID (32 bytes): the sender's 16 random bytes for the room, which the rendezvous gives the receiver, and the receiver's 16 for this attempt |
+| `ADa` | `01` ‖ the receiver's DGDTP major ‖ minor |
+| `ADb` | `02` ‖ the sender's DGDTP major ‖ minor |
+
+The generator is the draft's: SHA-512 of `lv_cat("CPace255", PRS, zero padding, CI, sid)`, the padding filling SHA-512's first block, and its first 32 bytes mapped to the curve with Elligator 2. Each side makes a new random scalar and its share, `Y = X25519(y, generator)`.
+
+The messages, relayed by the rendezvous as they are:
+
+| # | Direction | Bytes | Holds |
+|---|-----------|-------|-------|
+| 1 | Receiver → sender | 51 | The attempt ID (16), `Ya` (32), `ADa` (3) |
+| 2 | Sender → receiver | 99 | `Yb` (32), `ADb` (3), `Tb` (64) |
+| 3 | Receiver → sender | 64 | `Ta` |
+
+**Key confirmation.** Each side makes `K = X25519(its scalar, the other's share)`, then `ISK = SHA-512(lv_cat("CPace255_ISK", sid, K) ‖ lv_cat(Ya, ADa) ‖ lv_cat(Yb, ADb))`, and from it a confirmation key, `mac_key = SHA-512("CPaceMac" ‖ sid ‖ ISK)`. Then `Tb = HMAC-SHA-512(mac_key, lv_cat(Yb, ADb))` and `Ta = HMAC-SHA-512(mac_key, lv_cat(Ya, ADa))`, each compared in constant time. The sender makes the ISK from message 1 and sends `Tb`; the receiver checks `Tb` before it makes `Ta`; and the sender checks `Ta` before it uses the ISK, so it opens nothing sealed under keys made from it until the receiver has proved it holds the same one.
+
+**Aborts.** An attempt ends with `CODE_MISMATCH` on both devices if a message is the wrong length, a role byte in `ADa` or `ADb` is wrong, a share is one of the low-order points that would make `K` all zeros (both crypto providers refuse them, and CPace checks `K` again), or a confirmation doesn't match. The side that finds it sends an abort, an empty message, in place of message 2 or 3. When the sender's check of `Ta` fails, it sends one where the receiver waits for its first sealed frame. The versions in `ADa` and `ADb` are bound, not compared: the rendezvous is to check the major in plain ([§4.13](#413-what-the-rendezvous-and-the-engine-add)).
+
+**One try per code.** The sender runs CPace once for a code, right or wrong: the first message 1 uses up its password, and an attempt by code after that is answered with an abort. The sender then needs a new code from the rendezvous; its link still works.
+
+**Secrets.** The password's bytes are overwritten as soon as the generator is made, the generator as soon as the share is, `K` as soon as it's hashed, and the ISK as soon as the key schedule has used it. `K` never leaves CPace's code.
+
+### 4.4 The Key Schedule
+
+Every key of an attempt comes from one **base secret**: the link's secret (32 bytes), the ISK (64), or the resume secret (32). Each is made with HKDF-SHA256 and a label of its own, so no key serves two purposes. The salt is the attempt's context, `ctx` = the room's nonce (16) ‖ the attempt ID (16). Both are public, and every attempt (a second receiver by link, a retry, a resume) has a new attempt ID, so new keys.
+
+| Output | Bytes | HKDF-SHA256: key material, salt, label | Used for |
+|--------|-------|----------------------------------------|----------|
+| Room ID | 16 | The link's secret, no salt, `"dropgate/4 dgdtp room"` | The room's address on the rendezvous, by link |
+| PSK | 32 | The base secret, `ctx`, `"dropgate/4 dgdtp psk"` | Noise's pre-shared key ([§4.7](#47-noise)) |
+| Receiver's sealing key | 32 | The base secret, `ctx`, `"dropgate/4 dgdtp signal r>s"` | The receiver's sealed frames ([§4.5](#45-sealed-signalling)) |
+| Sender's sealing key | 32 | The base secret, `ctx`, `"dropgate/4 dgdtp signal s>r"` | The sender's sealed frames |
+| Close keys | 32 each | BIND's close secret, `ctx`, `"dropgate/4 dgdtp close r>s"` and `"dropgate/4 dgdtp close s>r"` | An out-of-band close, each way ([§4.8](#48-bind-and-the-out-of-band-close)) |
+
+The sealing and close keys are AES-256-GCM keys held inside the crypto provider, which can't be exported. The room ID and the PSK are bytes: the room ID is overwritten once the rendezvous has it, and the PSK is given to Noise once, then overwritten. Every output is made before the base secret is let go, so the ISK is overwritten as soon as the schedule is done.
+
+### 4.5 Sealed Signalling
+
+Every message that sets up the connection travels through the rendezvous as a sealed frame, under that direction's key for the attempt:
+
+```
+frame      kind (1) ‖ direction (1) ‖ attempt ID (16) ‖ counter (4) ‖ AES-256-GCM(key, nonce, inside, ad)
+kind       0x10 signalling, 0x11 an out-of-band close (§4.8)
+direction  1 receiver to sender, 2 sender to receiver
+nonce      8 zero bytes ‖ counter (4)
+ad         "dropgate/4 dgdtp signal" ‖ room nonce ‖ attempt ID ‖ direction ‖ counter (4) ‖ kind
+inside     type (1) ‖ length (2) ‖ body, then zero bytes to its padded size
+```
+
+| Type | Sent by | Body |
+|------|---------|------|
+| 1, offer | The receiver | Its SDP, in UTF-8, with no candidates in it |
+| 2, answer | The sender | Its SDP, in UTF-8, with no candidates in it |
+| 3, candidate | Either | `lv(candidate)` ‖ `lv(sdpMid)` ‖ `sdpMLineIndex` (2 bytes, `FFFF` for none) ‖ `lv(usernameFragment)` |
+| 4, end of candidates | Either | Nothing |
+| 5, restart | The sender | Nothing: it asks the receiver for an ICE-restart offer |
+| 6, close | Either | A close's body, in a close frame only ([§4.8](#48-bind-and-the-out-of-band-close)) |
+
+`lv(x)` is the length of `x` in UTF-8, in 2 bytes, then `x` in UTF-8; an empty one means none.
+
+**Padding.** An inside is padded to **512 bytes** for a candidate, the end of candidates, a restart or a close; to **2,048** for an offer or an answer; or to **8,192** for an offer or an answer that doesn't fit 2,048. So every frame is 550, 2,086 or 8,230 bytes, and the rendezvous can't tell an IPv4 candidate from an IPv6 one or a local name. Anything bigger (an offer or an answer of more than 8,189 bytes, a candidate's or a close's body of more than 509) is refused before it's sealed, never moved up a size. Browsers' candidates are far smaller.
+
+**The rules:**
+
+- The rendezvous sees each frame's kind, direction, attempt ID, counter, size and timing: nothing else.
+- Each direction's counter starts at 0 for the attempt, and a frame is opened only if its counter is exactly the next one expected.
+- A frame is checked before it's decrypted: its size, then its whole header, which must be exactly the one expected next. Once it's open, its inside must be exactly one message: a type the other side sends, padded to its own size (an answer that fits 2,048 bytes but is padded to 8,192 is refused), zero padding, and a body exactly its type's.
+- Anything else ends the attempt with `SECURITY_POLICY_MISMATCH`, both ways at once: a flipped bit, a frame from another attempt, one sent back to the device that sealed it, a replay, a gap, a reorder, the wrong size. Nothing is tried again, sealed or not.
+- At most 4,096 frames go each way. A device's 4,097th ends the attempt (`SECURITY_POLICY_MISMATCH`, origin `local`), and so does a 4,097th received.
+- The receiver's first frame must be its offer, and the sender's its answer, one each. Candidates follow as ICE finds them, then the end of them. The receiver seals its offer before it applies it, and the sender its answer, so each takes counter 0.
+- By code, the sender opens no frame before `Ta` checks ([§4.3](#43-cpace-typed-codes)), and until the sender's first frame opens, the receiver takes an empty message as the sender's abort.
+- A candidate the connection can't use is skipped, and ICE carries on with the others. A restart is ignored until the engine handles ICE restarts.
+
+### 4.6 The DTLS Prologue
+
+WebRTC encrypts the data channel with DTLS, and each device's SDP names its certificate by a fingerprint. A browser refuses a DTLS peer whose certificate doesn't match the SDP it applied, so tying those fingerprints into the handshake ties it to the certificates actually in use.
+
+**The fingerprints** come from the sealed SDPs each side applied: the receiver's from the offer, the sender's from the answer, as exactly the strings each side set. Every line that starts `a=fingerprint:` is read, at session or media level. A SHA-256 one (its name in either case) must be exactly 32 hex pairs, colon-separated, in either case; the same value more than once counts once; other hash functions are ignored. No SHA-256 fingerprint, two different ones, or a SHA-256 line that isn't one is `SECURITY_POLICY_MISMATCH`, and the error holds nothing from the SDP.
+
+**The prologue**, which Noise hashes in before anything else, is 131 bytes, the same on both sides:
+
+```
+"dropgate/4 dgdtp prologue" (25) ‖ major (1) ‖ mode (1: 1 link, 2 code, 3 resume) ‖ room nonce (16)
+‖ attempt ID (16) ‖ generation (8) ‖ receiver's fingerprint (32) ‖ sender's fingerprint (32)
+```
+
+Anything in the middle that ends DTLS with certificates of its own leaves the two devices with different prologues, so the handshake's first message doesn't open: `SECURITY_POLICY_MISMATCH`, and nothing after the handshake is sent.
+
+The server's address isn't in it. A server reached by two names, such as a LAN address and a hostname, would otherwise break every transfer between them, and the PSK and the sealed signalling already tie the handshake to the secret.
+
+### 4.7 Noise
+
+Once the data channel is open, the two devices run `Noise_NNpsk0_25519_AESGCM_SHA256` over it, exactly as the [Noise Protocol Framework](https://noiseprotocol.org/noise.html) (revision 34) specifies it, in core's own implementation of this one pattern. The receiver is the initiator:
+
+```
+-> psk, e     message 1, the receiver's: its one-time key, under the PSK (48 bytes, nothing in it)
+<- e, ee      message 2, the sender's: its one-time key, and its hello (at most 1,024 bytes)
+```
+
+- The PSK is the attempt's ([§4.4](#44-the-key-schedule)) and the prologue holds both certificates ([§4.6](#46-the-dtls-prologue)), so the handshake completes only between the two devices that hold the same secret, over the connection they set up.
+- Both one-time keys are new for every attempt, so a transfer stays secret even if its link or its code is learned later.
+- A message 1 with anything in it is refused.
+- After the handshake, there's one key each way. AES-GCM's nonce is 4 zero bytes, then the record's counter in 8 bytes. Records carry no associated data, and go strictly in order each way.
+
+**Its limits:**
+
+- **A record** is at most 65,535 bytes with its 16-byte tag (Noise's largest message), so at most 65,519 bytes of plaintext. A longer one isn't sent (`INVALID_ARGUMENT`, and nothing changes). One received that's shorter than 16 bytes or longer than 65,535 is refused before it's decrypted.
+- **Rekeying:** each direction rekeys after every 65,536 records, as Noise's `Rekey()` does: the key becomes the first 32 bytes of 32 zero bytes sealed under the reserved nonce 2⁶⁴ − 1. So about 4 GiB at most goes under one key. The counter carries on, never reset.
+- **The end of the nonces:** a direction stops before that reserved nonce. Sending there is `SECURITY_POLICY_MISMATCH`, origin `local`; no transfer comes near it.
+- **Failures:** any message that doesn't open, or isn't a length it can be, is `SECURITY_POLICY_MISMATCH`, and the direction is finished. Nothing is tried again, with or without encryption.
+- **NN:** neither device has a long-term key, so holding the secret is the only proof either gives. Anyone who saw a message 1 can send it again, but can't read message 2 or make a BIND, so nothing more reaches them.
+- **One suite:** there's no negotiation. Another suite would be another major version of DGDTP.
+
+### 4.8 BIND and the Out-of-Band Close
+
+**BIND** is the receiver's first record. For now its layout is provisional: `01` ‖ the close secret (32 random bytes) ‖ the receiver's capabilities (at most 1,024 bytes). The engine's own layout replaces it. Anything else as the receiver's first record is `SECURITY_POLICY_MISMATCH` at the sender. Both devices derive the close keys from the close secret ([§4.4](#44-the-key-schedule)), then overwrite it.
+
+**An out-of-band close** tells the other device a transfer has ended even when the data channel has already gone: a sealed frame through the rendezvous, of kind `0x11`, counter 0, under that direction's close key. Its inside is type 6, with the close's body, at most 509 bytes, padded to 512, so it's 550 bytes on the wire, like a candidate. Each device sends at most one. A close that doesn't open, isn't one, or comes after the first is ignored, so the server can't end a transfer by injecting one. Late candidates still arrive on the same path.
+
+### 4.9 The Resume Secret
+
+A resume is a new attempt, from the **resume secret** both devices hold: 32 bytes, mode 3 in the prologue, a new attempt ID and the generation one past the connection's last, so new sealing keys, a new PSK, a new handshake and new fingerprints. Nothing from the earlier attempt is reused, and a generation past 2⁶⁴ − 1 is refused.
+
+Core builds a resume's keys and handshake now. Where the resume secret comes from is the engine's, still to come: the receiver will make it, 32 random bytes, and give it to the sender inside the channel once it has accepted the transfer, so only the accepted receiver ever holds it, and only ever in memory.
+
+### 4.10 Errors
+
+Each error is core's `DropgateError` with one of these codes ([Errors](../core/errors.md)). The message is core's, in words the apps show as they are. None holds anything from the other device.
+
+| Code | Origin | When | Message |
+|------|--------|------|---------|
+| `CODE_MISMATCH` | `peer` | CPace didn't complete: a wrong code, a code already used, or any abort ([§4.3](#43-cpace-typed-codes)). Both devices get it | The receiver: "That code didn't match. Ask the sender for the new one." The sender: "Someone entered the wrong code. Here's a new one." |
+| `SECURITY_POLICY_MISMATCH` | `peer` | A sealed frame, a handshake message or a record didn't open, wasn't the next, or wasn't a length it can be; a fingerprint broke the rule; message 1 held something; BIND wasn't one | "The connection couldn't be secured, so it was closed." |
+| `SECURITY_POLICY_MISMATCH` | `local` | This device has sent every frame or record its keys allow | "Setting up this connection took too many messages, so it was closed." or "This connection has sent every record its keys allow, so it was closed." |
+| `CONNECTION_LOST` | `network` | The rendezvous, or the data channel, went before the channel was up | "The connection was lost." |
+| `INVALID_CODE` | `local` | A typed code isn't one. Nothing is sent | "That isn't a valid sharing code." |
+| `INVALID_RESPONSE` | `server` | The rendezvous gave a room nonce or a locator that isn't one | "The server's answer wasn't understood." |
+| `OPERATION_CANCELLED` | `local` | This device closed the attempt or the channel | "The operation was cancelled." |
+
+**How both devices hear it:**
+
+- A wrong code ends both with `CODE_MISMATCH`, each in its own words, through CPace's abort.
+- In the handshake or after it, the device that finds a fault sends one empty message on the data channel, then closes it. The other device's Noise refuses that as too short, so both end with `SECURITY_POLICY_MISMATCH`.
+- A sealed set-up frame that doesn't open ends that device with `SECURITY_POLICY_MISMATCH`. The other, whose path through the rendezvous closes before any data channel is open, ends with `CONNECTION_LOST`: nothing can tell it securely.
+- The rendezvous going matters only until the data channel is open. The data channel closing during the handshake is `CONNECTION_LOST`.
+- Whatever ends an attempt, every key it made is let go, and the data channel, the path through the rendezvous and the peer connection are closed.
+
+### 4.11 Secrets in Memory
+
+- Keys are crypto-provider handles, and AES keys can't be exported. Printed, logged or serialised, a key, a code's password, an attempt's keys, a sender's room or a channel shows only its label, such as `[AttemptKeys]` or `[SecureChannel]`.
+- Raw secret bytes (the link's secret, the ISK, CPace's `K`, Noise's chaining key and each key's bytes before it's imported, the PSK, the close secret and the resume secret) are held only while they're needed, then overwritten with zeros. JavaScript can't promise memory is erased, but this keeps the copies few.
+- Nothing in the secure channel logs.
+- CPace's map from a code to the curve, and all of the JavaScript provider, run in JavaScript, which makes no promise of constant time, so code on the same device might time them. That's a stated limit ([Crypto](../core/crypto.md)); a code is used once.
+
+### 4.12 Test Vectors and Tests
+
+**Published vectors,** on both crypto providers:
+
+| Vector | For |
+|--------|-----|
+| CPace's own, draft-irtf-cfrg-cpace-21's Appendix A.1, A.3, B.1 and B.1.10 ([`cpace-x25519-sha512-vectors.json`](../../packages/dropgate-core/tests/fixtures/cpace-x25519-sha512-vectors.json)) | CPace: the generator, both shares, `K`, the ISK both ways, the session-ID output, and the low-order points that must abort |
+| [Cacophony](https://github.com/haskell-cryptography/cacophony)'s one `Noise_NNpsk0_25519_AESGCM_SHA256` vector, commit `8ee9d41` ([`noise-cacophony-vector.json`](../../packages/dropgate-core/tests/fixtures/noise-cacophony-vector.json)) | Noise: both handshake messages, the handshake hash and four transport messages |
+| RFC 7748, FIPS 180-4, RFC 4231, RFC 5869, the GCM specification's test cases, and NIST's and Project Wycheproof's AES-256-GCM tests | X25519, SHA-256, SHA-512, HMAC, HKDF and AES-GCM with associated data |
+
+**Dropgate's own vectors.** No published vector covers Noise's `Rekey()`, or anything Dropgate builds on CPace and Noise. So each set comes from a second implementation in core's tests, on `node:crypto`, written from the format rather than from core's code, and core must give exactly its bytes:
+
+| Vectors | Second implementation | For |
+|---------|-----------------------|-----|
+| [`noise-rekey-vectors.json`](../../packages/dropgate-core/tests/fixtures/noise-rekey-vectors.json) | [`reference-noise.mjs`](../../packages/dropgate-core/tests/helpers/reference-noise.mjs), which passes cacophony's vector too | Runs past 65,536 records each way, with the key after each rekey |
+| [`dgdtp-signal-vectors.json`](../../packages/dropgate-core/tests/fixtures/dgdtp-signal-vectors.json) | [`reference-signal.mjs`](../../packages/dropgate-core/tests/helpers/reference-signal.mjs) | Every output of the key schedule, by link, by code and on resume; each type of sealed frame each way, in each padded size; a close each way |
+| [`dgdtp-prologue-vectors.json`](../../packages/dropgate-core/tests/fixtures/dgdtp-prologue-vectors.json) | [`reference-prologue.mjs`](../../packages/dropgate-core/tests/helpers/reference-prologue.mjs) | The fingerprint rule on 18 SDPs; the prologue in each mode, up to the last generation; a whole handshake from an offer and an answer |
+
+Core's tests also run the whole channel end to end, on each provider and with one device on each, over a stand-in rendezvous and stand-in connections with fake SDP: by link, by code and on resume, every attack above ending the attempt as it says, and with every random value fixed, the channel's own handshake giving the vector's bytes. The vectors and the channel's checks run in Chromium, Firefox and WebKit too, on the provider core chooses in each and on `@noble` in all three ([Building and Testing](../core/building-and-testing.md)).
+
+### 4.13 What the Rendezvous and the Engine Add
+
+Not built yet. What they need from the secure channel:
+
+- **In plain, as a room is created or joined:** the DGDTP major, so a mismatch is said before any cryptography.
+- **Creating a room:** the room ID, the room's nonce and whether the sender wants a code. The rendezvous gives a locator, or none when every one is taken, and the link still works.
+- **Joining:** by the room ID, or by the locator. Either way, the rendezvous gives the room's nonce.
+- **CPace:** its three messages relayed as they are, and only the first message 1 for a locator. The locator is then used up, and a later message 1 for it is refused without reaching the sender, which can ask for a new code.
+- **Frames:** relayed whole and in order each way, never read, at most 8,230 bytes, only for the room's live attempts.
+- **Nothing kept or logged:** no room ID, room nonce, attempt ID, locator, share or frame, in any log or on disk.
+- **From the engine:** the layouts of the sender's hello, BIND, the receiver's acceptance (with the resume secret) and a close; records sent over the data channel strictly in order; real fingerprints from real SDP; and 15 seconds for each attempt.
+
+### 4.14 Constants
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `NOISE_PROTOCOL_NAME` | `Noise_NNpsk0_25519_AESGCM_SHA256` | The handshake's protocol. |
+| `CPACE_MESSAGE1_BYTES`, `CPACE_MESSAGE2_BYTES`, `CPACE_MESSAGE3_BYTES` | 51, 99, 64 | CPace's three messages. |
+| `CPACE_ROOM_NONCE_BYTES`, `CPACE_ATTEMPT_ID_BYTES` | 16 | The room's nonce and an attempt ID. |
+| `LINK_SECRET_BYTES`, `RESUME_SECRET_BYTES`, `CLOSE_SECRET_BYTES` | 32 | The link's secret, the resume secret and BIND's close secret. |
+| `ISK_BYTES` | 64 | CPace's ISK. |
+| `ROOM_ID_BYTES` | 16 | The room's address by link. |
+| `PSK_BYTES` | 32 | Noise's pre-shared key. |
+| `FRAME_HEADER_BYTES` | 22 | A sealed frame's plain header. |
+| `SMALL_BUCKET_BYTES`, `SDP_BUCKET_BYTES`, `LARGE_BUCKET_BYTES` | 512, 2,048, 8,192 | The three padded sizes. |
+| `MAX_FRAME_BYTES` | 8,230 | The largest sealed frame. |
+| `MAX_FRAMES_EACH_WAY` | 4,096 | Sealed frames each way, per attempt. |
+| `MAX_CLOSE_BODY_BYTES` | 509 | A close's body. |
+| `PROLOGUE_BYTES` | 131 | Noise's prologue. |
+| `NOISE_MAX_MESSAGE_BYTES` | 65,535 | A record, with its tag. |
+| `NOISE_MAX_RECORD_PLAINTEXT_BYTES` | 65,519 | A record's plaintext. |
+| `NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES`, `MAX_HELLO_BYTES` | 1,024 | The sender's hello, and the receiver's capabilities in BIND. |
+| `NOISE_REKEY_INTERVAL` | 65,536 | Records under one key, each way. |
+| `MAX_GENERATION` | 2⁶⁴ − 1 | The last generation. |
+
+---
+
+## 5. Signalling Layer
+
+This section and those up to [§18](#18-error-model) are how today's direct transfers work: version 3's messages on PeerJS, with DTLS alone. Dropgate 4's rendezvous and engine replace them, running every transfer over the secure channel ([§1.1](#11-whats-built-now)).
+
+### 5.1 Architecture
+
+Today's direct transfers use PeerJS as their signalling layer. The Dropgate Server mounts an ExpressPeerServer at the fixed path `/peerjs`. The signalling server handles:
 
 - Peer registration and discovery.
 - ICE candidate relay.
 - SDP offer/answer exchange.
 - Connection state notifications.
 
-### 4.2 ICE Configuration
+### 5.2 ICE Configuration
 
 The server advertises ICE server configuration via the `/api/info` endpoint:
 
@@ -94,7 +405,7 @@ The server advertises ICE server configuration via the `/api/info` endpoint:
 - **Default STUN server:** `stun:stun.cloudflare.com:3478`.
 - **Custom STUN servers:** configurable via the `P2P_STUN_SERVERS` environment variable (comma- or space-separated list).
 
-### 4.3 Signalling Data Visible to the Server
+### 5.3 Signalling Data Visible to the Server
 
 The signalling server observes but does **not persist**:
 
@@ -105,28 +416,28 @@ The signalling server observes but does **not persist**:
 | SDP offers/answers | WebRTC capability negotiation — includes media/transport parameters. |
 | Connection lifecycle events | Connect, disconnect, error. |
 
-An honest server has **no visibility** into data channel content once the WebRTC connection is established. The SDP it relays includes each peer's DTLS certificate fingerprint, which is what authenticates the encrypted connection, so a malicious or compromised server could substitute its own and intercept the transfer. See [§18.1](#181-transport-encryption).
+An honest server has **no visibility** into data channel content once the WebRTC connection is established. The SDP it relays includes each peer's DTLS certificate fingerprint, which is what authenticates the encrypted connection, so a malicious or compromised server could substitute its own and intercept the transfer. See [§19.1](#191-transport-encryption).
 
-### 4.4 Secure Context Requirement
+### 5.4 Secure Context Requirement
 
 The Dropgate Web UI only allows direct transfers in a secure context (HTTPS or `localhost`). This is Dropgate's own check, using the core library's `hosts.isSecureForDirect()` helper, not a browser restriction on WebRTC; the core library does not enforce it itself. The signalling server MUST be accessed over HTTPS in production. The `proxied: true` flag is set on the PeerJS server to indicate it operates behind a TLS-terminating reverse proxy.
 
 ---
 
-## 5. Connection Establishment
+## 6. Connection Establishment
 
-### 5.1 Sender Setup
+### 6.1 Sender Setup
 
 1. The sender creates a PeerJS peer using their generated P2P code as the peer ID.
 2. The peer registers with the signalling server.
 3. The sender enters the **listening** state and waits for incoming connections.
 
-### 5.2 Receiver Setup
+### 6.2 Receiver Setup
 
 1. The receiver creates a PeerJS peer with an auto-generated ID (no code needed).
 2. The receiver calls `peer.connect(code)` to initiate a data channel with the sender.
 
-### 5.3 Connection Rate Limiting
+### 6.3 Connection Rate Limiting
 
 The sender enforces a **sliding-window rate limit** on incoming connections:
 
@@ -134,7 +445,7 @@ The sender enforces a **sliding-window rate limit** on incoming connections:
 - Excess attempts are rejected with an error message.
 - This prevents denial-of-service attacks via connection flooding.
 
-### 5.4 Connection Replacement
+### 6.4 Connection Replacement
 
 If a new connection arrives while an existing one is present:
 
@@ -144,13 +455,13 @@ If a new connection arrives while an existing one is present:
 
 ---
 
-## 6. Handshake
+## 7. Handshake
 
 Once the data channel is open, both peers exchange `hello` messages. The receiver sends its `hello` as soon as its channel opens. The sender waits for it before sending anything, then replies with its own.
 
 The sender waits because its channel can open before the receiver's, and a message sent in that gap is sometimes never delivered (seen in Chromium). The receiver would then never get the sender's `hello`, and would ignore the file details that follow it. Chromium also sometimes reports the sender's data channel open twice, so the sender starts only once per connection.
 
-### 6.1 Hello Message
+### 7.1 Hello Message
 
 ```json
 {
@@ -160,7 +471,7 @@ The sender waits because its channel can open before the receiver's, and a messa
 }
 ```
 
-### 6.2 Version Compatibility
+### 7.2 Version Compatibility
 
 `protocolVersion` is the DGDTP major. Protocol versions MUST match exactly. There is no backwards-compatibility negotiation, so a peer older than Dropgate 4 is refused. If a version mismatch is detected, the connection is terminated with an error:
 
@@ -172,15 +483,15 @@ In the current implementation only the sender performs this check. The receiver 
 
 Before either peer starts, its client checks the server's `protocols.dgdtp` from `/api/info` ([DGUP §3.3](./DGUP.md#33-compatibility)): a server whose major differs, or that gives none, is not used for direct transfers.
 
-### 6.3 Timeout
+### 7.3 Timeout
 
 The handshake MUST complete within **10 seconds**. If the `hello` is not received within this window, the connection is closed.
 
 ---
 
-## 7. Metadata Exchange
+## 8. Metadata Exchange
 
-### 7.1 Multi-File List (v3)
+### 8.1 Multi-File List (v3)
 
 For transfers involving multiple files, the sender transmits a file list immediately after the handshake:
 
@@ -203,7 +514,7 @@ For transfers involving multiple files, the sender transmits a file list immedia
 - `totalSize` MUST equal the sum of all individual file sizes.
 - Every `name` MUST follow the file name rule DGUP shares: not empty, at most 255 bytes in UTF-8, and no control character, `/` or `\`. A `meta` message's `name` is checked the same way, and the sender checks its names before sending. A name that breaks it ends the transfer with `INVALID_FILENAME`. The receiver saves a file under a name sanitised for every OS ([File Names](../core/quick-start.md#file-names)).
 
-### 7.2 File Metadata
+### 8.2 File Metadata
 
 Before each file's chunks, the sender transmits a `meta` message:
 
@@ -219,9 +530,9 @@ Before each file's chunks, the sender transmits a `meta` message:
 ```
 
 - `fileIndex` is present only in multi-file transfers (v3).
-- The `sessionId` is used for session hijacking prevention (see [§18.2](#182-session-id-tracking)).
+- The `sessionId` is used for session hijacking prevention (see [§19.2](#192-session-id-tracking)).
 
-### 7.3 Ready Signal
+### 8.3 Ready Signal
 
 The receiver sends a `ready` message to indicate it is prepared to accept chunks:
 
@@ -236,9 +547,9 @@ The receiver sends a `ready` message to indicate it is prepared to accept chunks
 
 ---
 
-## 8. Data Transfer
+## 9. Data Transfer
 
-### 8.1 Chunk Size
+### 9.1 Chunk Size
 
 The default DGDTP chunk size is **65,536 bytes** (64 KiB). This is deliberately smaller than DGUP's 5 MiB chunks because:
 
@@ -247,7 +558,7 @@ The default DGDTP chunk size is **65,536 bytes** (64 KiB). This is deliberately 
 
 The data channel is reliable, so lost packets are retransmitted by the transport (SCTP) regardless of chunk size. DGDTP itself never re-sends a chunk.
 
-### 8.2 Chunk Message
+### 9.2 Chunk Message
 
 Each chunk is sent as two consecutive data channel messages:
 
@@ -267,7 +578,7 @@ Each chunk is sent as two consecutive data channel messages:
 
 The raw binary data for this chunk.
 
-### 8.3 Chunk Acknowledgement
+### 9.3 Chunk Acknowledgement
 
 The receiver sends an acknowledgement after processing each chunk:
 
@@ -282,7 +593,7 @@ The receiver sends an acknowledgement after processing each chunk:
 - `seq` echoes the sequence number of the acknowledged chunk.
 - `received` indicates cumulative bytes received for the current transfer.
 
-### 8.4 Sequence Enforcement
+### 9.4 Sequence Enforcement
 
 The receiver enforces strict sequential ordering. If a chunk arrives out of order:
 
@@ -292,7 +603,7 @@ Chunk sequence error: expected 5, got 7
 
 The connection is terminated. WebRTC data channels configured in reliable mode guarantee ordering, so out-of-order delivery indicates a protocol violation.
 
-### 8.5 Size Validation
+### 9.5 Size Validation
 
 - The payload size MUST match the declared `size` field.
 - The cumulative received bytes MUST NOT exceed the declared `total`.
@@ -301,11 +612,11 @@ Violations result in immediate connection termination.
 
 ---
 
-## 9. Flow Control
+## 10. Flow Control
 
 DGDTP implements multi-layered flow control to prevent fast senders from overwhelming slow receivers.
 
-### 9.1 Chunk Acknowledgement Back-pressure
+### 10.1 Chunk Acknowledgement Back-pressure
 
 | Parameter | Default |
 |-----------|---------|
@@ -314,7 +625,7 @@ DGDTP implements multi-layered flow control to prevent fast senders from overwhe
 
 The sender maintains a map of unacknowledged chunks. When the number of unacknowledged chunks reaches the maximum, the sender pauses until acknowledgements are received. If no acknowledgement arrives within 60 seconds, the transfer is aborted.
 
-### 9.2 Data Channel Buffer Monitoring
+### 10.2 Data Channel Buffer Monitoring
 
 | Parameter | Default |
 |-----------|---------|
@@ -323,7 +634,7 @@ The sender maintains a map of unacknowledged chunks. When the number of unacknow
 
 The sender monitors the RTCDataChannel's `bufferedAmount` property. When `bufferedAmount` exceeds the high water mark, the sender waits for the `bufferedamountlow` event (with a 60 ms fallback timeout) before sending the next chunk. The `bufferedAmountLowThreshold` is set to the low water mark.
 
-### 9.3 Write Queue Depth Limiting
+### 10.3 Write Queue Depth Limiting
 
 The receiver enforces a maximum write queue depth of **100 entries**. If the queue exceeds this limit, the transfer is aborted with:
 
@@ -335,11 +646,11 @@ This prevents unbounded memory consumption when the receiver's storage I/O is sl
 
 ---
 
-## 10. Multi-File Transfers (v3)
+## 11. Multi-File Transfers (v3)
 
 Protocol version 3 introduced native multi-file transfer support.
 
-### 10.1 Sequence
+### 11.1 Sequence
 
 ```
 Sender                                      Receiver
@@ -387,7 +698,7 @@ Sender                                      Receiver
   │                                           │
 ```
 
-### 10.2 File End Signalling
+### 11.2 File End Signalling
 
 ```json
 { "t": "file_end", "fileIndex": 0, "attempt": 0 }
@@ -401,15 +712,15 @@ The sender signals that all chunks for the current file have been transmitted. T
 
 Only after receiving the `file_end_ack` does the sender proceed to the next file.
 
-### 10.3 Browser-Side ZIP Streaming
+### 11.3 Browser-Side ZIP Streaming
 
-When a multi-file transfer is received in a browser, the Web UI creates a streaming ZIP archive. Each file's chunks are piped through the core library's streaming ZIP writer (`zip.writer()`) and ultimately saved as a single `.zip` download. Each file starts its member with the name and size from its `meta` message ([§7.2](#72-file-metadata)): the writer stores the name made safe, told apart from any other the same, and fails the transfer if the file's bytes don't come to that size. The archive is stored, not compressed, and uses ZIP64 only when it needs it (a file or the archive past 4 GiB, or 65,535 files or more), so a smaller one is the classic format every reader opens.
+When a multi-file transfer is received in a browser, the Web UI creates a streaming ZIP archive. Each file's chunks are piped through the core library's streaming ZIP writer (`zip.writer()`) and ultimately saved as a single `.zip` download. Each file starts its member with the name and size from its `meta` message ([§8.2](#82-file-metadata)): the writer stores the name made safe, told apart from any other the same, and fails the transfer if the file's bytes don't come to that size. The archive is stored, not compressed, and uses ZIP64 only when it needs it (a file or the archive past 4 GiB, or 65,535 files or more), so a smaller one is the classic format every reader opens.
 
 ---
 
-## 11. Transfer Completion
+## 12. Transfer Completion
 
-### 11.1 End Message
+### 12.1 End Message
 
 Once all files have been transferred, the sender transmits:
 
@@ -417,7 +728,7 @@ Once all files have been transferred, the sender transmits:
 { "t": "end", "attempt": 0 }
 ```
 
-### 11.2 End Acknowledgement
+### 12.2 End Acknowledgement
 
 The receiver validates that all expected bytes have been received and responds:
 
@@ -425,7 +736,7 @@ The receiver validates that all expected bytes have been received and responds:
 { "t": "end_ack", "received": 3146240, "total": 3146240 }
 ```
 
-### 11.3 Retry Logic
+### 12.3 Retry Logic
 
 The `end` message is critical — if it is lost, the receiver will never know the transfer is complete. The sender therefore retries:
 
@@ -441,19 +752,19 @@ The `end` message is critical — if it is lost, the receiver will never know th
 
 The receiver sends multiple `end_ack` messages for reliability — an immediate response plus 2 additional retransmissions at **100 ms** intervals.
 
-### 11.4 Validation
+### 12.4 Validation
 
 The sender validates: `end_ack.received >= total`. If the receiver reports fewer bytes than expected, the sender treats the transfer as failed.
 
-### 11.5 Grace Period
+### 12.5 Grace Period
 
 After successful completion, both peers wait **2 seconds** before closing the connection. This grace period allows any in-flight acknowledgements to be processed.
 
 ---
 
-## 12. Heartbeat and Watchdog
+## 13. Heartbeat and Watchdog
 
-### 12.1 Heartbeat (Sender)
+### 13.1 Heartbeat (Sender)
 
 The sender emits periodic pings to prevent idle-timeout disconnections:
 
@@ -473,7 +784,7 @@ The receiver auto-responds:
 
 The heartbeat is active during the `transferring`, `finishing`, and `awaiting_ack` states. Setting the interval to 0 disables it.
 
-### 12.2 Watchdog (Receiver)
+### 13.2 Watchdog (Receiver)
 
 The receiver runs a watchdog timer that detects stalled senders:
 
@@ -487,9 +798,9 @@ If the watchdog fires, the transfer is aborted.
 
 ---
 
-## 13. Connection Health Monitoring
+## 14. Connection Health Monitoring
 
-### 13.1 Health Event
+### 14.1 Health Event
 
 Clients may optionally monitor connection health via periodic callbacks:
 
@@ -507,7 +818,7 @@ Health checks run every **2 seconds** and report:
 - The data channel's buffered byte count.
 - Milliseconds since last activity.
 
-### 13.2 Uses
+### 14.2 Uses
 
 - Display connection quality indicators in the UI.
 - Detect degrading connections before the watchdog fires.
@@ -515,9 +826,9 @@ Health checks run every **2 seconds** and report:
 
 ---
 
-## 14. Cancellation
+## 15. Cancellation
 
-### 14.1 Sender Cancellation
+### 15.1 Sender Cancellation
 
 The sender transmits:
 
@@ -527,7 +838,7 @@ The sender transmits:
 
 The session transitions to `cancelled` → `closed`. All timers are cleared and the connection is destroyed.
 
-### 14.2 Receiver Cancellation
+### 15.2 Receiver Cancellation
 
 The receiver transmits:
 
@@ -541,11 +852,11 @@ Both peers receive an `onCancel` callback with:
 { "cancelledBy": "sender" | "receiver", "message": "..." }
 ```
 
-### 14.3 Browser Navigation
+### 15.3 Browser Navigation
 
 The Web UI registers a `beforeunload` handler to warn users before navigating away during an active transfer. Navigation triggers implicit cancellation.
 
-### 14.4 Connection Loss
+### 15.4 Connection Loss
 
 If the data channel closes during an active transfer without a `cancelled` message, the current implementation still reports it as a cancellation by the other peer: the receiver's `onCancel` fires with `cancelledBy: "sender"`, and the sender's with `cancelledBy: "receiver"`. This happens whatever the cause, including a network drop, a closed or crashed tab, or a device going to sleep.
 
@@ -553,19 +864,19 @@ So a "cancelled by the other peer" result means the transfer stopped. It does no
 
 ---
 
-## 15. Resume Support
+## 16. Resume Support
 
-DGDTP reserves `resume` and `resume_ack` messages for continuing interrupted transfers, but **the current implementation does not support resuming**. Neither peer sends or handles these messages, and the `onResumeRequest` callback is never called. Once a transfer has started, the sender rejects new connections (see [§5.4](#54-connection-replacement)), so an interrupted transfer has to be started again.
+DGDTP reserves `resume` and `resume_ack` messages for continuing interrupted transfers, but **the current implementation does not support resuming**. Neither peer sends or handles these messages, and the `onResumeRequest` callback is never called. Once a transfer has started, the sender rejects new connections (see [§6.4](#64-connection-replacement)), so an interrupted transfer has to be started again.
 
 The message formats below are kept for reference.
 
-### 15.1 Resume Request (Receiver)
+### 16.1 Resume Request (Receiver)
 
 ```json
 { "t": "resume", "sessionId": "<uuid>", "receivedBytes": 524288 }
 ```
 
-### 15.2 Resume Acknowledgement (Sender)
+### 16.2 Resume Acknowledgement (Sender)
 
 ```json
 { "t": "resume_ack", "resumeFromOffset": 524288, "accepted": true }
@@ -575,9 +886,9 @@ As designed, the sender would validate the resume request via an `onResumeReques
 
 ---
 
-## 16. State Machines
+## 17. State Machines
 
-### 16.1 Sender States
+### 17.1 Sender States
 
 ```
 initializing ──► listening ──► handshaking ──► negotiating ──► transferring
@@ -595,7 +906,7 @@ initializing ──► listening ──► handshaking ──► negotiating ─
                                                                 closed
 ```
 
-### 16.2 Receiver States
+### 17.2 Receiver States
 
 ```
 initializing ──► connecting ──► handshaking ──► negotiating ──► transferring
@@ -611,19 +922,19 @@ Invalid state transitions are logged as warnings but do not throw exceptions, pr
 
 ---
 
-## 17. Error Model
+## 18. Error Model
 
-### 17.1 Error Message
+### 18.1 Error Message
 
 ```json
 { "t": "error", "message": "Human-readable description", "code": "OPTIONAL_CODE" }
 ```
 
-### 17.2 Error Propagation
+### 18.2 Error Propagation
 
 When one peer encounters an error, it transmits an `error` message to the other peer before closing the connection. Both peers invoke their `onError` callbacks.
 
-### 17.3 Error Codes
+### 18.3 Error Codes
 
 Core reports each error as a `DropgateError`, with one of these codes (the full list is in [core's docs](../core/errors.md)). A peer's own `message` isn't passed on: an `error` message from the other peer is reported as `PEER_FAILED`, with core's own wording.
 
@@ -643,64 +954,70 @@ Core reports each error as a `DropgateError`, with one of these codes (the full 
 
 ---
 
-## 18. Security Considerations
+## 19. Security Considerations
 
-### 18.1 Transport Encryption
+These are today's direct transfers' ([§5](#5-signalling-layer) to [§18](#18-error-model)). What the secure channel protects, and what it doesn't, is in [§4.1](#41-what-it-protects-and-what-it-doesnt).
+
+### 19.1 Transport Encryption
 
 WebRTC data channels are encrypted via **DTLS** (Datagram Transport Layer Security). This is handled transparently by the browser's WebRTC implementation. All data in transit between peers — including DGDTP messages and file content — is encrypted.
 
-DGDTP does **not** implement an additional application-layer encryption scheme, and that has a consequence for what DTLS protects against. Each peer proves its identity during the DTLS handshake with a certificate whose fingerprint is sent to the other peer in the SDP. In DGDTP the SDP travels through the signalling server, and nothing else authenticates it: the P2P code is only used to find the sender.
+Today's direct transfers add no encryption of their own to DTLS, and that has a consequence for what DTLS protects against. Each peer proves its identity during the DTLS handshake with a certificate whose fingerprint is sent to the other peer in the SDP. In DGDTP the SDP travels through the signalling server, and nothing else authenticates it: the P2P code is only used to find the sender.
 
 - **Network observers** (including anyone relaying WebRTC packets) see only encrypted data.
 - **An honest signalling server** relays the fingerprints unchanged and cannot read the transfer.
 - **A malicious or compromised signalling server** can replace both fingerprints with its own, place itself between the peers and read or alter everything, including file names and contents. Neither peer can detect this.
 
-In practice, DGDTP transfers are only as confidential as the signalling server is trustworthy. For sensitive transfers, use a server you run or trust.
+In practice, today's direct transfers are only as confidential as the signalling server is trustworthy. For sensitive transfers, use a server you run or trust.
 
-### 18.2 Session ID Tracking
+The secure channel closes this gap: its set-up messages are sealed, and both certificates' fingerprints are in its encrypted handshake, so a server that swaps them makes the handshake fail ([§4.6](#46-the-dtls-prologue)). Direct transfers run over it once Dropgate 4's rendezvous and engine are built.
+
+### 19.2 Session ID Tracking
 
 The `sessionId` from the initial `meta` message is stored by the receiver. Subsequent `meta` messages (in multi-file transfers) MUST carry the same `sessionId`. A mismatch indicates a possible session hijacking attempt and causes immediate termination.
 
-### 18.3 Binary Data State Gating
+### 19.3 Binary Data State Gating
 
 The receiver only accepts binary data (file chunks) when in the `transferring` state. Binary data received in any other state is rejected.
 
 This prevents pre-transfer data injection attacks.
 
-### 18.4 Connection Rate Limiting
+### 19.4 Connection Rate Limiting
 
 A sliding-window rate limit (10 attempts per 10 seconds) protects the sender from connection-flooding attacks.
 
-### 18.5 Write Queue Depth Limiting
+### 19.5 Write Queue Depth Limiting
 
 The receiver's write queue is capped at 100 entries. This prevents a malicious or buggy sender from causing unbounded memory allocation on the receiver.
 
-### 18.6 Watchdog Data-Only Reset
+### 19.6 Watchdog Data-Only Reset
 
 The receiver's watchdog timer resets only on actual binary data, not on `ping`/`pong` messages. A sender cannot keep a connection alive indefinitely by sending heartbeats without delivering file data.
 
-### 18.7 ICE Candidate Exposure
+### 19.7 ICE Candidate Exposure
 
 During WebRTC connection establishment, ICE candidates are exchanged via the signalling server. These candidates contain IP addresses and port numbers of both peers. In environments where IP privacy is critical:
 
 - **Use a VPN** to mask real IP addresses. Select a VPN provider that supports peer-to-peer traffic so that the WebRTC data channel can be established through the VPN tunnel. Research providers carefully, paying attention to their logging policies, jurisdiction, and track record.
 - Be aware that STUN servers receive requests from both peers' IP addresses during the ICE gathering phase.
 
-### 18.8 Code Brute-Force Resistance
+### 19.8 Code Brute-Force Resistance
 
 With ~3.3 billion possible codes and active codes existing only for the duration of a transfer, brute-force guessing is impractical under the connection rate limit (10 attempts per 10 seconds per sender). However, server operators SHOULD monitor for distributed scanning patterns.
 
 The code is the only credential needed to connect, so treat a live code like a password:
 
-- Anyone who connects with a valid code receives the file names and sizes as part of the preview (§7), before the receiver accepts anything.
+- Anyone who connects with a valid code receives the file names and sizes as part of the preview (§8), before the receiver accepts anything.
 - The receiver link carries the code in the URL path (`/p2p/<code>`), not in a fragment. It can therefore appear in reverse-proxy access logs and browser history.
 - The Web UI's receive page connects to the sender as soon as the link is opened.
 
+Over the secure channel, only a code's locator reaches the server, each code takes one try ([§4.3](#43-cpace-typed-codes)), and a link carries a secret of its own after its `#` ([§3.6](#36-links)).
+
 ---
 
-## 19. Configuration Reference
+## 20. Configuration Reference
 
-### 19.1 Server Environment Variables
+### 20.1 Server Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -708,7 +1025,7 @@ The code is the only credential needed to connect, so treat a live code like a p
 | `P2P_STUN_SERVERS` | `stun:stun.cloudflare.com:3478` | Comma-separated list of STUN server URLs. |
 | `PEERJS_DEBUG` | `false` | Currently has no effect: the bundled PeerJS server has no logging, and clients always run PeerJS with debug output off. Still reported in `GET /api/info`. |
 
-### 19.2 Client Configuration Options
+### 20.2 Client Configuration Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -725,7 +1042,7 @@ The code is the only credential needed to connect, so treat a live code like a p
 
 ---
 
-## 20. Protocol Constants
+## 21. Protocol Constants
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
@@ -744,7 +1061,7 @@ The code is the only credential needed to connect, so treat a live code like a p
 
 ---
 
-## 21. Message Type Reference
+## 22. Message Type Reference
 
 | Type | Direction | State(s) | Purpose |
 |------|-----------|----------|---------|
@@ -767,24 +1084,24 @@ The code is the only credential needed to connect, so treat a live code like a p
 
 ---
 
-## 22. Best Practices
+## 23. Best Practices
 
-### 22.1 Server Deployment
+### 23.1 Server Deployment
 
-- **Deploy the Dropgate Server/signalling server behind HTTPS.** The Web UI only enables direct transfers in a secure context (§4.4). The PeerJS server MUST be accessed via HTTPS (or `localhost` for development).
-- **Treat the signalling server as trusted infrastructure.** Because it relays the DTLS fingerprints that secure each transfer (§18.1), whoever controls it could intercept transfers. For sensitive use, run your own.
+- **Deploy the Dropgate Server/signalling server behind HTTPS.** The Web UI only enables direct transfers in a secure context (§5.4). The PeerJS server MUST be accessed via HTTPS (or `localhost` for development).
+- **Treat the signalling server as trusted infrastructure.** Because it relays the DTLS fingerprints that secure each transfer (§19.1), whoever controls it could intercept transfers. For sensitive use, run your own.
 - **Configure appropriate STUN servers.** The default Cloudflare STUN server is suitable for most deployments. For privacy-sensitive applications, consider self-hosting a STUN server or using a VPN to mask IP addresses.
 - **Mind the reverse proxy's access log.** Every sender's code appears in the URL of the PeerJS WebSocket connection (`/peerjs/peerjs?key=peerjs&id=<code>&token=…`), even when the receiver types the code in. See [DATA-PROCESSING §9.2](./DATA-PROCESSING.md#92-reverse-proxies).
 - **Monitor connection patterns.** Unusual rates of peer registrations or connection attempts may indicate scanning or abuse.
 
-### 22.2 Client Behaviour
+### 23.2 Client Behaviour
 
 - **Keep chunk acknowledgements enabled.** Disabling them removes flow control and can cause buffer overflows on slow receivers.
 - **Set appropriate buffer water marks.** The defaults (8 MiB high / 2 MiB low) are tuned for typical broadband connections. Constrained environments may benefit from lower values.
 - **Implement `onConnectionHealth` monitoring** for user-facing applications. This allows early detection of degrading connections.
 - **Respect the watchdog.** If the receiver's watchdog fires, the connection has genuinely stalled. Do not simply increase the timeout to mask underlying network problems.
 
-### 22.3 Network Privacy
+### 23.3 Network Privacy
 
 - **Use a VPN for sensitive P2P transfers.** ICE candidates expose real IP addresses to the signalling server and (briefly) to the peer. A VPN that supports peer-to-peer traffic masks the sender's and receiver's true network locations. Research VPN providers carefully — audit their logging policies, jurisdiction, and technical architecture before relying on them for privacy-critical transfers.
 - **Be aware of STUN server visibility.** STUN servers receive ICE binding requests containing the peer's IP address. Self-hosted STUN servers eliminate third-party visibility.
@@ -792,7 +1109,7 @@ The code is the only credential needed to connect, so treat a live code like a p
 
 ---
 
-## 23. Single-File Transfer Flow Summary
+## 24. Single-File Transfer Flow Summary
 
 ```
 Sender                                      Receiver

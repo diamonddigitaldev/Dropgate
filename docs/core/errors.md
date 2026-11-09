@@ -76,4 +76,6 @@ When the server answers with an error, the message is the server's own, if it se
 | `PEER_FAILED` | peer | No | A direct transfer's other device reported an error. What it said isn't passed on, since it could say anything |
 | `UNEXPECTED_ERROR` | local | No | Anything else, with the error underneath as its `cause` |
 
+`SECURITY_POLICY_MISMATCH` and `CODE_MISMATCH` are the secure channel's ([DGDTP §4.10](../technical/DGDTP.md#410-errors)). Core has it, but `client.direct` doesn't run over it yet, so no call gives either code for now, and a direct transfer's `INVALID_CODE` and `CONNECTION_LOST` are still today's.
+
 `retryable` says whether the same request could work later. Core's own retries are narrower, and an upload or a download only fails with one of these once they're over: see [Retries](api-reference.md#retries).

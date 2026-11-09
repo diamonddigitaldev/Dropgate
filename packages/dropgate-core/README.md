@@ -50,7 +50,7 @@ if (outcome.status === 'completed') console.log(outcome.value.downloadUrl);
 ## Supported Runtimes
 
 * **Node.js 24** or later, as an ES module or CommonJS.
-* **Browsers**, through a bundler, as an ES module, or with a `<script>` tag. Encryption uses the Web Crypto API, which browsers only give pages served over HTTPS or from `localhost`.
+* **Browsers**, through a bundler, as an ES module, or with a `<script>` tag. Encryption uses the Web Crypto API, which browsers only give pages served over HTTPS or from `localhost`, and core's own JavaScript crypto, compiled into it, on a page without it.
 
 
 ## Documentation

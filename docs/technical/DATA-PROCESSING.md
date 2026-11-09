@@ -63,7 +63,7 @@ Dropgate 4 reads nothing a Dropgate 3 server stored, and no Dropgate 3 link work
 | **File content** | **Never** | — | File data flows directly between peers via the WebRTC data channel. The server is not involved (tests: [a file sent by direct transfer arrives intact when the receiver types the code into the home page, and none of it passes through the server](../../tests/integration/parity/direct-transfer.spec.mjs); [several files sent together by direct transfer arrive intact as one ZIP, and none of them passes through the server](../../tests/integration/parity/direct-transfer.spec.mjs)). | — | — |
 | **File metadata** (name, size, MIME) | **Never** | — | Exchanged between peers over the encrypted data channel. The server cannot observe it. (No request or WebSocket message reaching the server holds a file's name: checked after every test, such as [a file sent by direct transfer arrives intact when the receiver opens the link…](../../tests/integration/parity/direct-transfer.spec.mjs).) | — | — |
 
-These guarantees assume the server relays signalling honestly. The SDP it relays includes the DTLS certificate fingerprints that secure the peer connection, so a malicious or compromised server could put itself between the peers and read the transfer, including file names and contents. See [DGDTP §18.1](./DGDTP.md#181-transport-encryption).
+These guarantees assume the server relays signalling honestly. The SDP it relays includes the DTLS certificate fingerprints that secure the peer connection, so a malicious or compromised server could put itself between the peers and read the transfer, including file names and contents. See [DGDTP §19.1](./DGDTP.md#191-transport-encryption).
 
 ### 2.4 Dropgate Server — HTTP Request Metadata
 

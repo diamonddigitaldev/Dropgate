@@ -103,7 +103,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
   - Some networks/NATs need a **TURN** server to relay traffic (currently not supported).
 
 **"The sender cancelled the transfer" (or "The receiver cancelled…") when nobody did**
-- Currently, if the connection drops mid-transfer for any reason (network change, Wi-Fi drop, a closed or sleeping device), it's reported as the other side cancelling. See [DGDTP §14.4](./technical/DGDTP.md#144-connection-loss).
+- Currently, if the connection drops mid-transfer for any reason (network change, Wi-Fi drop, a closed or sleeping device), it's reported as the other side cancelling. See [DGDTP §15.4](./technical/DGDTP.md#154-connection-loss).
 - Interrupted transfers can't be resumed. Start the transfer again, ideally on a more stable connection.
 
 ## 6) Rate limiting

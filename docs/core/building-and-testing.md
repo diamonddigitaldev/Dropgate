@@ -37,7 +37,9 @@ The kinds are `classic`, `member-4gib`, `offsets-4gib` and `members-65536`.
 
 Core's [`tests/copies.test.ts`](../../packages/dropgate-core/tests/copies.test.ts) checks that the server's and the client's copies are the build in `dist/`, so run it, and `tests/build.test.ts`, after `npm run build`.
 
-Outside the repository, for example unpacked from a release's `dropgate-core-<version>.tar.gz`, there are no copies. The build then says so and writes none, and their tests are skipped. A test that always runs checks this only happens when the server's and the client's copies aren't there.
+[`tests/dgdtp-doc.test.ts`](../../packages/dropgate-core/tests/dgdtp-doc.test.ts) holds the table of the secure channel's constants in [DGDTP §4.14](../technical/DGDTP.md#414-constants) to the values in core's code, both ways: every constant the table names has the value it gives, and none is missing from it.
+
+Outside the repository, for example unpacked from a release's `dropgate-core-<version>.tar.gz`, there are no copies and no docs. The build then says so and writes no copies, and their tests and the constants' test are skipped. A test that always runs checks this only happens when the server's and the client's copies aren't there.
 
 GitHub Actions runs these steps on Ubuntu ([`ci.yml`](../../.github/workflows/ci.yml)). It fails if the build changes either copy: that means a copy was edited by hand, or not built again after a change to core. The release workflow also runs them in core's source archive, unpacked on its own, and then stages the package on npm with provenance, through npm's trusted publishing, so no npm token is kept in GitHub. A staged version isn't on npm until a maintainer approves it there, with two-factor authentication. The workflow's dry run runs npm's dry run of publishing instead ([Releases](../../README.md#releases)).
 
