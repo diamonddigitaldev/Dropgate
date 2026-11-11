@@ -14,6 +14,7 @@ const SERVER_DIR = fileURLToPath(new URL('../../', import.meta.url));
 const CLOCK_PRELOAD = fileURLToPath(new URL('./clock.cjs', import.meta.url));
 const REQUESTS_PRELOAD = fileURLToPath(new URL('./requests.cjs', import.meta.url));
 const LISTENING_PRELOAD = fileURLToPath(new URL('./listening.cjs', import.meta.url));
+const HELD_PRELOAD = fileURLToPath(new URL('./rendezvous-held.cjs', import.meta.url));
 
 export const serverVersion = JSON.parse(
     fs.readFileSync(path.join(SERVER_DIR, 'package.json'), 'utf8')
@@ -40,11 +41,12 @@ const freePort = () => new Promise((resolve, reject) => {
  * @param {Record<string, string>} [opts.env] - Server settings for this run.
  * @param {boolean} [opts.clock] - Load the test clock so advanceClock() works.
  * @param {boolean} [opts.requests] - Write down every request the server receives, for requests().
+ * @param {boolean} [opts.held] - Let the test ask what the rendezvous holds, for rendezvousHeld().
  * @param {number} [opts.port] - Try this port first. Another is used if it's taken.
  */
-export async function startServer({ env = {}, clock = false, requests = false, port: firstPort } = {}) {
+export async function startServer({ env = {}, clock = false, requests = false, held = false, port: firstPort } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dropgate-server-test-'));
-    fs.copyFileSync(path.join(SERVER_DIR, 'server.js'), path.join(dir, 'server.js'));
+    for (const file of ['server.js', 'rendezvous.js']) fs.copyFileSync(path.join(SERVER_DIR, file), path.join(dir, file));
     fs.copyFileSync(path.join(SERVER_DIR, 'package.json'), path.join(dir, 'package.json'));
     fs.cpSync(path.join(SERVER_DIR, 'views'), path.join(dir, 'views'), { recursive: true });
     fs.cpSync(path.join(SERVER_DIR, 'public'), path.join(dir, 'public'), { recursive: true });
@@ -56,6 +58,7 @@ export async function startServer({ env = {}, clock = false, requests = false, p
     const preloads = ['--require', LISTENING_PRELOAD];
     if (clock) preloads.push('--require', CLOCK_PRELOAD);
     if (requests) preloads.push('--require', REQUESTS_PRELOAD);
+    if (held) preloads.push('--require', HELD_PRELOAD);
 
     // Everything every run of the server in this folder has written, restarts included.
     const output = { stdout: '', stderr: '' };
@@ -66,7 +69,7 @@ export async function startServer({ env = {}, clock = false, requests = false, p
         const child = spawn(process.execPath, [...preloads, 'server.js'], {
             cwd: dir,
             env: childEnv,
-            stdio: ['ignore', 'pipe', 'pipe', clock ? 'ipc' : 'ignore'],
+            stdio: ['ignore', 'pipe', 'pipe', clock || held ? 'ipc' : 'ignore'],
         });
         const run = { port, child, output, exited: false, closed: once(child, 'close') };
         child.stdout.on('data', (d) => { run.output.stdout += d; });
@@ -93,6 +96,19 @@ export async function startServer({ env = {}, clock = false, requests = false, p
     };
 
     let run;
+    // Sends a preload a message over IPC and waits for its answer, by type.
+    const ask = async (msg, answer) => {
+        const answered = new Promise((resolve) => {
+            const onMessage = (reply) => {
+                if (reply?.type !== answer) return;
+                run.child.off('message', onMessage);
+                resolve(reply);
+            };
+            run.child.on('message', onMessage);
+        });
+        run.child.send(msg);
+        return answered;
+    };
     const kill = async () => {
         if (!run.exited) {
             run.child.kill();
@@ -197,8 +213,15 @@ export async function startServer({ env = {}, clock = false, requests = false, p
          */
         advanceClock: async (ms) => {
             if (!clock) throw new Error('Start the server with { clock: true } to use advanceClock().');
-            run.child.send({ type: 'advance-clock', ms });
-            await once(run.child, 'message');
+            await ask({ type: 'advance-clock', ms }, 'clock-advanced');
+        },
+        /**
+         * How much the rendezvous holds right now, as counts: { sockets, rooms, attempts }, or
+         * null with direct transfer off (see rendezvous-held.cjs).
+         */
+        rendezvousHeld: async () => {
+            if (!held) throw new Error('Start the server with { held: true } to use rendezvousHeld().');
+            return (await ask({ type: 'rendezvous-held' }, 'rendezvous-held')).held;
         },
         /**
          * Stop the server and start it again in the same folder, as an operator's

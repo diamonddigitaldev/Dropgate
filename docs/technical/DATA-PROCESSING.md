@@ -60,6 +60,7 @@ Dropgate 4 reads nothing a Dropgate 3 server stored, and no Dropgate 3 link work
 | **Peer IDs** (P2P codes) | Transiently | PeerJS in-memory (not Dropgate-managed) | Peer discovery and routing. The code is also in the receiver link's URL path (`/p2p/<code>`), so reverse proxies may log it (see §9.2). | On peer registration. | On peer disconnection. |
 | **ICE candidates** | Transiently | PeerJS in-memory (not Dropgate-managed) | NAT traversal — relayed between peers during WebRTC connection setup. Contains IP addresses and ports. | During ICE gathering. | On connection establishment or failure. |
 | **SDP offers/answers** | Transiently | PeerJS in-memory (not Dropgate-managed) | WebRTC session negotiation. | During connection setup. | On connection establishment or failure. |
+| **Rendezvous rooms** (Dropgate 4's own, at `/api/v4/rendezvous`; no app uses them yet) | Transiently | Server memory | Lets a receiver's device find a sender's and pass it the sealed messages that set up their connection ([DGDTP §4.13](./DGDTP.md#413-what-the-rendezvous-and-the-engine-add)). A room holds its ID (made from the link's secret, which never reaches the server), its random nonce, the sender's socket, and each receiver's socket under a one-byte tag. The messages pass through whole, unread and not kept, and the rendezvous holds no address; the rate limiter counts each connection as a request (tests: [a room, an attempt and a socket each hold only known fields…](../../server/test/rendezvous.test.mjs); [nothing once every room has ended, however they ended](../../server/test/rendezvous.test.mjs)). | When a sender's device opens one. | When the sender's socket closes; a receiver's part when its own socket closes, or the sender drops it. |
 | **File content** | **Never** | — | File data flows directly between peers via the WebRTC data channel. The server is not involved (tests: [a file sent by direct transfer arrives intact when the receiver types the code into the home page, and none of it passes through the server](../../tests/integration/parity/direct-transfer.spec.mjs); [several files sent together by direct transfer arrive intact as one ZIP, and none of them passes through the server](../../tests/integration/parity/direct-transfer.spec.mjs)). | — | — |
 | **File metadata** (name, size, MIME) | **Never** | — | Exchanged between peers over the encrypted data channel. The server cannot observe it. (No request or WebSocket message reaching the server holds a file's name: checked after every test, such as [a file sent by direct transfer arrives intact when the receiver opens the link…](../../tests/integration/parity/direct-transfer.spec.mjs).) | — | — |
 
@@ -193,6 +194,7 @@ data/
 | Rate limiter store | IP → request count mappings. | Sliding window (default 60 s). |
 | Records (default mode) | Each stored upload's record. | Until it's deleted, or the server restarts. |
 | PeerJS state | Peer connections, ICE candidates, SDP. | Until peer disconnection. |
+| Rendezvous rooms | Each room's ID and nonce, and its devices' sockets ([§2.3](#23-dropgate-server--p2p-signalling-dgdtp)). Messages only in flight, at most 1 MiB waiting for any socket. | Until the sender's socket closes, or the server restarts. |
 
 ### 4.3 Database Persistence Modes
 
@@ -310,7 +312,7 @@ Data in transit peer-to-peer: File content + metadata (DTLS-encrypted)
 | `ERROR` | 0 | Startup and configuration errors, file I/O failures, and unexpected errors, by their kind only (see [§8.3](#83-what-does-not-appear-in-logs); test: [an error while answering gives 500 SERVER_ERROR…](../../server/test/api.test.mjs)). |
 | `WARN` | 1 | Configuration warnings (such as the HTTPS requirement or an unlimited limit) and rate limit triggers. |
 | `INFO` | 2 | Startup configuration and storage capacity at startup, and how many uploads a Dropgate 3 server left, when a start deletes them. Nothing per upload or download (test: [the default log level writes nothing per transfer](../../server/test/privacy-logs.test.mjs)). **Default.** |
-| `DEBUG` | 3 | Per-transfer events: an upload's start, each chunk, pause, resume, finish, cancel and deadline, downloads, deletion, expiry and rejections. |
+| `DEBUG` | 3 | Per-transfer events: an upload's start, each chunk, pause, resume, finish, cancel and deadline, downloads, deletion, expiry and rejections; a direct transfer's room opening and closing, and a receiver joining it. |
 
 ### 8.2 What Appears in Logs
 
@@ -327,6 +329,7 @@ Data in transit peer-to-peer: File content + metadata (DTLS-encrypted)
 - Downloads: "Download lease taken", "Download lease paused", "Download counted" with the count and limit, "Upload deleted at its download limit" and "Upload deleted by its uploader".
 - Chunk-level reception details (index, size).
 - An upload refused for want of storage, with the storage used, reserved and asked for.
+- Direct transfers' rendezvous: "A direct transfer's room opened.", "A direct transfer's room closed.", "A receiver joined." and "No code was free.", each just that, with nothing about the room, its devices or what they send.
 
 Every line carries a timestamp, so `DEBUG` output shows when transfers of a given size happened.
 

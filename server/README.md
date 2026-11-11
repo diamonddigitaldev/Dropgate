@@ -177,6 +177,8 @@ Images are built for `linux/amd64` and `linux/arm64`. Each release's image is ta
 | `P2P_STUN_SERVERS` | `stun:stun.cloudflare.com:3478` | Comma/space separated STUN servers for WebRTC. |
 | `PEERJS_DEBUG` | `false` | Currently has no effect (the bundled PeerJS server has no logging). Still reported in `/api/info`. |
 
+Dropgate 4's direct transfers find each other through the server's rendezvous, a WebSocket at `/api/v4/rendezvous`, on the server's own port. A reverse proxy in front of the server has to pass WebSocket upgrades through to it, as it already does for PeerJS at `/peerjs`. Each connection counts against `RATE_LIMIT_MAX_REQUESTS` like a request. The rendezvous keeps a transfer's room in memory while the sender is connected, and relays the sealed messages that set up the two devices' own connection without reading them; it writes nothing to disk, and logs only that a room opened or closed, or a receiver joined, at `DEBUG` ([DATA-PROCESSING.md §2.3](../docs/technical/DATA-PROCESSING.md#23-dropgate-server--p2p-signalling-dgdtp)). The Web UI's direct transfers still go through PeerJS until they move onto it.
+
 
 ## Server Info Endpoint
 

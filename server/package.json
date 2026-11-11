@@ -42,7 +42,8 @@
     "qr-code-styling": "^1.9.2",
     "quick.db": "^9.1.7",
     "streamsaver": "^2.0.6",
-    "uuid": "^14.0.2"
+    "uuid": "^14.0.2",
+    "ws": "^8.22.2"
   },
   "allowScripts": {
     "better-sqlite3": false

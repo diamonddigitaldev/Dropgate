@@ -30,6 +30,7 @@ const isLibraryFile = (route) => route.path.startsWith('/vendor/');
 test('the checks find the code\'s environment variables, endpoints, statuses and error codes', () => {
     assert.ok(productEnvReads.has('SERVER_PORT'), 'expected the server to read SERVER_PORT');
     assert.ok(routes.some((route) => route.method === 'GET' && route.path === '/api/info'), 'expected the server to have GET /api/info');
+    assert.ok(routes.some((route) => route.upgrade && route.path === '/api/v4/rendezvous'), 'expected the server to take WebSocket upgrades at /api/v4/rendezvous');
     assert.ok(statuses.has(200) && statuses.has(404), 'expected the server to send 200 and 404');
     assert.ok(productErrorCodes.size > 0, 'expected core to give its errors codes');
 });

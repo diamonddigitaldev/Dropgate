@@ -166,6 +166,13 @@ export function statusesSent() {
  */
 export function serverRoutes() {
     const routes = [];
+    // Each server file's string constants, for the paths another file compares to them.
+    const shared = new Map();
+    for (const file of serverFiles) {
+        for (const match of readCode(file).matchAll(/\b(?:const|let|var)\s+([A-Z][A-Z0-9_]*_PATH)\s*=\s*(['"`])([^'"`$]*)\2/g)) {
+            shared.set(match[1], match[3]);
+        }
+    }
     for (const file of serverFiles) {
         const code = readCode(file);
         const constants = new Map();
@@ -192,6 +199,11 @@ export function serverRoutes() {
                 if (route === undefined) continue;
                 routes.push({ method: match[1].toUpperCase(), path: joinPath(at, route), file });
             }
+        }
+        // A WebSocket's path: an upgrade request goes to it when its path is that one, by name.
+        for (const match of code.matchAll(/\bpathname === ([A-Z][A-Z0-9_]*_PATH)\b/g)) {
+            const at = constants.get(match[1]) ?? shared.get(match[1]);
+            if (at !== undefined) routes.push({ method: 'GET', path: at, file, upgrade: true });
         }
         for (const match of code.matchAll(/express\.static\(\s*path\.join\(\s*__dirname\s*,\s*(['"`])([^'"`]+)\1\s*\)\s*\)/g)) {
             const dir = path.posix.join(path.posix.dirname(file), match[2]);

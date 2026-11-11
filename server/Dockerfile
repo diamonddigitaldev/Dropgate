@@ -14,7 +14,7 @@ COPY package*.json ./
 RUN npm ci
 
 # Copy application source, and its license
-COPY server.js ./
+COPY server.js rendezvous.js ./
 COPY views/ ./views/
 COPY public/ ./public/
 COPY LICENSE ./

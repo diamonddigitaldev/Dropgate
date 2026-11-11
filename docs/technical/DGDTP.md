@@ -21,7 +21,7 @@ The secure channel is built in `@dropgate/core` ([`packages/dropgate-core/src/dg
 
 Today's direct transfers still run version 3's transfer messages, with `hello` carrying 4, on PeerJS, protected by WebRTC's own DTLS encryption alone ([§5](#5-signalling-layer) to [§18](#18-error-model)). They support single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§16](#16-resume-support)). What DTLS alone does and doesn't protect against is in [§19.1](#191-transport-encryption).
 
-Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, and its transfer engine are still to come. They carry every direct transfer over the secure channel, and their messages replace §5 to §18. What they need from the secure channel is in [§4.13](#413-what-the-rendezvous-and-the-engine-add).
+Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, has its rooms built: a sender's room, its receivers' attempts, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Its codes, core's client for it, and the transfer engine are still to come. Together they carry every direct transfer over the secure channel, and their messages replace §5 to §18.
 
 ### 1.2 Design Goals
 
@@ -336,21 +336,27 @@ Core's tests also run the whole channel end to end, on each provider and with on
 
 ### 4.13 What the Rendezvous and the Engine Add
 
-Of these, only the connection itself is built: core runs the secure channel over a W3C `RTCPeerConnection` (the browser's own, or one an integrator passes in for Node).
+Of these, the connection itself and the rendezvous's rooms are built. Core runs the secure channel over a W3C `RTCPeerConnection` (the browser's own, or one an integrator passes in for Node).
 
 - **The data channel:** the receiver makes the one data channel, `dgdtp/4`, ordered and fully reliable, carrying bytes only; anything else on it is refused as a fault. The fingerprints come from the real SDP each device applied.
 - **Record size:** a device's largest record is the smaller of 65,535 bytes and its data channel's max-message-size. A data channel that can't take 16,384 bytes ends the attempt with `CAPABILITY_UNSUPPORTED`. How each device tells the other its size comes with the engine.
 - **Backpressure:** a device sends no more while over 256 KiB waits in the data channel's buffer, going on once it drains, whether or not the `bufferedamountlow` event comes.
 - **Ends:** ICE or the connection failing, or the data channel closing, ends it with `CONNECTION_LOST`.
 
-The rendezvous and the engine aren't built yet. What they need from the secure channel:
+The rendezvous's rooms are built on the Dropgate Server ([`server/rendezvous.js`](../../server/rendezvous.js)), beside PeerJS; nothing in core or the apps uses them yet.
 
-- **In plain, as a room is created or joined:** the DGDTP major, so a mismatch is said before any cryptography.
-- **Creating a room:** the room ID, the room's nonce and whether the sender wants a code. The rendezvous gives a locator, or none when every one is taken, and the link still works.
-- **Joining:** by the room ID, or by the locator. Either way, the rendezvous gives the room's nonce.
-- **CPace:** its three messages relayed as they are, and only the first message 1 for a locator. The locator is then used up, and a later message 1 for it is refused without reaching the sender, which can ask for a new code.
-- **Frames:** relayed whole and in order each way, never read, at most 8,230 bytes, only for the room's live attempts.
+- **One WebSocket per device** at `/api/v4/rendezvous`, with nothing about a room in its address, speaking short binary messages: a type byte, then fixed fields. The sender's one socket holds its room; each receiver's attempt has a socket of its own. A text message, or one over 8,232 bytes, closes the socket.
+- **In plain, as a room is created or joined:** the DGDTP major, so a mismatch is said before any cryptography. A major other than the server's is refused with the server's version; the minor is passed over.
+- **Creating a room:** the room ID, the room's nonce and whether the sender wants a code. A second room with a live room's ID is refused.
+- **Joining by the room ID:** the receiver gets the room's nonce, and the sender hears of the attempt under a one-byte tag, which then carries that attempt's frames on the sender's socket. A room takes at most 4 attempts by link at once. Once the sender locks it, it takes no new ones (core will lock it as a receiver accepts), and the attempts under way carry on; the sender can also drop any one attempt.
+- **Frames:** relayed whole and in order each way, never read or kept, from 0 to 8,230 bytes (CPace's abort is an empty one), at most 4,104 each way in an attempt, only for the room's live attempts.
+- **Ends:** a room lives while its sender's socket is open, with no time limit; when it closes, each receiver is told and its socket closed, and when a receiver's closes, the sender is told. The server pings every socket every 30 seconds and closes one it hasn't heard from in 60, and closes one with more than 1 MiB waiting to be sent to it.
 - **Nothing kept or logged:** no room ID, room nonce, attempt ID, locator, share or frame, in any log or on disk.
+
+Still to come:
+
+- **Codes:** a locator from a pool for a sender that wants one; joining by it; CPace's three messages relayed as they are, and only the first message 1 for a locator. The locator is then used up, and a later message 1 for it is refused without reaching the sender, which can ask for a new code. Until then, a sender that wants a code is told none is free, and its room works by link; joining by a locator finds no room.
+- **Core's client** for the rendezvous, under the secure channel.
 - **From the engine:** the layouts of the sender's hello, BIND, the receiver's acceptance (with the resume secret) and a close; records sent over the data channel strictly in order; and 15 seconds for each attempt.
 
 ### 4.14 Constants

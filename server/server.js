@@ -68,6 +68,8 @@ const rateLimit = require('express-rate-limit').default;
 const helmet = require('helmet').default;
 const cors = require('cors');
 const { ExpressPeerServer } = require('peer');
+const { WebSocketServer } = require('ws');
+const { RENDEZVOUS_PATH, createRendezvous } = require('./rendezvous');
 const { create: contentDisposition } = require('content-disposition');
 const { QuickDB, MemoryDriver, SqliteDriver } = require('quick.db');
 const { v4: uuidv4 } = require('uuid');
@@ -1422,16 +1424,69 @@ app.use('/api/v4', apiNotFound);
 app.use('/api', apiRouter);
 
 // ===== PeerJS signalling server (PeerServer) =====
-// Mounted at a fixed path: /peerjs
+// Mounted at a fixed path: /peerjs. Its WebSocket server takes only the
+// upgrades sent to it below, beside the rendezvous's.
+let peerSocketServer = null;
 if (enableP2P) {
     const peerServer = ExpressPeerServer(server, {
         path: '/',
         debug: process.env.PEERJS_DEBUG === 'true',
         proxied: true,
+        createWebSocketServer: (options) => {
+            peerSocketServer = new WebSocketServer({ path: options.path, noServer: true });
+            return peerSocketServer;
+        },
     });
     app.use(PEERJS_MOUNT_PATH, peerServer);
     log('info', `PeerServer mounted at ${PEERJS_MOUNT_PATH}`);
 }
+
+// ===== Dropgate 4's rendezvous for direct transfers (rendezvous.js) =====
+const rendezvous = enableP2P ? createRendezvous({ version: PROTOCOLS.dgdtp, log }) : null;
+
+/**
+ * Runs the rate limiter on a WebSocket upgrade, as on any request: its address
+ * is read with the server's own rule (`trust proxy`), which the raw request
+ * Node hands an upgrade doesn't have. Calls `next` if it may go on; otherwise
+ * it has been answered 429, and the socket closed.
+ */
+const limitUpgrade = (req, socket, next) => {
+    const request = Object.assign(Object.create(app.request), {
+        method: req.method, url: req.url, headers: req.headers, socket,
+    });
+    const response = new http.ServerResponse(req);
+    Object.setPrototypeOf(response, app.response);
+    response.assignSocket(socket);
+    response.req = request;
+    request.res = response;
+    response.setHeader('Connection', 'close');
+    response.once('finish', () => socket.destroy());
+    limiter(request, response, (err) => {
+        if (err || socket.destroyed) return socket.destroy();
+        response.detachSocket(socket);
+        next();
+    });
+};
+
+// Each upgrade goes to its own WebSocket server by its path; any other is refused.
+// With direct transfer off there are none, and an upgrade is answered as any
+// other request.
+if (enableP2P) server.on('upgrade', (req, socket, head) => {
+    socket.on('error', () => socket.destroy());
+    let pathname;
+    try {
+        ({ pathname } = new URL(req.url, 'http://localhost'));
+    } catch {
+        return socket.destroy();
+    }
+    if (pathname === RENDEZVOUS_PATH) {
+        return limitUpgrade(req, socket, () => rendezvous.handleUpgrade(req, socket, head));
+    }
+    if (pathname === PEERJS_MOUNT_PATH || pathname.startsWith(`${PEERJS_MOUNT_PATH}/`)) {
+        return peerSocketServer.handleUpgrade(req, socket, head, (ws) => peerSocketServer.emit('connection', ws, req));
+    }
+    socket.destroy();
+});
 
 // P2P receiver page
 app.get('/p2p/:code', limiter, (req, res) => {
