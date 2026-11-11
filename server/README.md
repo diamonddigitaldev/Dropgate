@@ -173,11 +173,15 @@ Images are built for `linux/amd64` and `linux/arm64`. Each release's image is ta
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `ENABLE_P2P` | `true` | Enables direct transfer (P2P). |
-| `P2P_STUN_SERVERS` | `stun:stun.cloudflare.com:3478` | Comma/space separated STUN servers for WebRTC. |
-| `PEERJS_DEBUG` | `false` | Currently has no effect (the bundled PeerJS server has no logging). Still reported in `/api/info`. |
+| `ENABLE_P2P` | `true` | Enables direct transfer (P2P). With it off, the settings below aren't read. |
+| `P2P_STUN_SERVERS` | `stun:stun.cloudflare.com:3478` | The STUN servers browsers are offered, to find their way through a router: `stun:` or `stuns:` addresses, each a host and an optional port, separated by commas or spaces. `none` offers none at all, for a server used only on one network or to keep devices' addresses away from a third party. Set to nothing, a `turn:` address or anything else, the server stops at startup and says why. |
+| `P2P_LOCATOR_LETTERS` | `2` | How many of a code's four letters the server hands out: `2` lets 576 codes wait for a receiver at once, `3` lets 13,824 (each then has one letter fewer of its own). Anything else stops the server at startup. |
+| `P2P_MAX_CODES_PER_IP` | `5` | The most unused codes one address can hold at once (an IPv6 address counts with the rest of its /56 network, as the rate limiter counts it). A sender past it gets a link and no code. A whole number; `0` turns codes off, so direct transfers go by link only. Anything else stops the server at startup. |
+| `PEERJS_DEBUG` | — | **Removed in 4.0.** Set to anything, the server warns once at startup that it's ignored. |
 
-Dropgate 4's direct transfers find each other through the server's rendezvous, a WebSocket at `/api/v4/rendezvous`, on the server's own port. A reverse proxy in front of the server has to pass WebSocket upgrades through to it, as it already does for PeerJS at `/peerjs`. Each connection counts against `RATE_LIMIT_MAX_REQUESTS` like a request. The rendezvous keeps a transfer's room in memory while the sender is connected, and relays the sealed messages that set up the two devices' own connection without reading them; it writes nothing to disk, and logs only that a room opened or closed, or a receiver joined, at `DEBUG` ([DATA-PROCESSING.md §2.3](../docs/technical/DATA-PROCESSING.md#23-dropgate-server--p2p-signalling-dgdtp)). The Web UI's direct transfers still go through PeerJS until they move onto it.
+Dropgate 4's direct transfers find each other through the server's rendezvous, a WebSocket at `/api/v4/rendezvous`, on the server's own port. A reverse proxy in front of the server has to pass WebSocket upgrades through to it, as it already does for PeerJS at `/peerjs`. Each connection counts against `RATE_LIMIT_MAX_REQUESTS` like a request. The rendezvous keeps a transfer's room in memory while the sender is connected, and relays the sealed messages that set up the two devices' own connection without reading them; it writes nothing to disk, and logs only that a room opened or closed, a receiver joined, or no code was free, at `DEBUG` ([DATA-PROCESSING.md §2.3](../docs/technical/DATA-PROCESSING.md#23-dropgate-server--p2p-signalling-dgdtp)). The Web UI's direct transfers still go through PeerJS until they move onto it.
+
+**Codes.** A sender can ask the rendezvous for a code, such as `ABCD-1234`, which a person can type. Only its first letters, the locator, come from the server's pool; the rest never leaves the sender's device. A code takes one try: the first message a receiver sends by it uses it up. Each locator that leaves a room, used or not, waits 5 minutes before it's handed out again, and an unused code is released 10 minutes after its sender last asked for it or renewed it (the apps renew theirs while they're open). When every code is waiting, or the sender's address holds `P2P_MAX_CODES_PER_IP` of them, the sender gets a link and no code, and its app asks again later. The count by address holds a keyed hash of each address, never the address itself, with a key made at random when the server starts.
 
 
 ## Server Info Endpoint
@@ -210,7 +214,6 @@ Example response:
     },
     "p2p": {
       "enabled": true,
-      "peerjsPath": "/peerjs",
       "iceServers": [
         {
           "urls": [
@@ -218,7 +221,8 @@ Example response:
           ]
         }
       ],
-      "peerjsDebugLogging": false
+      "codeLetters": 2,
+      "credentialRequired": false
     },
     "webUI": {
       "enabled": true
@@ -230,7 +234,7 @@ Example response:
 }
 ```
 
-With uploads off, `upload` is `{ "enabled": false }` and nothing more. `maxSizeMB` is `UPLOAD_MAX_FILE_SIZE_MB` as set, in 1024s, and `maxPauseMinutes` is `0` when pausing is off. Nothing asks for a credential yet, and accounts aren't built yet. The answer is never cached. The [DGUP spec](../docs/technical/DGUP.md#3-capability-discovery) describes each field.
+With uploads off, `upload` is `{ "enabled": false }` and nothing more, and the same goes for `p2p` with direct transfer off. `maxSizeMB` is `UPLOAD_MAX_FILE_SIZE_MB` as set, in 1024s, and `maxPauseMinutes` is `0` when pausing is off. `iceServers` is `[]` with `P2P_STUN_SERVERS=none`. `codeLetters` is `P2P_LOCATOR_LETTERS`, how many of a code's letters are the server's, or `0` when `P2P_MAX_CODES_PER_IP=0` turns codes off. Dropgate 3's `peerjsPath` and `peerjsDebugLogging` are gone. Nothing asks for a credential yet, and accounts aren't built yet. The answer is never cached. The [DGUP spec](../docs/technical/DGUP.md#3-capability-discovery) describes each field.
 
 
 ## HTTPS / Reverse Proxy Setup

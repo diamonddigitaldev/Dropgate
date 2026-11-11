@@ -67,12 +67,16 @@ describe('at every log level, with a malformed request and a missing stored file
                 const { secrets } = await runFixture(server, { faults: true });
                 for (const secret of (await runUploads(server, { faults: true })).secrets) secrets.add(secret);
                 for (const secret of (await runDownloads(server)).secrets) secrets.add(secret);
-                for (const secret of (await runRendezvous(server)).secrets) secrets.add(secret);
+                const rendezvousMark = server.mark();
+                const rendezvous = await runRendezvous(server);
+                for (const secret of rendezvous.secrets) secrets.add(secret);
                 const info = await (await fetch(`${server.baseUrl}/api/info`)).json();
                 await sleep(500);
                 runs.push({
                     level,
                     secrets,
+                    locators: rendezvous.locators,
+                    rendezvousLines: linesOf(server.since(rendezvousMark)),
                     reportedLevel: info.logLevel,
                     lines: linesOf(server.output),
                     bytes: server.output.stdout.length + server.output.stderr.length,
@@ -89,6 +93,19 @@ describe('at every log level, with a malformed request and a missing stored file
             for (const line of lines.filter((l) => OWN_LINE.test(l))) {
                 for (const secret of secrets) {
                     if (line.includes(secret)) leaks.push(`${level}: "${secret}" in: ${line}`);
+                }
+            }
+        }
+        assert.deepEqual(leaks, []);
+    });
+
+    test("no line written while the rendezvous ran names a code's locator, as a word of its own", () => {
+        const leaks = [];
+        for (const { level, locators, rendezvousLines } of runs) {
+            assert.ok(locators.size >= 7, `${level}: the run was given its codes (${locators.size})`);
+            for (const line of rendezvousLines) {
+                for (const locator of locators) {
+                    if (new RegExp(`\\b${locator}\\b`).test(line)) leaks.push(`${level}: "${locator}" in: ${line}`);
                 }
             }
         }

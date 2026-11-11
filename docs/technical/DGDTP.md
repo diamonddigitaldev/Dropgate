@@ -21,7 +21,7 @@ The secure channel is built in `@dropgate/core` ([`packages/dropgate-core/src/dg
 
 Today's direct transfers still run version 3's transfer messages, with `hello` carrying 4, on PeerJS, protected by WebRTC's own DTLS encryption alone ([§5](#5-signalling-layer) to [§18](#18-error-model)). They support single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§16](#16-resume-support)). What DTLS alone does and doesn't protect against is in [§19.1](#191-transport-encryption).
 
-Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, has its rooms built: a sender's room, its receivers' attempts, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Its codes, core's client for it, and the transfer engine are still to come. Together they carry every direct transfer over the secure channel, and their messages replace §5 to §18.
+Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, has its rooms and codes built: a sender's room, its code, its receivers' attempts by link or by code, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Core's client for it and the transfer engine are still to come. Together they carry every direct transfer over the secure channel, and their messages replace §5 to §18.
 
 ### 1.2 Design Goals
 
@@ -336,26 +336,29 @@ Core's tests also run the whole channel end to end, on each provider and with on
 
 ### 4.13 What the Rendezvous and the Engine Add
 
-Of these, the connection itself and the rendezvous's rooms are built. Core runs the secure channel over a W3C `RTCPeerConnection` (the browser's own, or one an integrator passes in for Node).
+Of these, the connection itself and the rendezvous's rooms and codes are built. Core runs the secure channel over a W3C `RTCPeerConnection` (the browser's own, or one an integrator passes in for Node).
 
 - **The data channel:** the receiver makes the one data channel, `dgdtp/4`, ordered and fully reliable, carrying bytes only; anything else on it is refused as a fault. The fingerprints come from the real SDP each device applied.
 - **Record size:** a device's largest record is the smaller of 65,535 bytes and its data channel's max-message-size. A data channel that can't take 16,384 bytes ends the attempt with `CAPABILITY_UNSUPPORTED`. How each device tells the other its size comes with the engine.
 - **Backpressure:** a device sends no more while over 256 KiB waits in the data channel's buffer, going on once it drains, whether or not the `bufferedamountlow` event comes.
 - **Ends:** ICE or the connection failing, or the data channel closing, ends it with `CONNECTION_LOST`.
 
-The rendezvous's rooms are built on the Dropgate Server ([`server/rendezvous.js`](../../server/rendezvous.js)), beside PeerJS; nothing in core or the apps uses them yet.
+The rendezvous's rooms and codes are built on the Dropgate Server ([`server/rendezvous.js`](../../server/rendezvous.js)), beside PeerJS; nothing in core or the apps uses them yet.
 
 - **One WebSocket per device** at `/api/v4/rendezvous`, with nothing about a room in its address, speaking short binary messages: a type byte, then fixed fields. The sender's one socket holds its room; each receiver's attempt has a socket of its own. A text message, or one over 8,232 bytes, closes the socket.
 - **In plain, as a room is created or joined:** the DGDTP major, so a mismatch is said before any cryptography. A major other than the server's is refused with the server's version; the minor is passed over.
 - **Creating a room:** the room ID, the room's nonce and whether the sender wants a code. A second room with a live room's ID is refused.
 - **Joining by the room ID:** the receiver gets the room's nonce, and the sender hears of the attempt under a one-byte tag, which then carries that attempt's frames on the sender's socket. A room takes at most 4 attempts by link at once. Once the sender locks it, it takes no new ones (core will lock it as a receiver accepts), and the attempts under way carry on; the sender can also drop any one attempt.
+- **Codes** ([§3](#3-codes-and-links)): a sender that wants one, on creating its room or later by asking, is given a locator drawn uniformly at random from the server's free ones: every string of `CODE_LETTERS` of the server's length, 2 (576 of them) or 3 (13,824), which `GET /api/info` gives as `capabilities.p2p.codeLetters`. A room has at most one unused code; asked again while it's unused, the server gives the same one. A receiver joins by the locator alone, the rest of the code never leaving either device, and the sender hears of the attempt as one by code.
+- **One try per code:** a code is that attempt's until the attempt sends its first frame, CPace's first message ([§4.3](#43-cpace-typed-codes)), and another join by it meanwhile is refused as busy. Relaying that frame uses the code up, right or wrong: only the first CPace message for a locator ever reaches the sender, and a later join by it finds nothing. The sender can ask for a new code, and its link still works. A receiver that leaves, or is dropped, before sending anything leaves the code unused. A room has one attempt by code at a time, beside its 4 by link.
+- **Codes come back:** a locator leaves its room when its code is used, when the sender locks the room, when the room ends, or when the code is released: 10 minutes after the sender last asked for it or renewed it, when the sender is told. Every locator that leaves a room waits 5 minutes before the server hands it out again, so a late try at an old code can't meet another sender's new one.
+- **When none is free,** or the sender's address already holds the server's limit of unused codes (5 by default), the sender is given none, and its room works by link. The count by address holds a 16-byte keyed hash of each address (HMAC-SHA-256, under a key made at random as the server starts and never written), never the address, and an entry goes when its count reaches 0. An IPv6 address is counted with the rest of its /56 network, as the server's rate limiter counts it. A server can turn codes off, and then gives `codeLetters` 0.
 - **Frames:** relayed whole and in order each way, never read or kept, from 0 to 8,230 bytes (CPace's abort is an empty one), at most 4,104 each way in an attempt, only for the room's live attempts.
 - **Ends:** a room lives while its sender's socket is open, with no time limit; when it closes, each receiver is told and its socket closed, and when a receiver's closes, the sender is told. The server pings every socket every 30 seconds and closes one it hasn't heard from in 60, and closes one with more than 1 MiB waiting to be sent to it.
 - **Nothing kept or logged:** no room ID, room nonce, attempt ID, locator, share or frame, in any log or on disk.
 
 Still to come:
 
-- **Codes:** a locator from a pool for a sender that wants one; joining by it; CPace's three messages relayed as they are, and only the first message 1 for a locator. The locator is then used up, and a later message 1 for it is refused without reaching the sender, which can ask for a new code. Until then, a sender that wants a code is told none is free, and its room works by link; joining by a locator finds no room.
 - **Core's client** for the rendezvous, under the secure channel.
 - **From the engine:** the layouts of the sender's hello, BIND, the receiver's acceptance (with the resume secret) and a close; records sent over the data channel strictly in order; and 15 seconds for each attempt.
 
@@ -409,17 +412,19 @@ The server advertises ICE server configuration via the `/api/info` endpoint:
   "capabilities": {
     "p2p": {
       "enabled": true,
-      "peerjsPath": "/peerjs",
       "iceServers": [
         { "urls": ["stun:stun.cloudflare.com:3478"] }
-      ]
+      ],
+      "codeLetters": 2,
+      "credentialRequired": false
     }
   }
 }
 ```
 
 - **Default STUN server:** `stun:stun.cloudflare.com:3478`.
-- **Custom STUN servers:** configurable via the `P2P_STUN_SERVERS` environment variable (comma- or space-separated list).
+- **Custom STUN servers:** configurable via the `P2P_STUN_SERVERS` environment variable (comma- or space-separated list of `stun:` or `stuns:` addresses). Set to `none`, the server offers no ICE servers at all (`"iceServers": []`).
+- **PeerJS's path** isn't given any more: today's direct transfers find PeerJS at its fixed path, `/peerjs`.
 
 ### 5.3 Signalling Data Visible to the Server
 
@@ -1038,8 +1043,10 @@ Over the secure channel, only a code's locator reaches the server, each code tak
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ENABLE_P2P` | `true` | Enable or disable DGDTP. |
-| `P2P_STUN_SERVERS` | `stun:stun.cloudflare.com:3478` | Comma-separated list of STUN server URLs. |
-| `PEERJS_DEBUG` | `false` | Currently has no effect: the bundled PeerJS server has no logging, and clients always run PeerJS with debug output off. Still reported in `GET /api/info`. |
+| `P2P_STUN_SERVERS` | `stun:stun.cloudflare.com:3478` | `stun:` or `stuns:` addresses, each a host and an optional port, separated by commas or spaces; or `none`, for no ICE servers. Set to nothing, a `turn:` address or anything else, the server doesn't start. |
+| `P2P_LOCATOR_LETTERS` | `2` | How many of a code's letters are the rendezvous's locator: `2` (576 codes at once) or `3` (13,824). |
+| `P2P_MAX_CODES_PER_IP` | `5` | The most unused codes one address holds at once; `0` turns codes off. |
+| `PEERJS_DEBUG` | — | Removed in Dropgate 4: set to anything, the server warns once at startup that it's ignored. |
 
 ### 20.2 Client Configuration Options
 

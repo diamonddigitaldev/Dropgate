@@ -1,6 +1,8 @@
 // Test-only preload: lets a test ask the server, over IPC, how much its
-// rendezvous holds right now (rendezvous.js' held(): how many sockets, rooms
-// and attempts), so it can check nothing is left once they've ended.
+// rendezvous holds right now (rendezvous.js' held(): how many sockets, rooms,
+// attempts, unused codes, quarantined and free locators, and per-address
+// counts), so it can check nothing is left once they've ended; and what the
+// per-address counts' keys are (counted()), to show none is an address.
 //
 // It catches the rendezvous as server.js makes it, without changing it: when
 // rendezvous.js is loaded, its createRendezvous() is wrapped to keep what it
@@ -22,4 +24,7 @@ Module._load = function load(request, parent, ...rest) {
 
 process.on('message', (msg) => {
     if (msg && msg.type === 'rendezvous-held') process.send({ type: 'rendezvous-held', held: rendezvous ? rendezvous.held() : null });
+    if (msg && msg.type === 'rendezvous-counted') process.send({ type: 'rendezvous-counted', counted: rendezvous ? rendezvous.counted() : null });
+    // Everything the server's process holds, written to a file the test names, as a memory dump would show it.
+    if (msg && msg.type === 'heap-snapshot') process.send({ type: 'heap-snapshot', file: require('node:v8').writeHeapSnapshot(msg.file) });
 });

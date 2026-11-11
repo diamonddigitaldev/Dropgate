@@ -67,9 +67,13 @@ A JSON object containing (at minimum):
 | `capabilities.upload.chunkSize` | `number` | The chunk size the server takes, in bytes: an encrypted object's header must give the same ([§4.2](#42-the-header)). |
 | `capabilities.upload.maxPauseMinutes` | `number` | How long the server keeps a paused upload or download, in minutes, or `0` when pausing is off ([§5.4](#54-pause-and-resume)). |
 | `capabilities.upload.credentialRequired` | `boolean` | Whether an upload needs a credential ([§3.5](#35-credentials)). Absent means none. This server sends `false`: it asks for no credential yet. |
+| `capabilities.p2p.enabled` | `boolean` | Whether direct transfers ([DGDTP](./DGDTP.md)) are on. When it's `false`, `p2p` has no other field. |
+| `capabilities.p2p.iceServers` | `{ urls: string[] }[]` | The STUN servers a device offers its peer connection, as WebRTC's `iceServers`: `stun:` and `stuns:` addresses only, or `[]` when the server offers none. |
+| `capabilities.p2p.codeLetters` | `number` | How many of a direct transfer code's four letters are the server's locator, `2` or `3`, so a client can split a typed code; `0` when the server gives no codes, and direct transfers go by link only ([DGDTP §4.13](./DGDTP.md#413-what-the-rendezvous-and-the-engine-add)). |
+| `capabilities.p2p.credentialRequired` | `boolean` | Whether opening a direct transfer's room needs a credential. This server sends `false`: it asks for no credential yet. |
 | `capabilities.accounts.enabled` | `boolean` | Whether the server has accounts. This server always sends `false`: accounts come later. |
 
-The answer is never cached (`Cache-Control: no-store`). It never holds a count of anything. Dropgate 3's `bundleSizeMode` is gone: the size limit always applies to the whole upload.
+The answer is never cached (`Cache-Control: no-store`). It never holds a count of anything. Dropgate 3's `bundleSizeMode` is gone: the size limit always applies to the whole upload. So are its `p2p.peerjsPath` and `p2p.peerjsDebugLogging`.
 
 ### 3.3 Compatibility
 

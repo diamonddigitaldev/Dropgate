@@ -12,15 +12,28 @@
 // and the server never parses or keeps one: they're sealed, so it couldn't
 // read them, and anything it changed would be found.
 //
-// What the server holds is in memory only, while the sockets are open: the
-// room's ID, its public nonce, and each attempt's socket and tag. Nothing is
-// written to disk, nothing about a room is logged but that something
-// happened, and an address is never kept (the rate limiter, in server.js, has
-// counted the upgrade before a socket reaches here).
+// A sender can also ask for a code, such as ABCD-1234, which a person can
+// type. Only its first letters, the locator, are the server's: it draws them
+// from a pool of every 2-letter (or 3-letter) string of the code's letters,
+// and a receiver joins by them. The rest is the password, which never leaves
+// the sender's device. A code takes one try: the receiver's first frame by it
+// is CPace's first message, and relaying it uses the code up. Every locator
+// that leaves a room (used, released, locked or its room gone) waits 5 minutes
+// before the pool hands it out again, so a late try at an old code can't meet
+// another sender's new one. An unused code is released 10 minutes after the
+// sender last asked for it or renewed it.
 //
-// Codes come later: a sender asking for one is told none is free, and its room
-// works by link; a receiver joining by a code's locator is told there's no
-// such room.
+// Codes run out, so each address holds at most a few unused ones at once. It's
+// counted under a keyed hash of the address, the key made at random as the
+// server starts and never written anywhere: the address itself is hashed as
+// its socket connects and never kept, and nothing ties the counts of one run
+// to the next.
+//
+// What the server holds is in memory only, while the sockets are open: the
+// room's ID, its public nonce, its unused code's locator, each attempt's
+// socket and tag, and the counts by hash. Nothing is written to disk, and
+// nothing about a room is logged but that something happened.
+const { createHmac, randomBytes, randomInt } = require('crypto');
 const { WebSocketServer } = require('ws');
 
 /** The rendezvous's one path. Nothing about a room is ever in its URL. */
@@ -44,6 +57,13 @@ const PING_INTERVAL_MS = 30_000;
 /** A socket the server hasn't heard from (a message or a pong) for this long is closed. */
 const SILENT_LIMIT_MS = 60_000;
 
+/** How long a locator that has left a room waits before the pool hands it out again. */
+const QUARANTINE_MS = 5 * 60_000;
+/** An unused code is released this long after its sender last asked for it (CREATE or CODE) or renewed it. */
+const RELEASE_MS = 10 * 60_000;
+/** The per-address count's key, from HMAC-SHA-256, is cut to this many bytes. */
+const COUNT_KEY_BYTES = 16;
+
 const ROOM_ID_BYTES = 16;
 const ROOM_NONCE_BYTES = 16;
 const MAX_CREDENTIAL_BYTES = 8192;
@@ -63,6 +83,7 @@ const TYPE = Object.freeze({
     ATTEMPT: 0x83,
     FRAME_TO_SENDER: 0x84,
     GONE_TO_SENDER: 0x85,
+    CODE_GONE: 0x86,
     // From a receiver.
     JOIN: 0x11,
     RECEIVER_SEND: 0x12,
@@ -108,8 +129,10 @@ const CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
  * @param {object} opts
  * @param {{ major: number, minor: number }} opts.version - The DGDTP version this server speaks.
  * @param {(level: string, message: string) => void} opts.log - The server's logger.
+ * @param {2 | 3} [opts.locatorLetters] - How many letters a locator has: 576 codes at once with 2, 13,824 with 3.
+ * @param {number} [opts.maxCodesPerAddress] - The most unused codes one address holds at once; 0 turns codes off.
  */
-function createRendezvous({ version, log }) {
+function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress = 5 }) {
     const sockets = new WebSocketServer({
         noServer: true,
         maxPayload: MAX_MESSAGE_BYTES,
@@ -122,7 +145,23 @@ function createRendezvous({ version, log }) {
     /** Every connected socket's state. */
     const peers = new Set();
 
+    // The pool: every string of the code's letters of this length. Those free
+    // are kept in an array, so one is drawn uniformly by its index.
+    let free = [''];
+    for (let i = 0; i < locatorLetters; i++) free = free.flatMap((start) => [...CODE_LETTERS].map((letter) => start + letter));
+    /** Each unused code's room, by its locator. */
+    const codes = new Map();
+    /** Each locator waiting out its quarantine, with its timer. */
+    const quarantined = new Map();
+
+    /** The per-address count's key: made at random for this run, and never written anywhere. */
+    const countKey = randomBytes(32);
+    /** How many unused codes each address holds, by the address's keyed hash; an entry goes when it reaches 0. */
+    const counts = new Map();
+
     const message = (...bytes) => Buffer.from(bytes);
+    /** CREATED or CODE_IS: the locator's length, then the locator; 0 and nothing when there's none. */
+    const withLocator = (type, locator) => Buffer.concat([message(type, locator ? locator.length : 0), Buffer.from(locator ?? '', 'latin1')]);
 
     /** Sends to a socket that's still open. One that can't keep up is closed, and its 'close' ends what it held. */
     const send = (peer, bytes) => {
@@ -149,6 +188,8 @@ function createRendezvous({ version, log }) {
         if (!attempt.live) return;
         attempt.live = false;
         attempt.room.attempts.delete(attempt.tag);
+        // An attempt by code that ends before its first frame leaves the code unused, for another to try.
+        if (attempt.room.code?.attempt === attempt) attempt.room.code.attempt = null;
         if (tellSender) send(attempt.room.sender, message(TYPE.GONE_TO_SENDER, attempt.tag));
         const { receiver } = attempt;
         if (receiver.finished) return;
@@ -167,6 +208,7 @@ function createRendezvous({ version, log }) {
             const { room } = peer;
             peer.room = null;
             rooms.delete(room.id);
+            letGoOfCode(room);
             for (const attempt of [...room.attempts.values()]) endAttempt(attempt, { tellSender: false });
             log('debug', "A direct transfer's room closed.");
         }
@@ -189,6 +231,69 @@ function createRendezvous({ version, log }) {
         while (room.attempts.has(tag));
         room.lastTag = tag;
         return tag;
+    };
+
+    /** The count's key for an address: HMAC-SHA-256 under this run's key, cut to 16 bytes. */
+    const countKeyOf = (address) => createHmac('sha256', countKey).update(String(address ?? '')).digest().toString('latin1', 0, COUNT_KEY_BYTES);
+
+    const countCode = (key, by) => {
+        const count = (counts.get(key) ?? 0) + by;
+        if (count > 0) counts.set(key, count);
+        else counts.delete(key);
+    };
+
+    /** Restarts an unused code's 10 minutes. When they run out, the code is released and its sender told. */
+    const renew = (room) => {
+        const { code } = room;
+        clearTimeout(code.release);
+        code.release = setTimeout(() => {
+            letGoOfCode(room);
+            send(room.sender, message(TYPE.CODE_GONE));
+        }, RELEASE_MS);
+        code.release.unref?.();
+    };
+
+    /**
+     * Gives a room a code: a locator drawn uniformly from the free ones, unless
+     * none is free or its sender's address already holds as many unused codes
+     * as it may. Gives the locator, or null.
+     */
+    const giveCode = (room) => {
+        const key = room.sender.counted;
+        if ((counts.get(key) ?? 0) >= maxCodesPerAddress || free.length === 0) {
+            log('debug', 'No code was free.');
+            return null;
+        }
+        const at = randomInt(free.length);
+        const locator = free[at];
+        free[at] = free[free.length - 1];
+        free.pop();
+        const code = { locator, attempt: null, release: null };
+        room.code = code;
+        codes.set(locator, room);
+        countCode(key, 1);
+        renew(room);
+        return locator;
+    };
+
+    /**
+     * The room's code leaves it, if it has one: used, released, locked or the
+     * room gone. Its address's count drops, and its locator waits out its
+     * quarantine before going back to the pool.
+     */
+    const letGoOfCode = (room) => {
+        const { code } = room;
+        if (!code) return;
+        room.code = null;
+        clearTimeout(code.release);
+        codes.delete(code.locator);
+        countCode(room.sender.counted, -1);
+        const back = setTimeout(() => {
+            quarantined.delete(code.locator);
+            free.push(code.locator);
+        }, QUARANTINE_MS);
+        back.unref?.();
+        quarantined.set(code.locator, back);
     };
 
     /** Checks the major in plain, before anything else in CREATE or JOIN: false once the socket has been told. */
@@ -231,14 +336,14 @@ function createRendezvous({ version, log }) {
             locked: false,
             attempts: new Map(),
             lastTag: 0,
+            code: null,
         };
         rooms.set(id, room);
         peer.role = 'sender';
         peer.room = room;
         log('debug', "A direct transfer's room opened.");
-        // No code is ever free yet: the room works by link.
-        if (flags & 1) log('debug', 'No code was free.');
-        send(peer, message(TYPE.CREATED, 0));
+        // With no code free, the room works by link.
+        send(peer, withLocator(TYPE.CREATED, flags & 1 ? giveCode(room) : null));
     };
 
     // JOIN: major (1) ‖ minor (1) ‖ by (1) ‖ roomId (16), or locator length (1) ‖ locator.
@@ -246,24 +351,30 @@ function createRendezvous({ version, log }) {
         if (!versionOk(peer, data)) return;
         // Too short for its way of joining is MALFORMED below, as any other wrong length.
         const by = data[3];
+        let room;
         if (by === BY.CODE) {
             const letters = data[4];
             if (data.length !== 5 + letters || (letters !== 2 && letters !== 3)) return fail(peer, ERROR.MALFORMED);
-            if ([...data.subarray(5)].some((c) => !CODE_LETTERS.includes(String.fromCharCode(c)))) return fail(peer, ERROR.MALFORMED);
-            // No room has a code yet.
-            return fail(peer, ERROR.NOT_FOUND);
+            const locator = data.toString('latin1', 5);
+            if ([...locator].some((c) => !CODE_LETTERS.includes(c))) return fail(peer, ERROR.MALFORMED);
+            // Only an unused code finds its room: one used, released or never given, or of the other length, finds none.
+            room = codes.get(locator);
+            if (!room) return fail(peer, ERROR.NOT_FOUND);
+            // One attempt by code at a time: the code is this attempt's until it's used or the attempt ends.
+            if ([...room.attempts.values()].some((a) => a.by === BY.CODE)) return fail(peer, ERROR.BUSY);
+        } else {
+            if (by !== BY.LINK || data.length !== 4 + ROOM_ID_BYTES) return fail(peer, ERROR.MALFORMED);
+            room = rooms.get(data.toString('hex', 4));
+            if (!room) return fail(peer, ERROR.NOT_FOUND);
+            if (room.locked) return fail(peer, ERROR.BUSY);
+            const byLink = [...room.attempts.values()].filter((a) => a.by === BY.LINK).length;
+            if (byLink >= MAX_LINK_ATTEMPTS) return fail(peer, ERROR.BUSY);
         }
-        if (by !== BY.LINK || data.length !== 4 + ROOM_ID_BYTES) return fail(peer, ERROR.MALFORMED);
-
-        const room = rooms.get(data.toString('hex', 4));
-        if (!room) return fail(peer, ERROR.NOT_FOUND);
-        if (room.locked) return fail(peer, ERROR.BUSY);
-        const byLink = [...room.attempts.values()].filter((a) => a.by === BY.LINK).length;
-        if (byLink >= MAX_LINK_ATTEMPTS) return fail(peer, ERROR.BUSY);
         const tag = nextTag(room);
 
         const attempt = { room, tag, by, receiver: peer, live: true, toSender: 0, toReceiver: 0 };
         room.attempts.set(tag, attempt);
+        if (by === BY.CODE) room.code.attempt = attempt;
         peer.role = 'receiver';
         peer.attempt = attempt;
         log('debug', 'A receiver joined.');
@@ -290,17 +401,19 @@ function createRendezvous({ version, log }) {
                 return;
             }
             case TYPE.LOCK:
+                // No new attempt joins, by link or by code, so an unused code is released.
                 if (data.length !== 1) return fail(peer, ERROR.MALFORMED);
                 room.locked = true;
+                letGoOfCode(room);
                 return;
             case TYPE.CODE:
                 if (data.length !== 1) return fail(peer, ERROR.MALFORMED);
-                // No code is ever free yet.
-                log('debug', 'No code was free.');
-                return send(peer, message(TYPE.CODE_IS, 0));
+                // An unused code is given again, and kept for another 10 minutes; a locked room takes no new attempt.
+                if (room.code) renew(room);
+                return send(peer, withLocator(TYPE.CODE_IS, room.code?.locator ?? (room.locked ? null : giveCode(room))));
             case TYPE.RENEW:
-                // There's no unused code to keep yet.
                 if (data.length !== 1) return fail(peer, ERROR.MALFORMED);
+                if (room.code) renew(room);
                 return;
             default:
                 return fail(peer, ERROR.MALFORMED);
@@ -311,7 +424,9 @@ function createRendezvous({ version, log }) {
         if (data[0] !== TYPE.RECEIVER_SEND || data.length > 1 + MAX_FRAME_BYTES) return fail(peer, ERROR.MALFORMED);
         const { attempt } = peer;
         if (++attempt.toSender > MAX_FRAMES_EACH_WAY) return endAttempt(attempt, { tellSender: true, receiverError: ERROR.LIMIT });
-        send(attempt.room.sender, Buffer.concat([message(TYPE.FRAME_TO_SENDER, attempt.tag), data.subarray(1)]));
+        // An attempt by code's first frame is CPace's first message: relaying it uses the code up, right or wrong.
+        if (attempt.room.code?.attempt === attempt) letGoOfCode(attempt.room);
+        send(attempt.room.sender,Buffer.concat([message(TYPE.FRAME_TO_SENDER, attempt.tag), data.subarray(1)]));
     };
 
     const onMessage = (peer, data, isBinary) => {
@@ -329,8 +444,8 @@ function createRendezvous({ version, log }) {
         return fail(peer, ERROR.MALFORMED);
     };
 
-    const connect = (ws) => {
-        const peer = { ws, role: null, room: null, attempt: null, heardAt: Date.now(), finished: false };
+    const connect = (ws, counted) => {
+        const peer = { ws, role: null, room: null, attempt: null, heardAt: Date.now(), finished: false, counted };
         peers.add(peer);
         ws.on('message', (data, isBinary) => onMessage(peer, data, isBinary));
         ws.on('pong', () => { peer.heardAt = Date.now(); });
@@ -354,14 +469,27 @@ function createRendezvous({ version, log }) {
     heartbeat.unref?.();
 
     return {
-        /** Takes over an upgrade request at the rendezvous's path, once it has been let through. */
-        handleUpgrade: (req, socket, head) => sockets.handleUpgrade(req, socket, head, connect),
+        /**
+         * Takes over an upgrade request at the rendezvous's path, once it has
+         * been let through. The address it came from is hashed here, for the
+         * count of its unused codes, and goes no further.
+         */
+        handleUpgrade: (req, socket, head, address) => {
+            const counted = countKeyOf(address);
+            sockets.handleUpgrade(req, socket, head, (ws) => connect(ws, counted));
+        },
         /** How much the rendezvous holds right now: counts only. */
         held: () => ({
             sockets: peers.size,
             rooms: rooms.size,
             attempts: [...rooms.values()].reduce((sum, room) => sum + room.attempts.size, 0),
+            codes: codes.size,
+            quarantined: quarantined.size,
+            free: free.length,
+            counted: counts.size,
         }),
+        /** The per-address counts, each key in hex: for the tests, to show what they hold. */
+        counted: () => [...counts].map(([key, count]) => [Buffer.from(key, 'latin1').toString('hex'), count]),
     };
 }
 

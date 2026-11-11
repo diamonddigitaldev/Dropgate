@@ -63,8 +63,9 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const http = require('http');
+const net = require('net');
 const express = require('express');
-const rateLimit = require('express-rate-limit').default;
+const { default: rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const helmet = require('helmet').default;
 const cors = require('cors');
 const { ExpressPeerServer } = require('peer');
@@ -135,13 +136,82 @@ const parseEnvNumber = (envName, raw, defaultValue) => {
     return num;
 };
 
-// Default: public STUN (Cloudflare) so P2P works out of the box.
-const p2pStunUrls = process.env.P2P_STUN_SERVERS
-    ? parseList(process.env.P2P_STUN_SERVERS)
-    : ['stun:stun.cloudflare.com:3478'];
+// ===== Direct transfer's settings =====
+// Each stops the server with a clear error when it's set wrong, as nothing
+// about direct transfer should quietly differ from what the operator meant.
 
-const p2pIceServers = [];
-if (p2pStunUrls.length) p2pIceServers.push({ urls: p2pStunUrls });
+/** Stops the server, saying why its settings can't be used. */
+const refuseSetting = (message) => {
+    log('error', message);
+    process.exit(1);
+};
+
+/**
+ * A STUN server's address (RFC 7064): `stun:` or `stuns:`, then a host (a
+ * name, an IPv4 address or an IPv6 one in brackets) and an optional port.
+ */
+const isStunUrl = (url) => {
+    const match = /^stuns?:(\[[^\]]*\]|[^:[\]]+)(?::(\d{1,5}))?$/i.exec(url);
+    if (!match) return false;
+    const [, host, port] = match;
+    if (port !== undefined && (Number(port) < 1 || Number(port) > 65535)) return false;
+    if (host.startsWith('[')) return net.isIPv6(host.slice(1, -1));
+    const label = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+    return host.length <= 253 && host.split('.').every((part) => label.test(part));
+};
+
+/**
+ * The STUN servers offered to browsers: Cloudflare's by default, so direct
+ * transfers work out of the box; none with `none`; else a list of STUN
+ * addresses, separated by commas or spaces. An empty value no longer falls
+ * back to Cloudflare's, and TURN isn't supported.
+ */
+const parseStunServers = (raw) => {
+    if (raw === undefined) return ['stun:stun.cloudflare.com:3478'];
+    if (raw.trim().toLowerCase() === 'none') return [];
+    const urls = parseList(raw);
+    if (urls.length === 0) {
+        refuseSetting('P2P_STUN_SERVERS is set, but to nothing. Set it to none to offer browsers no STUN server, list the STUN servers to offer, or remove it to offer Cloudflare\'s (stun:stun.cloudflare.com:3478).');
+    }
+    for (const url of urls) {
+        if (/^turns?:/i.test(url)) {
+            refuseSetting(`P2P_STUN_SERVERS lists a TURN server (${url}). Dropgate doesn't relay direct transfers through TURN: list only STUN servers, or set it to none.`);
+        }
+        if (!isStunUrl(url)) {
+            refuseSetting(`P2P_STUN_SERVERS lists ${JSON.stringify(url)}, which isn't a STUN server's address. Each must be stun: or stuns:, a host and an optional port, such as stun:stun.example.com:3478; or set it to none.`);
+        }
+    }
+    return urls;
+};
+
+const p2pStunUrls = enableP2P ? parseStunServers(process.env.P2P_STUN_SERVERS) : [];
+const p2pIceServers = p2pStunUrls.length ? [{ urls: p2pStunUrls }] : [];
+
+// How many letters a code's locator has: 576 codes can be waiting at once with
+// 2, 13,824 with 3. A code is always four letters and four digits.
+let p2pLocatorLetters = 2;
+if (enableP2P && process.env.P2P_LOCATOR_LETTERS !== undefined) {
+    p2pLocatorLetters = Number(process.env.P2P_LOCATOR_LETTERS.trim());
+    if (!['2', '3'].includes(process.env.P2P_LOCATOR_LETTERS.trim())) {
+        refuseSetting('Invalid P2P_LOCATOR_LETTERS environment variable. It must be 2 (576 codes at once) or 3 (13,824).');
+    }
+}
+
+// The most unused codes one address can hold at once; 0 turns codes off, and
+// direct transfers go by link only.
+let p2pMaxCodesPerIp = 5;
+if (enableP2P && process.env.P2P_MAX_CODES_PER_IP !== undefined) {
+    const raw = process.env.P2P_MAX_CODES_PER_IP.trim();
+    p2pMaxCodesPerIp = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(p2pMaxCodesPerIp)) {
+        refuseSetting('Invalid P2P_MAX_CODES_PER_IP environment variable. It must be a whole number: the most unused codes one address can hold at once, or 0 to turn codes off.');
+    }
+}
+
+// PeerJS's own debug output was never on in Dropgate's builds, and PeerJS goes in Dropgate 4.
+if (process.env.PEERJS_DEBUG !== undefined) {
+    log('warn', 'PEERJS_DEBUG was removed in Dropgate 4 and is ignored.');
+}
 
 const uploadEnableE2EE = process.env.UPLOAD_ENABLE_E2EE !== 'false';
 if (enableUpload) log('info', `Upload End-to-End Encryption (E2EE) Enabled: ${uploadEnableE2EE}`);
@@ -154,8 +224,9 @@ if (enableUpload && uploadEnableE2EE) {
 if (enableP2P) {
     log('warn', 'P2P is enabled. The server MUST be running behind a reverse proxy that provides HTTPS.');
     log('warn', 'Failure to provide a secure context will prevent P2P transfers from working in browsers.');
-    log('info', `P2P_STUN_SERVERS: ${p2pStunUrls.length ? p2pStunUrls.join(', ') : 'None'}`);
-    log('info', `PeerJS Debug Logging: ${process.env.PEERJS_DEBUG === 'true'}`);
+    log('info', `P2P_STUN_SERVERS: ${p2pStunUrls.length ? p2pStunUrls.join(', ') : 'none (no STUN server is offered)'}`);
+    log('info', `P2P_LOCATOR_LETTERS: ${p2pLocatorLetters} (${(24 ** p2pLocatorLetters).toLocaleString('en-US')} codes at once)`);
+    log('info', `P2P_MAX_CODES_PER_IP: ${p2pMaxCodesPerIp === 0 ? '0 (codes are off: direct transfers go by link only)' : p2pMaxCodesPerIp}`);
 }
 
 const app = express();
@@ -1388,12 +1459,15 @@ apiRouter.get('/info', limiter, (req, res) => {
         credentialRequired: false,
     } : { enabled: false };
 
-    const p2pCapabilities = {
-        enabled: enableP2P,
-        peerjsPath: enableP2P ? PEERJS_MOUNT_PATH : undefined,
-        iceServers: enableP2P ? p2pIceServers : undefined,
-        peerjsDebugLogging: enableP2P ? (process.env.PEERJS_DEBUG === 'true') : undefined,
-    };
+    // codeLetters is how many letters of a code are its locator, so a client
+    // knows how to split one, or 0 with codes off. Nothing asks for a
+    // credential yet.
+    const p2pCapabilities = enableP2P ? {
+        enabled: true,
+        iceServers: p2pIceServers,
+        codeLetters: p2pMaxCodesPerIp === 0 ? 0 : p2pLocatorLetters,
+        credentialRequired: false,
+    } : { enabled: false };
 
     res.set('Cache-Control', 'no-store');
     res.status(200).json({
@@ -1430,7 +1504,6 @@ let peerSocketServer = null;
 if (enableP2P) {
     const peerServer = ExpressPeerServer(server, {
         path: '/',
-        debug: process.env.PEERJS_DEBUG === 'true',
         proxied: true,
         createWebSocketServer: (options) => {
             peerSocketServer = new WebSocketServer({ path: options.path, noServer: true });
@@ -1442,13 +1515,18 @@ if (enableP2P) {
 }
 
 // ===== Dropgate 4's rendezvous for direct transfers (rendezvous.js) =====
-const rendezvous = enableP2P ? createRendezvous({ version: PROTOCOLS.dgdtp, log }) : null;
+const rendezvous = enableP2P ? createRendezvous({
+    version: PROTOCOLS.dgdtp,
+    log,
+    locatorLetters: p2pLocatorLetters,
+    maxCodesPerAddress: p2pMaxCodesPerIp,
+}) : null;
 
 /**
  * Runs the rate limiter on a WebSocket upgrade, as on any request: its address
  * is read with the server's own rule (`trust proxy`), which the raw request
- * Node hands an upgrade doesn't have. Calls `next` if it may go on; otherwise
- * it has been answered 429, and the socket closed.
+ * Node hands an upgrade doesn't have. Calls `next` with Express's request if
+ * it may go on; otherwise it has been answered 429, and the socket closed.
  */
 const limitUpgrade = (req, socket, next) => {
     const request = Object.assign(Object.create(app.request), {
@@ -1464,15 +1542,25 @@ const limitUpgrade = (req, socket, next) => {
     limiter(request, response, (err) => {
         if (err || socket.destroyed) return socket.destroy();
         response.detachSocket(socket);
-        next();
+        next(request);
     });
 };
+
+/**
+ * Ends a socket that fails before its WebSocket server takes it. A listener
+ * stays for the socket's life, so it's made out here: one made inside the
+ * upgrade's handler would keep that handler's request, and the address in its
+ * headers, for as long as the socket is open.
+ */
+function destroyOnError() {
+    this.destroy();
+}
 
 // Each upgrade goes to its own WebSocket server by its path; any other is refused.
 // With direct transfer off there are none, and an upgrade is answered as any
 // other request.
 if (enableP2P) server.on('upgrade', (req, socket, head) => {
-    socket.on('error', () => socket.destroy());
+    socket.on('error', destroyOnError);
     let pathname;
     try {
         ({ pathname } = new URL(req.url, 'http://localhost'));
@@ -1480,7 +1568,10 @@ if (enableP2P) server.on('upgrade', (req, socket, head) => {
         return socket.destroy();
     }
     if (pathname === RENDEZVOUS_PATH) {
-        return limitUpgrade(req, socket, () => rendezvous.handleUpgrade(req, socket, head));
+        // The rendezvous counts a sender's codes by the address the rate limiter
+        // counts it by: an IPv4 address, or an IPv6 address's /56 network, which
+        // one line is often given whole. It keeps only a keyed hash of it.
+        return limitUpgrade(req, socket, (request) => rendezvous.handleUpgrade(req, socket, head, ipKeyGenerator(request.ip)));
     }
     if (pathname === PEERJS_MOUNT_PATH || pathname.startsWith(`${PEERJS_MOUNT_PATH}/`)) {
         return peerSocketServer.handleUpgrade(req, socket, head, (ws) => peerSocketServer.emit('connection', ws, req));

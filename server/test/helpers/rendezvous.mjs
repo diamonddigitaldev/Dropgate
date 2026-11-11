@@ -21,6 +21,14 @@ export const BY = Object.freeze({ LINK: 1, CODE: 2 });
 export const MAX_FRAME_BYTES = 8230;
 export const MAX_FRAMES_EACH_WAY = 4104;
 export const PING_INTERVAL_MS = 30_000;
+/** How long a locator that left a room waits before it's handed out again. */
+export const QUARANTINE_MS = 5 * 60_000;
+/** How long an unused code lasts after its sender last asked for it or renewed it. */
+export const RELEASE_MS = 10 * 60_000;
+/** The letters a code's locator is made of. */
+export const CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+/** CPace's first message, from the receiver: the first frame of an attempt by code. */
+export const CPACE_MESSAGE1_BYTES = 51;
 
 /** The DGDTP version the server speaks. */
 export const VERSION = Object.freeze({ major: 4, minor: 0 });
@@ -125,13 +133,30 @@ export function upgradeRefused(server, { path = RENDEZVOUS_PATH, headers = {} } 
     });
 }
 
-/** A sender with its room open: CREATE sent and CREATED taken. */
+/** A CREATED or CODE_IS message's locator, or null for none. */
+export function locatorOf(message, type) {
+    if (message[0] !== type || message.length !== 2 + message[1]) throw new Error(`Expected ${type.toString(16)}, got ${message.toString('hex')}.`);
+    return message[1] === 0 ? null : message.toString('latin1', 2);
+}
+
+/**
+ * A sender with its room open: CREATE sent and CREATED taken, with the code's
+ * locator it was given (null for none). Without a code asked for, CREATED has
+ * to carry none.
+ */
 export async function openRoom(server, { roomId = randomBytes(16), roomNonce = randomBytes(16), code = false, ...opts } = {}) {
     const sender = await connect(server, opts);
     sender.send(msg.create({ roomId, roomNonce, code }));
     const created = await sender.next();
-    if (!created.equals(Buffer.from([TYPE.CREATED, 0]))) throw new Error(`CREATE was answered ${created.toString('hex')}.`);
-    return { sender, roomId, roomNonce };
+    const locator = locatorOf(created, TYPE.CREATED);
+    if (!code && locator !== null) throw new Error(`CREATE was answered ${created.toString('hex')}.`);
+    return { sender, roomId, roomNonce, locator };
+}
+
+/** The sender asks for a code (CODE), and is told it, or none (null). */
+export async function askCode(sender) {
+    sender.send(msg.code());
+    return locatorOf(await sender.next(), TYPE.CODE_IS);
 }
 
 /** A receiver joined to a room by its ID, with the tag the sender was told. */
@@ -142,6 +167,17 @@ export async function joinRoom(server, { sender, roomId, roomNonce }, opts = {})
     if (!joined.equals(bytes(TYPE.JOINED, roomNonce))) throw new Error(`JOIN was answered ${joined.toString('hex')}.`);
     const attempt = await sender.next();
     if (attempt[0] !== TYPE.ATTEMPT || attempt.length !== 3 || attempt[2] !== BY.LINK) throw new Error(`The sender was told ${attempt.toString('hex')}.`);
+    return { receiver, tag: attempt[1] };
+}
+
+/** A receiver joined to a room by its code's locator, with the tag the sender was told. */
+export async function joinByCode(server, { sender, roomNonce, locator }, opts = {}) {
+    const receiver = await connect(server, opts);
+    receiver.send(msg.joinByCode(locator));
+    const joined = await receiver.next();
+    if (!joined.equals(bytes(TYPE.JOINED, roomNonce))) throw new Error(`JOIN by ${locator} was answered ${joined.toString('hex')}.`);
+    const attempt = await sender.next();
+    if (attempt[0] !== TYPE.ATTEMPT || attempt.length !== 3 || attempt[2] !== BY.CODE) throw new Error(`The sender was told ${attempt.toString('hex')}.`);
     return { receiver, tag: attempt[1] };
 }
 
@@ -169,16 +205,20 @@ export const RENDEZVOUS_CREDENTIAL = 'zq7RENDEZVOUScredential';
 
 /**
  * A run of everything the rendezvous does, ending with nothing open: rooms by
- * link with and without a code asked for, joins, frames each way (empty and
- * the largest), CODE and RENEW, DROP, LOCK and BUSY, a receiver and a sender
- * leaving, and each ERROR (VERSION_UNSUPPORTED, NOT_FOUND by ID and by
- * locator, BUSY, MALFORMED, LIMIT), a text message and one too large.
- * @returns {Promise<{ secrets: Set<string> }>} Every room ID, nonce, locator, address and frame marker it used, as
- * they could be written: hex, base64 and base64url.
+ * link with and without a code asked for, joins by link and by code, frames
+ * each way (empty and the largest), a code used up by its first frame and a
+ * later join by it refused, CODE and RENEW, DROP, LOCK (releasing a code) and
+ * BUSY, a receiver and a sender leaving, the address's cap on codes reached,
+ * and each ERROR (VERSION_UNSUPPORTED, NOT_FOUND by ID and by locator, BUSY,
+ * MALFORMED, LIMIT), a text message and one too large.
+ * @returns {Promise<{ secrets: Set<string>, locators: Set<string> }>} Every room ID, nonce, address and frame
+ * marker it used, as they could be written: hex, base64 and base64url; and every locator it was given, which, at
+ * two or three letters, only a whole word in a line can be.
  */
 export async function runRendezvous(server) {
     const headers = { 'X-Forwarded-For': RENDEZVOUS_CLIENT_IP, 'User-Agent': 'DropgateTestAgent/1.0' };
     const secrets = new Set([RENDEZVOUS_CLIENT_IP, FRAME_MARKER, RENDEZVOUS_CREDENTIAL, 'QXW']);
+    const locators = new Set();
     const note = (b) => {
         for (const encoding of ['hex', 'base64', 'base64url']) secrets.add(Buffer.from(b).toString(encoding).replace(/=+$/, ''));
     };
@@ -194,8 +234,10 @@ export async function runRendezvous(server) {
     note(roomNonce);
     const sender = await connect(server, { headers });
     sender.send(msg.create({ roomId, roomNonce, code: true, credential: RENDEZVOUS_CREDENTIAL }));
-    await sender.next();
-    const room = { sender, roomId, roomNonce };
+    const locator = locatorOf(await sender.next(), TYPE.CREATED);
+    if (!locator) throw new Error("The run's first room was given no code.");
+    locators.add(locator);
+    const room = { sender, roomId, roomNonce, locator };
     const first = await joinRoom(server, room, { headers });
     const second = await joinRoom(server, room, { headers });
     first.receiver.send(msg.receiverSend(frame(1)));
@@ -206,8 +248,26 @@ export async function runRendezvous(server) {
     await sender.next();
     await first.receiver.next();
     await first.receiver.next();
-    sender.send(msg.code());
+
+    // By the code: a receiver who leaves before any frame, which leaves it
+    // unused; then one whose first frame, CPace's first message, uses it up, so
+    // a later join by it finds nothing.
+    const leaver = await joinByCode(server, room, { headers });
+    leaver.receiver.close();
     await sender.next();
+    const byCode = await joinByCode(server, room, { headers });
+    byCode.receiver.send(msg.receiverSend(Buffer.concat([frame(6), randomBytes(CPACE_MESSAGE1_BYTES - frame(6).length)])));
+    await sender.next();
+    const spent = await connect(server, { headers });
+    spent.send(msg.joinByCode(locator));
+    await ended(spent);
+    sender.send(msg.send(byCode.tag, frame(7)));
+    await byCode.receiver.next();
+
+    // A new code, renewed, which LOCK below releases.
+    const next = await askCode(sender);
+    if (!next) throw new Error("The run's first room was given no second code.");
+    locators.add(next);
     sender.send(msg.renew());
     // DROP the second, then LOCK: a late receiver is BUSY.
     sender.send(msg.drop(second.tag));
@@ -216,6 +276,9 @@ export async function runRendezvous(server) {
     const late = await connect(server, { headers });
     late.send(msg.joinByLink(roomId));
     await ended(late);
+    const released = await connect(server, { headers });
+    released.send(msg.joinByCode(next));
+    await ended(released);
 
     // The first receiver sends past the limit.
     for (let i = 0; i <= MAX_FRAMES_EACH_WAY; i++) first.receiver.send(msg.receiverSend(frame(4)));
@@ -257,5 +320,20 @@ export async function runRendezvous(server) {
     await refused(msg.create({ roomId: taken.roomId }));
     taken.sender.close();
     await ended(taken.sender);
-    return { secrets };
+
+    // Rooms from one address, each with a code, until the address has as many as it may.
+    const capped = [];
+    for (let given = true; given;) {
+        const one = await openRoom(server, { headers, code: true });
+        note(one.roomId);
+        note(one.roomNonce);
+        if (one.locator) locators.add(one.locator);
+        capped.push(one.sender);
+        given = one.locator !== null;
+    }
+    for (const one of capped) {
+        one.close();
+        await ended(one);
+    }
+    return { secrets, locators };
 }

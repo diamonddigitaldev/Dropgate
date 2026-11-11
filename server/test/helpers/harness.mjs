@@ -216,12 +216,29 @@ export async function startServer({ env = {}, clock = false, requests = false, h
             await ask({ type: 'advance-clock', ms }, 'clock-advanced');
         },
         /**
-         * How much the rendezvous holds right now, as counts: { sockets, rooms, attempts }, or
+         * How much the rendezvous holds right now, as counts: { sockets, rooms, attempts, codes, quarantined, free,
+         * counted }, or
          * null with direct transfer off (see rendezvous-held.cjs).
          */
         rendezvousHeld: async () => {
             if (!held) throw new Error('Start the server with { held: true } to use rendezvousHeld().');
             return (await ask({ type: 'rendezvous-held' }, 'rendezvous-held')).held;
+        },
+        /**
+         * The rendezvous's per-address counts of unused codes, as [key in hex, count] pairs, or null with
+         * direct transfer off (see rendezvous-held.cjs).
+         */
+        rendezvousCounted: async () => {
+            if (!held) throw new Error('Start the server with { held: true } to use rendezvousCounted().');
+            return (await ask({ type: 'rendezvous-counted' }, 'rendezvous-counted')).counted;
+        },
+        /**
+         * Writes a heap snapshot of the server's process to this file, as a memory dump would show what it holds
+         * (see rendezvous-held.cjs).
+         */
+        heapSnapshot: async (file) => {
+            if (!held) throw new Error('Start the server with { held: true } to use heapSnapshot().');
+            return (await ask({ type: 'heap-snapshot', file }, 'heap-snapshot')).file;
         },
         /**
          * Stop the server and start it again in the same folder, as an operator's

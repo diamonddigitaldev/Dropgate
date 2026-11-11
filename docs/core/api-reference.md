@@ -241,7 +241,7 @@ The server's info (`ServerInfo`) is what it gives in `/api/info`:
 | `name`, `version` | The server's name, and its own version, for display |
 | `protocols` | `{ dgup, dgdtp }`, each `{ major, minor }` ([Versions](#versions)) |
 | `capabilities.upload` | `enabled`, `maxSizeMB` (0 for no limit), `maxLifetimeHours` (0 for unlimited), `maxFileDownloads` (the most an upload's `maxDownloads` may be, and what it is when left out; 0 for no limit), `e2ee`, `chunkSize` in bytes, `maxPauseMinutes` (how long a paused upload or download is held; 0 when pausing is off, [Pausing](#pausing)), and `credentialRequired` ([Credentials](#credentials)) |
-| `capabilities.p2p` | `enabled`, `peerjsPath` and `iceServers`, for direct transfers |
+| `capabilities.p2p` | `enabled`, `iceServers`, `codeLetters` (how many of a code's letters are the server's, or 0 with codes off) and `credentialRequired`, for direct transfers. Today's direct transfers read `enabled` and `iceServers`, and find PeerJS at `/peerjs` |
 | `capabilities.webUI` | `enabled` |
 
 ### client.operations

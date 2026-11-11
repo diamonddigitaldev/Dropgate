@@ -99,8 +99,10 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - If peers can’t connect or get stuck “connecting”:
   - Try a different network (mobile hotspot is a quick test).
   - Confirm `ENABLE_P2P=true`.
-  - Try changing `P2P_STUN_SERVERS` to a different STUN provider.
+  - Try changing `P2P_STUN_SERVERS` to a different STUN provider. With `P2P_STUN_SERVERS=none`, devices on different networks often can't reach each other: that setting is for a server used on one network.
   - Some networks/NATs need a **TURN** server to relay traffic (currently not supported).
+- **The server stops at startup over `P2P_STUN_SERVERS`, `P2P_LOCATOR_LETTERS` or `P2P_MAX_CODES_PER_IP`:** its log says which, and what it takes. In 4.0, `P2P_STUN_SERVERS` set to nothing is an error, where 3.x quietly used Cloudflare's STUN server: remove it for Cloudflare's, or set it to `none` for no STUN server. A `turn:` address is refused too. An app template that passes the setting through empty needs the same change.
+- **`PEERJS_DEBUG` was removed in Dropgate 4:** the server warns that it's ignored, and starts. Remove it to quiet the warning.
 
 **"The sender cancelled the transfer" (or "The receiver cancelled…") when nobody did**
 - Currently, if the connection drops mid-transfer for any reason (network change, Wi-Fi drop, a closed or sleeping device), it's reported as the other side cancelling. See [DGDTP §15.4](./technical/DGDTP.md#154-connection-loss).

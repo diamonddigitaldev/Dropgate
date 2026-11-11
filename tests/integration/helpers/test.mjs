@@ -16,11 +16,10 @@ import { startStunServer } from './stun.mjs';
 
 export { expect };
 
-// The server hands browsers a public STUN server by default, and an empty value
-// falls back to that default. A lone comma is a list with nothing in it, so the
-// server offers no ICE servers at all. Direct transfer tests offer the tests' own
-// STUN server instead (localStun), so either way nothing leaves this machine.
-export const NO_ICE_SERVERS = ',';
+// The server hands browsers a public STUN server by default. Set to none, it
+// offers no ICE servers at all. Direct transfer tests offer the tests' own STUN
+// server instead (localStun), so either way nothing leaves this machine.
+export const NO_ICE_SERVERS = 'none';
 
 /** Whether the test body passed, as it was meant to. */
 export const passed = (testInfo) => testInfo.status === 'passed' && testInfo.expectedStatus === 'passed';
