@@ -5,7 +5,7 @@
 // No WebRTC and no server. Nothing here uses Node, so the browser check runs
 // the same code.
 import type {
-  DataChannelPipe, IceCandidate, IncomingAttempt, MessagePipe, PeerConnection, ReceiverRendezvous, SenderRendezvous, SessionDescription,
+  DataChannelPipe, IceCandidate, IncomingAttempt, MessagePipe, PeerConnection, ReceiverRendezvous, RoomNews, SenderRendezvous, SessionDescription,
 } from '../../src/dgdtp/channel.js';
 import { hex } from './cpace-vectors.js';
 
@@ -126,16 +126,16 @@ export interface RendezvousRecord {
 export class MockRendezvous {
   readonly records: RendezvousRecord[] = [];
   readonly pipes: Array<PipePair<MessagePipe>> = [];
-  readonly #rooms = new Map<string, { roomNonce: Uint8Array; incoming: IncomingAttempt[]; waiting: Array<(a: IncomingAttempt) => void> }>();
+  readonly #rooms = new Map<string, { roomNonce: Uint8Array; incoming: IncomingAttempt[]; waiting: Array<(a: IncomingAttempt) => void>; news?: RoomNews }>();
   /** The locator the next room with a code gets. */
   locator = 'AB';
   /** A relay on every attempt's pipe, given which pipe it is (0 for the first join). */
   relay?: (pipe: number) => Relay | undefined;
 
   readonly sender: SenderRendezvous = {
-    create: async ({ roomId, roomNonce, code }) => {
+    create: async ({ roomId, roomNonce, code }, news) => {
       this.records.push({ from: 'sender', what: 'create', bytes: concat(roomId, roomNonce, Uint8Array.of(code ? 1 : 0)) });
-      const room = { roomNonce: new Uint8Array(roomNonce), incoming: [], waiting: [] };
+      const room = { roomNonce: new Uint8Array(roomNonce), incoming: [], waiting: [], news };
       this.#rooms.set(`id:${hex(roomId)}`, room);
       if (!code) return {};
       this.#rooms.set(`code:${this.locator}`, room);
@@ -154,6 +154,8 @@ export class MockRendezvous {
       const pair = this.#recorded(pipePair(this.relay?.(n)));
       this.pipes.push(pair);
       const attempt: IncomingAttempt = { by: 'roomId' in by ? 'link' : 'code', pipe: pair.sender };
+      // The room hears of it as a real rendezvous tells it; a test may take it from here too.
+      room.news?.attempt(attempt);
       const waiter = room.waiting.shift();
       if (waiter) waiter(attempt);
       else room.incoming.push(attempt);

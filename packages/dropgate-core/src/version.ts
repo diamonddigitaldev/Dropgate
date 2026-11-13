@@ -1,3 +1,5 @@
+import type { ProtocolCompatibility } from './types.js';
+
 // The build writes core's version in from its package.json, so nobody types
 // it in. The tests' config does the same.
 declare const __DROPGATE_CORE_VERSION__: string | undefined;
@@ -27,3 +29,32 @@ export const PROTOCOLS: Protocols = Object.freeze({
 });
 
 export type ProtocolName = keyof Protocols;
+
+/** A protocol version the server gave, if it's one: whole numbers, major and minor. */
+export function protocolVersion(value: unknown): ProtocolVersion | null {
+  if (!value || typeof value !== 'object') return null;
+  const { major, minor } = value as { major?: unknown; minor?: unknown };
+  if (!Number.isInteger(major) || !Number.isInteger(minor) || (major as number) < 0 || (minor as number) < 0) return null;
+  return Object.freeze({ major: major as number, minor: minor as number });
+}
+
+/**
+ * Whether this client's version of a protocol works with the server's: the
+ * same major. A server that gives none is older than Dropgate 4.
+ */
+export function checkProtocol(client: ProtocolVersion, given: unknown): ProtocolCompatibility {
+  const server = protocolVersion(given);
+  if (!server || server.major < client.major) {
+    return {
+      compatible: false, client, server, update: 'server',
+      message: 'Update required: this server runs an older version of Dropgate. Its operator needs to update it.',
+    };
+  }
+  if (server.major > client.major) {
+    return {
+      compatible: false, client, server, update: 'client',
+      message: 'Update required: this server runs a newer version of Dropgate. Update this app to use it.',
+    };
+  }
+  return { compatible: true, client, server, message: 'This server works with this version of Dropgate.' };
+}

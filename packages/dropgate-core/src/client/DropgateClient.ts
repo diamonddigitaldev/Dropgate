@@ -2,10 +2,10 @@ import { DEFAULT_CHUNK_SIZE } from '../constants.js';
 import { DropgateError, directTransferDisabled, errorFromStatus, toDropgateError, withTransport } from '../errors.js';
 import { guardedFetch, insecureTransportNotAllowed, isSecureServerUrl } from '../transport.js';
 import type { Transport } from '../transport.js';
-import { CORE_VERSION, PROTOCOLS } from '../version.js';
+import { CORE_VERSION, PROTOCOLS, checkProtocol } from '../version.js';
 import { RetryWindow, retrying, retryPolicy, withRetryAfter } from '../retry.js';
 import type { RetryPolicy } from '../retry.js';
-import type { ProtocolName, ProtocolVersion, Protocols } from '../version.js';
+import type { ProtocolName, Protocols } from '../version.js';
 import { startOperation } from '../operation.js';
 import type { OperationContext } from '../operation.js';
 import type { PauseControl, PauseHooks } from '../pause.js';
@@ -19,7 +19,6 @@ import type {
   ServerInfo,
   ServerTarget,
   CompatibilityResult,
-  ProtocolCompatibility,
   AppInfo,
   ShareTargetResult,
   UploadResult,
@@ -243,35 +242,6 @@ const DIRECT_EVENTS = [
   'onStatus', 'onProgress', 'onMeta', 'onComplete', 'onCancel', 'onConnectionHealth',
   'onFileStart', 'onFileEnd', 'onResumeRequest',
 ] as const;
-
-/** A protocol version the server gave, if it's one: whole numbers, major and minor. */
-function protocolVersion(value: unknown): ProtocolVersion | null {
-  if (!value || typeof value !== 'object') return null;
-  const { major, minor } = value as { major?: unknown; minor?: unknown };
-  if (!Number.isInteger(major) || !Number.isInteger(minor) || (major as number) < 0 || (minor as number) < 0) return null;
-  return Object.freeze({ major: major as number, minor: minor as number });
-}
-
-/**
- * Whether this client's version of a protocol works with the server's: the
- * same major. A server that gives none is older than Dropgate 4.
- */
-function checkProtocol(client: ProtocolVersion, given: unknown): ProtocolCompatibility {
-  const server = protocolVersion(given);
-  if (!server || server.major < client.major) {
-    return {
-      compatible: false, client, server, update: 'server',
-      message: 'Update required: this server runs an older version of Dropgate. Its operator needs to update it.',
-    };
-  }
-  if (server.major > client.major) {
-    return {
-      compatible: false, client, server, update: 'client',
-      message: 'Update required: this server runs a newer version of Dropgate. Update this app to use it.',
-    };
-  }
-  return { compatible: true, client, server, message: 'This server works with this version of Dropgate.' };
-}
 
 /** An upload's ID, as a Dropgate server makes them. It's put in a URL's path, so nothing else is. */
 const UPLOAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

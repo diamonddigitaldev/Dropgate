@@ -141,10 +141,30 @@ export interface ReceiverRendezvous {
   join(by: { roomId: Uint8Array } | { locator: string }): Promise<{ roomNonce: Uint8Array; pipe: MessagePipe }>;
 }
 
-/** The sender's side of the rendezvous: opening its room. */
+/** What the rendezvous tells a sender's room after it's opened, in the order it comes. */
+export interface RoomNews {
+  /** An attempt reached the room. */
+  attempt(attempt: IncomingAttempt): void;
+  /** A new code's locator, or none for now (none free, or the last was released). */
+  code(locator: string | undefined): void;
+  /** The room's connection to the rendezvous ended: no more attempts or codes. */
+  ended?(err: DropgateError): void;
+}
+
+/** The sender's side of the rendezvous: opening its room, and what comes to it. */
 export interface SenderRendezvous {
-  /** Opens the room under link mode's room ID and the sender's nonce: a code's locator, if one was asked for and one is free. */
-  create(room: { roomId: Uint8Array; roomNonce: Uint8Array; code: boolean }): Promise<{ locator?: string }>;
+  /**
+   * Opens the room under link mode's room ID and the sender's nonce: a code's
+   * locator, if one was asked for and one is free. Later attempts and codes
+   * come through `news`.
+   */
+  create(room: { roomId: Uint8Array; roomNonce: Uint8Array; code: boolean }, news?: RoomNews): Promise<{ locator?: string }>;
+  /** False when the server gives no codes (`/api/info`'s `codeLetters` 0): a room asking for one then has its code off. */
+  readonly givesCodes?: boolean;
+  /** A receiver was accepted: no new attempts, every other one dropped, no more codes. */
+  lock?(keep?: IncomingAttempt): void;
+  /** Closes the room on the rendezvous. */
+  close?(): void;
 }
 
 /** A secure channel, once its handshake is done and BIND is sent or taken. Printed, logged or serialised, it shows as `[SecureChannel]`. */
@@ -263,7 +283,7 @@ class Attempt {
       message = await this.#race(pipe.receive());
     } catch (err) {
       if (this.#error) throw this.#error;
-      throw lost();
+      throw pipeError(err);
     }
     if (!(message instanceof Uint8Array)) throw insecure();
     return message;
@@ -304,9 +324,9 @@ class Attempt {
       if (frame === undefined) {
         try {
           frame = await this.#pipe.receive();
-        } catch {
+        } catch (err) {
           // The rendezvous going matters only until the data channel is open, which carries on without it.
-          if (!this.#data) this.end(lost());
+          if (!this.#data) this.end(pipeError(err));
           return;
         }
       }
@@ -623,11 +643,19 @@ async function firstMessage(pipe: MessagePipe): Promise<Uint8Array> {
   let message: unknown;
   try {
     message = await pipe.receive();
-  } catch {
-    throw lost();
+  } catch (err) {
+    throw pipeError(err);
   }
   if (!(message instanceof Uint8Array)) throw insecure();
   return message;
+}
+
+/**
+ * Why a pipe ended: its own error when it gives one of core's (the rendezvous
+ * refusing something, say), else CONNECTION_LOST.
+ */
+function pipeError(err: unknown): DropgateError {
+  return DropgateError.is(err) ? err : lost();
 }
 
 export interface ConnectOptions extends AttemptOptions {
@@ -733,23 +761,81 @@ export type IncomingAttempt =
   | { by: 'link' | 'code'; pipe: MessagePipe }
   | { by: 'resume'; pipe: MessagePipe; resumeSecret: Uint8Array; previousGeneration: bigint };
 
+/** A code as the room holds it: the locator, the password for CPace, and the whole code for the screen. */
+interface RoomCode {
+  locator: string;
+  password: CodePassword;
+  code: string;
+}
+
+/** Whether the room's code is on the sender's screen: `ready`, `unavailable` (none free, or being replaced), or `off` (not asked for). */
+export type RoomCodeState = 'ready' | 'unavailable' | 'off';
+
+/**
+ * The rendezvous's news for a room that doesn't exist yet: kept in order until
+ * the room takes it, so nothing that comes while it's being made is lost.
+ */
+class NewsRelay implements RoomNews {
+  #target: RoomNews | undefined;
+  readonly #early: Array<(target: RoomNews) => void> = [];
+
+  connect(target: RoomNews): void {
+    this.#target = target;
+    for (const deliver of this.#early.splice(0)) deliver(target);
+  }
+
+  #pass(deliver: (target: RoomNews) => void): void {
+    if (this.#target) deliver(this.#target);
+    else this.#early.push(deliver);
+  }
+
+  attempt(attempt: IncomingAttempt): void { this.#pass((t) => t.attempt(attempt)); }
+  code(locator: string | undefined): void { this.#pass((t) => t.code(locator)); }
+  ended(err: DropgateError): void { this.#pass((t) => t.ended?.(err)); }
+}
+
 /**
  * The sender's room: its link's secret, its nonce, its code if it has one,
- * and the attempts it accepts. Printed, logged or serialised, it shows as
+ * and the attempts that reach it. Printed, logged or serialised, it shows as
  * `[SenderRoom]`.
+ *
+ * A code is tried once, right or wrong: the code on the screen when an
+ * attempt by code reaches the room is that attempt's, and the room is given a
+ * new one (a new password, on whatever locator the rendezvous gives next),
+ * so a code someone has typed is never shown again. The link keeps working.
  */
 export class SenderRoom {
   readonly #provider: CryptoProvider;
   #secret: Uint8Array<ArrayBuffer> | undefined;
   readonly #roomNonce: Uint8Array<ArrayBuffer>;
-  #code: { locator: string; password: CodePassword; code: string } | undefined;
+  readonly #rendezvous: SenderRendezvous | undefined;
+  readonly #letters: LocatorLetters | undefined;
+  readonly #codeWanted: boolean;
+  #code: RoomCode | undefined;
+  /** Each attempt by code that came through the rendezvous's news, with the code it was for (none if none was shown). */
+  readonly #bound = new Map<IncomingAttempt, RoomCode | undefined>();
+  readonly #incoming: IncomingAttempt[] = [];
+  readonly #waiting: Array<{ resolve: (attempt: IncomingAttempt) => void; reject: (err: unknown) => void }> = [];
+  readonly #listeners = new Set<() => void>();
+  #ended: DropgateError | undefined;
 
   /** @internal openRoom() makes these. */
-  constructor(provider: CryptoProvider, secret: Uint8Array<ArrayBuffer>, roomNonce: Uint8Array<ArrayBuffer>, code?: { locator: string; password: CodePassword; code: string }) {
+  constructor(
+    provider: CryptoProvider, secret: Uint8Array<ArrayBuffer>, roomNonce: Uint8Array<ArrayBuffer>,
+    options: { code?: RoomCode; codeWanted?: boolean; rendezvous?: SenderRendezvous; letters?: LocatorLetters; news?: NewsRelay } = {},
+  ) {
     this.#provider = provider;
     this.#secret = secret;
     this.#roomNonce = roomNonce;
-    this.#code = code;
+    this.#code = options.code;
+    this.#codeWanted = options.codeWanted ?? options.code !== undefined;
+    this.#rendezvous = options.rendezvous;
+    this.#letters = options.letters;
+    options.news?.connect({
+      attempt: (attempt) => this.#attempt(attempt),
+      code: (locator) => this.#newCode(locator),
+      ended: (err) => this.#end(err),
+    });
     Object.freeze(this);
   }
 
@@ -761,8 +847,108 @@ export class SenderRoom {
   /** The room's nonce, a copy: public. */
   get roomNonce(): Uint8Array<ArrayBuffer> { return new Uint8Array(this.#roomNonce); }
 
-  /** The code for the sender's screen, until an attempt uses it. */
+  /** The code for the sender's screen, until an attempt uses it and a new one comes. */
   get code(): string | undefined { return this.#code?.code; }
+
+  /** Whether a code is on the screen: `ready`; `unavailable` while none is free or the next is coming; `off` if none was asked for. */
+  get codeState(): RoomCodeState {
+    if (!this.#codeWanted) return 'off';
+    return this.#code ? 'ready' : 'unavailable';
+  }
+
+  /** Calls `listener` whenever `code` changes. Returns a function that stops it. */
+  onCodeChange(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => { this.#listeners.delete(listener); };
+  }
+
+  /**
+   * The next attempt to reach the room, in the order they came. Rejects once
+   * the room's connection to the rendezvous has ended, or the room is closed.
+   */
+  nextAttempt(): Promise<IncomingAttempt> {
+    const ready = this.#incoming.shift();
+    if (ready) return Promise.resolve(ready);
+    if (this.#ended) return Promise.reject(this.#ended);
+    return new Promise((resolve, reject) => this.#waiting.push({ resolve, reject }));
+  }
+
+  /**
+   * A receiver was accepted: the room takes no new attempt and asks for no
+   * more codes, every attempt but `keep` is dropped, and the code, if one is
+   * shown, is let go.
+   */
+  lock(keep?: IncomingAttempt): void {
+    this.#rendezvous?.lock?.(keep);
+    this.#forgetCode();
+    for (const [attempt, code] of this.#bound) {
+      if (attempt !== keep) {
+        code?.password.forget();
+        this.#bound.delete(attempt);
+      }
+    }
+    // The kept attempt, if it's still waiting to be taken, stays.
+    for (const attempt of this.#incoming.splice(0)) {
+      if (attempt === keep) this.#incoming.push(attempt);
+      else attempt.pipe.close();
+    }
+  }
+
+  #notify(): void {
+    for (const listener of [...this.#listeners]) {
+      try {
+        listener();
+      } catch {
+        // A listener's error is its own.
+      }
+    }
+  }
+
+  #attempt(attempt: IncomingAttempt): void {
+    if (this.#ended) {
+      attempt.pipe.close();
+      return;
+    }
+    if (attempt.by === 'code') {
+      // The code on the screen now is this attempt's: tried once, then replaced.
+      this.#bound.set(attempt, this.#code);
+      this.#code = undefined;
+      this.#notify();
+    }
+    const waiter = this.#waiting.shift();
+    if (waiter) waiter.resolve(attempt);
+    else this.#incoming.push(attempt);
+  }
+
+  /** The rendezvous gave a new locator (or none for now): a new password is drawn for it here. */
+  #newCode(locator: string | undefined): void {
+    if (this.#ended || !this.#codeWanted) return;
+    // One change, told once: the old code goes and the new one comes together.
+    this.#forgetCode(false);
+    if (locator !== undefined) {
+      try {
+        this.#code = newCode(this.#provider, locator, this.#letters);
+      } catch {
+        // Not a locator of this room's length: no code is shown.
+      }
+    }
+    this.#notify();
+  }
+
+  /** Lets the shown code go, its password overwritten; listeners told unless `tell` is false. */
+  #forgetCode(tell = true): void {
+    const had = this.#code !== undefined;
+    this.#code?.password.forget();
+    this.#code = undefined;
+    if (had && tell) this.#notify();
+  }
+
+  #end(err: DropgateError): void {
+    if (this.#ended) return;
+    this.#ended = err;
+    for (const waiter of this.#waiting.splice(0)) waiter.reject(err);
+    this.#forgetCode();
+  }
 
   /**
    * Takes one attempt to its secure channel. By code: CPace as the responder,
@@ -780,8 +966,16 @@ export class SenderRoom {
     const roomNonce = this.#roomNonce;
     const open = () => [pipe, peer];
     if (attempt.by === 'code') {
-      const code = this.#code;
-      this.#code = undefined;
+      let code: RoomCode | undefined;
+      if (this.#bound.has(attempt)) {
+        code = this.#bound.get(attempt);
+        this.#bound.delete(attempt);
+      } else {
+        // An attempt a test's rendezvous handed over directly: the code on the screen now.
+        code = this.#code;
+        this.#code = undefined;
+        if (code) this.#notify();
+      }
       return guarded('sender', open, async () => {
         // A code is used once, right or wrong: an attempt after that is answered with an abort.
         if (!code) {
@@ -803,6 +997,7 @@ export class SenderRoom {
           }
           return await senderAttempt(provider, keys, pipe, peer, 0n, hello);
         } finally {
+          // Closing the exchange lets the password go too, spent or not.
           exchange.close();
         }
       });
@@ -827,12 +1022,20 @@ export class SenderRoom {
     });
   }
 
-  /** Closes the room: the link's secret overwritten, the code's password let go. */
+  /**
+   * Closes the room: the link's secret overwritten, every code's password let
+   * go, the attempts not yet taken closed, and the room closed on the
+   * rendezvous.
+   */
   close(): void {
     this.#secret?.fill(0);
     this.#secret = undefined;
-    this.#code?.password.forget();
-    this.#code = undefined;
+    this.#forgetCode();
+    for (const code of this.#bound.values()) code?.password.forget();
+    this.#bound.clear();
+    for (const attempt of this.#incoming.splice(0)) attempt.pipe.close();
+    this.#end(new DropgateError({ code: 'OPERATION_CANCELLED' }));
+    this.#rendezvous?.close?.();
   }
 
   toJSON(): string { return '[SenderRoom]'; }
@@ -858,18 +1061,20 @@ export interface OpenRoomOptions {
  * The sender's new room: a link's secret S and the room's nonce, both random
  * from the provider; the room opened on the rendezvous under S's room ID; and,
  * if a code was asked for and the rendezvous gave a locator, a code whose
- * password is drawn on this device.
+ * password is drawn on this device. Later codes and attempts come to the room
+ * from the rendezvous.
  */
 export async function openRoom(provider: CryptoProvider, options: OpenRoomOptions): Promise<SenderRoom> {
   const { rendezvous } = options ?? ({} as never);
   if (!rendezvous || typeof rendezvous.create !== 'function') throw invalid('A room is opened on the rendezvous.');
   const secret = provider.randomBytes(LINK_SECRET_BYTES);
   const roomNonce = provider.randomBytes(CPACE_ROOM_NONCE_BYTES);
+  const news = new NewsRelay();
   try {
     const roomId = await deriveRoomId(provider, secret);
     let created: { locator?: string };
     try {
-      created = await rendezvous.create({ roomId, roomNonce: new Uint8Array(roomNonce), code: options.code === true });
+      created = await rendezvous.create({ roomId, roomNonce: new Uint8Array(roomNonce), code: options.code === true }, news);
     } finally {
       roomId.fill(0);
     }
@@ -879,10 +1084,17 @@ export async function openRoom(provider: CryptoProvider, options: OpenRoomOption
         code = newCode(provider, created.locator, options.letters);
       } catch {
         // The rendezvous gave something that isn't a locator.
+        rendezvous.close?.();
         throw new DropgateError({ code: 'INVALID_RESPONSE' });
       }
     }
-    return new SenderRoom(provider, secret, roomNonce, code && { locator: code.locator, password: code.password, code: code.code });
+    return new SenderRoom(provider, secret, roomNonce, {
+      code: code && { locator: code.locator, password: code.password, code: code.code },
+      codeWanted: options.code === true && rendezvous.givesCodes !== false,
+      rendezvous,
+      letters: options.letters,
+      news,
+    });
   } catch (err) {
     secret.fill(0);
     throw toDropgateError(err);

@@ -16,8 +16,14 @@ import {
   SMALL_BUCKET_BYTES,
 } from '../src/dgdtp/seal.js';
 import { DATA_CHANNEL_LABEL, LOW_WATER_BYTES } from '../src/dgdtp/webrtc.js';
+import { CODE_RETRY_MS, RENDEZVOUS_PATH, RENEW_INTERVAL_MS } from '../src/dgdtp/rendezvous.js';
+import {
+  BIND_BYTES, BLOCK_BYTES, DATA_HEADER_BYTES, HELLO_BYTES, MANIFEST_HEADER_BYTES, MANIFEST_VERSION, MAX_MANIFEST_BYTES, MAX_MANIFEST_FILES,
+  MAX_MEDIA_TYPE_BYTES,
+} from '../src/dgdtp/messages.js';
 
-// DGDTP.md's table of the secure channel's constants gives each one's value.
+// DGDTP.md's table of the secure channel's, the rendezvous client's and the
+// engine's records' constants gives each one's value.
 // The docs checks read names, not values, so this holds the table to the code:
 // every constant the table names is one of these, with the value it gives, and
 // every one of these is in the table. Unpacked on its own, from a release's
@@ -33,6 +39,9 @@ const CONSTANTS: Record<string, number | bigint | string> = {
   MAX_CLOSE_BODY_BYTES, PROLOGUE_BYTES, NOISE_MAX_MESSAGE_BYTES, NOISE_MAX_RECORD_PLAINTEXT_BYTES,
   NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES, MAX_HELLO_BYTES, NOISE_REKEY_INTERVAL, MAX_GENERATION,
   DATA_CHANNEL_LABEL, MIN_RECORD_BYTES, LOW_WATER_BYTES,
+  RENDEZVOUS_PATH, RENEW_INTERVAL_MS, CODE_RETRY_MS,
+  HELLO_BYTES, BIND_BYTES, MANIFEST_HEADER_BYTES, DATA_HEADER_BYTES, BLOCK_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_FILES,
+  MAX_MEDIA_TYPE_BYTES, MANIFEST_VERSION,
 };
 
 /** A value as the table writes it: `a string`, 8,230, or 2⁶⁴ − 1. */

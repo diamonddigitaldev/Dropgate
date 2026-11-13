@@ -55,6 +55,7 @@ export const ERROR_CODES = {
   SECURITY_POLICY_MISMATCH: { origin: 'peer', retryable: false, message: "The connection couldn't be secured, so it was closed." },
   CODE_MISMATCH: { origin: 'peer', retryable: false, message: "The code didn't match, so the connection was closed." },
   PEER_FAILED: { origin: 'peer', retryable: false, message: 'The other device reported an error.' },
+  INVALID_MESSAGE: { origin: 'peer', retryable: false, message: "The other device sent something this version of Dropgate doesn't understand." },
   UNEXPECTED_ERROR: { origin: 'local', retryable: false, message: 'Something unexpected went wrong.' },
 } as const satisfies Record<string, ErrorCodeInfo>;
 

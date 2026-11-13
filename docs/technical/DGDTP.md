@@ -17,11 +17,11 @@ DGDTP 4 has two layers:
 
 ### 1.1 What's Built Now
 
-The secure channel is built in `@dropgate/core` ([`packages/dropgate-core/src/dgdtp/`](../../packages/dropgate-core/src/dgdtp/)), and tested end to end over a stand-in server and stand-in connections, with no WebRTC ([§4.12](#412-test-vectors-and-tests)). Nothing in core's API uses it yet, and none of it is exported.
+The secure channel is built in `@dropgate/core` ([`packages/dropgate-core/src/dgdtp/`](../../packages/dropgate-core/src/dgdtp/)), and tested end to end over stand-in connections, over WebRTC between two peer connections in Node, and through a real Dropgate Server's rendezvous ([§4.12](#412-test-vectors-and-tests)). Nothing in core's API uses it yet, and none of it is exported.
 
 Today's direct transfers still run version 3's transfer messages, with `hello` carrying 4, on PeerJS, protected by WebRTC's own DTLS encryption alone ([§5](#5-signalling-layer) to [§18](#18-error-model)). They support single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§16](#16-resume-support)). What DTLS alone does and doesn't protect against is in [§19.1](#191-transport-encryption).
 
-Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, has its rooms and codes built: a sender's room, its code, its receivers' attempts by link or by code, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Core's client for it and the transfer engine are still to come. Together they carry every direct transfer over the secure channel, and their messages replace §5 to §18.
+Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, is built, and so is core's client for it: a sender's room, its codes, its receivers' attempts by link or by code, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Core also writes and reads the transfer engine's records, its list of files and its checkpoint chain. The engine that sends them is still to come. Together they carry every direct transfer over the secure channel, and their messages replace §5 to §18.
 
 ### 1.2 Design Goals
 
@@ -294,9 +294,15 @@ Each error is core's `DropgateError` with one of these codes ([Errors](../core/e
 | `CODE_MISMATCH` | `peer` | CPace didn't complete: a wrong code, a code already used, or any abort ([§4.3](#43-cpace-typed-codes)). Both devices get it | The receiver: "That code didn't match. Ask the sender for the new one." The sender: "Someone entered the wrong code. Here's a new one." |
 | `SECURITY_POLICY_MISMATCH` | `peer` | A sealed frame, a handshake message or a record didn't open, wasn't the next, or wasn't a length it can be; a fingerprint broke the rule; message 1 held something; BIND wasn't one | "The connection couldn't be secured, so it was closed." |
 | `SECURITY_POLICY_MISMATCH` | `local` | This device has sent every frame or record its keys allow | "Setting up this connection took too many messages, so it was closed." or "This connection has sent every record its keys allow, so it was closed." |
-| `CONNECTION_LOST` | `network` | The rendezvous, or the data channel, went before the channel was up | "The connection was lost." |
+| `CONNECTION_LOST` | `network` | The rendezvous, or the data channel, went before the channel was up: the server closed the socket, or told a receiver the sender has gone | "The connection was lost." |
+| `SERVER_UNREACHABLE` | `network` | The socket to the rendezvous never opened | "The server couldn't be reached." |
+| `NOT_FOUND` | `server` | No room has that link's room ID, or no unused code has that locator | "No transfer has that code or link. It may have ended, or the code was used." |
+| `REQUEST_REJECTED` | `server` | The room is locked, already has 4 attempts by link, or its code is being tried | "This transfer is already going to someone else." |
+| `VERSION_UNSUPPORTED` | `server` | The rendezvous speaks another DGDTP major. `details` says which side needs updating, as `GET /api/info` does | "Update required: this server runs a newer version of Dropgate. Update this app to use it.", or that its operator needs to update it |
+| `CAPABILITY_UNSUPPORTED` | `server` | A typed code, on a server whose `codeLetters` is 0. Nothing is sent | "This server doesn't use codes. Ask the sender for the link." |
 | `INVALID_CODE` | `local` | A typed code isn't one. Nothing is sent | "That isn't a valid sharing code." |
-| `INVALID_RESPONSE` | `server` | The rendezvous gave a room nonce or a locator that isn't one | "The server's answer wasn't understood." |
+| `INVALID_RESPONSE` | `server` | The rendezvous gave a room nonce or a locator that isn't one, sent something that isn't one of its messages, or refused one of core's as malformed or as one frame too many | "The server's answer wasn't understood." |
+| `INVALID_MESSAGE` | `peer` | A record from the other device isn't one of this version's, at its exact length (the engine, still to come, ends a transfer with it) | "The other device sent something this version of Dropgate doesn't understand." |
 | `OPERATION_CANCELLED` | `local` | This device closed the attempt or the channel | "The operation was cancelled." |
 
 **How both devices hear it:**
@@ -331,19 +337,20 @@ Each error is core's `DropgateError` with one of these codes ([Errors](../core/e
 | [`noise-rekey-vectors.json`](../../packages/dropgate-core/tests/fixtures/noise-rekey-vectors.json) | [`reference-noise.mjs`](../../packages/dropgate-core/tests/helpers/reference-noise.mjs), which passes cacophony's vector too | Runs past 65,536 records each way, with the key after each rekey |
 | [`dgdtp-signal-vectors.json`](../../packages/dropgate-core/tests/fixtures/dgdtp-signal-vectors.json) | [`reference-signal.mjs`](../../packages/dropgate-core/tests/helpers/reference-signal.mjs) | Every output of the key schedule, by link, by code and on resume; each type of sealed frame each way, in each padded size; a close each way |
 | [`dgdtp-prologue-vectors.json`](../../packages/dropgate-core/tests/fixtures/dgdtp-prologue-vectors.json) | [`reference-prologue.mjs`](../../packages/dropgate-core/tests/helpers/reference-prologue.mjs) | The fingerprint rule on 18 SDPs; the prologue in each mode, up to the last generation; a whole handshake from an offer and an answer |
+| [`dgdtp-message-vectors.json`](../../packages/dropgate-core/tests/fixtures/dgdtp-message-vectors.json) | [`reference-messages.mjs`](../../packages/dropgate-core/tests/helpers/reference-messages.mjs) | Every record of the engine at its edges, those read leniently and those refused; manifests of one file, of several with empty ones, and of exactly 1 MiB, with their hashes; the checkpoint chain over files of 0, 1, 1 MiB − 1, 1 MiB and 1 MiB + 1 bytes; every rendezvous message, and the server's that must be refused |
 
-Core's tests also run the whole channel end to end, on each provider and with one device on each, over a stand-in rendezvous and stand-in connections with fake SDP: by link, by code and on resume, every attack above ending the attempt as it says, and with every random value fixed, the channel's own handshake giving the vector's bytes. The vectors and the channel's checks run in Chromium, Firefox and WebKit too, on the provider core chooses in each and on `@noble` in all three ([Building and Testing](../core/building-and-testing.md)).
+Core's tests also run the whole channel end to end, on each provider and with one device on each, over a stand-in rendezvous and stand-in connections with fake SDP: by link, by code and on resume, every attack above ending the attempt as it says, and with every random value fixed, the channel's own handshake giving the vector's bytes. They run it over WebRTC too, between two peer connections in Node, and through a real Dropgate Server's rendezvous: by link, by code, a wrong code then the link and the new code, a resume, and a server with every code held. The vectors and the channel's checks run in Chromium, Firefox and WebKit too, on the provider core chooses in each and on `@noble` in all three ([Building and Testing](../core/building-and-testing.md)).
 
 ### 4.13 What the Rendezvous and the Engine Add
 
-Of these, the connection itself and the rendezvous's rooms and codes are built. Core runs the secure channel over a W3C `RTCPeerConnection` (the browser's own, or one an integrator passes in for Node).
+Of these, the connection itself, the rendezvous's rooms and codes, and core's client for the rendezvous are built. Core runs the secure channel over a W3C `RTCPeerConnection` (the browser's own, or one an integrator passes in for Node).
 
 - **The data channel:** the receiver makes the one data channel, `dgdtp/4`, ordered and fully reliable, carrying bytes only; anything else on it is refused as a fault. The fingerprints come from the real SDP each device applied.
 - **Record size:** a device's largest record is the smaller of 65,535 bytes and its data channel's max-message-size. A data channel that can't take 16,384 bytes ends the attempt with `CAPABILITY_UNSUPPORTED`. How each device tells the other its size comes with the engine.
 - **Backpressure:** a device sends no more while over 256 KiB waits in the data channel's buffer, going on once it drains, whether or not the `bufferedamountlow` event comes.
 - **Ends:** ICE or the connection failing, or the data channel closing, ends it with `CONNECTION_LOST`.
 
-The rendezvous's rooms and codes are built on the Dropgate Server ([`server/rendezvous.js`](../../server/rendezvous.js)), beside PeerJS; nothing in core or the apps uses them yet.
+The rendezvous's rooms and codes are built on the Dropgate Server ([`server/rendezvous.js`](../../server/rendezvous.js)), beside PeerJS; core's client speaks to it, but nothing in core's API or the apps uses it yet.
 
 - **One WebSocket per device** at `/api/v4/rendezvous`, with nothing about a room in its address, speaking short binary messages: a type byte, then fixed fields. The sender's one socket holds its room; each receiver's attempt has a socket of its own. A text message, or one over 8,232 bytes, closes the socket.
 - **In plain, as a room is created or joined:** the DGDTP major, so a mismatch is said before any cryptography. A major other than the server's is refused with the server's version; the minor is passed over.
@@ -357,10 +364,17 @@ The rendezvous's rooms and codes are built on the Dropgate Server ([`server/rend
 - **Ends:** a room lives while its sender's socket is open, with no time limit; when it closes, each receiver is told and its socket closed, and when a receiver's closes, the sender is told. The server pings every socket every 30 seconds and closes one it hasn't heard from in 60, and closes one with more than 1 MiB waiting to be sent to it.
 - **Nothing kept or logged:** no room ID, room nonce, attempt ID, locator, share or frame, in any log or on disk.
 
-Still to come:
+Core's client for the rendezvous ([`dgdtp/rendezvous.ts`](../../packages/dropgate-core/src/dgdtp/rendezvous.ts)) carries the secure channel's set-up through it:
 
-- **Core's client** for the rendezvous, under the secure channel.
-- **From the engine:** the layouts of the sender's hello, BIND, the receiver's acceptance (with the resume secret) and a close; records sent over the data channel strictly in order; and 15 seconds for each attempt.
+- **Its sockets:** one for the sender's room, and one for each receiver's attempt, at `wss://<server>/api/v4/rendezvous` (`ws:` for a server on plain HTTP, which a client reaches only with `allowInsecure`), with the global `WebSocket`. Every message is binary, in the layouts above; the DGDTP major and minor are core's own.
+- **A sender's code:** asked for only when the sender wants one and the server gives codes (`codeLetters` isn't 0), and renewed every 4 minutes while it's unused. After any attempt by code, right, wrong or given up before it was tried, the sender asks for a new code at once and draws a new password on this device for whatever locator comes back, so a code someone has typed is never shown again. While none is free, the room works by its link, and the sender asks again every 15 seconds until one comes or a receiver is accepted; if the server releases an unused code, the sender asks again at once.
+- **Accepting a receiver** locks the room: it takes no new attempt, every other attempt is dropped, and no more codes are asked for.
+- **A receiver** joins by the link's room ID, or by a typed code's locator, as many letters as the server's `codeLetters`; the rest of the code never leaves the device. On a server that gives no codes, a typed code is refused before anything is sent.
+- **Errors** are core's, worded for direct transfers ([§4.10](#410-errors)): another major `VERSION_UNSUPPORTED` saying which side needs updating; no such room or code `NOT_FOUND`; a room taken, locked or full `REQUEST_REJECTED`; anything the server sends that isn't one of its messages, or its refusing one of core's, `INVALID_RESPONSE`; a socket that never opens `SERVER_UNREACHABLE`, and one that closes before the data channel is open `CONNECTION_LOST`.
+
+The engine's records are written and read by core ([`dgdtp/messages.ts`](../../packages/dropgate-core/src/dgdtp/messages.ts)), each a type byte then fixed fields at an exact length, a record of any other length `INVALID_MESSAGE`; so are the list of files a sender offers, in pieces the size of a record, with its hash, and the checkpoint chain over every 1 MiB block of every file. They match a second implementation's vectors ([§4.12](#412-test-vectors-and-tests)).
+
+Still to come, from the engine: sending those records (the sender's hello, BIND, the receiver's acceptance with the resume secret, a close), strictly in order over the data channel; and 15 seconds for each attempt.
 
 ### 4.14 Constants
 
@@ -387,6 +401,16 @@ Still to come:
 | `DATA_CHANNEL_LABEL` | `dgdtp/4` | The one data channel's name. |
 | `MIN_RECORD_BYTES` | 16,384 | A data channel that can't take a record of this size isn't used. |
 | `LOW_WATER_BYTES` | 262,144 | A device sends no more while more than this waits in the data channel's buffer. |
+| `RENDEZVOUS_PATH` | `/api/v4/rendezvous` | The rendezvous's one path on a server. |
+| `RENEW_INTERVAL_MS` | 240,000 | How often a sender renews its unused code; the server releases one after 10 minutes. |
+| `CODE_RETRY_MS` | 15,000 | How often a sender asks again for a code while none is free. |
+| `HELLO_BYTES` | 18 | A hello: the sender's in Noise's second message, the receiver's in BIND. |
+| `BIND_BYTES` | 51 | BIND: its type, the close secret and the receiver's hello. |
+| `MANIFEST_HEADER_BYTES`, `DATA_HEADER_BYTES` | 9, 14 | A MANIFEST record and a DATA record before their bytes. |
+| `BLOCK_BYTES`, `MAX_MANIFEST_BYTES` | 1,048,576 | An integrity block of a file, and the largest list of files. |
+| `MAX_MANIFEST_FILES` | 10,000 | The most files one transfer offers. |
+| `MAX_MEDIA_TYPE_BYTES` | 127 | A file's media type in the list of files. |
+| `MANIFEST_VERSION` | 1 | The list of files' version. |
 
 ---
 

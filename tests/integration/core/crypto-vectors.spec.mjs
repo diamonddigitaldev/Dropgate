@@ -9,6 +9,9 @@
 // flipped bit, a replay, a reorder or a reflected frame ending the attempt), the
 // DTLS binding against the same second implementation's vectors (each SDP's
 // fingerprint, the prologue, and a handshake over it), a direct transfer's
+// records, manifest, checkpoint chain and rendezvous messages against a second
+// implementation's vectors (each record at its edges, those refused, manifests
+// to 1 MiB and their hashes, the chain over files at the block edges), a direct transfer's
 // secure channel end to end over a mock rendezvous and fake peer connections (by
 // link, by code and on resume; a wrong code and a swapped fingerprint ending
 // both sides), and the standards' answers for the crypto provider's X25519, SHA-512, HMAC, HKDF
@@ -84,6 +87,9 @@ async function open(page, context) {
     return () => expect(elsewhere, "requests that weren't to this test's own server").toEqual([]);
 }
 
+/** The records', manifest's, chain's and rendezvous messages' checks: one for each vector, two for a record or chain step. */
+const MESSAGE_CHECKS = 329;
+
 /** Each check whose value isn't the known answer, so a failure names them all. */
 const wrong = (checks) => checks.filter(({ expected, actual }) => actual !== expected);
 
@@ -107,12 +113,13 @@ async function expectedProvider(page, browserName) {
     return name;
 }
 
-test("CPace's generator, transcripts and session-ID output, SHA-512, HMAC, HKDF, AES-GCM with associated data, the key schedule and sealed frames, on the provider core chooses", async ({ page, context, browserName }) => {
+test("CPace's generator, transcripts and session-ID output, SHA-512, HMAC, HKDF, AES-GCM with associated data, the key schedule and sealed frames, a direct transfer's records, manifest, chain and rendezvous messages, on the provider core chooses", async ({ page, context, browserName }) => {
     const nothingElsewhere = await open(page, context);
     const expected = await expectedProvider(page, browserName);
-    const { name, cpace, exchange, provider, signal, channel } = await page.evaluate(() => window.runCryptoVectors({ x25519: false, provider: 'chosen' }));
+    const { name, cpace, exchange, provider, signal, channel, messages } = await page.evaluate(() => window.runCryptoVectors({ x25519: false, provider: 'chosen' }));
     expect(name, 'the provider core chose').toBe(expected);
-    expect(wrong([...cpace, ...provider, ...signal]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(wrong([...cpace, ...provider, ...signal, ...messages]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(messages.length, "the records', manifest's, chain's and rendezvous messages' checks").toBe(MESSAGE_CHECKS);
     expect(exchange, 'no exchange without X25519').toEqual([]);
     expect(channel, 'no channel without X25519').toEqual([]);
     expect(cpace.length, "CPace's checks").toBe(31);
@@ -140,9 +147,10 @@ test("X25519, CPace's shares, K and ISK, B.1.10's points, the CPace exchange, ca
 
 test('every check on @noble, in this engine', async ({ page, context }) => {
     const nothingElsewhere = await open(page, context);
-    const { name, cpace, exchange, provider, noise, signal, channel } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'noble' }));
+    const { name, cpace, exchange, provider, noise, signal, channel, messages } = await page.evaluate(() => window.runCryptoVectors({ x25519: true, provider: 'noble' }));
     expect(name).toBe('noble');
-    expect(wrong([...cpace, ...exchange, ...provider, ...noise, ...signal, ...channel]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(wrong([...cpace, ...exchange, ...provider, ...noise, ...signal, ...channel, ...messages]), 'checks whose value differs from the known answer').toEqual([]);
+    expect(messages.length, "the records', manifest's, chain's and rendezvous messages' checks").toBe(MESSAGE_CHECKS);
     expect(cpace.length, "CPace's checks").toBe(58);
     expect(exchange.length, "the CPace exchange's checks").toBe(18);
     expect(provider.length, "the provider's checks").toBe(14);

@@ -87,6 +87,7 @@ var ERROR_CODES = {
   SECURITY_POLICY_MISMATCH: { origin: "peer", retryable: false, message: "The connection couldn't be secured, so it was closed." },
   CODE_MISMATCH: { origin: "peer", retryable: false, message: "The code didn't match, so the connection was closed." },
   PEER_FAILED: { origin: "peer", retryable: false, message: "The other device reported an error." },
+  INVALID_MESSAGE: { origin: "peer", retryable: false, message: "The other device sent something this version of Dropgate doesn't understand." },
   UNEXPECTED_ERROR: { origin: "local", retryable: false, message: "Something unexpected went wrong." }
 };
 var DropgateError = class _DropgateError extends Error {
@@ -3714,6 +3715,34 @@ var PROTOCOLS = Object.freeze({
   dgup: Object.freeze({ major: 4, minor: 0 }),
   dgdtp: Object.freeze({ major: 4, minor: 0 })
 });
+function protocolVersion(value) {
+  if (!value || typeof value !== "object") return null;
+  const { major, minor } = value;
+  if (!Number.isInteger(major) || !Number.isInteger(minor) || major < 0 || minor < 0) return null;
+  return Object.freeze({ major, minor });
+}
+function checkProtocol(client, given) {
+  const server = protocolVersion(given);
+  if (!server || server.major < client.major) {
+    return {
+      compatible: false,
+      client,
+      server,
+      update: "server",
+      message: "Update required: this server runs an older version of Dropgate. Its operator needs to update it."
+    };
+  }
+  if (server.major > client.major) {
+    return {
+      compatible: false,
+      client,
+      server,
+      update: "client",
+      message: "Update required: this server runs a newer version of Dropgate. Update this app to use it."
+    };
+  }
+  return { compatible: true, client, server, message: "This server works with this version of Dropgate." };
+}
 
 // src/utils/network.ts
 function parseServerUrl(urlStr) {
@@ -6785,34 +6814,6 @@ var DIRECT_EVENTS = [
   "onFileEnd",
   "onResumeRequest"
 ];
-function protocolVersion(value) {
-  if (!value || typeof value !== "object") return null;
-  const { major, minor } = value;
-  if (!Number.isInteger(major) || !Number.isInteger(minor) || major < 0 || minor < 0) return null;
-  return Object.freeze({ major, minor });
-}
-function checkProtocol(client, given) {
-  const server = protocolVersion(given);
-  if (!server || server.major < client.major) {
-    return {
-      compatible: false,
-      client,
-      server,
-      update: "server",
-      message: "Update required: this server runs an older version of Dropgate. Its operator needs to update it."
-    };
-  }
-  if (server.major > client.major) {
-    return {
-      compatible: false,
-      client,
-      server,
-      update: "client",
-      message: "Update required: this server runs a newer version of Dropgate. Update this app to use it."
-    };
-  }
-  return { compatible: true, client, server, message: "This server works with this version of Dropgate." };
-}
 var UPLOAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function hostedTarget(opts) {
   const { id } = opts ?? {};
