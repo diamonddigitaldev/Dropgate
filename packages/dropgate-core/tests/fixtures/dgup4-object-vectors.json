@@ -1,0 +1,154 @@
+{
+  "about": [
+    "DGUP 4's encrypted object, pinned. Made with node:crypto from the format itself (tests/helpers/reference-object.mjs);",
+    "core's src/object/ and the server's test builder must make exactly these bytes.",
+    "Byte j of file k (from 0) is (7j + 13k + 1) mod 256. The meta is sealed under input.metaNonce.",
+    "chunks[i].sha256 is the SHA-256 of chunk i as stored (ciphertext and tag); lastChunk is the last 32 bytes of the last chunk."
+  ],
+  "vectors": [
+    {
+      "name": "one byte, one chunk",
+      "input": {
+        "secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "salt": "404142434445464748494a4b4c4d4e4f",
+        "metaNonce": "808182838485868788898a8b",
+        "chunkSize": 65536,
+        "maxBytes": 0,
+        "files": [
+          {
+            "name": "a.txt",
+            "size": 1
+          }
+        ]
+      },
+      "output": {
+        "keys": {
+          "header": "4f140130989f0dbde4dbe4d56106497a895c262dabd589403f5f1e61699b2942",
+          "payload": "e012fccce0af5ca109e90099cd02f8825588e54aef2d0fabd4be8db72a3a63e5",
+          "meta": "67bac419baae6e15ace41d89532e5299613f537892736e7ecbaa91b12b72f873"
+        },
+        "header": "444755500401000000010000404142434445464748494a4b4c4d4e4f29685cea4cc922f6428b0f1ee67b39bd924a83dec31437e175536fbe34bb9076",
+        "paddedLength": 1,
+        "storedSize": 77,
+        "chunks": [
+          {
+            "length": 17,
+            "sha256": "9914cef29af7ef8a94fa24635e288a6464bc24b445e0b62d6915fbfea386a584"
+          }
+        ],
+        "lastChunk": "b5b3f02ea185a45d77773b574f2cf328f5",
+        "meta": {
+          "length": 4124,
+          "sha256": "815baaebd5b228dcec7d83563ca5d9ee962959cd830f4556fa83773b90b83b12"
+        },
+        "object": {
+          "sha256": "7b0f6e6354a9ebf4d283e10b30e883222fad09a99b43d07ba73b0118f85464c6"
+        }
+      }
+    },
+    {
+      "name": "two files, three chunks, Padmé",
+      "input": {
+        "secret": "11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3ea",
+        "salt": "a0a3a6a9acafb2b5b8bbbec1c4c7cacd",
+        "metaNonce": "c0c5cacfd4d9dee3e8edf2f7",
+        "chunkSize": 65536,
+        "maxBytes": 0,
+        "files": [
+          {
+            "name": "report.pdf",
+            "size": 100000
+          },
+          {
+            "name": "Photo – été.jpg",
+            "size": 50000
+          }
+        ]
+      },
+      "output": {
+        "keys": {
+          "header": "ef272813f0eb7ea6cb5d14106290baa641ffec556b5311272ad4934f1d14a1c2",
+          "payload": "2232d5d0afe97bd8f7ff7b0ea7d7d2263c56a7338a1e2dc396f611644508b376",
+          "meta": "3d0c4fae04a8d17e32ccda23cec1caf4b08c027f09ddb5b8168a2debb99afe1e"
+        },
+        "header": "444755500401000000010000a0a3a6a9acafb2b5b8bbbec1c4c7cacdffd493f97bf70fba9b38e37537ac4a3f6569df946cd8345572a764f75759ebdc",
+        "paddedLength": 151552,
+        "storedSize": 151660,
+        "chunks": [
+          {
+            "length": 65552,
+            "sha256": "9dab18d1947eb84599253a0a8d9b48d7f3d56ec1ef3afbeb64d6ae202aa9c3cc"
+          },
+          {
+            "length": 65552,
+            "sha256": "118bdd1378bb7396d43edf28efd0014d287044a16926e67821e4724f4a50c9d1"
+          },
+          {
+            "length": 20496,
+            "sha256": "0cc11c209e373dc7b73175fef4de5a5694ec270dca994f4cb3e1389863840740"
+          }
+        ],
+        "lastChunk": "6d733f8367a265146fef30fcfe1d04e626bcbac00c47a346d177aeb83cdc42b1",
+        "meta": {
+          "length": 4124,
+          "sha256": "fea721101dc9dded2bcb04c2ab7e7a65369ced22495b21820805b04df5127193"
+        },
+        "object": {
+          "sha256": "b5df8b9384d2dc82cf072dca45918b622f53701afd76dd95182aaf2cf721d0b9"
+        }
+      }
+    },
+    {
+      "name": "the same files, clamped to the limit",
+      "input": {
+        "secret": "11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3ea",
+        "salt": "303b46515c67727d88939ea9b4bfcad5",
+        "metaNonce": "e0e1e2e3e4e5e6e7e8e9eaeb",
+        "chunkSize": 65536,
+        "maxBytes": 151000,
+        "files": [
+          {
+            "name": "report.pdf",
+            "size": 100000
+          },
+          {
+            "name": "Photo – été.jpg",
+            "size": 50000
+          }
+        ]
+      },
+      "output": {
+        "keys": {
+          "header": "2b4549a06b055b7cc6f3cde6c3445e0fa31c7594baa8506cdef3fbbfbf58e476",
+          "payload": "956b362e6ece0c96b99ed4f08e061a3f8bee3504f5deb332c81b2de61a327165",
+          "meta": "d4bf81fb60174842cffcc14971dd2075ab02e4fe0ff7ae46f01ace397280b940"
+        },
+        "header": "444755500401000000010000303b46515c67727d88939ea9b4bfcad5c853a64d1f8579780e00a637c166604e24eb986691fcce397f15ef5ed644adef",
+        "paddedLength": 150892,
+        "storedSize": 151000,
+        "chunks": [
+          {
+            "length": 65552,
+            "sha256": "a9fa0a5e55c7c9ccb88b4c9d34f589ce3d05fc5e09b07189c190a0ea42bf306a"
+          },
+          {
+            "length": 65552,
+            "sha256": "30dc40976c1bc5481048eb11b26f0556b2f62e99dce9f940b4553775072fdda2"
+          },
+          {
+            "length": 19836,
+            "sha256": "83350b5ba3b167688dd0b06183db62d5f1aece81f418b6e91fcae3190f10dfb9"
+          }
+        ],
+        "lastChunk": "ef413587cf0f25d167a37cb07ffc7dd6eeaf16b9cc63e60a6a3c08614362dfd2",
+        "meta": {
+          "length": 4124,
+          "sha256": "989a63d972732d1ca2849983938ea33985067de5914715802b674c9920cb5016"
+        },
+        "object": {
+          "sha256": "ef7d4df45ea072443c7810981141e26f93e5f7caae27022d191448c51785911f"
+        }
+      }
+    }
+  ]
+}

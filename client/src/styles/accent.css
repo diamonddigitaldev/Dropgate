@@ -1,0 +1,15 @@
+/* Dropgate's accent: the only colours that differ between the house apps.
+   Bootstrap's own blue, with Bootstrap's own shades of it: white on it is
+   4.5:1, and the text and link shades are the ones that pass on the page and
+   the rail in each theme. test/kit.test.mjs checks every pairing. */
+
+:root {
+    --accent:            #0d6efd;      /* the fill: primary buttons, progress, checked boxes */
+    --accent-hover:      #0b5ed7;      /* the fill, hovered or pressed */
+    --accent-rgb:        13, 110, 253; /* --accent as r, g, b, for the washes */
+    --accent-contrast:   #fff;         /* text and icons on the fill */
+    --accent-text-light: #0a58ca;      /* accent text, and links on hover, in each theme */
+    --accent-text-dark:  #8bb9fe;
+    --accent-link-light: #0d6efd;      /* links, in each theme */
+    --accent-link-dark:  #6ea8fe;
+}

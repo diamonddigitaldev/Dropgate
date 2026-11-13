@@ -1,0 +1,82 @@
+# Errors
+
+Core has one error class, `DropgateError`. Every error it gives is one, with a `code` from the table below. Check the `code`, never the message: the codes are stable, so a code keeps its meaning, and a new situation gets a new code. `ERROR_CODES` lists them all, each with its default origin, retryable and message.
+
+An upload or a download doesn't throw when it goes wrong: it ends with a `failed` [outcome](outcomes.md) that holds the error. The other calls, such as `client.server.connect()` and `client.hosted.metadata()`, throw it.
+
+```javascript
+import { DropgateError } from '@dropgate/core';
+
+try {
+  const upload = await client.hosted.metadata({ id, secret });
+} catch (err) {
+  if (DropgateError.is(err, 'VERSION_UNSUPPORTED')) showUpdateRequired(err.message, err.details.update);
+  else if (DropgateError.is(err) && err.retryable) showTryAgain(err.message);
+  else throw err;
+}
+```
+
+## What an Error Holds
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `name` | `string` | Always `DropgateError` |
+| `code` | `DropgateErrorCode` | What went wrong: one of the codes below |
+| `message` | `string` | A sentence a person can read. It never holds a file name or a key, so it's safe to show and to log |
+| `origin` | `'local' \| 'server' \| 'network' \| 'peer'` | Where it went wrong: this device, the server, the network between, or the other device in a direct transfer |
+| `retryable` | `boolean` | Whether the same request could succeed if made again later |
+| `status` | `number` | The HTTP status, when the server answered with an error |
+| `details` | `object` | More about it, for some codes: `capability` for `CAPABILITY_UNSUPPORTED` (`upload`, `e2ee` or `p2p`); `component` (`dgup` or `dgdtp`), `update` (`server` or `client`, the side that needs it), and the `client` and `server` versions for `VERSION_UNSUPPORTED`; `index` for a file's problem; `cancellation` for `OPERATION_CANCELLED` |
+| `transport` | `{ secure }` | How the client reached its server: every error a client gives has it, `secure: false` for an [insecure server](api-reference.md#insecure-servers). `JSON.stringify()` keeps it |
+| `cause` | `unknown` | The error underneath, when there was one. Core didn't write it, so it may hold anything: `JSON.stringify()` leaves it out |
+
+When the server answers with an error, the message is the server's own, if it sent a short one. A credential error (the four `AUTH_` and `QUOTA_` codes) always has core's own message, so nothing the server says about a credential is repeated.
+
+`DropgateError.is(err, code?)` tells whether `err` is a `DropgateError`, with that code if one is given.
+
+## Codes
+
+| Code | Origin | Retryable | When |
+| --- | --- | --- | --- |
+| `INVALID_ARGUMENT` | local | No | An option is missing or invalid: no server, or one that isn't an address; an `appInfo` that isn't `{ name, version? }`; an `auth` that isn't a function, or a credential it gives that isn't `{ token }`; no files, or something that isn't a file; no `id`; a download from an opened upload that has been closed; a download's `files` that isn't indexes, each once, or names a file the upload doesn't have; a download without a sink that fits it; a delete without an `id`, or with a `manageToken` that isn't one; a lifetime that isn't a whole number of milliseconds; or an event `client.server.on()` doesn't have |
+| `RUNTIME_UNSUPPORTED` | local | No | There's no `fetch()`, or no secure random numbers (`crypto.getRandomValues()`), or a download's answer can't be read as a stream |
+| `OPERATION_CANCELLED` | local | No | A call was given an `AbortSignal`, and it was aborted. An upload or download that's cancelled ends with a `cancelled` outcome instead |
+| `PAUSE_UNAVAILABLE` | local | No | `pause()` was called on an upload or download that can't pause now (the server hasn't taken it or given its lease yet, it's finishing or has ended, or a pause or resume is settling), or `resume()` on one that isn't paused. Nothing changes ([Pausing](api-reference.md#pausing)) |
+| `SOURCE_UNAVAILABLE` | local | No | A file being uploaded couldn't be read, or changed since the upload started (such as while it was paused) |
+| `OUTPUT_WRITE_FAILED` | local | No | A download's sink failed a `write()` or its `close()`, or a function giving a sink failed; a direct transfer's `onData` threw or rejected, or its receiver couldn't keep up |
+| `ENCRYPT_FAILED` | local | No | The encryption keys couldn't be made, or a file name, list of files or chunk couldn't be encrypted |
+| `KEY_REQUIRED` | local | No | The upload is encrypted, and there's no secret |
+| `DECRYPT_FAILED` | local | No | An upload's list of files couldn't be decrypted: usually the wrong link. A secret that isn't 32 bytes of URL-safe base64 is refused the same way |
+| `INTEGRITY_FAILED` | server | No | Downloaded data didn't decrypt, or an upload's header, list of files or chunks were changed, reordered or cut short, or its files don't fit it; the server already held different bytes for a chunk, or a chunk's `Content-Digest` didn't match it; a download being picked up again was sent the whole upload instead of the rest, so it may not be the same upload (none of it is written); or a direct transfer's sender sent data that didn't match what it declared (origin `peer`) |
+| `INVALID_MANIFEST` | peer | No | A direct transfer's list of files didn't add up |
+| `INVALID_FILENAME` | local, or `server` or `peer` for a name received | No | A file name sent or received, encrypted or not, is empty, longer than 255 bytes in UTF-8, or has a control character or path separator in it ([File Names](quick-start.md#file-names)) |
+| `INVALID_CODE` | local | No | A direct transfer code isn't the shape of one: four of the letters A–Z without I and O, then four digits, with or without a dash between. Spaces and lower case are fine. Nothing is sent before it's checked |
+| `FILE_EMPTY` | local | No | A file to upload is empty (0 bytes) |
+| `FILE_TOO_LARGE` | server | No | The upload is larger than the server's limit (`details.index` says which file, when core finds it before asking the server) |
+| `LIFETIME_NOT_ALLOWED` | server | No | The server doesn't allow that file lifetime: too long, or unlimited |
+| `CAPABILITY_UNSUPPORTED` | server | No | The server has uploads, end-to-end encryption, pausing or direct transfer turned off (`details.capability`, when core finds it before asking the server) |
+| `VERSION_UNSUPPORTED` | server | No | The server speaks another major version of the protocol the call needs (DGUP for hosted calls, DGDTP for direct ones), or none (it's older than Dropgate 4); or a direct transfer's other device uses another protocol version (origin `peer`). The message says "Update required" and which side needs it. An upload made in a format this version of Dropgate can't read is refused the same way |
+| `INSECURE_TRANSPORT_NOT_ALLOWED` | local | No | The server is on plain `http://` on another machine, and the client wasn't made with `allowInsecure: true`. Thrown by the constructor, before any request |
+| `REDIRECT_NOT_FOLLOWED` | server | No | The server answered with a redirect, which core never follows: use the address it redirects to. `status` is the redirect's, where the runtime gives it (a browser doesn't) |
+| `AUTH_REQUIRED` | server | No | The server needs a [credential](api-reference.md#credentials) for this, and the client has no `auth`, it gave none or it failed (origin `local` for the last), or the server didn't accept the one sent (HTTP 401) |
+| `AUTH_EXPIRED` | server | No | The credential has expired, and did again after `auth` was asked for a new one (HTTP 401) |
+| `AUTH_DENIED` | server | No | The credential doesn't allow this |
+| `QUOTA_EXCEEDED` | server | No | This would go over the quota the server allows the credential's holder |
+| `NOT_FOUND` | server | No | The upload isn't on the server: it never was, it expired, it was deleted, or it was downloaded as many times as it could be (HTTP 404 or 410). For an upload in progress, the server dropped it ("The server dropped this upload"), or couldn't be reached for longer than it waits for one. For a paused upload or download, it was still paused at the server's deadline, or the server had dropped it by the time it was resumed ("The server dropped this paused upload.") |
+| `REQUEST_REJECTED` | server | No | The server refused the request for another reason (any other 4xx status), and says why: such as a manage token that isn't the upload's (HTTP 403) |
+| `RATE_LIMITED` | server | Yes | The server has had too many requests (HTTP 429) |
+| `SERVER_FULL` | server | Yes | The server is out of space (HTTP 507) |
+| `SERVER_ERROR` | server | Yes | The server ran into an error (HTTP 5xx) |
+| `INVALID_RESPONSE` | server | No | The server's answer wasn't understood, or isn't a Dropgate server's, or it couldn't send the range of bytes asked for, or sent another range than the rest of a download |
+| `SERVER_UNREACHABLE` | network | Yes | No answer came: the server couldn't be reached |
+| `TIMED_OUT` | network | Yes | The server took too long to answer, or a download's next bytes took longer than its `timeoutMs`, or a direct transfer's other device didn't answer in time (origin `peer`) |
+| `CONNECTION_LOST` | network | Yes | A download was cut off part-way, and couldn't be picked up again before the server stopped holding it, or a direct transfer's connection dropped, or the server or the connection between the two devices went before it was secured |
+| `SECURITY_POLICY_MISMATCH` | peer | No | A direct transfer's connection couldn't be secured, so it was closed: one of the sealed messages that set up its connection, a message of its encrypted handshake, or one of its records, didn't open, wasn't a length it can be, came out of order, was from another attempt, or was one this device had sent itself, sent back. That happens when the other device doesn't hold the same secret, or something between the two devices changed, replayed or reordered what they sent. It's also the error when the certificates the connection runs on aren't the ones its set-up named: the offer and the answer must each name exactly one SHA-256 certificate fingerprint, and both go into the encrypted handshake, so anything in the middle that ends the connection with certificates of its own leaves the handshake unable to open. Whichever device finds a fault in the handshake or after it tells the other over the connection, which ends with this error too, and nothing more is sent. Nothing is tried again, with or without encryption, and the error holds nothing from the other device. Origin `local` when this device has sent every message its keys allow (4,096 to set up one connection, or 2⁶⁴ − 1 records in one direction), which no real transfer reaches |
+| `CODE_MISMATCH` | peer | No | A direct transfer started with a typed code ended because the code didn't match: the receiver typed a code other than the sender's, or one already used. Both devices get it, before either opens anything the other sent to set up the connection, so a wrong guess learns nothing about the sender's network. A code is used once, right or wrong: the sender gets a new one, and its link still works. Each device's message says it for that side: the receiver's "That code didn't match. Ask the sender for the new one.", the sender's "Someone entered the wrong code. Here's a new one." The error holds nothing from the other device |
+| `PEER_FAILED` | peer | No | A direct transfer's other device reported an error. What it said isn't passed on, since it could say anything |
+| `INVALID_MESSAGE` | peer | No | A direct transfer's other device sent something this version of Dropgate doesn't understand: a record of a type it doesn't use, or not the exact length its type has, or with a field outside what its type allows. Nothing it held is passed on |
+| `UNEXPECTED_ERROR` | local | No | Anything else, with the error underneath as its `cause` |
+
+`SECURITY_POLICY_MISMATCH`, `CODE_MISMATCH` and `INVALID_MESSAGE` are the secure channel's and its engine's ([DGDTP §4.10](../technical/DGDTP.md#410-errors)). Core has the channel and its client for the server's rendezvous, but `client.direct` doesn't run over them yet, so no call gives these codes for now, and a direct transfer's `INVALID_CODE` and `CONNECTION_LOST` are still today's.
+
+`retryable` says whether the same request could work later. Core's own retries are narrower, and an upload or a download only fails with one of these once they're over: see [Retries](api-reference.md#retries).
