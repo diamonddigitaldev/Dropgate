@@ -7,7 +7,7 @@
 import { deadlineTimes, installClock } from '../helpers/clock.mjs';
 import { madeUpFile, summary } from '../helpers/files.mjs';
 import { secretsOf } from '../helpers/privacy.mjs';
-import { expect, test } from '../helpers/test.mjs';
+import { expect, savedName, test } from '../helpers/test.mjs';
 import { download, openLink, uploadFromHomePage } from '../helpers/webui.mjs';
 
 // Three 5 MiB chunks.
@@ -97,7 +97,7 @@ for (const encrypted of [false, true]) {
             await expect(page.locator('#file-name')).toHaveText(file.name);
             const got = await download(page, page.locator('#download-button'));
             await expect(page.locator('#status-title')).toHaveText(/download complete/i);
-            expect(got.name).toBe(file.name);
+            expect(got.name).toBe(savedName(file.name));
             expect(summary(got.bytes)).toEqual(summary(file.buffer));
         });
     });

@@ -3,7 +3,7 @@
 // uploads there, and the download page decrypts them there too: the server
 // serves the page over HTTP as over HTTPS, and the page checks for itself.
 import { madeUpFile, summary } from '../helpers/files.mjs';
-import { expect, test } from '../helpers/test.mjs';
+import { expect, savedName, test } from '../helpers/test.mjs';
 import { download, uploadFromHomePage } from '../helpers/webui.mjs';
 
 // Nothing in front of the server says the request came in over HTTPS.
@@ -19,6 +19,6 @@ test('an encrypted upload downloads from its own link on a plain-HTTP localhost 
     const got = await download(page, page.locator('#download-button'));
     await expect(page.locator('#status-title')).toHaveText(/download complete/i);
 
-    expect(got.name).toBe(file.name);
+    expect(got.name).toBe(savedName(file.name));
     expect(summary(got.bytes)).toEqual(summary(file.buffer));
 });

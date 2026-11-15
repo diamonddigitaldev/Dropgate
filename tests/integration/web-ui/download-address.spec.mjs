@@ -5,7 +5,7 @@
 // address is random and holds no file name, and the name reaches the browser
 // only in the download's Content-Disposition header, which saves the file under it.
 import { madeUpFile } from '../helpers/files.mjs';
-import { expect, test } from '../helpers/test.mjs';
+import { expect, savedName, test } from '../helpers/test.mjs';
 import { uploadFromHomePage } from '../helpers/webui.mjs';
 
 /** Start a download from `trigger`, and give its name and the address it came from once it's saved. */
@@ -27,7 +27,7 @@ test('the addresses a file and a ZIP are saved from hold no file name, and each 
     await page.locator('#toggle-file-list').click();
 
     const got = [];
-    for (const file of files) got.push({ expected: file.name, ...await saved(page, page.getByTitle(`Download ${file.name}`, { exact: true })) });
+    for (const file of files) got.push({ expected: savedName(file.name), ...await saved(page, page.getByTitle(`Download ${file.name}`, { exact: true })) });
     got.push({ expected: /^dropgate-bundle-.+\.zip$/, ...await saved(page, page.locator('#download-all-button')) });
 
     for (const { expected, name, url } of got) {
@@ -43,6 +43,6 @@ test('the address a single file is saved from holds no file name, and it saves u
     const link = await uploadFromHomePage(page, [file], { encrypted: true });
     await page.goto(link);
     const { name, url } = await saved(page, page.locator('#download-button'));
-    expect(name).toBe(file.name);
+    expect(name).toBe(savedName(file.name));
     for (const form of formsOf(file.name)) expect(url, 'the address it was saved from').not.toContain(form);
 });

@@ -40,6 +40,52 @@ export function skipNavigationCheckForThisTest() {
     process.env[SKIP_NAVIGATION_CHECK] = '1';
 }
 
+// WebKit on some Linux systems saves every space in a download's name as an
+// underscore: "photos (holiday).zip" is saved as "photos_(holiday).zip". It's
+// the system's WebKit, not the page: Ubuntu 26.04's own WebKitGTK does it, and
+// Playwright's WebKit built for it, from a plain Blob as from any
+// Content-Disposition header; the same WebKit on Ubuntu 24.04 and Windows
+// keeps the spaces. Chromium and Firefox never do it. The downloadNaming
+// fixture finds out once per worker whether this browser does.
+let spacesSavedAsUnderscores;
+
+/**
+ * The name this browser saves a download called `name` under: `name` itself,
+ * except in a WebKit that saves spaces as underscores (above).
+ * @param {string} name
+ */
+export function savedName(name) {
+    if (spacesSavedAsUnderscores === undefined) throw new Error("savedName() before the downloadNaming fixture found this browser's rule");
+    return spacesSavedAsUnderscores ? name.replace(/ /g, '_') : name;
+}
+
+/**
+ * Whether this WebKit saves spaces in a download's name as underscores: a Blob
+ * named with a space, saved from a page that isn't Dropgate's, tells. Any
+ * other change to its name is something this doesn't know, and fails.
+ * @param {import('@playwright/test').BrowserType} webkit
+ */
+async function webkitSavesSpacesAsUnderscores(webkit) {
+    const browser = await webkit.launch();
+    try {
+        const page = await browser.newPage({ acceptDownloads: true });
+        await page.setContent('<a id="save">save</a>');
+        await page.evaluate(() => {
+            const a = document.getElementById('save');
+            a.href = URL.createObjectURL(new Blob(['probe'], { type: 'application/octet-stream' }));
+            a.download = 'a b.txt';
+        });
+        const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('#save').click()]);
+        const name = dl.suggestedFilename();
+        await dl.cancel();
+        if (name === 'a b.txt') return false;
+        if (name === 'a_b.txt') return true;
+        throw new Error(`WebKit saved a download called "a b.txt" as "${name}"`);
+    } finally {
+        await browser.close();
+    }
+}
+
 /**
  * Record every http(s) and ws(s) request a browser context makes to anywhere but
  * the server's own origin, and every WebSocket message its pages send.
@@ -98,6 +144,13 @@ export const test = base.extend({
             else process.env[SKIP_NAVIGATION_CHECK] = before;
         }
     }, { auto: true }],
+
+    // How this worker's browser names what it saves, for savedName(). Only WebKit
+    // is asked; Chromium and Firefox keep a download's name as it's given.
+    downloadNaming: [async ({ playwright, browserName }, use) => {
+        spacesSavedAsUnderscores = browserName === 'webkit' && await webkitSavesSpacesAsUnderscores(playwright.webkit);
+        await use(spacesSavedAsUnderscores);
+    }, { scope: 'worker', auto: true }],
 
     // The file names and keys this test's flows handle. The web UI helpers add to it.
     secrets: async ({}, use) => {

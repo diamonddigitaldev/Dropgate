@@ -20,7 +20,7 @@
 // says what each page saw.
 import os from 'node:os';
 import { holdsPlaintext, madeUpFile, readZip, summary } from '../helpers/files.mjs';
-import { expect, test } from '../helpers/test.mjs';
+import { expect, savedName, test } from '../helpers/test.mjs';
 import { describePeers, download, openReceivePage, peerConnections, receiverReaches, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
 
 test.use({ localStun: true });
@@ -151,7 +151,7 @@ async function receiveAndCompare(receiver, sender, file) {
     await expect(receiver.locator('#file-name')).toHaveText(file.name);
 
     const got = await takeDownload(receiver, sender);
-    expect(got.name).toBe(file.name);
+    expect(got.name).toBe(savedName(file.name));
     expect(summary(got.bytes)).toEqual(summary(file.buffer));
 }
 

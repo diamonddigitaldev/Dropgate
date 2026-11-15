@@ -3,7 +3,7 @@
 // page is one download, however many it makes: its files one at a time and a
 // ZIP count once, when the page goes.
 import { madeUpFile, readZip, summary } from '../helpers/files.mjs';
-import { expect, test } from '../helpers/test.mjs';
+import { expect, savedName, test } from '../helpers/test.mjs';
 import { download, expectGone, openLink, uploadFromHomePage } from '../helpers/webui.mjs';
 
 // The server's default is single-use links, and its page won't offer more.
@@ -16,7 +16,7 @@ async function downloadFromStandardPage(page, link, file) {
     await expect(page.locator('#file-name')).toHaveText(file.name);
     const got = await download(page, page.locator('#download-button'));
     await expect(page.locator('#status-title')).toHaveText(/download complete/i);
-    expect(got.name).toBe(file.name);
+    expect(got.name).toBe(savedName(file.name));
     expect(summary(got.bytes)).toEqual(summary(file.buffer));
 }
 
@@ -37,7 +37,7 @@ async function downloadEachFile(page, files) {
     await page.locator('#toggle-file-list').click();
     for (const file of files) {
         const got = await download(page, page.getByTitle(`Download ${file.name}`, { exact: true }));
-        expect(got.name).toBe(file.name);
+        expect(got.name).toBe(savedName(file.name));
         expect(summary(got.bytes), file.name).toEqual(summary(file.buffer));
     }
 }

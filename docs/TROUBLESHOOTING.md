@@ -67,6 +67,9 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - Download the file again from its link. A download that got part of the file counts as one against the upload's download limit, so with a limit of 1 the upload is already gone: ask its sender to upload it again.
 - No browser shows such a download as complete: Firefox marks it failed, and Chrome leaves it unfinished. See [DGUP §9.2](./technical/DGUP.md#92-the-download-page).
 
+**A saved file has underscores where its name had spaces**
+- Browsers built on the WebKitGTK that Ubuntu 26.04 ships, such as GNOME Web, save every space in a downloaded file's name as an underscore: "photos (holiday).zip" is saved as "photos_(holiday).zip". The browser does this to every download from any site, a direct transfer's too. The file is the same, and Dropgate's page shows its real name. Rename it after saving if you want the spaces back. The same WebKitGTK on Ubuntu 24.04 keeps them, and so do other browsers.
+
 **"A file changed after the upload started, so the rest of it can't be read as it was."**
 - A file was edited, replaced or resized while it was uploading or paused. The Dropgate Client, like a browser, won't read on, so the upload never holds part of the old file and part of the new one. Upload the file again as it is now.
 

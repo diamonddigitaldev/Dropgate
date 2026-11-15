@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { holdsPlaintext, madeUpFile, summary } from '../helpers/files.mjs';
-import { expect, test } from '../helpers/test.mjs';
+import { expect, savedName, test } from '../helpers/test.mjs';
 import { download, uploadFromHomePage } from '../helpers/webui.mjs';
 
 // Just over one 5 MiB chunk, so the upload and the download each take two.
@@ -25,7 +25,7 @@ test.describe('a single file, unencrypted', () => {
         const got = await download(page, page.locator('#download-button'));
         await expect(page.locator('#status-title')).toHaveText(/download complete/i);
 
-        expect(got.name).toBe(file.name);
+        expect(got.name).toBe(savedName(file.name));
         expect(summary(got.bytes)).toEqual(summary(file.buffer));
     });
 });
@@ -49,7 +49,7 @@ test.describe('a single file, end-to-end encrypted', () => {
         const got = await download(page, page.locator('#download-button'));
         await expect(page.locator('#status-title')).toHaveText(/download complete/i);
 
-        expect(got.name).toBe(file.name);
+        expect(got.name).toBe(savedName(file.name));
         expect(summary(got.bytes)).toEqual(summary(file.buffer));
     });
 });

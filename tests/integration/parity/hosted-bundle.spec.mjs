@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { holdsPlaintext, madeUpFile, readZip, summary } from '../helpers/files.mjs';
-import { expect, test } from '../helpers/test.mjs';
+import { expect, savedName, test } from '../helpers/test.mjs';
 import { download, uploadFromHomePage } from '../helpers/webui.mjs';
 
 const UPLOAD_ID = /^\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -25,7 +25,7 @@ async function downloadEachThenZip(page, files) {
     await page.locator('#toggle-file-list').click();
     for (const file of files) {
         const got = await download(page, page.getByTitle(`Download ${file.name}`, { exact: true }));
-        expect(got.name).toBe(file.name);
+        expect(got.name).toBe(savedName(file.name));
         expect(summary(got.bytes), file.name).toEqual(summary(file.buffer));
     }
 
