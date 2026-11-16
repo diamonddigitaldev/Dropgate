@@ -161,11 +161,23 @@ export function expectNoSecretsSent(server, secrets) {
  * @param {string} which - Which context this is, for the failure message.
  */
 export async function expectNothingStored(context, origin, which) {
-    let pages = context.pages().filter((p) => p.url().startsWith(`${origin}/`));
+    // Each page is asked where it is. Playwright's own idea of it can still be
+    // about:blank when it never heard the page's navigation (Firefox, now and
+    // then, on CI's runner), though the page is at the server's origin.
+    const open = context.pages();
+    const at = await Promise.all(open.map(whereIs));
+    let pages = open.filter((_, i) => at[i]?.startsWith(`${origin}/`));
     if (pages.length === 0) {
         // Nothing of this origin is open any more, so open something that is.
+        // Only the navigation's start is waited for, as a page's load can go
+        // unheard in the same way; the page itself says when it has loaded.
         const page = await context.newPage();
-        await page.goto(`${origin}/`);
+        await page.goto(`${origin}/`, { waitUntil: 'commit', timeout: 15_000 }).catch((err) => {
+            if (page.isClosed()) throw err;
+        });
+        const loaded = await page.waitForFunction((o) => location.href.startsWith(`${o}/`) && document.readyState === 'complete', origin, { polling: 100, timeout: 15_000 })
+            .then(() => true, () => false);
+        if (!loaded) throw new Error(`A page of the server's origin, opened to check what ${which} keeps, never loaded in 15 s: it says it's at ${(await whereIs(page)) ?? '(no answer in 10 s)'}.`);
         pages = [page];
     }
 
@@ -191,4 +203,12 @@ export async function expectNothingStored(context, origin, which) {
         cookies: [], localStorage: [], sessionStorage: [], indexedDB: [], cacheStorage: [],
     });
     expect(shared.serviceWorkers.length, `service workers ${which} has registered: ${shared.serviceWorkers.join(', ')}`).toBeLessThanOrEqual(1);
+}
+
+/** A page's own location, asked of the page, or null if it doesn't answer in 10 s. */
+function whereIs(page) {
+    return Promise.race([
+        page.evaluate(() => location.href).catch(() => null),
+        new Promise((resolve) => setTimeout(resolve, 10_000, null)),
+    ]);
 }
