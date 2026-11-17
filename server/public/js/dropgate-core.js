@@ -3404,6 +3404,17 @@ function nobleProvider(source) {
 var view = (bytes) => bytes.buffer instanceof ArrayBuffer ? bytes : own(bytes);
 var HMAC_KEY_BITS = 256;
 var X25519_PKCS8_PREFIX = Uint8Array.of(48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 110, 4, 34, 4, 32);
+var X25519_GENERATE_TRIES = 3;
+var isOperationError = (err) => err?.name === "OperationError";
+async function generateX25519(subtle) {
+  for (let tries = 1; ; tries++) {
+    try {
+      return await subtle.generateKey({ name: "X25519" }, false, ["deriveBits"]);
+    } catch (err) {
+      if (tries >= X25519_GENERATE_TRIES || !isOperationError(err)) throw err;
+    }
+  }
+}
 var noEncryption = () => new DropgateError({
   code: "RUNTIME_UNSUPPORTED",
   message: "Web Crypto API not available (crypto.subtle). Encryption needs a secure context (HTTPS or localhost)."
@@ -3504,7 +3515,7 @@ function webCryptoProvider(webCrypto) {
     },
     equal: constantTimeEqual,
     async x25519Generate() {
-      const pair = await needSubtle().generateKey({ name: "X25519" }, false, ["deriveBits"]);
+      const pair = await generateX25519(needSubtle());
       const publicKey = new Uint8Array(await needSubtle().exportKey("raw", pair.publicKey));
       return { privateKey: new X25519Key(name, pair.privateKey), publicKey };
     },
@@ -3516,7 +3527,7 @@ function webCryptoProvider(webCrypto) {
       try {
         shared = new Uint8Array(await needSubtle().deriveBits({ name: "X25519", public: peer }, scalar, 256));
       } catch (err) {
-        if (err?.name === "OperationError") throw lowOrder();
+        if (isOperationError(err)) throw lowOrder();
         throw err;
       }
       if (allZero(shared)) throw lowOrder();
@@ -3540,7 +3551,7 @@ function webCryptoProvider(webCrypto) {
 async function hasX25519(subtle) {
   if (!subtle) return false;
   try {
-    await subtle.generateKey({ name: "X25519" }, false, ["deriveBits"]);
+    await generateX25519(subtle);
     return true;
   } catch {
     return false;

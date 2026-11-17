@@ -123,6 +123,24 @@ describe('Choosing the provider', () => {
     expect(made).toHaveBeenCalledTimes(1);
   });
 
+  it("asks the probe again after an OperationError (Linux WebKit refuses a key whose first byte is zero): WebCrypto still, unless three are refused", async () => {
+    for (const [refusals, name] of [[1, 'webcrypto'], [2, 'webcrypto'], [3, 'noble']] as const) {
+      let asked = 0;
+      const subtle = new Proxy(globalThis.crypto.subtle, {
+        get: (target, prop) => {
+          const real = (Reflect.get(target, prop, target) as (...args: unknown[]) => unknown).bind(target);
+          if (prop !== 'generateKey') return real;
+          return (...args: unknown[]) => (++asked <= refusals
+            ? Promise.reject(new DOMException('The operation failed for an operation-specific reason', 'OperationError'))
+            : real(...args));
+        },
+      });
+      vi.stubGlobal('crypto', { getRandomValues: random, subtle });
+      expect((await cryptoProvider().chosen()).name, `${refusals} refused`).toBe(name);
+      expect(asked).toBe(Math.min(refusals + 1, 3));
+    }
+  });
+
   it('a probe that throws as it is called, rather than rejecting, chooses @noble too', async () => {
     const subtle = new Proxy(globalThis.crypto.subtle, {
       get: (target, prop) => (prop === 'generateKey' ? () => { throw new TypeError('Unknown algorithm'); } : Reflect.get(target, prop, target)),

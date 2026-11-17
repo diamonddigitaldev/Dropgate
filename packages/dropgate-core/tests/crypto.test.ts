@@ -9,6 +9,8 @@ import { cryptoProvider, nobleProvider, webCryptoProvider, type NamedCryptoProvi
 import { newOperationId } from '../src/operation.js';
 import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
 import { providerVectorChecks } from './helpers/provider-vectors.js';
+import { channelChecks } from './helpers/channel-checks.js';
+import { cpaceExchangeChecks } from './helpers/cpace-exchange-checks.js';
 
 // The crypto provider: every encrypt, decrypt, key, hash and random number
 // core uses goes through it. There are two, WebCrypto's and @noble's (in
@@ -465,6 +467,69 @@ describe("The WebCrypto provider and an engine's own WebCrypto", () => {
     const other = withDeriveBits(async () => { throw new DOMException('Not supported', 'NotSupportedError'); });
     const { privateKey } = await other.x25519Generate();
     await expect(other.x25519(privateKey, new Uint8Array(32).fill(9))).rejects.toMatchObject({ name: 'NotSupportedError' });
+  });
+
+  /** WebCrypto's provider on Node's crypto.subtle, but `method` answered by `answer`, which gets the real one. */
+  const engineWith = (method: keyof SubtleCrypto, answer: (real: (...args: unknown[]) => Promise<unknown>, ...args: unknown[]) => Promise<unknown>) => {
+    const subtle = globalThis.crypto.subtle;
+    return webCryptoProvider({
+      getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto),
+      subtle: new Proxy(subtle, {
+        get: (target, prop) => {
+          const real = (Reflect.get(target, prop, target) as (...args: unknown[]) => Promise<unknown>).bind(target);
+          return prop === method ? (...args: unknown[]) => answer(real, ...args) : real;
+        },
+      }),
+    });
+  };
+  const operationError = () => new DOMException('The operation failed for an operation-specific reason', 'OperationError');
+  const isX25519 = (algorithm: unknown) => (algorithm as { name?: string })?.name === 'X25519';
+
+  it("asks again for an X25519 key Linux WebKit refuses (any whose first byte is zero), up to three tries; any other refusal comes at once, as itself", async () => {
+    /** An engine refusing its first `refusals` X25519 keys with `refusal`, counting what it's asked. */
+    const refusing = (refusals: number, refusal: () => Error) => {
+      let asked = 0;
+      const engine = engineWith('generateKey', (real, algorithm, ...rest) => {
+        if (!isX25519(algorithm)) return real(algorithm, ...rest);
+        asked++;
+        return asked <= refusals ? Promise.reject(refusal()) : real(algorithm, ...rest);
+      });
+      return { engine, asked: () => asked };
+    };
+    for (const refusals of [1, 2]) {
+      const { engine, asked } = refusing(refusals, operationError);
+      const mine = await engine.x25519Generate();
+      expect(asked(), `${refusals} refused`).toBe(refusals + 1);
+      // The key it gives is a working one.
+      const theirs = await provider.x25519Generate();
+      expect(hex(await engine.x25519(mine.privateKey, theirs.publicKey))).toBe(hex(await provider.x25519(theirs.privateKey, mine.publicKey)));
+    }
+    const always = refusing(3, operationError);
+    await expect(always.engine.x25519Generate()).rejects.toMatchObject({ name: 'OperationError' });
+    await expect(always.engine.x25519Generate()).resolves.toBeDefined();
+    expect(always.asked()).toBe(4);
+    const unsupported = refusing(1, () => new DOMException('The operation is not supported.', 'NotSupportedError'));
+    await expect(unsupported.engine.x25519Generate()).rejects.toMatchObject({ name: 'NotSupportedError' });
+    expect(unsupported.asked()).toBe(1);
+  });
+
+  it("passes on an engine's refusal of a u-coordinate it should take, as itself: only an all-zero result is a low-order point", async () => {
+    for (const refusal of [operationError, () => new DOMException('Data provided to an operation does not meet requirements', 'DataError')]) {
+      const engine = engineWith('importKey', (real, format, data, algorithm, ...rest) =>
+        (format === 'raw' && isX25519(algorithm) ? Promise.reject(refusal()) : real(format, data, algorithm, ...rest)));
+      const { privateKey } = await engine.x25519Generate();
+      const { publicKey } = await provider.x25519Generate();
+      await expect(engine.x25519(privateKey, publicKey)).rejects.toMatchObject({ name: refusal().name });
+    }
+  });
+
+  it("runs the CPace exchange and the secure channel on an engine refusing every other X25519 key, as Linux WebKit's can", async () => {
+    let asked = 0;
+    const engine = engineWith('generateKey', (real, algorithm, ...rest) =>
+      (isX25519(algorithm) && ++asked % 2 === 1 ? Promise.reject(operationError()) : real(algorithm, ...rest)));
+    const checks = [...await cpaceExchangeChecks(engine), ...await channelChecks(engine)];
+    expect(checks.filter(({ expected, actual }) => actual !== expected)).toEqual([]);
+    expect(asked, 'keys asked for, half refused').toBeGreaterThan(40);
   });
 
   it('hands WebCrypto a u-coordinate only in its canonical form', async () => {

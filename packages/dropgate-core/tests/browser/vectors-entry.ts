@@ -48,12 +48,19 @@ globalThis.runCryptoVectors = async ({ x25519, provider: which }) => {
   };
 };
 
-/** `yes`, or why not: the error making an X25519 key gives. */
+/**
+ * `yes`, or why not: the error making an X25519 key gives, asked as core asks,
+ * again after an OperationError, up to three tries (Linux WebKit refuses a
+ * key whose first byte is zero).
+ */
 globalThis.webCryptoHasX25519 = async () => {
-  try {
-    await globalThis.crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']);
-    return 'yes';
-  } catch (err) {
-    return `${(err as Error).name}: ${(err as Error).message}`;
+  for (let tries = 1; ; tries++) {
+    try {
+      await globalThis.crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']);
+      return 'yes';
+    } catch (err) {
+      if (tries < 3 && (err as Error)?.name === 'OperationError') continue;
+      return `${(err as Error).name}: ${(err as Error).message}`;
+    }
   }
 };

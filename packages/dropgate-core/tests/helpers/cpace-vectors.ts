@@ -24,6 +24,18 @@ export interface VectorCheck {
 /** What a refusal shows as: `abort` for core's own, else the error's name and message. */
 const ABORT = 'abort';
 
+/**
+ * What an error shows as in a check: core's code, else the error's name, so an
+ * engine's own DOMException (whose `code` is a number, 0 for most) names
+ * itself; anything else as it prints.
+ */
+export const codeOf = (err: unknown): string => {
+  const { code, name } = (err ?? {}) as { code?: unknown; name?: unknown };
+  if (typeof code === 'string') return code;
+  if (typeof name === 'string') return name;
+  return String(err);
+};
+
 export const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 export const fromHex = (value: string) => Uint8Array.from(value.match(/../g) ?? [], (pair) => parseInt(pair, 16));
 const ascii = (text: string) => new TextEncoder().encode(text);

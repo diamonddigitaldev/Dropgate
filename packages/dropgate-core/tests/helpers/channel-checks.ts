@@ -17,15 +17,13 @@ import { deriveAttemptKeys } from '../../src/dgdtp/keys.js';
 import { noiseInitiator, noiseResponder } from '../../src/dgdtp/noise.js';
 import { buildPrologue, prologueFromSdp, sdpFingerprint } from '../../src/dgdtp/prologue.js';
 import { signalChannel, type SignalChannel, type SignalMessage } from '../../src/dgdtp/seal.js';
-import { fromHex, hex, type VectorCheck } from './cpace-vectors.js';
+import { codeOf, fromHex, hex, type VectorCheck } from './cpace-vectors.js';
 import { MockRendezvous, PeerPair, fingerprintText, pipePair, type Relay } from './fake-channel.js';
 
 const v = vectors.inputs;
 
 /** X25519's base point. */
 const BASE = Uint8Array.of(9, ...new Uint8Array(31));
-
-const codeOf = (err: unknown) => String((err as { code?: string })?.code ?? err);
 
 /** One side's outcome: `up`, or its error's code and message. */
 const outcome = (result: PromiseSettledResult<SecureChannel>) =>

@@ -8,7 +8,7 @@ import vectors from '../fixtures/cpace-x25519-sha512-vectors.json';
 import type { CryptoProvider } from '../../src/crypto/index.js';
 import { parseCode } from '../../src/dgdtp/codes.js';
 import { checkCpaceAbort, cpaceAbort, cpaceInitiator, cpaceResponder } from '../../src/dgdtp/cpace.js';
-import { fromHex, hex, type VectorCheck } from './cpace-vectors.js';
+import { codeOf, fromHex, hex, type VectorCheck } from './cpace-vectors.js';
 
 type Change = (message: Uint8Array) => Uint8Array;
 
@@ -21,11 +21,11 @@ async function ending(provider: CryptoProvider, typed: string, change: { m1?: Ch
   const roomNonce = provider.randomBytes(16);
   const sender = cpaceResponder(provider, { password: parseCode('ABCD-1234').password, locator: 'AB', roomNonce });
   const receiver = cpaceInitiator(provider, { password: parseCode(typed).password, locator: 'AB', roomNonce, attemptId: provider.randomBytes(16) });
-  const codeOf = (err: unknown) => String((err as { code?: string })?.code ?? err);
   const side = { receiver: '', sender: '' };
   const isks: string[] = [];
   const take = (isk: Uint8Array) => isks.push(hex(isk));
-  const pass = (message: Uint8Array, how?: Change) => (how ? how(new Uint8Array(message)) : message);
+  // A change is made to a message on its way; an abort goes as it is.
+  const pass = (message: Uint8Array, how?: Change) => (how && message.byteLength > 0 ? how(new Uint8Array(message)) : message);
 
   const m1 = pass(await receiver.writeMessage1(), change.m1);
   let m2 = cpaceAbort();

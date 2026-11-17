@@ -40,6 +40,33 @@ const HMAC_KEY_BITS = 256;
  */
 const X25519_PKCS8_PREFIX = Uint8Array.of(0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20);
 
+/**
+ * How many times WebCrypto is asked for a new X25519 key before its refusal is
+ * passed on. WebKit's Linux builds (Playwright's, at least) refuse any X25519
+ * private key whose first byte is zero, with an OperationError, so about one
+ * `generateKey()` in 256 fails although nothing about the request is wrong.
+ * Each try draws a fresh key, and a failed one gave nothing; three failing in
+ * a row is about one in 16.7 million.
+ */
+const X25519_GENERATE_TRIES = 3;
+
+const isOperationError = (err: unknown) => (err as { name?: unknown } | null)?.name === 'OperationError';
+
+/**
+ * A new X25519 key pair from `subtle`, asked again after an OperationError, up
+ * to three tries in all. Any other refusal (an engine without X25519's
+ * NotSupportedError, say) is passed on at once.
+ */
+async function generateX25519(subtle: SubtleCrypto): Promise<CryptoKeyPair> {
+  for (let tries = 1; ; tries++) {
+    try {
+      return await subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']) as CryptoKeyPair;
+    } catch (err) {
+      if (tries >= X25519_GENERATE_TRIES || !isOperationError(err)) throw err;
+    }
+  }
+}
+
 const noEncryption = () => new DropgateError({
   code: 'RUNTIME_UNSUPPORTED',
   message: 'Web Crypto API not available (crypto.subtle). Encryption needs a secure context (HTTPS or localhost).',
@@ -144,7 +171,7 @@ export function webCryptoProvider(webCrypto: WebCryptoLike): NamedCryptoProvider
     equal: constantTimeEqual,
     async x25519Generate() {
       // The private key can't be exported; the public key always can.
-      const pair = await needSubtle().generateKey({ name: 'X25519' }, false, ['deriveBits']) as CryptoKeyPair;
+      const pair = await generateX25519(needSubtle());
       const publicKey = new Uint8Array(await needSubtle().exportKey('raw', pair.publicKey));
       return { privateKey: new X25519Key(name, pair.privateKey), publicKey };
     },
@@ -157,7 +184,7 @@ export function webCryptoProvider(webCrypto: WebCryptoLike): NamedCryptoProvider
         shared = new Uint8Array(await needSubtle().deriveBits({ name: 'X25519', public: peer }, scalar, 256));
       } catch (err) {
         // WebCrypto refuses an all-zero result with an OperationError.
-        if ((err as { name?: unknown } | null)?.name === 'OperationError') throw lowOrder();
+        if (isOperationError(err)) throw lowOrder();
         throw err;
       }
       // And should an engine not refuse it, it's refused here.
@@ -182,12 +209,13 @@ export function webCryptoProvider(webCrypto: WebCryptoLike): NamedCryptoProvider
 
 /**
  * Whether this WebCrypto can do X25519: it has `crypto.subtle`, and making an
- * X25519 key works. Playwright's WebKit on Windows, for one, has no X25519.
+ * X25519 key works, within the same three tries as any other key. Playwright's
+ * WebKit on Windows, for one, has no X25519.
  */
 async function hasX25519(subtle: SubtleCrypto | undefined): Promise<boolean> {
   if (!subtle) return false;
   try {
-    await subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']);
+    await generateX25519(subtle);
     return true;
   } catch {
     return false;
