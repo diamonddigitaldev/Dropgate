@@ -31,10 +31,17 @@ const heldBecomes = (server, expected) => waitFor(async () => {
     return JSON.stringify(await heldOf(server, Object.keys(expected))) === JSON.stringify(expected);
 }, { what: `the rendezvous to hold ${JSON.stringify(expected)}` });
 
-/** Sends a socket something and checks it's still open and answering: CODE on a sender's socket, with codes off. */
-const stillOpen = async (sender) => {
+/**
+ * Sends a socket something and checks it's still open and answering: CODE on
+ * a sender's socket, with codes off. With `framesFrom`, an attempt the sender
+ * has dropped: frames it sent before the server read the DROP were rightly
+ * relayed, and may come first; nothing else may.
+ */
+const stillOpen = async (sender, { framesFrom } = {}) => {
     sender.send(msg.code());
-    assert.equal(hex(await sender.next()), hex([TYPE.CODE_IS, 0]));
+    let next = await sender.next();
+    while (framesFrom !== undefined && next[0] === TYPE.FRAME_TO_SENDER && next[1] === framesFrom) next = await sender.next();
+    assert.equal(hex(next), hex([TYPE.CODE_IS, 0]));
 };
 
 describe('the rendezvous', () => {
@@ -395,7 +402,8 @@ describe('the rendezvous', () => {
 
             const info = await fetch(`${server.baseUrl}/api/info`);
             assert.equal(info.status, 200, 'the server is still up');
-            await stillOpen(room.sender);
+            // The DROP and the receiver's frames race to the server on two sockets.
+            await stillOpen(room.sender, { framesFrom: dropped.tag });
             room.sender.close();
             await heldBecomes(server, NOTHING_HELD);
         });
