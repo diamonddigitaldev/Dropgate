@@ -6,10 +6,10 @@ import {
   AttemptKeys, CLOSE_SECRET_BYTES, LINK_SECRET_BYTES, RESUME_SECRET_BYTES, deriveAttemptKeys, deriveCloseKeys, deriveRoomId,
   type AttemptMode,
 } from './keys.js';
-import {
-  NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES, NOISE_MAX_MESSAGE_BYTES, NOISE_TAG_BYTES, noiseInitiator, noiseResponder, type NoiseTransport,
-} from './noise.js';
+import { MESSAGE_TYPE, MIN_RECORD_BYTES, decodeHello, decodeMessage, encodeHello, encodeMessage, type Hello } from './messages.js';
+import { NOISE_MAX_MESSAGE_BYTES, NOISE_TAG_BYTES, noiseInitiator, noiseResponder, type NoiseTransport } from './noise.js';
 import { MAX_GENERATION, prologueFromSdp } from './prologue.js';
+import { PROTOCOLS } from '../version.js';
 import {
   CLOSE_KIND, FRAME_HEADER_BYTES, closeChannel, signalChannel, type CloseChannel, type SignalChannel, type SignalMessage, type SignalRole,
 } from './seal.js';
@@ -34,10 +34,13 @@ import {
 //      initiator, under the attempt's PSK, with the prologue (prologue.ts) made
 //      from the two SDPs' fingerprints: message 1 is empty (DGDTP's rule, and a
 //      payload there is refused), message 2 carries the sender's hello.
-//   4. BIND, the receiver's first record: its capabilities, and closeSecret, 32
-//      random bytes from which both sides make the out-of-band close keys, so
-//      a CLOSE can also go sealed through the rendezvous once the data channel
-//      is gone.
+//   4. BIND, the receiver's first record: closeSecret, 32 random bytes from
+//      which both sides make the out-of-band close keys, so a CLOSE can also go
+//      sealed through the rendezvous once the data channel is gone; then the
+//      receiver's hello. Each hello (messages.ts) says its side's DGDTP major
+//      and minor, the largest record its data channel takes, and its pause
+//      limit and reconnect window. Each side checks the other's major once its
+//      own hello has gone, so both learn which of them needs updating.
 //
 // Every failure ends the attempt with its typed error, and every key it made
 // let go: CODE_MISMATCH for a code that didn't match (each side told in its
@@ -49,15 +52,10 @@ import {
 // in turn, so both end with the same error; nothing after the handshake is
 // sent. No error carries anything from the other device, and nothing here logs.
 
-/** The most the sender's hello (Noise message 2's payload) or the receiver's capabilities (in BIND) hold. */
-export const MAX_HELLO_BYTES = NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES;
+export { MIN_RECORD_BYTES };
 
-/**
- * The smallest record a data channel must carry: one that can't take 16,384
- * bytes (with Noise's tag) ends the attempt with CAPABILITY_UNSUPPORTED. The
- * largest is Noise's 65,535.
- */
-export const MIN_RECORD_BYTES = 16384;
+/** A side's reconnect window when it doesn't set one: 2 minutes. */
+export const DEFAULT_RECONNECT_WINDOW_SECONDS = 120;
 
 /**
  * The abort on the data channel: one zero byte, too short for any handshake
@@ -66,9 +64,8 @@ export const MIN_RECORD_BYTES = 16384;
  */
 const DATA_ABORT = Uint8Array.of(0);
 
-/** BIND's type, the receiver's first record: then closeSecret (32), then its capabilities. */
-const BIND_TYPE = 0x01;
-const BIND_HEADER_BYTES = 1 + CLOSE_SECRET_BYTES;
+/** Where the receiver's hello, and so its major, starts in BIND: after the type and the close secret. */
+const BIND_HELLO_AT = 1 + CLOSE_SECRET_BYTES;
 
 /** What each side is told when a code didn't match. */
 const CODE_MISMATCH_WORDING: Readonly<Record<SignalRole, string>> = Object.freeze({
@@ -178,8 +175,8 @@ export interface SecureChannel {
   readonly attemptId: Uint8Array<ArrayBuffer>;
   /** Noise's handshake hash, the same on both sides: a transcript, not a secret. */
   readonly handshakeHash: Uint8Array<ArrayBuffer>;
-  /** What the other side sent with the handshake: the sender's hello, or the receiver's capabilities. */
-  readonly peerHello: Uint8Array<ArrayBuffer>;
+  /** The other side's hello, read and checked: the sender's from Noise's second message, the receiver's from BIND. */
+  readonly peerHello: Hello;
   /**
    * The largest record this side can send, with Noise's 16-byte tag:
    * min(65,535, the data channel's max-message-size), at least 16,384.
@@ -199,16 +196,72 @@ export interface SecureChannel {
   close(): void;
 }
 
-interface AttemptOptions {
-  /** The receiver's capabilities (in BIND) or the sender's hello (Noise message 2), at most 1,024 bytes. */
-  hello?: Uint8Array;
+/** What this side says in its hello, beside the largest record, which its data channel gives once it's open. */
+export interface HelloOptions {
+  /** This side's pause limit in seconds: 0, the default, for none. */
+  pauseLimitSeconds?: number;
+  /** This side's reconnect window in seconds: 120 by default. */
+  reconnectWindowSeconds?: number;
+  /** For tests: the major and minor another version of Dropgate would say. Core's own otherwise. */
+  major?: number;
+  minor?: number;
 }
 
-function checkHello(hello: unknown): Uint8Array<ArrayBuffer> {
-  if (hello === undefined) return new Uint8Array(0);
-  if (!(hello instanceof Uint8Array)) throw invalid('A hello is bytes.');
-  if (hello.byteLength > MAX_HELLO_BYTES) throw invalid(`A hello is at most ${MAX_HELLO_BYTES} bytes.`);
-  return new Uint8Array(hello);
+/** A hello's fields, all but the largest record. */
+type HelloFields = Omit<Hello, 'maxRecord'>;
+
+interface AttemptOptions {
+  /** This side's hello: the receiver's in BIND, the sender's in Noise's second message. */
+  hello?: HelloOptions;
+}
+
+/** The hello's fields from `options`: INVALID_ARGUMENT, before anything is sent, for one a hello can't carry. */
+function checkHello(options: unknown): HelloFields {
+  if (options !== undefined && (options === null || typeof options !== 'object')) throw invalid('A hello is its options.');
+  const o = (options ?? {}) as HelloOptions;
+  const fields: HelloFields = {
+    major: o.major ?? PROTOCOLS.dgdtp.major,
+    minor: o.minor ?? PROTOCOLS.dgdtp.minor,
+    features: 0,
+    pauseLimitSeconds: o.pauseLimitSeconds ?? 0,
+    reconnectWindowSeconds: o.reconnectWindowSeconds ?? DEFAULT_RECONNECT_WINDOW_SECONDS,
+  };
+  // Written once now, with the smallest record, so a field out of range is refused here.
+  encodeHello({ ...fields, maxRecord: MIN_RECORD_BYTES });
+  return fields;
+}
+
+/** The other side's major, if it said one: VERSION_UNSUPPORTED, in this side's words, when it isn't `ownMajor`. */
+function checkMajor(major: number | undefined, ownMajor: number, role: SignalRole): void {
+  if (major !== undefined && major !== ownMajor) throw otherVersion(role, ownMajor, major);
+}
+
+/**
+ * The sender's hello, as the receiver reads it: its major checked first, then
+ * exactly a hello, or SECURITY_POLICY_MISMATCH, as anything else in the
+ * handshake that isn't what it must be.
+ */
+function senderHelloOf(bytes: Uint8Array, ownMajor: number): Hello {
+  checkMajor(bytes[0], ownMajor, 'receiver');
+  try {
+    return decodeHello(bytes);
+  } catch {
+    throw insecure();
+  }
+}
+
+/** The other side speaks another major of DGDTP: which of the two needs updating, in this side's words. */
+function otherVersion(role: SignalRole, own: number, theirs: number): DropgateError {
+  const other = role === 'receiver' ? 'sender' : 'receiver';
+  const older = theirs < own;
+  return new DropgateError({
+    code: 'VERSION_UNSUPPORTED',
+    origin: 'peer',
+    message: older
+      ? `Update required: the ${other} is using an older version of Dropgate. They need to update.`
+      : `Update required: the ${other} is using a newer version of Dropgate. Update this app to ${role === 'receiver' ? 'receive from' : 'send to'} them.`,
+    details: { component: 'dgdtp', update: older ? 'peer' : 'client' },
+  });
 }
 
 function checkPeer(peer: unknown): asserts peer is PeerConnection {
@@ -411,8 +464,12 @@ class Attempt {
     return data;
   }
 
-  /** The receiver's handshake and BIND, over the data channel. */
-  async receiverHandshake(capabilities: Uint8Array<ArrayBuffer>): Promise<SecureChannel> {
+  /**
+   * The receiver's handshake and BIND, over the data channel: its hello says
+   * the largest record its data channel takes. The sender's hello is checked
+   * once BIND has gone, so a sender of another major hears this side's too.
+   */
+  async receiverHandshake(fields: HelloFields): Promise<SecureChannel> {
     const data = await this.#openData();
     const prologue = this.#prologue();
     const keys = this.#keys as AttemptKeys;
@@ -421,22 +478,24 @@ class Attempt {
     const { payload, transport } = await this.#race(initiator.readMessage2(await this.#next(data)));
     this.#transport = transport;
     const closeSecret = this.#provider.randomBytes(CLOSE_SECRET_BYTES);
-    const bind = new Uint8Array(BIND_HEADER_BYTES + capabilities.byteLength);
+    const bind = encodeMessage({ type: 'bind', closeSecret, hello: { ...fields, maxRecord: this.#maxRecord } });
     try {
-      bind[0] = BIND_TYPE;
-      bind.set(closeSecret, 1);
-      bind.set(capabilities, BIND_HEADER_BYTES);
       data.send(await this.#race(transport.encrypt(bind)));
       await this.#closeKeys(closeSecret);
     } finally {
       bind.fill(0);
       closeSecret.fill(0);
     }
-    return this.#opened(payload);
+    return this.#opened(senderHelloOf(payload, fields.major));
   }
 
-  /** The sender's handshake, then the receiver's BIND, over the data channel. */
-  async senderHandshake(hello: Uint8Array<ArrayBuffer>): Promise<SecureChannel> {
+  /**
+   * The sender's handshake, its hello in Noise's second message, then the
+   * receiver's BIND, over the data channel. A BIND whose hello says another
+   * major is VERSION_UNSUPPORTED; a first record that isn't exactly a BIND,
+   * SECURITY_POLICY_MISMATCH.
+   */
+  async senderHandshake(fields: HelloFields): Promise<SecureChannel> {
     const data = await this.#openData();
     const prologue = this.#prologue();
     const keys = this.#keys as AttemptKeys;
@@ -444,14 +503,25 @@ class Attempt {
     const payload1 = await this.#race(responder.readMessage1(await this.#next(data)));
     // DGDTP's message 1 carries nothing.
     if (payload1.byteLength !== 0) throw insecure();
-    const { message, transport } = await this.#race(responder.writeMessage2(hello));
+    const { message, transport } = await this.#race(responder.writeMessage2(encodeHello({ ...fields, maxRecord: this.#maxRecord })));
     this.#transport = transport;
     data.send(message);
     const bind = await this.#race(transport.decrypt(await this.#next(data)));
     try {
-      if (bind.byteLength < BIND_HEADER_BYTES || bind.byteLength > BIND_HEADER_BYTES + MAX_HELLO_BYTES || bind[0] !== BIND_TYPE) throw insecure();
-      await this.#closeKeys(bind.subarray(1, BIND_HEADER_BYTES));
-      return this.#opened(bind.slice(BIND_HEADER_BYTES));
+      if (bind[0] !== MESSAGE_TYPE.BIND) throw insecure();
+      checkMajor(bind[BIND_HELLO_AT], fields.major, 'sender');
+      let read: Extract<ReturnType<typeof decodeMessage>, { type: 'bind' }>;
+      try {
+        read = decodeMessage(bind) as typeof read;
+      } catch {
+        throw insecure();
+      }
+      try {
+        await this.#closeKeys(read.closeSecret);
+      } finally {
+        read.closeSecret.fill(0);
+      }
+      return this.#opened(read.hello);
     } finally {
       bind.fill(0);
     }
@@ -464,7 +534,7 @@ class Attempt {
   }
 
   /** The channel, up. */
-  #opened(peerHello: Uint8Array<ArrayBuffer>): SecureChannel {
+  #opened(hello: Hello): SecureChannel {
     if (this.#ended) throw this.#error ?? insecure();
     const keys = this.#keys as AttemptKeys;
     const transport = this.#transport as NoiseTransport;
@@ -476,15 +546,16 @@ class Attempt {
     const maxPlaintext = maxRecordBytes - NOISE_TAG_BYTES;
     const attempt = this;
     const ended = () => attempt.#error ?? insecure();
+    const peerHello = Object.freeze({ ...hello });
     return Object.freeze({
       role: this.#role,
       mode: keys.mode,
       generation,
       maxRecordBytes,
+      peerHello,
       get roomNonce() { return new Uint8Array(roomNonce); },
       get attemptId() { return new Uint8Array(attemptId); },
       get handshakeHash() { return new Uint8Array(handshakeHash); },
-      get peerHello() { return new Uint8Array(peerHello); },
       async send(plaintext: Uint8Array) {
         if (attempt.#ended) throw ended();
         // Too long for this data channel: refused, nothing sent, the channel carries on.
@@ -613,13 +684,13 @@ async function guarded<T>(role: SignalRole, open: () => Array<{ close(): void } 
 
 /** The receiver's attempt from its keys on: signalling, the handshake and BIND. */
 async function receiverAttempt(
-  provider: CryptoProvider, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint, capabilities: Uint8Array<ArrayBuffer>,
+  provider: CryptoProvider, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint, hello: HelloFields,
 ): Promise<SecureChannel> {
   const attempt = new Attempt(provider, 'receiver', keys, pipe, peer, generation);
   try {
     attempt.start();
     await attempt.offer();
-    return await attempt.receiverHandshake(capabilities);
+    return await attempt.receiverHandshake(hello);
   } catch (err) {
     throw attempt.end(err);
   }
@@ -627,7 +698,7 @@ async function receiverAttempt(
 
 /** The sender's attempt from its keys on: the receiver's offer (already read in link mode), the handshake and BIND. */
 async function senderAttempt(
-  provider: CryptoProvider, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint, hello: Uint8Array<ArrayBuffer>, first?: Uint8Array,
+  provider: CryptoProvider, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint, hello: HelloFields, first?: Uint8Array,
 ): Promise<SecureChannel> {
   const attempt = new Attempt(provider, 'sender', keys, pipe, peer, generation);
   try {
@@ -671,7 +742,7 @@ export async function connectByLink(provider: CryptoProvider, options: ConnectOp
   const { rendezvous, peer, secret } = options ?? ({} as never);
   checkPeer(peer);
   if (!isBytes(secret, LINK_SECRET_BYTES)) throw invalid(`A link's secret is ${LINK_SECRET_BYTES} bytes.`);
-  const capabilities = checkHello(options.hello);
+  const hello = checkHello(options.hello);
   let pipe: MessagePipe | undefined;
   return guarded('receiver', () => [pipe, peer], async () => {
     const roomId = await deriveRoomId(provider, secret);
@@ -686,7 +757,7 @@ export async function connectByLink(provider: CryptoProvider, options: ConnectOp
     const roomNonce = roomNonceOf(joined.roomNonce);
     const attemptId = provider.randomBytes(CPACE_ATTEMPT_ID_BYTES);
     const keys = await deriveAttemptKeys(provider, { mode: 'link', base: secret, roomNonce, attemptId });
-    return receiverAttempt(provider, keys, pipe, peer, 0n, capabilities);
+    return receiverAttempt(provider, keys, pipe, peer, 0n, hello);
   });
 }
 
@@ -701,7 +772,7 @@ export async function connectByCode(
 ): Promise<SecureChannel> {
   const { rendezvous, peer } = options ?? ({} as never);
   checkPeer(peer);
-  const capabilities = checkHello(options.hello);
+  const hello = checkHello(options.hello);
   const { locator, password } = parseCode(options.code, options.letters);
   let pipe: MessagePipe | undefined;
   let exchange: ReturnType<typeof cpaceInitiator> | undefined;
@@ -725,7 +796,7 @@ export async function connectByCode(
         if (DropgateError.is(err, 'CODE_MISMATCH')) pipe.send(cpaceAbort());
         throw err;
       }
-      return receiverAttempt(provider, keys, pipe, peer, 0n, capabilities);
+      return receiverAttempt(provider, keys, pipe, peer, 0n, hello);
     });
   } finally {
     exchange?.close();
@@ -747,12 +818,12 @@ export async function reconnect(
   checkPipe(pipe);
   if (!isBytes(resumeSecret, RESUME_SECRET_BYTES)) throw invalid(`A resume secret is ${RESUME_SECRET_BYTES} bytes.`);
   const generation = nextGeneration(options.previousGeneration);
-  const capabilities = checkHello(options.hello);
+  const hello = checkHello(options.hello);
   return guarded('receiver', () => [pipe, peer], async () => {
     const roomNonce = roomNonceOf(options.roomNonce);
     const attemptId = provider.randomBytes(CPACE_ATTEMPT_ID_BYTES);
     const keys = await deriveAttemptKeys(provider, { mode: 'resume', base: resumeSecret, roomNonce, attemptId });
-    return receiverAttempt(provider, keys, pipe, peer, generation, capabilities);
+    return receiverAttempt(provider, keys, pipe, peer, generation, hello);
   });
 }
 

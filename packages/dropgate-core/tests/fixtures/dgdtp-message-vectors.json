@@ -302,6 +302,15 @@
       "record": "0c25262728292a2b2c2d2e2f30313233340600"
     },
     {
+      "name": "CLOSE, TAKEN",
+      "fields": {
+        "type": "close",
+        "operationId": "262728292a2b2c2d2e2f303132333435",
+        "reason": "TAKEN"
+      },
+      "record": "0c262728292a2b2c2d2e2f3031323334350700"
+    },
+    {
       "name": "CLOSE, FAILED with OUTPUT_WRITE_FAILED",
       "fields": {
         "type": "close",
@@ -466,7 +475,7 @@
   "lenient": [
     {
       "name": "CLOSE, a reason this version does not know, read as FAILED with no detail",
-      "record": "0c505152535455565758595a5b5c5d5e5f0704",
+      "record": "0c505152535455565758595a5b5c5d5e5f0804",
       "reads": {
         "type": "close",
         "operationId": "505152535455565758595a5b5c5d5e5f",
@@ -718,6 +727,14 @@
     {
       "name": "CLOSE, FAILED: one byte short",
       "record": "0c25262728292a2b2c2d2e2f303132333406"
+    },
+    {
+      "name": "CLOSE, TAKEN: one byte long",
+      "record": "0c262728292a2b2c2d2e2f303132333435070000"
+    },
+    {
+      "name": "CLOSE, TAKEN: one byte short",
+      "record": "0c262728292a2b2c2d2e2f30313233343507"
     },
     {
       "name": "CLOSE, FAILED with OUTPUT_WRITE_FAILED: one byte long",

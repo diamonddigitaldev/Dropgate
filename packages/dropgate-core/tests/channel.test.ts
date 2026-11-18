@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { inspect } from 'node:util';
 import { nobleProvider, webCryptoProvider, type CryptoProvider, type NamedCryptoProvider } from '../src/crypto/index.js';
 import {
-  MAX_HELLO_BYTES, connectByCode, connectByLink, openRoom, reconnect, type SecureChannel,
+  connectByCode, connectByLink, openRoom, reconnect, type SecureChannel,
 } from '../src/dgdtp/channel.js';
 import { MAX_GENERATION } from '../src/dgdtp/prologue.js';
 import { hex } from './helpers/cpace-vectors.js';
@@ -280,7 +280,7 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
 
   it("a swapped fingerprint ends both sides with SECURITY_POLICY_MISMATCH: the sender's message 2 and the receiver's BIND are never sent", async () => {
     const { fingerprintSwapper } = await import('./helpers/channel-checks.js');
-    const hello = ascii("the sender's capabilities");
+    const hello = { pauseLimitSeconds: 60 };
     for (const swap of [{ offer: true }, { answer: true }]) {
       const r = watched(provider);
       const s = watched(provider);
@@ -319,12 +319,14 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
     expect(data.sent.sender.length > 0 && data.sent.sender.every(isAbort)).toBe(true);
   });
 
-  it("a BIND that isn't one ends the sender's attempt with SECURITY_POLICY_MISMATCH, and the receiver's channel with it", async () => {
+  it("a BIND that isn't exactly one ends the sender's attempt with SECURITY_POLICY_MISMATCH, and the receiver's channel with it", async () => {
     const changes: Array<[string, (bind: Uint8Array) => Uint8Array]> = [
       ['another type', (b) => Uint8Array.of(0x02, ...b.subarray(1))],
       ['no type at all: empty', () => new Uint8Array(0)],
       ['closeSecret cut short', (b) => b.slice(0, 32)],
-      ['capabilities over 1,024 bytes', (b) => Uint8Array.of(...b, ...new Uint8Array(MAX_HELLO_BYTES + 1 - (b.byteLength - 33)))],
+      ['a byte short of its hello', (b) => b.slice(0, 50)],
+      ['a byte past its hello', (b) => Uint8Array.of(...b, 0)],
+      ['a hello naming a record too small', (b) => { const c = b.slice(); c.set([0, 0, 0x3f, 0xff], 39); return c; }],
     ];
     for (const [what, change] of changes) {
       const receiverProvider: CryptoProvider = {
@@ -337,11 +339,64 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
       await expect(channels(t).receiver.receive(), what).rejects.toMatchObject({ code: MISMATCH });
       await expect(channels(t).receiver.send(ascii('x')), what).rejects.toMatchObject({ code: MISMATCH });
     }
-    // And the largest capabilities allowed come through.
-    const capabilities = new Uint8Array(MAX_HELLO_BYTES).fill(0x33);
-    const t = await transfer(provider, { capabilities, hello: new Uint8Array(MAX_HELLO_BYTES).fill(0x44) });
+    // And a BIND exactly 51 bytes, the sender's hello exactly 18, each with its side's own values, come through.
+    const t = await transfer(provider, { capabilities: { pauseLimitSeconds: 0xffffffff, reconnectWindowSeconds: 0 }, hello: { pauseLimitSeconds: 1 } });
     expect(ending(t)).toBe('up / up, the same handshake hash');
-    expect(hex(channels(t).sender.peerHello)).toBe(hex(capabilities));
+    expect(channels(t).sender.peerHello).toEqual({ major: 4, minor: 0, features: 0, maxRecord: 65535, pauseLimitSeconds: 0xffffffff, reconnectWindowSeconds: 0 });
+    expect(channels(t).receiver.peerHello).toEqual({ major: 4, minor: 0, features: 0, maxRecord: 65535, pauseLimitSeconds: 1, reconnectWindowSeconds: 120 });
+  });
+
+  it("a sender's hello that isn't exactly one ends the receiver's attempt with SECURITY_POLICY_MISMATCH, after its BIND, and the sender's with it", async () => {
+    for (const [what, change] of [
+      ['a byte short', (h: Uint8Array) => h.slice(0, 17)],
+      ['a byte long', (h: Uint8Array) => Uint8Array.of(...h, 0)],
+      ['empty', () => new Uint8Array(0)],
+      ['a record too large', (h: Uint8Array) => { const c = h.slice(); c.set([0, 1, 0, 0], 6); return c; }],
+    ] as Array<[string, (h: Uint8Array) => Uint8Array]>) {
+      let changed = false;
+      const senderProvider: CryptoProvider = {
+        ...provider,
+        // The sender's first plaintext sealed with associated data of 32 bytes (Noise's h) is message 2's payload: its hello.
+        encryptWithNonce: (key, nonce, plaintext, ad) => {
+          if (!changed && ad && ad.byteLength === 32) {
+            changed = true;
+            return provider.encryptWithNonce(key, nonce, change(plaintext), ad);
+          }
+          return provider.encryptWithNonce(key, nonce, plaintext, ad);
+        },
+      };
+      const t = await transfer(provider, { senderProvider });
+      expect(changed, what).toBe(true);
+      // The sender, its handshake done once BIND came, hears the receiver's abort at its next record.
+      expect(codes(t), what).toBe(`${MISMATCH} / up`);
+      await expect(channels(t).sender.receive(), what).rejects.toMatchObject({ code: MISMATCH });
+    }
+  });
+
+  it("another major in either hello is VERSION_UNSUPPORTED on both sides, each told which of them needs updating, and nothing after the handshake is sent", async () => {
+    const newer = { major: 5 };
+    const older = { major: 3 };
+    for (const [what, options, receiverSays, senderSays] of [
+      ['a newer receiver', { capabilities: newer },
+        'the sender is using an older version of Dropgate. They need to update.',
+        'the receiver is using a newer version of Dropgate. Update this app to send to them.'],
+      ['a newer sender', { hello: newer },
+        'the sender is using a newer version of Dropgate. Update this app to receive from them.',
+        'the receiver is using an older version of Dropgate. They need to update.'],
+      ['an older sender', { hello: older },
+        'the sender is using an older version of Dropgate. They need to update.',
+        'the receiver is using a newer version of Dropgate. Update this app to send to them.'],
+    ] as const) {
+      const t = await transfer(provider, options);
+      const fault = (r: PromiseSettledResult<SecureChannel>) => (r.status === 'rejected' ? r.reason : undefined);
+      expect(fault(t.receiver), what).toMatchObject({ code: 'VERSION_UNSUPPORTED', origin: 'peer', message: `Update required: ${receiverSays}` });
+      expect(fault(t.sender), what).toMatchObject({ code: 'VERSION_UNSUPPORTED', origin: 'peer', message: `Update required: ${senderSays}` });
+      expect(fault(t.receiver).details).toEqual({ component: 'dgdtp', update: receiverSays.includes('They') ? 'peer' : 'client' });
+      // Noise's two messages and BIND, nothing more: no abort, no record.
+      const data = t.peers.data as NonNullable<PeerPair['data']>;
+      expect(data.sent.receiver.map((m) => m.byteLength), what).toEqual([48, 51 + 16]);
+      expect(data.sent.sender, what).toHaveLength(1);
+    }
   });
 
   it("a sealed frame that doesn't open during set-up ends the receiver's attempt with SECURITY_POLICY_MISMATCH, and the sender's, its rendezvous gone, with CONNECTION_LOST", async () => {
@@ -479,11 +534,12 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
         return out;
       },
     };
-    const t = await transfer(provider, { senderProvider, capabilities: ascii('caps') });
+    const t = await transfer(provider, { senderProvider, capabilities: { reconnectWindowSeconds: 7 } });
     expect(ending(t)).toBe('up / up, the same handshake hash');
     expect(opened).toHaveLength(1);
+    expect(opened[0].byteLength).toBe(51);
     expect(allZero(opened[0])).toBe(true);
-    expect(new TextDecoder().decode(channels(t).sender.peerHello)).toBe('caps');
+    expect(channels(t).sender.peerHello.reconnectWindowSeconds).toBe(7);
   });
 
   it('every attempt has an attempt ID of its own: two receivers by the same link', async () => {
@@ -592,7 +648,8 @@ describe("the secure channel's secrets and checks", () => {
     const bad: Array<() => Promise<unknown>> = [
       () => connectByLink(webCrypto, { rendezvous: rendezvous.receiver, secret: secret.slice(1), peer: peers.receiver }),
       () => connectByLink(webCrypto, { rendezvous: rendezvous.receiver, secret, peer: undefined as never }),
-      () => connectByLink(webCrypto, { rendezvous: rendezvous.receiver, secret, peer: peers.receiver, hello: new Uint8Array(MAX_HELLO_BYTES + 1) }),
+      () => connectByLink(webCrypto, { rendezvous: rendezvous.receiver, secret, peer: peers.receiver, hello: { pauseLimitSeconds: -1 } }),
+      () => connectByLink(webCrypto, { rendezvous: rendezvous.receiver, secret, peer: peers.receiver, hello: { major: 256 } }),
       () => connectByLink(webCrypto, { rendezvous: rendezvous.receiver, secret, peer: peers.receiver, hello: 'hi' as never }),
       () => reconnect(webCrypto, { pipe: pipePair().receiver, roomNonce: room.roomNonce, resumeSecret: new Uint8Array(31), previousGeneration: 0n, peer: peers.receiver }),
       () => reconnect(webCrypto, { pipe: pipePair().receiver, roomNonce: room.roomNonce, resumeSecret: new Uint8Array(32), previousGeneration: MAX_GENERATION, peer: peers.receiver }),
@@ -601,7 +658,7 @@ describe("the secure channel's secrets and checks", () => {
       () => reconnect(webCrypto, { pipe: undefined as never, roomNonce: room.roomNonce, resumeSecret: new Uint8Array(32), previousGeneration: 0n, peer: peers.receiver }),
       () => room.accept({ by: 'other' as never, pipe: pipePair().sender }, { peer: peers.sender }),
       () => room.accept({ by: 'resume', pipe: pipePair().sender, resumeSecret: new Uint8Array(16), previousGeneration: 0n }, { peer: peers.sender }),
-      () => room.accept({ by: 'link', pipe: pipePair().sender }, { peer: peers.sender, hello: new Uint8Array(MAX_HELLO_BYTES + 1) }),
+      () => room.accept({ by: 'link', pipe: pipePair().sender }, { peer: peers.sender, hello: { reconnectWindowSeconds: 1.5 } }),
       () => openRoom(webCrypto, { rendezvous: undefined as never }),
     ];
     for (const run of bad) await expect(run()).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });

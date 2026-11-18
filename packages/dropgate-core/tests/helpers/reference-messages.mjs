@@ -27,7 +27,7 @@
 // The hello: major (1) || minor (1) || features (4) || maxRecord (4: 16,384 to 65,535)
 //   || pauseLimit seconds (4) || reconnectWindow seconds (4).
 // CLOSE's reasons 1 USER_CANCELLED, 2 USER_DECLINED, 3 APP_CLOSED, 4 PAUSE_LIMIT,
-// 5 RECOVERY_EXHAUSTED, 6 FAILED; its detail (with FAILED, else 0) 1 OUTPUT_WRITE_FAILED,
+// 5 RECOVERY_EXHAUSTED, 6 FAILED, 7 TAKEN (another receiver accepted first); its detail (with FAILED, else 0) 1 OUTPUT_WRITE_FAILED,
 // 2 OUTPUT_STALLED, 3 SOURCE_UNAVAILABLE, 4 INTEGRITY_FAILED, 5 INVALID_MANIFEST,
 // 6 INVALID_MESSAGE, 7 TIMED_OUT, 8 CAPABILITY_UNSUPPORTED. A value not listed: FAILED, no detail.
 // 64-bit sizes are at most 2^53 - 1.
@@ -71,7 +71,7 @@ const hello = (h) => Buffer.concat([
 ]);
 const assurance = { saved: 1, 'handed-off': 2 };
 const resultBody = (r) => Buffer.concat([field.hex(r.commitId), field.u8(assurance[r.assurance]), field.u32(r.fileCount), field.u64(r.totalSize), field.hex(r.chain)]);
-const REASONS = ['USER_CANCELLED', 'USER_DECLINED', 'APP_CLOSED', 'PAUSE_LIMIT', 'RECOVERY_EXHAUSTED', 'FAILED'];
+const REASONS = ['USER_CANCELLED', 'USER_DECLINED', 'APP_CLOSED', 'PAUSE_LIMIT', 'RECOVERY_EXHAUSTED', 'FAILED', 'TAKEN'];
 const DETAILS = ['OUTPUT_WRITE_FAILED', 'OUTPUT_STALLED', 'SOURCE_UNAVAILABLE', 'INTEGRITY_FAILED', 'INVALID_MANIFEST', 'INVALID_MESSAGE', 'TIMED_OUT', 'CAPABILITY_UNSUPPORTED'];
 
 /** Each record's type number and how its fields are laid out, from the table above. */
@@ -149,7 +149,7 @@ const RECORDS = [
 
 /** Records read as something else than they say: what a receiver makes of them. */
 const LENIENT = [
-  ['CLOSE, a reason this version does not know, read as FAILED with no detail', Buffer.concat([field.u8(12), pattern(16, 0x50), field.u8(7), field.u8(4)]), { type: 'close', operationId: hexOf(16, 0x50), reason: 'FAILED' }],
+  ['CLOSE, a reason this version does not know, read as FAILED with no detail', Buffer.concat([field.u8(12), pattern(16, 0x50), field.u8(8), field.u8(4)]), { type: 'close', operationId: hexOf(16, 0x50), reason: 'FAILED' }],
   ['CLOSE, reason 0, read as FAILED', Buffer.concat([field.u8(12), pattern(16, 0x51), field.u8(0), field.u8(0)]), { type: 'close', operationId: hexOf(16, 0x51), reason: 'FAILED' }],
   ['CLOSE, FAILED with a detail this version does not know, read as none', Buffer.concat([field.u8(12), pattern(16, 0x52), field.u8(6), field.u8(9)]), { type: 'close', operationId: hexOf(16, 0x52), reason: 'FAILED' }],
   ['CLOSE, a detail with a reason other than FAILED, ignored', Buffer.concat([field.u8(12), pattern(16, 0x53), field.u8(1), field.u8(4)]), { type: 'close', operationId: hexOf(16, 0x53), reason: 'USER_CANCELLED' }],

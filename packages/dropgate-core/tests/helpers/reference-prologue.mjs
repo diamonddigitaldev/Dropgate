@@ -64,7 +64,9 @@ export const PROLOGUE_INPUTS = Object.freeze({
   otherFingerprint: fixed('other fingerprint', 32),
   receiverEphemeral: fixed('receiver ephemeral', 32),
   senderEphemeral: fixed('sender ephemeral', 32),
-  hello: Buffer.from('the sender\'s hello', 'ascii').toString('hex'),
+  // The sender's hello, 18 bytes: major 4, minor 0, no feature bits, records of
+  // up to 65,535 bytes, no pause limit, a reconnect window of 120 seconds.
+  hello: '04' + '00' + '00000000' + '0000ffff' + '00000000' + '00000078',
 });
 
 /** `hex` as SDP writes a fingerprint: upper-case pairs, colon-separated (or lower case). */

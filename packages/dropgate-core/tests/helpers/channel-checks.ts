@@ -11,7 +11,7 @@
 import vectors from '../fixtures/dgdtp-prologue-vectors.json';
 import type { CryptoProvider } from '../../src/crypto/index.js';
 import {
-  connectByCode, connectByLink, openRoom, reconnect, type SecureChannel, type SenderRoom,
+  connectByCode, connectByLink, openRoom, reconnect, type HelloOptions, type SecureChannel, type SenderRoom,
 } from '../../src/dgdtp/channel.js';
 import { deriveAttemptKeys } from '../../src/dgdtp/keys.js';
 import { noiseInitiator, noiseResponder } from '../../src/dgdtp/noise.js';
@@ -58,8 +58,10 @@ export interface TransferOptions {
   dataRelay?: Relay;
   /** Set up the peers before the attempt. */
   peers?: (peers: PeerPair) => void;
-  hello?: Uint8Array;
-  capabilities?: Uint8Array;
+  /** The sender's hello. */
+  hello?: HelloOptions;
+  /** The receiver's hello, in BIND. */
+  capabilities?: HelloOptions;
 }
 
 /** One attempt by link, both sides at once, over a mock rendezvous and fake peers: how each side ended. */
@@ -196,7 +198,7 @@ export async function channelChecks(provider: CryptoProvider): Promise<VectorChe
         peers.receiver.sdp = hs.offer;
         peers.sender.sdp = hs.answer;
       },
-      hello: fromHex(v.hello),
+      // Core's own hello, at the fakes' record size: the vector's.
     });
     if (t.receiver.status === 'rejected' || t.sender.status === 'rejected') return ending(t);
     const data = t.peers.data as NonNullable<PeerPair['data']>;
@@ -205,13 +207,12 @@ export async function channelChecks(provider: CryptoProvider): Promise<VectorChe
   });
 
   // End to end.
-  const hello = new TextEncoder().encode("the sender's capabilities");
-  const capabilities = new TextEncoder().encode("the receiver's capabilities");
-  await check('by link: both up, the same handshake hash, each with the other\'s hello', `up / up, the same handshake hash; ${hex(capabilities)} ${hex(hello)}`, async () => {
-    const t = await transfer(provider, { hello, capabilities });
+  const said = (h: SecureChannel['peerHello']) => `${h.major}.${h.minor} ${h.features} ${h.maxRecord} ${h.pauseLimitSeconds} ${h.reconnectWindowSeconds}`;
+  await check("by link: both up, the same handshake hash, each with the other's hello", 'up / up, the same handshake hash; 4.0 0 65535 0 30, 4.0 0 65535 3600 120', async () => {
+    const t = await transfer(provider, { hello: { pauseLimitSeconds: 3600 }, capabilities: { reconnectWindowSeconds: 30 } });
     if (t.receiver.status === 'rejected' || t.sender.status === 'rejected') return ending(t);
     const { receiver, sender } = channels(t);
-    return `${ending(t)}; ${hex(sender.peerHello)} ${hex(receiver.peerHello)}`;
+    return `${ending(t)}; ${said(sender.peerHello)}, ${said(receiver.peerHello)}`;
   });
   await check('by link: a record each way, then an out-of-band close each way through the rendezvous', 'ping pong; bye from the receiver, bye from the sender', async () => {
     const t = await transfer(provider);
@@ -232,7 +233,7 @@ export async function channelChecks(provider: CryptoProvider): Promise<VectorChe
     ending(await codeTransfer(provider, wrongDigit)));
   for (const [what, swap] of [['the offer', { offer: true }], ['the answer', { answer: true }], ['both', { offer: true, answer: true }]] as const) {
     await check(`a fingerprint swapped in ${what}: SECURITY_POLICY_MISMATCH on both sides; nothing after Noise's message 1 but aborts, one zero byte each`, 'SECURITY_POLICY_MISMATCH / SECURITY_POLICY_MISMATCH; 48 abort', async () => {
-      const t = await transfer(provider, { relay: fingerprintSwapper(provider, swap), hello });
+      const t = await transfer(provider, { relay: fingerprintSwapper(provider, swap), hello: { pauseLimitSeconds: 60 } });
       const sent = t.peers.data?.sent ?? { receiver: [], sender: [] };
       const after = [...new Set([...sent.receiver.slice(1), ...sent.sender].map((m) => (m.byteLength === 1 && m[0] === 0 ? 'abort' : String(m.byteLength))))].sort();
       const codes = [t.receiver, t.sender].map((r) => (r.status === 'fulfilled' ? 'up' : codeOf(r.reason))).join(' / ');

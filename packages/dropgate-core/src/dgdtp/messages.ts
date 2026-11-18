@@ -1,7 +1,6 @@
 import type { CryptoProvider } from '../crypto/index.js';
 import { DropgateError } from '../errors.js';
 import { validateFilename } from '../utils/filename.js';
-import { MIN_RECORD_BYTES } from './channel.js';
 import { CLOSE_SECRET_BYTES, RESUME_SECRET_BYTES } from './keys.js';
 import { NOISE_MAX_MESSAGE_BYTES, NOISE_TAG_BYTES } from './noise.js';
 
@@ -40,6 +39,13 @@ export const MESSAGE_TYPE = Object.freeze({
   STATUS: 18,
 });
 
+/**
+ * The smallest record a data channel must carry: one that can't take 16,384
+ * bytes (with Noise's tag) ends the attempt with CAPABILITY_UNSUPPORTED. The
+ * largest is Noise's 65,535.
+ */
+export const MIN_RECORD_BYTES = 16384;
+
 /** A hello: the sender's in Noise's second message, the receiver's in BIND. */
 export const HELLO_BYTES = 18;
 /** BIND: its type, the close secret, the receiver's hello. */
@@ -75,14 +81,17 @@ const CHAIN_FILE_END = 0x02;
 const MAX_U32 = 0xffffffff;
 const MAX_U64 = (1n << 64n) - 1n;
 
-/** Why a CLOSE ends a transfer. An unknown reason is read as FAILED. */
-export type CloseReason = 'USER_CANCELLED' | 'USER_DECLINED' | 'APP_CLOSED' | 'PAUSE_LIMIT' | 'RECOVERY_EXHAUSTED' | 'FAILED';
+/**
+ * Why a CLOSE ends a transfer. TAKEN is the sender's to a receiver it didn't
+ * choose: another receiver accepted first. An unknown reason is read as FAILED.
+ */
+export type CloseReason = 'USER_CANCELLED' | 'USER_DECLINED' | 'APP_CLOSED' | 'PAUSE_LIMIT' | 'RECOVERY_EXHAUSTED' | 'FAILED' | 'TAKEN';
 /** What failed, with FAILED. An unknown detail is read as none. */
 export type CloseDetail =
   | 'OUTPUT_WRITE_FAILED' | 'OUTPUT_STALLED' | 'SOURCE_UNAVAILABLE' | 'INTEGRITY_FAILED' | 'INVALID_MANIFEST' | 'INVALID_MESSAGE'
   | 'TIMED_OUT' | 'CAPABILITY_UNSUPPORTED';
 
-const CLOSE_REASONS: readonly CloseReason[] = ['USER_CANCELLED', 'USER_DECLINED', 'APP_CLOSED', 'PAUSE_LIMIT', 'RECOVERY_EXHAUSTED', 'FAILED'];
+const CLOSE_REASONS: readonly CloseReason[] = ['USER_CANCELLED', 'USER_DECLINED', 'APP_CLOSED', 'PAUSE_LIMIT', 'RECOVERY_EXHAUSTED', 'FAILED', 'TAKEN'];
 const CLOSE_DETAILS: readonly CloseDetail[] = [
   'OUTPUT_WRITE_FAILED', 'OUTPUT_STALLED', 'SOURCE_UNAVAILABLE', 'INTEGRITY_FAILED', 'INVALID_MANIFEST', 'INVALID_MESSAGE',
   'TIMED_OUT', 'CAPABILITY_UNSUPPORTED',

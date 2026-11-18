@@ -1,6 +1,6 @@
 # DGDTP — Dropgate Direct Transfer Protocol
 
-**Protocol Version:** 4.0, in development. Its secure channel ([§4](#4-the-secure-channel)) is built in the core library and tested, but no transfer runs over it yet: today's direct transfers use version 3's messages ([§5](#5-signalling-layer) to [§18](#18-error-model)), with `hello` carrying 4
+**Protocol Version:** 4.0, in development. Its secure channel, and the engine that carries a transfer over it ([§4](#4-the-secure-channel)), are built in the core library and tested, but nothing in core's API or the apps uses them yet: today's direct transfers use version 3's messages ([§5](#5-signalling-layer) to [§18](#18-error-model)), with `hello` carrying 4
 **Status:** In development
 **Last Updated:** November 2026
 
@@ -21,7 +21,7 @@ The secure channel is built in `@dropgate/core` ([`packages/dropgate-core/src/dg
 
 Today's direct transfers still run version 3's transfer messages, with `hello` carrying 4, on PeerJS, protected by WebRTC's own DTLS encryption alone ([§5](#5-signalling-layer) to [§18](#18-error-model)). They support single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§16](#16-resume-support)). What DTLS alone does and doesn't protect against is in [§19.1](#191-transport-encryption).
 
-Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, is built, and so is core's client for it: a sender's room, its codes, its receivers' attempts by link or by code, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Core also writes and reads the transfer engine's records, its list of files and its checkpoint chain. The engine that sends them is still to come. Together they carry every direct transfer over the secure channel, and their messages replace §5 to §18.
+Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, is built, and so is core's client for it: a sender's room, its codes, its receivers' attempts by link or by code, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Core also has the transfer engine: its records, its list of files and its checkpoint chain, and the engine that sends them, one transfer end to end, from the offer to the receiver's result. Nothing in core's API or the apps uses them yet. Together they will carry every direct transfer over the secure channel, and their messages replace §5 to §18.
 
 ### 1.2 Design Goals
 
@@ -275,7 +275,13 @@ Once the data channel is open, the two devices run `Noise_NNpsk0_25519_AESGCM_SH
 
 ### 4.8 BIND and the Out-of-Band Close
 
-**BIND** is the receiver's first record. For now its layout is provisional: `01` ‖ the close secret (32 random bytes) ‖ the receiver's capabilities (at most 1,024 bytes). The engine's own layout replaces it. Anything else as the receiver's first record is `SECURITY_POLICY_MISMATCH` at the sender. Both devices derive the close keys from the close secret ([§4.4](#44-the-key-schedule)), then overwrite it.
+**BIND** is the receiver's first record, exactly 51 bytes: `01` ‖ the close secret (32 random bytes) ‖ the receiver's hello (18 bytes). The sender's hello, the same 18 bytes, is Noise's second message's payload. A **hello** is, big-endian:
+
+```
+major (1) ‖ minor (1) ‖ features (4) ‖ largest record (4) ‖ pause limit, seconds (4, 0 for none) ‖ reconnect window, seconds (4)
+```
+
+The major and minor are the device's DGDTP version; feature bits are none in 4.0, and bits a device doesn't know are ignored; the largest record is the one its data channel takes ([§4.13](#413-what-the-rendezvous-and-the-engine-add)), 16,384 to 65,535; the pause limit and the reconnect window are the device's own (a reconnect window of 2 minutes unless it sets another). Each device checks the other's major once its own hello has gone: another is `VERSION_UNSUPPORTED` on both devices, each told which of them needs updating ([§4.10](#410-errors)). A first record that isn't exactly a BIND, or a sender's hello that isn't exactly a hello, is `SECURITY_POLICY_MISMATCH`. Both devices derive the close keys from the close secret ([§4.4](#44-the-key-schedule)), then overwrite it.
 
 **An out-of-band close** tells the other device a transfer has ended even when the data channel has already gone: a sealed frame through the rendezvous, of kind `0x11`, counter 0, under that direction's close key. Its inside is type 6, with the close's body, at most 509 bytes, padded to 512, so it's 550 bytes on the wire, like a candidate. Each device sends at most one. A close that doesn't open, isn't one, or comes after the first is ignored, so the server can't end a transfer by injecting one. Late candidates still arrive on the same path.
 
@@ -283,7 +289,7 @@ Once the data channel is open, the two devices run `Noise_NNpsk0_25519_AESGCM_SH
 
 A resume is a new attempt, from the **resume secret** both devices hold: 32 bytes, mode 3 in the prologue, a new attempt ID and the generation one past the connection's last, so new sealing keys, a new PSK, a new handshake and new fingerprints. Nothing from the earlier attempt is reused, and a generation past 2⁶⁴ − 1 is refused.
 
-Core builds a resume's keys and handshake now. Where the resume secret comes from is the engine's, still to come: the receiver will make it, 32 random bytes, and give it to the sender inside the channel once it has accepted the transfer, so only the accepted receiver ever holds it, and only ever in memory.
+Core builds a resume's keys and handshake now. The resume secret is the receiver's: 32 random bytes it makes as it accepts a transfer and gives the sender in its acceptance, inside the channel, so only the accepted receiver ever holds it, and only ever in memory. Each device overwrites it as its transfer ends. Resuming with it comes with recovery.
 
 ### 4.10 Errors
 
@@ -292,7 +298,8 @@ Each error is core's `DropgateError` with one of these codes ([Errors](../core/e
 | Code | Origin | When | Message |
 |------|--------|------|---------|
 | `CODE_MISMATCH` | `peer` | CPace didn't complete: a wrong code, a code already used, or any abort ([§4.3](#43-cpace-typed-codes)). Both devices get it | The receiver: "That code didn't match. Ask the sender for the new one." The sender: "Someone entered the wrong code. Here's a new one." |
-| `SECURITY_POLICY_MISMATCH` | `peer` | A sealed frame, a handshake message or a record didn't open, wasn't the next, or wasn't a length it can be; a fingerprint broke the rule; message 1 held something; BIND wasn't one | "The connection couldn't be secured, so it was closed." |
+| `SECURITY_POLICY_MISMATCH` | `peer` | A sealed frame, a handshake message or a record didn't open, wasn't the next, or wasn't a length it can be; a fingerprint broke the rule; message 1 held something; BIND, or the sender's hello, wasn't exactly one | "The connection couldn't be secured, so it was closed." |
+| `VERSION_UNSUPPORTED` | `peer` | The other device's hello says another DGDTP major. Both devices get it; `details.update` is `peer` when the other device needs updating, `client` when this one does | "Update required: the sender is using an older version of Dropgate. They need to update.", or "… a newer version of Dropgate. Update this app to receive from them." (and the receiver's, for the sender) |
 | `SECURITY_POLICY_MISMATCH` | `local` | This device has sent every frame or record its keys allow | "Setting up this connection took too many messages, so it was closed." or "This connection has sent every record its keys allow, so it was closed." |
 | `CONNECTION_LOST` | `network` | The rendezvous, or the data channel, went before the channel was up: the server closed the socket, or told a receiver the sender has gone | "The connection was lost." |
 | `SERVER_UNREACHABLE` | `network` | The socket to the rendezvous never opened | "The server couldn't be reached." |
@@ -302,8 +309,22 @@ Each error is core's `DropgateError` with one of these codes ([Errors](../core/e
 | `CAPABILITY_UNSUPPORTED` | `server` | A typed code, on a server whose `codeLetters` is 0. Nothing is sent | "This server doesn't use codes. Ask the sender for the link." |
 | `INVALID_CODE` | `local` | A typed code isn't one. Nothing is sent | "That isn't a valid sharing code." |
 | `INVALID_RESPONSE` | `server` | The rendezvous gave a room nonce or a locator that isn't one, sent something that isn't one of its messages, or refused one of core's as malformed or as one frame too many | "The server's answer wasn't understood." |
-| `INVALID_MESSAGE` | `peer` | A record from the other device isn't one of this version's, at its exact length (the engine, still to come, ends a transfer with it) | "The other device sent something this version of Dropgate doesn't understand." |
+| `INVALID_MESSAGE` | `peer` | A record from the other device isn't one of this version's at its exact length, or isn't one the engine takes then: from the wrong device, out of order, a DATA record of any size but the one it must be, or past the credit given ([§4.13](#413-what-the-rendezvous-and-the-engine-add)) | "The other device sent something this version of Dropgate doesn't understand." |
 | `OPERATION_CANCELLED` | `local` | This device closed the attempt or the channel | "The operation was cancelled." |
+
+In a transfer, the engine adds these ([§4.13](#413-what-the-rendezvous-and-the-engine-add)):
+
+| Code | Origin | When | Message |
+|------|--------|------|---------|
+| `REQUEST_REJECTED` | `peer` | Another receiver accepted the transfer first: the sender's CLOSE, `TAKEN` | "This transfer is already going to someone else." |
+| `INTEGRITY_FAILED` | `peer` | A block didn't match its hash, or a file's end or FINISH didn't match what arrived | "A block of a file didn't match its hash.", "A file's end didn't match the list of files.", "A file's checkpoint didn't match." or "The transfer's end didn't match what arrived." |
+| `INVALID_MANIFEST` | `peer` | The list of files didn't come whole and in order, or doesn't add up | "The list of files sent didn't add up." |
+| `OUTPUT_WRITE_FAILED` | `local` | The receiver's sink couldn't be had, or a write or a close failed | "Received data couldn't be written." |
+| `SOURCE_UNAVAILABLE` | `local` | The sender couldn't read a file, or it gave other than the bytes asked for | "A file couldn't be read." |
+| `PEER_FAILED` | `peer` | The other device's CLOSE: `FAILED`, with what failed as `details.reason`, or a reason this side can only report | The sender's: "The receiver couldn't save the file.", "The receiver's device stopped saving the file.", "The file didn't arrive intact.", "The receiver couldn't read the list of files."; the receiver's: "The sender's file couldn't be read."; either: "The … device couldn't understand what this device sent.", "The … closed Dropgate before the transfer finished.", "The … device reported an error." |
+| `TIMED_OUT` | `peer` | The other device's CLOSE says the offer wasn't accepted in time | "The offer wasn't accepted within 10 minutes." |
+
+A cancel by the other device (CLOSE, `USER_CANCELLED`) ends this one cancelled by the peer; a receiver's decline (`USER_DECLINED`) ends the sender cancelled by the peer, declined.
 
 **How both devices hear it:**
 
@@ -341,12 +362,14 @@ Each error is core's `DropgateError` with one of these codes ([Errors](../core/e
 
 Core's tests also run the whole channel end to end, on each provider and with one device on each, over a stand-in rendezvous and stand-in connections with fake SDP: by link, by code and on resume, every attack above ending the attempt as it says, and with every random value fixed, the channel's own handshake giving the vector's bytes. They run it over WebRTC too, between two peer connections in Node, and through a real Dropgate Server's rendezvous: by link, by code, a wrong code then the link and the new code, a resume, and a server with every code held. The vectors and the channel's checks run in Chromium, Firefox and WebKit too, on the provider core chooses in each and on `@noble` in all three ([Building and Testing](../core/building-and-testing.md)).
 
+The engine's tests run it over the channel in memory, with the test playing either device record by record (every refusal above, credit, the pump's limits, fencing a generation's effects, and each of the faults Dropgate 3's direct transfer had, now a plain test), and end to end through a real Dropgate Server over WebRTC in Node: one file of 0, 1, 1 MiB − 1, 1 MiB and 1 MiB + 1 bytes, many files with empty ones by code, into one ZIP, and 20 MiB, each byte for byte.
+
 ### 4.13 What the Rendezvous and the Engine Add
 
-Of these, the connection itself, the rendezvous's rooms and codes, and core's client for the rendezvous are built. Core runs the secure channel over a W3C `RTCPeerConnection` (the browser's own, or one an integrator passes in for Node).
+All of these are built: the connection itself, the rendezvous's rooms and codes, core's client for the rendezvous, and the engine that sends one transfer. Core runs the secure channel over a W3C `RTCPeerConnection` (the browser's own, or one an integrator passes in for Node).
 
 - **The data channel:** the receiver makes the one data channel, `dgdtp/4`, ordered and fully reliable, carrying bytes only; anything else on it is refused as a fault. The fingerprints come from the real SDP each device applied.
-- **Record size:** a device's largest record is the smaller of 65,535 bytes and its data channel's max-message-size. A data channel that can't take 16,384 bytes ends the attempt with `CAPABILITY_UNSUPPORTED`. How each device tells the other its size comes with the engine.
+- **Record size:** a device's largest record is the smaller of 65,535 bytes and its data channel's max-message-size. A data channel that can't take 16,384 bytes ends the attempt with `CAPABILITY_UNSUPPORTED`. Each device says its own in its hello ([§4.8](#48-bind-and-the-out-of-band-close)), and both send records no larger than the smaller of the two.
 - **Backpressure:** a device sends no more while over 256 KiB waits in the data channel's buffer, going on once it drains, whether or not the `bufferedamountlow` event comes.
 - **Ends:** ICE or the connection failing, or the data channel closing, ends it with `CONNECTION_LOST`.
 
@@ -355,7 +378,7 @@ The rendezvous's rooms and codes are built on the Dropgate Server ([`server/rend
 - **One WebSocket per device** at `/api/v4/rendezvous`, with nothing about a room in its address, speaking short binary messages: a type byte, then fixed fields. The sender's one socket holds its room; each receiver's attempt has a socket of its own. A text message, or one over 8,232 bytes, closes the socket.
 - **In plain, as a room is created or joined:** the DGDTP major, so a mismatch is said before any cryptography. A major other than the server's is refused with the server's version; the minor is passed over.
 - **Creating a room:** the room ID, the room's nonce and whether the sender wants a code. A second room with a live room's ID is refused.
-- **Joining by the room ID:** the receiver gets the room's nonce, and the sender hears of the attempt under a one-byte tag, which then carries that attempt's frames on the sender's socket. A room takes at most 4 attempts by link at once. Once the sender locks it, it takes no new ones (core will lock it as a receiver accepts), and the attempts under way carry on; the sender can also drop any one attempt.
+- **Joining by the room ID:** the receiver gets the room's nonce, and the sender hears of the attempt under a one-byte tag, which then carries that attempt's frames on the sender's socket. A room takes at most 4 attempts by link at once. Once the sender locks it, it takes no new ones (core locks it as a receiver accepts), and the attempts under way carry on; the sender can also drop any one attempt.
 - **Codes** ([§3](#3-codes-and-links)): a sender that wants one, on creating its room or later by asking, is given a locator drawn uniformly at random from the server's free ones: every string of `CODE_LETTERS` of the server's length, 2 (576 of them) or 3 (13,824), which `GET /api/info` gives as `capabilities.p2p.codeLetters`. A room has at most one unused code; asked again while it's unused, the server gives the same one. A receiver joins by the locator alone, the rest of the code never leaving either device, and the sender hears of the attempt as one by code.
 - **One try per code:** a code is that attempt's until the attempt sends its first frame, CPace's first message ([§4.3](#43-cpace-typed-codes)), and another join by it meanwhile is refused as busy. Relaying that frame uses the code up, right or wrong: only the first CPace message for a locator ever reaches the sender, and a later join by it finds nothing. The sender can ask for a new code, and its link still works. A receiver that leaves, or is dropped, before sending anything leaves the code unused. A room has one attempt by code at a time, beside its 4 by link.
 - **Codes come back:** a locator leaves its room when its code is used, when the sender locks the room, when the room ends, or when the code is released: 10 minutes after the sender last asked for it or renewed it, when the sender is told. Every locator that leaves a room waits 5 minutes before the server hands it out again, so a late try at an old code can't meet another sender's new one.
@@ -374,7 +397,16 @@ Core's client for the rendezvous ([`dgdtp/rendezvous.ts`](../../packages/dropgat
 
 The engine's records are written and read by core ([`dgdtp/messages.ts`](../../packages/dropgate-core/src/dgdtp/messages.ts)), each a type byte then fixed fields at an exact length, a record of any other length `INVALID_MESSAGE`; so are the list of files a sender offers, in pieces the size of a record, with its hash, and the checkpoint chain over every 1 MiB block of every file. They match a second implementation's vectors ([§4.12](#412-test-vectors-and-tests)).
 
-Still to come, from the engine: sending those records (the sender's hello, BIND, the receiver's acceptance with the resume secret, a close), strictly in order over the data channel; and 15 seconds for each attempt.
+**The engine** ([`dgdtp/engine.ts`](../../packages/dropgate-core/src/dgdtp/engine.ts), [`send.ts`](../../packages/dropgate-core/src/dgdtp/send.ts), [`receive.ts`](../../packages/dropgate-core/src/dgdtp/receive.ts)) sends one transfer over the secure channel, once each device's hello has said its largest record ([§4.8](#48-bind-and-the-out-of-band-close)):
+
+- **The offer.** The sender opens its room and shares its link, and its code if one was free. Each receiver that reaches it runs the handshake, then is sent the list of files: MANIFEST records, each fragment the most a record of the agreed size holds. Once the list is whole and checked, the receiver sees the files. A link can reach several people before one accepts, and each sees the offer.
+- **Acceptance.** No sink, no ACCEPT: the receiver accepts into a sink (one, one for each file, or one ZIP of them all), opened first, so a sink that can't be had fails the receive before anything is accepted. ACCEPT carries the list's hash, the resume secret ([§4.9](#49-the-resume-secret)), the first credit and whether the files are saved or handed to a browser. The first ACCEPT whose hash matches wins: the sender locks the room, and tells every other receiver already offered, and any that accepts later, with a CLOSE whose reason is `TAKEN`; they end `REQUEST_REJECTED`, "This transfer is already going to someone else." A receiver that declines sends a CLOSE (`USER_DECLINED`), and the send ends, cancelled by the receiver.
+- **Data under credit.** Each file is read a 1 MiB block at a time, at most 2 blocks ahead of what's sent, and each block is hashed and stepped into the checkpoint chain. Its bytes go as DATA records, each exactly the most a record holds (65,505 bytes at 65,535) or what's left of its block, so a block is 16 records and one of 496 bytes; then its BLOCK_END. The sender never has more than the receiver's credit sent and not yet written: 4 MiB, given in ACCEPT and moved on by CREDIT as the receiver writes: every 256 KiB, and at once as a file finishes (it writes whole blocks, so no CREDIT waits on a timer). At most 8 file ends go ahead of the files the receiver has finished. An empty file is its FILE_END alone.
+- **Checked, then written.** The receiver checks each record as it comes: DATA past the credit given, a record of any other size, out of order or from the wrong device, is `INVALID_MESSAGE`. It writes a block only once it matches its BLOCK_END's hash; a block, a file's end (its size against the list, its checkpoint against the chain) or FINISH (the count, total, list's hash and chain) that doesn't match is `INTEGRITY_FAILED`. A sink that fails is `OUTPUT_WRITE_FAILED`, and the sink is aborted, never finished as if whole.
+- **Completion only after the save.** Each file's sink is closed at its end, the last after FINISH (a ZIP finished first). Only then does the receiver send RESULT, with the same totals and chain and whether the files were saved or handed to a browser; the sender checks them, answers RESULT_ACK and completes, with the receiver's word for where the files went. The receiver completes once RESULT_ACK comes, or 2 seconds after RESULT without it: the files are saved either way.
+- **The pump.** Each device sends its records from one ordered loop. Control records go ahead of any of the stream not yet sent; records are encrypted in the order they go, up to 8 at a time, and none is ever dropped. The loop stops once about 1 MiB waits in the data channel's buffer, and goes on at 256 KiB.
+- **Generation fencing.** Every effect carries the generation of the connection it came from or started on: a record, a sink's write, a file's read, a timer. One from another generation, or that comes after the transfer has ended, touches nothing.
+- **Ends.** A device that fails tells the other with one CLOSE inside the channel, `FAILED` with what failed, and the other ends as [§4.10](#410-errors) says, in its own words (`PEER_FAILED`, with what failed as `details.reason`, never the other device's text). The data channel closing before RESULT is `CONNECTION_LOST` on both devices, never a cancel. For now a cancel closes the channel, which the other device hears as the connection lost; still to come are CLOSE_ACK, the close's copy through the rendezvous, its own outcome for a cancel or an app closing, HOLD (pausing), the timers (15 seconds for each attempt's handshake among them) and liveness.
 
 ### 4.14 Constants
 
@@ -395,7 +427,7 @@ Still to come, from the engine: sending those records (the sender's hello, BIND,
 | `PROLOGUE_BYTES` | 131 | Noise's prologue. |
 | `NOISE_MAX_MESSAGE_BYTES` | 65,535 | A record, with its tag. |
 | `NOISE_MAX_RECORD_PLAINTEXT_BYTES` | 65,519 | A record's plaintext. |
-| `NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES`, `MAX_HELLO_BYTES` | 1,024 | The sender's hello, and the receiver's capabilities in BIND. |
+| `NOISE_MAX_HANDSHAKE_PAYLOAD_BYTES` | 1,024 | The most a handshake message's payload holds. |
 | `NOISE_REKEY_INTERVAL` | 65,536 | Records under one key, each way. |
 | `MAX_GENERATION` | 2⁶⁴ − 1 | The last generation. |
 | `DATA_CHANNEL_LABEL` | `dgdtp/4` | The one data channel's name. |
@@ -411,6 +443,14 @@ Still to come, from the engine: sending those records (the sender's hello, BIND,
 | `MAX_MANIFEST_FILES` | 10,000 | The most files one transfer offers. |
 | `MAX_MEDIA_TYPE_BYTES` | 127 | A file's media type in the list of files. |
 | `MANIFEST_VERSION` | 1 | The list of files' version. |
+| `DEFAULT_RECONNECT_WINDOW_SECONDS` | 120 | A device's reconnect window, in its hello, when it doesn't set one. |
+| `CREDIT_WINDOW_BYTES` | 4,194,304 | The receiver's credit: at most this much sent and not yet written. |
+| `CREDIT_STEP_BYTES` | 262,144 | The receiver sends CREDIT once what it has written moves this far. |
+| `PUMP_HIGH_WATER_BYTES` | 1,048,576 | A device's pump stops once about this much waits in the data channel's buffer. |
+| `SOURCE_BLOCKS_AHEAD` | 2 | The sender reads a file at most this many blocks ahead of what it has sent. |
+| `ENCRYPT_AHEAD` | 8 | Records encrypted at once, ahead of the data channel. |
+| `MAX_UNFINISHED_FILE_ENDS` | 8 | File ends the sender sends ahead of the files the receiver has finished. |
+| `RESULT_ACK_WAIT_MS` | 2,000 | How long the receiver waits for RESULT_ACK before completing anyway. |
 
 ---
 
@@ -1015,7 +1055,7 @@ Today's direct transfers add no encryption of their own to DTLS, and that has a 
 
 In practice, today's direct transfers are only as confidential as the signalling server is trustworthy. For sensitive transfers, use a server you run or trust.
 
-The secure channel closes this gap: its set-up messages are sealed, and both certificates' fingerprints are in its encrypted handshake, so a server that swaps them makes the handshake fail ([§4.6](#46-the-dtls-prologue)). Direct transfers run over it once Dropgate 4's rendezvous and engine are built.
+The secure channel closes this gap: its set-up messages are sealed, and both certificates' fingerprints are in its encrypted handshake, so a server that swaps them makes the handshake fail ([§4.6](#46-the-dtls-prologue)). Direct transfers run over it once core's API and the apps use Dropgate 4's rendezvous and engine, which core has now.
 
 ### 19.2 Session ID Tracking
 

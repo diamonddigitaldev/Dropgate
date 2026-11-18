@@ -88,7 +88,7 @@ async function open(page, context) {
 }
 
 /** The records', manifest's, chain's and rendezvous messages' checks: one for each vector, two for a record or chain step. */
-const MESSAGE_CHECKS = 329;
+const MESSAGE_CHECKS = 333;
 
 /** Each check whose value isn't the known answer, so a failure names them all. */
 const wrong = (checks) => checks.filter(({ expected, actual }) => actual !== expected);
