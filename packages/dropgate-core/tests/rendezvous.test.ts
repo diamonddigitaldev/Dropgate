@@ -126,6 +126,22 @@ async function until(check: () => boolean, what: string, ms = 5000): Promise<voi
   }
 }
 
+/**
+ * Waits until the server holds `expected` (each count it names): the server
+ * hears a socket close a moment after the socket itself does.
+ */
+async function heldBecomes(server: Server, expected: Record<string, number>, ms = 5000): Promise<void> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const held = await server.rendezvousHeld();
+    if (Object.entries(expected).every(([key, count]) => held[key] === count) || Date.now() > end) {
+      expect(held).toMatchObject(expected);
+      return;
+    }
+    await sleep(10);
+  }
+}
+
 const codeOf = (err: unknown) => String((err as { code?: string })?.code ?? err);
 async function failure(promise: Promise<unknown>): Promise<{ code: string; message: string; details?: unknown }> {
   try {
@@ -537,7 +553,7 @@ describe('every locator held', () => {
     const freed = holders[0];
     freed.sender.close();
     await freed.sender.closed;
-    expect(await server.rendezvousHeld()).toMatchObject({ codes: 575, quarantined: 1, free: 0 });
+    await heldBecomes(server, { codes: 575, quarantined: 1, free: 0 });
     await advanceServer(5 * 60_000 + 1000);
     expect(await server.rendezvousHeld()).toMatchObject({ codes: 575, quarantined: 0, free: 1 });
     timers.advance(CODE_RETRY_MS);
