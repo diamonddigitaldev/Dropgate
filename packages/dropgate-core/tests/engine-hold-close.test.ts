@@ -9,7 +9,7 @@ import { receiveDirect, type DirectReceiver } from '../src/dgdtp/receive.js';
 import { sendDirect, type DirectSender } from '../src/dgdtp/send.js';
 import type { FileSource } from '../src/source.js';
 import { channels, fingerprintSwapper, transfer, wrongDigit } from './helpers/channel-checks.js';
-import { FakeClock, MemorySink, ScriptedSender, memoryFile, patterned, recordOf, sameAs } from './helpers/direct.js';
+import { FakeClock, tracked, MemorySink, ScriptedSender, memoryFile, patterned, recordOf, sameAs } from './helpers/direct.js';
 import { MockRendezvous, PeerPair, pipePair, type FakePeer, type Side } from './helpers/fake-channel.js';
 
 // The direct-transfer engine's holds, timers and ends (src/dgdtp/engine.ts,
@@ -23,7 +23,8 @@ import { MockRendezvous, PeerPair, pipePair, type FakePeer, type Side } from './
 // every way a transfer ends, table-driven: one outcome on each side, and at
 // most one CLOSE from each.
 
-const provider = webCryptoProvider(globalThis.crypto);
+// Tracked, so the fake clock waits for exactly the crypto each timer starts.
+const provider = tracked(webCryptoProvider(globalThis.crypto));
 const MiB = 1048576;
 
 // The timers' values as the spec gives them, not read from the code under test, so a timer that moves fails here.

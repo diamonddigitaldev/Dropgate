@@ -59,16 +59,44 @@ export class FakeClock implements EngineTimers {
   }
 }
 
-/** Lets real work started by a timer (crypto, the in-memory pipes' promises) run its course. */
-export async function settle(ms = 0.25): Promise<void> {
-  // Turns of the event loop for about `ms` of real time: the crypto runs on Node's thread pool, whose results come between
-  // turns. Work that takes longer simply finishes during a later timer's turns, as it would between a real clock's ticks.
-  const end = performance.now() + ms;
-  let turns = 0;
-  do {
+/** Calls of a `tracked()` provider still running. */
+let cryptoInFlight = 0;
+
+/**
+ * `provider`, counting its calls still running: the engine's every step that
+ * waits on something real (a record's encryption, a hash) is one of these, so
+ * `settle()` can wait for exactly that work, on a fast machine or a slow one.
+ */
+export function tracked(provider: CryptoProvider): CryptoProvider {
+  // A copy, each method wrapped: the provider itself is frozen.
+  const copy: Record<string, unknown> = {};
+  for (const key of Object.keys(provider)) {
+    const value = (provider as unknown as Record<string, unknown>)[key];
+    copy[key] = typeof value !== 'function' ? value : (...args: unknown[]) => {
+      const out = (value as (...a: unknown[]) => unknown).apply(provider, args);
+      if (out instanceof Promise) {
+        cryptoInFlight += 1;
+        out.then(() => { cryptoInFlight -= 1; }, () => { cryptoInFlight -= 1; });
+      }
+      return out;
+    };
+  }
+  return Object.freeze(copy) as unknown as CryptoProvider;
+}
+
+/**
+ * Lets the real work a timer started run its course: until no call of a
+ * `tracked()` provider is running and the event loop has turned three times
+ * with none (the in-memory pipes and the engine's steps between crypto calls
+ * are promises, done within a turn), or `capMs` of real time has passed.
+ */
+export async function settle(capMs = 100): Promise<void> {
+  const end = performance.now() + capMs;
+  let quiet = 0;
+  while (quiet < 3 && performance.now() < end) {
     await immediate();
-    turns += 1;
-  } while (turns < 3 || performance.now() < end);
+    quiet = cryptoInFlight === 0 ? quiet + 1 : 0;
+  }
 }
 
 /** `size` bytes that differ from block to block and file to file: a counter run through a small mix. */

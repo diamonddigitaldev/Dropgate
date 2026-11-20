@@ -5,7 +5,7 @@ import type { SecureChannel } from '../src/dgdtp/channel.js';
 import { Link } from '../src/dgdtp/engine.js';
 import { encodeMessage, type Message } from '../src/dgdtp/messages.js';
 import { channels, transfer } from './helpers/channel-checks.js';
-import { FakeClock, anythingWithin, recordOf } from './helpers/direct.js';
+import { FakeClock, tracked, anythingWithin, recordOf } from './helpers/direct.js';
 
 // The engine's liveness (src/dgdtp/engine.ts' Link): one Link over the real
 // secure channel in memory, the test playing the other device record by
@@ -14,7 +14,8 @@ import { FakeClock, anythingWithin, recordOf } from './helpers/direct.js';
 // (each new one an eighth of it); and nothing heard for max(15 s, 6 × that)
 // ends the link CONNECTION_LOST.
 
-const provider = webCryptoProvider(globalThis.crypto);
+// Tracked, so the fake clock waits for exactly the crypto each timer starts.
+const provider = tracked(webCryptoProvider(globalThis.crypto));
 // As the spec gives them, not read from the code under test.
 const PING_INTERVAL_MS = 5000;
 const MIN_NO_ANSWER_MS = 15_000;
