@@ -10,6 +10,7 @@ import { MESSAGE_TYPE, MIN_RECORD_BYTES, decodeHello, decodeMessage, encodeHello
 import { NOISE_MAX_MESSAGE_BYTES, NOISE_TAG_BYTES, noiseInitiator, noiseResponder, type NoiseTransport } from './noise.js';
 import { MAX_GENERATION, prologueFromSdp } from './prologue.js';
 import { PROTOCOLS } from '../version.js';
+import { GLOBAL_TIMERS, HANDSHAKE_TIMEOUT_MS, ICE_TIMEOUT_MS, SETUP_TIMEOUT_MS, type EngineTimers } from './timers.js';
 import {
   CLOSE_KIND, FRAME_HEADER_BYTES, closeChannel, signalChannel, type CloseChannel, type SignalChannel, type SignalMessage, type SignalRole,
 } from './seal.js';
@@ -76,6 +77,8 @@ const CODE_MISMATCH_WORDING: Readonly<Record<SignalRole, string>> = Object.freez
 const invalid = (message: string) => new DropgateError({ code: 'INVALID_ARGUMENT', message });
 const insecure = () => new DropgateError({ code: 'SECURITY_POLICY_MISMATCH' });
 const lost = () => new DropgateError({ code: 'CONNECTION_LOST' });
+/** An attempt that ran out of time: ICE, the handshake or the whole set-up. */
+const couldntConnect = () => new DropgateError({ code: 'TIMED_OUT', message: "Couldn't connect to the other device." });
 
 const isBytes = (value: unknown, length: number): value is Uint8Array => value instanceof Uint8Array && value.byteLength === length;
 
@@ -177,6 +180,8 @@ export interface SecureChannel {
   readonly handshakeHash: Uint8Array<ArrayBuffer>;
   /** The other side's hello, read and checked: the sender's from Noise's second message, the receiver's from BIND. */
   readonly peerHello: Hello;
+  /** This side's own hello, as it was sent. */
+  readonly hello: Hello;
   /**
    * The largest record this side can send, with Noise's 16-byte tag:
    * min(65,535, the data channel's max-message-size), at least 16,384.
@@ -188,9 +193,17 @@ export interface SecureChannel {
   receive(): Promise<Uint8Array<ArrayBuffer>>;
   /** Resolves once the data channel's buffer has room again (`MessagePipe.writable()`); rejects once the channel has ended. */
   writable(): Promise<void>;
-  /** This side's one out-of-band close, sealed, through the rendezvous: `body` at most 509 bytes. */
+  /**
+   * This side's one out-of-band close, sealed, through the rendezvous: `body`
+   * at most 509 bytes. It still goes once the data channel has gone, until
+   * `close()`.
+   */
   sendClose(body: Uint8Array): Promise<void>;
-  /** The other side's out-of-band close, when one comes: its body. */
+  /**
+   * The other side's out-of-band close, when one comes: its body. One can
+   * still come once the data channel has gone (CONNECTION_LOST), until
+   * `close()`: the rendezvous's pipe and the close keys are kept till then.
+   */
   readonly closeReceived: Promise<Uint8Array<ArrayBuffer>>;
   /** Ends the channel: every key let go, the data channel, the pipe and the peer connection closed. */
   close(): void;
@@ -213,6 +226,8 @@ type HelloFields = Omit<Hello, 'maxRecord'>;
 interface AttemptOptions {
   /** This side's hello: the receiver's in BIND, the sender's in Noise's second message. */
   hello?: HelloOptions;
+  /** The set-up's timers (ICE, the handshake, the whole set-up): the global clock, or a test's. */
+  timers?: EngineTimers;
 }
 
 /** The hello's fields from `options`: INVALID_ARGUMENT, before anything is sent, for one a hello can't carry. */
@@ -295,6 +310,7 @@ class Attempt {
   readonly #pipe: MessagePipe;
   readonly #peer: PeerConnection;
   readonly #generation: bigint;
+  readonly #timers: EngineTimers;
   #keys: AttemptKeys | undefined;
   #signal: SignalChannel | undefined;
   #close: CloseChannel | undefined;
@@ -303,6 +319,12 @@ class Attempt {
   #maxRecord = 0;
   #error: DropgateError | undefined;
   #ended = false;
+  /** The channel was handed over: its owner closes it. */
+  #handedOver = false;
+  /** Ended by the data channel going, with the pipe and the close keys kept for a late out-of-band close. */
+  #lingering = false;
+  /** ICE's timer, then the handshake's. */
+  #timer: unknown;
   #outgoing: Promise<unknown> = Promise.resolve();
   #offer: string | undefined;
   #answer: string | undefined;
@@ -311,13 +333,16 @@ class Attempt {
   #closeBody!: (body: Uint8Array<ArrayBuffer>) => void;
   readonly closeReceived: Promise<Uint8Array<ArrayBuffer>>;
 
-  constructor(provider: CryptoProvider, role: SignalRole, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint) {
+  constructor(
+    provider: CryptoProvider, role: SignalRole, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint, timers: EngineTimers,
+  ) {
     this.#provider = provider;
     this.#role = role;
     this.#keys = keys;
     this.#pipe = pipe;
     this.#peer = peer;
     this.#generation = generation;
+    this.#timers = timers;
     this.#signal = signalChannel(provider, { keys, role });
     this.#failed = new Promise<never>((_, reject) => { this.#fail = reject; });
     this.#failed.catch(() => undefined);
@@ -355,8 +380,15 @@ class Attempt {
       .catch((err) => this.end(err));
   }
 
-  /** Starts the attempt's signalling: local candidates as they come, and the pipe's frames as they arrive. */
+  /** `ms` from now the attempt ends TIMED_OUT, unless the next step has re-armed or cleared the timer. */
+  #within(ms: number): void {
+    this.#timers.clearTimeout(this.#timer);
+    this.#timer = this.#timers.setTimeout(() => { this.end(couldntConnect()); }, ms);
+  }
+
+  /** Starts the attempt's signalling: local candidates as they come, and the pipe's frames as they arrive. ICE has 30 s. */
   start(first?: Uint8Array): void {
+    this.#within(ICE_TIMEOUT_MS);
     this.#peer.onIceCandidate((candidate) => {
       this.#sendSignal(candidate === null ? { type: 'end-of-candidates' } : { type: 'candidate', ...candidateOf(candidate) });
     });
@@ -383,7 +415,14 @@ class Attempt {
           return;
         }
       }
-      if (this.#ended) return;
+      if (this.#ended) {
+        // Once ended, only a late out-of-band close is still listened for, while the pipe is kept.
+        if (!this.#lingering) return;
+        if (frame[0] !== CLOSE_KIND) {
+          frame = undefined;
+          continue;
+        }
+      }
       try {
         await this.#take(frame);
       } catch (err) {
@@ -456,10 +495,14 @@ class Attempt {
     });
   }
 
-  /** The data channel, once open, and the largest record it carries: CAPABILITY_UNSUPPORTED under 16,384 bytes. */
+  /**
+   * The data channel, once open, and the largest record it carries:
+   * CAPABILITY_UNSUPPORTED under 16,384 bytes. The handshake then has 15 s.
+   */
   async #openData(): Promise<DataChannelPipe> {
     const data = await this.#race(this.#peer.dataChannel());
     this.#data = data;
+    this.#within(HANDSHAKE_TIMEOUT_MS);
     this.#maxRecord = recordLimit(data);
     return data;
   }
@@ -478,7 +521,8 @@ class Attempt {
     const { payload, transport } = await this.#race(initiator.readMessage2(await this.#next(data)));
     this.#transport = transport;
     const closeSecret = this.#provider.randomBytes(CLOSE_SECRET_BYTES);
-    const bind = encodeMessage({ type: 'bind', closeSecret, hello: { ...fields, maxRecord: this.#maxRecord } });
+    const hello: Hello = { ...fields, maxRecord: this.#maxRecord };
+    const bind = encodeMessage({ type: 'bind', closeSecret, hello });
     try {
       data.send(await this.#race(transport.encrypt(bind)));
       await this.#closeKeys(closeSecret);
@@ -486,7 +530,7 @@ class Attempt {
       bind.fill(0);
       closeSecret.fill(0);
     }
-    return this.#opened(senderHelloOf(payload, fields.major));
+    return this.#opened(senderHelloOf(payload, fields.major), hello);
   }
 
   /**
@@ -503,7 +547,8 @@ class Attempt {
     const payload1 = await this.#race(responder.readMessage1(await this.#next(data)));
     // DGDTP's message 1 carries nothing.
     if (payload1.byteLength !== 0) throw insecure();
-    const { message, transport } = await this.#race(responder.writeMessage2(encodeHello({ ...fields, maxRecord: this.#maxRecord })));
+    const hello: Hello = { ...fields, maxRecord: this.#maxRecord };
+    const { message, transport } = await this.#race(responder.writeMessage2(encodeHello(hello)));
     this.#transport = transport;
     data.send(message);
     const bind = await this.#race(transport.decrypt(await this.#next(data)));
@@ -521,7 +566,7 @@ class Attempt {
       } finally {
         read.closeSecret.fill(0);
       }
-      return this.#opened(read.hello);
+      return this.#opened(read.hello, hello);
     } finally {
       bind.fill(0);
     }
@@ -533,9 +578,12 @@ class Attempt {
     this.#close = closeChannel(this.#provider, { keys: closeKeys, role: this.#role });
   }
 
-  /** The channel, up. */
-  #opened(hello: Hello): SecureChannel {
+  /** The channel, up: the set-up's timer stopped, the channel handed over to its owner, who closes it. */
+  #opened(hello: Hello, own: Hello): SecureChannel {
     if (this.#ended) throw this.#error ?? insecure();
+    this.#timers.clearTimeout(this.#timer);
+    this.#timer = undefined;
+    this.#handedOver = true;
     const keys = this.#keys as AttemptKeys;
     const transport = this.#transport as NoiseTransport;
     const data = this.#data as DataChannelPipe;
@@ -547,12 +595,14 @@ class Attempt {
     const attempt = this;
     const ended = () => attempt.#error ?? insecure();
     const peerHello = Object.freeze({ ...hello });
+    const ownHello = Object.freeze({ ...own });
     return Object.freeze({
       role: this.#role,
       mode: keys.mode,
       generation,
       maxRecordBytes,
       peerHello,
+      hello: ownHello,
       get roomNonce() { return new Uint8Array(roomNonce); },
       get attemptId() { return new Uint8Array(attemptId); },
       get handshakeHash() { return new Uint8Array(handshakeHash); },
@@ -592,7 +642,10 @@ class Attempt {
         attempt.#pipe.send(await close.seal(body));
       },
       closeReceived: this.closeReceived,
-      close: () => { attempt.end(); },
+      close: () => {
+        attempt.end();
+        attempt.#release();
+      },
       toJSON: () => '[SecureChannel]',
       toString: () => '[SecureChannel]',
       [Symbol.for('nodejs.util.inspect.custom')]: () => '[SecureChannel]',
@@ -607,6 +660,8 @@ class Attempt {
   end(err?: unknown): DropgateError {
     if (this.#ended) return this.#error ?? insecure();
     this.#ended = true;
+    this.#timers.clearTimeout(this.#timer);
+    this.#timer = undefined;
     const error = err === undefined ? new DropgateError({ code: 'OPERATION_CANCELLED' }) : errorFor(err, this.#role);
     this.#error = error;
     if (this.#data && error.code === 'SECURITY_POLICY_MISMATCH') {
@@ -616,14 +671,18 @@ class Attempt {
         // Gone already.
       }
     }
+    // A channel already handed over whose data channel went: the rendezvous's pipe and the close keys stay until its owner
+    // closes it, so the other side's CLOSE can still be heard, or this side's sent, that way.
+    this.#lingering = this.#handedOver && error.code === 'CONNECTION_LOST' && this.#close !== undefined;
     this.#keys?.forget();
     this.#keys = undefined;
     this.#signal?.close();
     this.#signal = undefined;
-    this.#close = undefined;
+    if (!this.#lingering) this.#close = undefined;
     this.#transport?.close();
     this.#transport = undefined;
-    for (const close of [() => this.#data?.close(), () => this.#pipe.close(), () => this.#peer.close()]) {
+    const closes = this.#lingering ? [() => this.#data?.close(), () => this.#peer.close()] : [() => this.#data?.close(), () => this.#pipe.close(), () => this.#peer.close()];
+    for (const close of closes) {
       try {
         close();
       } catch {
@@ -632,6 +691,18 @@ class Attempt {
     }
     this.#fail(error);
     return error;
+  }
+
+  /** What a lost channel kept for a late close let go: the close keys and the rendezvous's pipe. */
+  #release(): void {
+    if (!this.#lingering) return;
+    this.#lingering = false;
+    this.#close = undefined;
+    try {
+      this.#pipe.close();
+    } catch {
+      // Gone already.
+    }
   }
 }
 
@@ -663,13 +734,26 @@ function errorFor(err: unknown, role: SignalRole): DropgateError {
 }
 
 /**
- * Runs `work`, the steps before an attempt exists and the attempt itself: any
- * failure closes what's open (`open()` says what, as it stands then), and ends
- * with the error as this side should say it.
+ * Runs `work`, the steps before an attempt exists and the attempt itself,
+ * within the whole set-up's 90 s: any failure, or running out of time
+ * (TIMED_OUT), closes what's open (`open()` says what, as it stands then), and
+ * ends with the error as this side should say it. A channel that comes up
+ * after the time ran out is closed.
  */
-async function guarded<T>(role: SignalRole, open: () => Array<{ close(): void } | undefined>, work: () => Promise<T>): Promise<T> {
+async function guarded(
+  role: SignalRole, open: () => Array<{ close(): void } | undefined>, work: () => Promise<SecureChannel>, timers: EngineTimers,
+): Promise<SecureChannel> {
+  let timer: unknown;
+  let late = false;
+  const running = work();
+  const timeout = new Promise<never>((_, reject) => {
+    timer = timers.setTimeout(() => {
+      late = true;
+      reject(couldntConnect());
+    }, SETUP_TIMEOUT_MS);
+  });
   try {
-    return await work();
+    return await Promise.race([running, timeout]);
   } catch (err) {
     for (const thing of open()) {
       try {
@@ -678,15 +762,20 @@ async function guarded<T>(role: SignalRole, open: () => Array<{ close(): void } 
         // Already gone.
       }
     }
+    if (late) running.then((channel) => channel.close(), () => undefined);
     throw errorFor(err, role);
+  } finally {
+    timers.clearTimeout(timer);
   }
 }
 
+const timersOf = (options: AttemptOptions | undefined): EngineTimers => options?.timers ?? GLOBAL_TIMERS;
+
 /** The receiver's attempt from its keys on: signalling, the handshake and BIND. */
 async function receiverAttempt(
-  provider: CryptoProvider, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint, hello: HelloFields,
+  provider: CryptoProvider, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint, hello: HelloFields, timers: EngineTimers,
 ): Promise<SecureChannel> {
-  const attempt = new Attempt(provider, 'receiver', keys, pipe, peer, generation);
+  const attempt = new Attempt(provider, 'receiver', keys, pipe, peer, generation, timers);
   try {
     attempt.start();
     await attempt.offer();
@@ -698,9 +787,10 @@ async function receiverAttempt(
 
 /** The sender's attempt from its keys on: the receiver's offer (already read in link mode), the handshake and BIND. */
 async function senderAttempt(
-  provider: CryptoProvider, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint, hello: HelloFields, first?: Uint8Array,
+  provider: CryptoProvider, keys: AttemptKeys, pipe: MessagePipe, peer: PeerConnection, generation: bigint, hello: HelloFields, timers: EngineTimers,
+  first?: Uint8Array,
 ): Promise<SecureChannel> {
-  const attempt = new Attempt(provider, 'sender', keys, pipe, peer, generation);
+  const attempt = new Attempt(provider, 'sender', keys, pipe, peer, generation, timers);
   try {
     attempt.start(first);
     return await attempt.senderHandshake(hello);
@@ -743,6 +833,7 @@ export async function connectByLink(provider: CryptoProvider, options: ConnectOp
   checkPeer(peer);
   if (!isBytes(secret, LINK_SECRET_BYTES)) throw invalid(`A link's secret is ${LINK_SECRET_BYTES} bytes.`);
   const hello = checkHello(options.hello);
+  const timers = timersOf(options);
   let pipe: MessagePipe | undefined;
   return guarded('receiver', () => [pipe, peer], async () => {
     const roomId = await deriveRoomId(provider, secret);
@@ -757,8 +848,8 @@ export async function connectByLink(provider: CryptoProvider, options: ConnectOp
     const roomNonce = roomNonceOf(joined.roomNonce);
     const attemptId = provider.randomBytes(CPACE_ATTEMPT_ID_BYTES);
     const keys = await deriveAttemptKeys(provider, { mode: 'link', base: secret, roomNonce, attemptId });
-    return receiverAttempt(provider, keys, pipe, peer, 0n, hello);
-  });
+    return receiverAttempt(provider, keys, pipe, peer, 0n, hello, timers);
+  }, timers);
 }
 
 /**
@@ -773,6 +864,7 @@ export async function connectByCode(
   const { rendezvous, peer } = options ?? ({} as never);
   checkPeer(peer);
   const hello = checkHello(options.hello);
+  const timers = timersOf(options);
   const { locator, password } = parseCode(options.code, options.letters);
   let pipe: MessagePipe | undefined;
   let exchange: ReturnType<typeof cpaceInitiator> | undefined;
@@ -796,8 +888,8 @@ export async function connectByCode(
         if (DropgateError.is(err, 'CODE_MISMATCH')) pipe.send(cpaceAbort());
         throw err;
       }
-      return receiverAttempt(provider, keys, pipe, peer, 0n, hello);
-    });
+      return receiverAttempt(provider, keys, pipe, peer, 0n, hello, timers);
+    }, timers);
   } finally {
     exchange?.close();
     password.forget();
@@ -819,12 +911,13 @@ export async function reconnect(
   if (!isBytes(resumeSecret, RESUME_SECRET_BYTES)) throw invalid(`A resume secret is ${RESUME_SECRET_BYTES} bytes.`);
   const generation = nextGeneration(options.previousGeneration);
   const hello = checkHello(options.hello);
+  const timers = timersOf(options);
   return guarded('receiver', () => [pipe, peer], async () => {
     const roomNonce = roomNonceOf(options.roomNonce);
     const attemptId = provider.randomBytes(CPACE_ATTEMPT_ID_BYTES);
     const keys = await deriveAttemptKeys(provider, { mode: 'resume', base: resumeSecret, roomNonce, attemptId });
-    return receiverAttempt(provider, keys, pipe, peer, generation, hello);
-  });
+    return receiverAttempt(provider, keys, pipe, peer, generation, hello, timers);
+  }, timers);
 }
 
 /** An attempt reaching the sender's room, as the rendezvous says it came: by link, by code, or a resume. */
@@ -1032,6 +1125,7 @@ export class SenderRoom {
     checkPeer(peer);
     checkPipe(attempt?.pipe);
     const hello = checkHello(options.hello);
+    const timers = timersOf(options);
     const provider = this.#provider;
     const { pipe } = attempt;
     const roomNonce = this.#roomNonce;
@@ -1066,12 +1160,12 @@ export class SenderRoom {
             if (DropgateError.is(err, 'CODE_MISMATCH')) pipe.send(cpaceAbort());
             throw err;
           }
-          return await senderAttempt(provider, keys, pipe, peer, 0n, hello);
+          return await senderAttempt(provider, keys, pipe, peer, 0n, hello, timers);
         } finally {
           // Closing the exchange lets the password go too, spent or not.
           exchange.close();
         }
-      });
+      }, timers);
     }
     if (attempt.by === 'resume') {
       const { resumeSecret } = attempt;
@@ -1080,8 +1174,8 @@ export class SenderRoom {
       return guarded('sender', open, async () => {
         const first = await firstMessage(pipe);
         const keys = await deriveAttemptKeys(provider, { mode: 'resume', base: resumeSecret, roomNonce, attemptId: attemptIdIn(first) });
-        return senderAttempt(provider, keys, pipe, peer, generation, hello, first);
-      });
+        return senderAttempt(provider, keys, pipe, peer, generation, hello, timers, first);
+      }, timers);
     }
     if (attempt.by !== 'link') throw invalid('An attempt comes by link, by code or as a resume.');
     return guarded('sender', open, async () => {
@@ -1089,8 +1183,8 @@ export class SenderRoom {
       if (!secret) throw invalid('This room is closed.');
       const first = await firstMessage(pipe);
       const keys = await deriveAttemptKeys(provider, { mode: 'link', base: secret, roomNonce, attemptId: attemptIdIn(first) });
-      return senderAttempt(provider, keys, pipe, peer, 0n, hello, first);
-    });
+      return senderAttempt(provider, keys, pipe, peer, 0n, hello, timers, first);
+    }, timers);
   }
 
   /**

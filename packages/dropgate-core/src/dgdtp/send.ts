@@ -4,24 +4,27 @@ import { readRange, type FileSource } from '../source.js';
 import { openRoom, type HelloOptions, type IncomingAttempt, type PeerConnection, type SecureChannel, type SenderRendezvous, type SenderRoom } from './channel.js';
 import type { LocatorLetters } from './codes.js';
 import {
-  CREDIT_WINDOW_BYTES, GLOBAL_TIMERS, Link, Listeners, MAX_UNFINISHED_FILE_ENDS, RESULT_ACK_WAIT_MS, SOURCE_BLOCKS_AHEAD, closeFor, deferred,
-  invalidMessage, outcomeOfClose, readRecord, sameBytes, within,
-  type DirectOutcome, type DirectState, type EngineTimers, type Inbound,
+  CREDIT_WINDOW_BYTES, GLOBAL_TIMERS, Holds, Link, Listeners, MAX_UNFINISHED_FILE_ENDS, RESULT_ACK_WAIT_MS, SOURCE_BLOCKS_AHEAD, STATUS_STATE,
+  StallWatch, closeFor, deferred, invalidMessage, offerTimedOut, outcomeOfClose, pauseLimitReached, readRecord, sameBytes, within,
+  type CloseMessage, type CloseWhy, type DirectOutcome, type DirectState, type EngineTimers, type Inbound, type PausedBy, type PeerStatus,
+  type StatusAnswer,
 } from './engine.js';
 import {
   BLOCK_BYTES, blockCount, chainBlock, chainFileEnd, chainStart, dataBytes, encodeManifest, manifestHash, manifestRecords,
-  type CloseDetail, type CloseReason, type Message,
+  type Message, type ResultBody,
 } from './messages.js';
+import { CLOSE_ACK_WAIT_MS, LATE_CLOSE_WAIT_MS, OFFER_TIMEOUT_MS } from './timers.js';
 
 // The sender's side of one direct transfer.
 //
 // `sendDirect()` opens a room on the rendezvous (its link, and a code if one
 // was asked for and is free). Every receiver that reaches it runs the secure
 // channel's handshake, then is sent the list of files (MANIFEST records the
-// size both hellos allow) and sees the offer. The first ACCEPT whose manifest
-// hash matches wins: the room is locked (no new attempt, every other dropped
-// at the rendezvous) and every other receiver already offered is told TAKEN
-// with a CLOSE. A receiver that declines ends the send.
+// size both hellos allow) and sees the offer, for 10 minutes. The first
+// ACCEPT whose manifest hash matches wins: the room is locked (no new
+// attempt, every other dropped at the rendezvous) and every other receiver
+// already offered is told TAKEN with a CLOSE. A receiver that declines, or an
+// offer that runs out of time, ends the send.
 //
 // The chosen receiver's transfer: each file read from its source a 1 MiB
 // block at a time, at most 2 blocks ahead of what's sent; each block hashed
@@ -31,6 +34,12 @@ import {
 // chain, at most 8 ahead of the files the receiver has finished; then FINISH.
 // RESULT, with the same totals and chain, is answered with RESULT_ACK, and the
 // send is completed with the receiver's assurance.
+//
+// Pausing: either side may hold the transfer from ACCEPT to FINISH (HOLD), and
+// nothing more of the stream goes while either does. A read that takes 30 s
+// shows as stalled, and at 120 s ends the send SOURCE_UNAVAILABLE; neither
+// counts while held. A cancel once FINISH has gone waits up to 2 s for the
+// receiver's answer: if the files were already saved, the send completed.
 //
 // A file that can't be read (SOURCE_UNAVAILABLE) or a record that isn't one
 // (INVALID_MESSAGE) is told to the receiver with a CLOSE. Every effect is
@@ -63,19 +72,22 @@ export interface SessionHost {
   readonly timers: EngineTimers;
   /** A receiver accepted: true if it's the one chosen, false if another was. */
   accepted(session: SenderSession): boolean;
-  /** The session's transfer moved on (offered, transferring, finalising). */
+  /** The session moved on (offered, transferring, finalising), or its holds, stall or the receiver's status changed. */
   moved(session: SenderSession): void;
   /** The session ended: how, for the chosen one; for any other, its error, or a decline. */
   ended(session: SenderSession, outcome: DirectOutcome): void;
 }
 
-type SessionPhase = 'offered' | 'transferring' | 'finalising' | 'ended';
+type SessionPhase = 'offered' | 'transferring' | 'finalising' | 'closing' | 'ended';
 
 /** One prepared step of the stream: a block, read, hashed and chained; a file's end; or the finish. */
 type Prepared =
   | { kind: 'block'; fileIndex: number; blockIndex: number; bytes: Uint8Array; hash: Uint8Array; sent: number }
   | { kind: 'file-end'; fileIndex: number; size: number; blockCount: number; chain: Uint8Array }
   | { kind: 'finish'; chain: Uint8Array };
+
+const cantPause = () => new DropgateError({ code: 'PAUSE_UNAVAILABLE', message: 'A direct transfer can be paused once it has been accepted, until all its data has been sent.' });
+const connectionLost = () => new DropgateError({ code: 'CONNECTION_LOST', message: "The connection was lost, so the transfer couldn't continue." });
 
 /** The sender's side of one receiver's channel: the offer, and the transfer once this receiver is chosen. */
 export class SenderSession {
@@ -84,6 +96,9 @@ export class SenderSession {
   readonly #link: Link;
   readonly #generation: bigint;
   readonly #maxData: number;
+  readonly #holds: Holds;
+  readonly #stall: StallWatch;
+  readonly #peerPauseLimit: number;
   #phase: SessionPhase = 'offered';
   #resumeSecret: Uint8Array | undefined;
   #assurance: 'saved' | 'handed-off' = 'saved';
@@ -98,23 +113,66 @@ export class SenderSession {
   #consumed = 0;
   #filesDone = 0;
   #fileEndsSent = 0;
+
+  // Timers, and the end.
+  #offerTimer: unknown;
+  #lostTimer: unknown;
   /** Completed: the channel waits this long for the receiver to close it. */
   #linger: unknown;
+  #peerStatus: PeerStatus | undefined;
+  /** The receiver's CLOSE has been heard: another is ignored. */
+  #peerClosed = false;
+  readonly #settled = deferred<void>();
 
   constructor(host: SessionHost, channel: SecureChannel, attempt?: IncomingAttempt) {
     if (channel?.role !== 'sender') throw new DropgateError({ code: 'INVALID_ARGUMENT', message: "A send runs over the sender's channel." });
     this.#host = host;
     this.attempt = attempt;
     this.#generation = channel.generation;
-    this.#link = new Link(channel, { record: (inbound) => this.deliver(inbound), ended: (err) => this.#lost(err) });
+    const g = this.#generation;
+    const timers = host.timers;
+    this.#peerPauseLimit = channel.peerHello.pauseLimitSeconds;
+    this.#holds = new Holds(timers, channel.hello?.pauseLimitSeconds ?? 0, this.#peerPauseLimit, () => {
+      this.#fail(pauseLimitReached('sender', 'self', channel.hello.pauseLimitSeconds), g);
+    });
+    this.#stall = new StallWatch(timers, () => host.moved(this), () => {
+      this.#fail(new DropgateError({ code: 'SOURCE_UNAVAILABLE', message: 'Reading a file stopped for 2 minutes, so the transfer ended.' }), g);
+    });
+    this.#link = new Link(channel, {
+      record: (inbound) => this.deliver(inbound),
+      ended: (err) => this.#lost(err),
+      close: (message, generation) => this.#closeHeard(message, generation),
+      status: () => this.#status(),
+      statusHeard: (answer, generation) => this.#statusHeard(answer, generation),
+    }, timers);
     this.#maxData = dataBytes(this.#link.recordBytes);
   }
 
   get phase(): SessionPhase { return this.#phase; }
 
-  /** Sends the list of files, in records the size both hellos allow, and starts reading the receiver's. */
+  /** Resolves once the session has ended and told its receiver (its CLOSE sent both ways, 2 s at most). */
+  get settled(): Promise<void> { return this.#settled.promise; }
+
+  /** Whether `pause()` can be called now: from ACCEPT until FINISH has gone. */
+  get canPause(): boolean { return this.#phase === 'transferring'; }
+
+  /** Who holds the transfer: this side, the receiver, both, or no one. */
+  get pausedBy(): PausedBy { return this.#holds.pausedBy; }
+
+  /** While held: when the transfer ends unless both sides resume first (ms since the epoch); else null. */
+  get deadline(): number | null { return this.#holds.deadline; }
+
+  /** Whether reading a file has taken 30 s or more for the block it's on. */
+  get stalled(): boolean { return this.#stall.stalled; }
+
+  /** The receiver's last answer to a STATUS ask, if one has come. */
+  get peerStatus(): PeerStatus | undefined { return this.#peerStatus; }
+
+  /** Sends the list of files, in records the size both hellos allow, and starts reading the receiver's. The offer has 10 minutes. */
   start(): void {
     for (const record of manifestRecords(this.#host.manifest, this.#link.recordBytes)) this.#link.sendRecord(record);
+    const g = this.#generation;
+    this.#offerTimer = this.#host.timers.setTimeout(() => this.#fail(offerTimedOut(), g), OFFER_TIMEOUT_MS);
     this.#link.start();
   }
 
@@ -139,9 +197,38 @@ export class SenderSession {
     void this.#end({ state: 'failed', error: new DropgateError({ code: 'REQUEST_REJECTED', message: 'Another receiver accepted first.' }) }, { reason: 'TAKEN' });
   }
 
-  /** Closes the channel: the send was cancelled or has ended. (The receiver hears it as the connection closing, for now.) */
-  close(): void {
-    void this.#end({ state: 'cancelled', by: 'self' });
+  /** Holds the transfer (HOLD): no more of it is sent until neither side holds it. PAUSE_UNAVAILABLE unless `canPause`. */
+  pause(): void {
+    if (!this.canPause) throw cantPause();
+    if (!this.#holds.set('self', true)) return;
+    this.#link.send({ type: 'hold', held: true, reason: 'person' });
+    this.#holdChanged();
+  }
+
+  /** Lets this side's hold go (HOLD): the transfer runs again once the receiver holds it no more. Nothing if this side doesn't hold it. */
+  resume(): void {
+    if (this.#phase !== 'transferring' || !this.#holds.set('self', false)) return;
+    this.#link.send({ type: 'hold', held: false, reason: 'person' });
+    this.#holdChanged();
+  }
+
+  /**
+   * Cancels this receiver's transfer: told with CLOSE{USER_CANCELLED} after
+   * whatever is already encrypted. Once FINISH has gone, the receiver may
+   * already have saved the files: its answer is waited for (2 s at most), and
+   * a RESULT, or a CLOSE_ACK that carries one, completes the send instead.
+   */
+  cancel(): void {
+    if (this.#phase === 'finalising') {
+      void this.#cancelWhileFinalising();
+      return;
+    }
+    void this.#end({ state: 'cancelled', by: 'self' }, { reason: 'USER_CANCELLED' });
+  }
+
+  /** Ends the session with `outcome`, the receiver told with `close`: the send has ended. Resolves once it's told. */
+  endWith(outcome: DirectOutcome, close: CloseWhy | undefined): Promise<void> {
+    return this.#end(outcome, close);
   }
 
   #live(g: bigint): boolean {
@@ -153,16 +240,10 @@ export class SenderSession {
       case 'accept': return this.#accept(message, g);
       case 'credit': return this.#credit(message);
       case 'result': return this.#result(message);
-      case 'close': return this.#closeHeard(message);
-      case 'hold':
-      case 'ping':
-      case 'pong':
-      case 'status':
-      case 'close-ack':
-        // Pausing, liveness and the close's answer aren't used yet: passed over.
-        return undefined;
+      case 'hold': return this.#hold(message);
       default:
-        // Every other record is the sender's to send, never the receiver's (BIND comes only in the handshake).
+        // Every other record is the sender's to send, never the receiver's (BIND comes only in the handshake). (PING, PONG,
+        // STATUS, CLOSE and CLOSE_ACK are answered as they arrive, and never come here.)
         throw invalidMessage();
     }
   }
@@ -170,6 +251,7 @@ export class SenderSession {
   async #accept(m: Extract<Message, { type: 'accept' }>, g: bigint): Promise<void> {
     if (this.#phase !== 'offered') throw invalidMessage();
     if (!sameBytes(m.manifestHash, this.#host.manifestHash) || m.creditLimit > CREDIT_WINDOW_BYTES) throw invalidMessage();
+    this.#clearOfferTimer();
     // Another receiver already has it.
     if (!this.#host.accepted(this)) {
       this.taken();
@@ -185,7 +267,7 @@ export class SenderSession {
   }
 
   #credit(m: Extract<Message, { type: 'credit' }>): void {
-    if (this.#phase !== 'transferring' && this.#phase !== 'finalising') throw invalidMessage();
+    if (this.#phase !== 'transferring' && this.#phase !== 'finalising' && this.#phase !== 'closing') throw invalidMessage();
     // Revisions only rise, nothing goes down, nothing is said to be written that wasn't sent, and no more than 4 MiB is given ahead.
     if (m.revision <= this.#revision || m.limit < this.#limit || m.consumed < this.#consumed || m.filesDone < this.#filesDone
       || m.consumed > this.#submitted || m.limit - m.consumed > CREDIT_WINDOW_BYTES || m.filesDone > this.#fileEndsSent) {
@@ -198,19 +280,60 @@ export class SenderSession {
     this.#link.wake();
   }
 
+  /** Whether a receiver's result is what was sent and accepted: the same totals and chain, the files where ACCEPT said they'd go. */
+  #resultMatches(m: ResultBody): boolean {
+    return m.fileCount === this.#host.files.length && m.totalSize === this.#host.totalSize && sameBytes(m.chain, this.#finalChain as Uint8Array)
+      && m.assurance === this.#assurance;
+  }
+
   async #result(m: Extract<Message, { type: 'result' }>): Promise<void> {
-    if (this.#phase !== 'finalising') throw invalidMessage();
-    // The same totals and chain as were sent, and the files where ACCEPT said they'd go.
-    if (m.fileCount !== this.#host.files.length || m.totalSize !== this.#host.totalSize || !sameBytes(m.chain, this.#finalChain as Uint8Array)
-      || m.assurance !== this.#assurance) {
-      throw invalidMessage();
-    }
+    if (this.#phase !== 'finalising' && this.#phase !== 'closing') throw invalidMessage();
+    if (!this.#resultMatches(m)) throw invalidMessage();
     this.#link.send({ type: 'result-ack', commitId: m.commitId });
     void this.#end({ state: 'completed', assurance: m.assurance });
   }
 
-  #closeHeard(m: Extract<Message, { type: 'close' }>): void {
-    void this.#end(outcomeOfClose(m, 'sender'));
+  /** The receiver's HOLD: heard from ACCEPT until FINISH has gone, passed over otherwise (nothing is left to hold). */
+  #hold(m: Extract<Message, { type: 'hold' }>): void {
+    if (this.#phase !== 'transferring') return;
+    if (this.#holds.set('peer', m.held)) this.#holdChanged();
+  }
+
+  /** A hold began or ended: reads stop counting as stalled while held; when it runs again, the stream goes on. */
+  #holdChanged(): void {
+    this.#stall.hold(this.#holds.held);
+    if (!this.#holds.held) this.#link.wake();
+    this.#host.moved(this);
+  }
+
+  #status(): Omit<StatusAnswer, 'type' | 'kind' | 'id'> {
+    const state = this.#phase === 'offered' ? STATUS_STATE.OFFERED
+      : this.#phase === 'transferring' ? STATUS_STATE.TRANSFERRING
+        : this.#phase === 'finalising' || this.#phase === 'closing' ? STATUS_STATE.FINALISING : 0;
+    return { state, held: this.#holds.self, consumed: this.#consumed };
+  }
+
+  #statusHeard(answer: StatusAnswer, g: bigint): void {
+    if (!this.#live(g)) return;
+    // Kept for the screens: it changes nothing else.
+    this.#peerStatus = Object.freeze({ state: answer.state, held: answer.held, consumed: answer.consumed });
+    this.#host.moved(this);
+  }
+
+  /**
+   * The receiver's CLOSE, by either path, as it arrives: answered with
+   * CLOSE_ACK, and the session ends as it says. A second is ignored. One that
+   * crosses this side's own cancel leaves it cancelled.
+   */
+  #closeHeard(m: CloseMessage, g: bigint): void {
+    if (g !== this.#generation || this.#peerClosed) return;
+    this.#peerClosed = true;
+    this.#link.send({ type: 'close-ack', operationId: m.operationId, finished: false });
+    if (this.#phase === 'closing') {
+      void this.#end({ state: 'cancelled', by: 'self' });
+      return;
+    }
+    void this.#end(outcomeOfClose(m, 'sender', this.#peerPauseLimit));
   }
 
   /** Reads, hashes and chains the files' blocks in order, at most 2 ahead of what's sent. */
@@ -227,7 +350,7 @@ export class SenderSession {
             if (!this.#live(g)) return;
           }
           const start = blockIndex * BLOCK_BYTES;
-          const bytes = await readRange(files[fileIndex], start, Math.min(size, start + BLOCK_BYTES));
+          const bytes = await this.#stall.during(readRange(files[fileIndex], start, Math.min(size, start + BLOCK_BYTES)));
           if (!this.#live(g)) return;
           const hash = await provider.sha256(bytes);
           chain = await chainBlock(provider, chain, { fileIndex, blockIndex, length: bytes.byteLength, hash });
@@ -247,9 +370,9 @@ export class SenderSession {
     }
   }
 
-  /** The stream's next record, if one is ready and may go now. */
+  /** The stream's next record, if one is ready and may go now: nothing while either side holds the transfer. */
   #next(): Message | undefined {
-    if (this.#phase !== 'transferring') return undefined;
+    if (this.#phase !== 'transferring' || this.#holds.held) return undefined;
     const step = this.#queue[0];
     if (!step) return undefined;
     switch (step.kind) {
@@ -277,6 +400,7 @@ export class SenderSession {
         this.#queue.shift();
         this.#finalChain = step.chain;
         this.#phase = 'finalising';
+        this.#stall.stop();
         this.#host.moved(this);
         return {
           type: 'finish', fileCount: this.#host.files.length, totalSize: this.#host.totalSize, manifestHash: this.#host.manifestHash, chain: step.chain,
@@ -290,14 +414,45 @@ export class SenderSession {
     wake?.();
   }
 
-  /** The channel ended under the session: lost as the channel says, unless the session has already ended. */
+  /** A cancel once FINISH has gone: the receiver told, and its answer waited for, since it may have saved the files already. */
+  async #cancelWhileFinalising(): Promise<void> {
+    this.#phase = 'closing';
+    const ack = await this.#link.closeWith({ type: 'close', operationId: this.#host.provider.randomBytes(16), reason: 'USER_CANCELLED' });
+    // A RESULT came meanwhile, and completed it (the phase narrowed above isn't what it is now).
+    if ((this.#phase as SessionPhase) === 'ended') return;
+    if (ack?.finished && this.#resultMatches(ack.result)) {
+      this.#link.send({ type: 'result-ack', commitId: ack.result.commitId });
+      void this.#end({ state: 'completed', assurance: ack.result.assurance });
+      return;
+    }
+    void this.#end({ state: 'cancelled', by: 'self' });
+  }
+
+  /**
+   * The channel ended under the session: lost as the channel says, unless the
+   * session has already ended (then the link is closed). A lost connection
+   * listens 2 s for the receiver's CLOSE through the rendezvous first.
+   */
   #lost(err: DropgateError): void {
     if (this.#phase === 'ended') {
       if (this.#linger !== undefined) this.#host.timers.clearTimeout(this.#linger);
       this.#linger = undefined;
+      this.#link.close();
       return;
     }
-    void this.#end({ state: 'failed', error: err });
+    if (this.#phase === 'closing') {
+      void this.#end({ state: 'cancelled', by: 'self' });
+      return;
+    }
+    if (err.code !== 'CONNECTION_LOST') {
+      void this.#end({ state: 'failed', error: err });
+      return;
+    }
+    this.#quiet();
+    const g = this.#generation;
+    this.#lostTimer = this.#host.timers.setTimeout(() => {
+      if (this.#live(g)) void this.#end({ state: 'failed', error: connectionLost() });
+    }, LATE_CLOSE_WAIT_MS);
   }
 
   /** This side failed, in generation `g`: the receiver told with a CLOSE. A failure from another generation is dropped. */
@@ -307,25 +462,51 @@ export class SenderSession {
     void this.#end({ state: 'failed', error }, closeFor(error));
   }
 
+  #clearOfferTimer(): void {
+    if (this.#offerTimer !== undefined) this.#host.timers.clearTimeout(this.#offerTimer);
+    this.#offerTimer = undefined;
+  }
+
+  /** Every timer of the transfer stopped: it's ending, or waiting to hear why its connection went. */
+  #quiet(): void {
+    this.#clearOfferTimer();
+    this.#stall.stop();
+    this.#holds.clear();
+  }
+
   /**
    * Ends the session, once: fenced at once, the producer woken to stop, the
-   * receiver told with `close` if one is given, the resume secret
-   * overwritten. Completed, the channel is left for the receiver to close (its
-   * RESULT_ACK on its way), and closed after 2 s whatever happens.
+   * resume secret overwritten. With `close`, the receiver is told (in-band and
+   * through the rendezvous, its CLOSE_ACK waited for 2 s at most); otherwise
+   * whatever is queued (a CLOSE_ACK, say) goes first. Completed, the channel
+   * is left for the receiver to close (its RESULT_ACK on its way), and closed
+   * after 2 s whatever happens.
    */
-  async #end(outcome: DirectOutcome, close?: { reason: CloseReason; detail?: CloseDetail }): Promise<void> {
+  async #end(outcome: DirectOutcome, close?: CloseWhy): Promise<void> {
     if (this.#phase === 'ended') return;
     this.#phase = 'ended';
+    try {
+      await this.#ending(outcome, close);
+    } finally {
+      this.#settled.resolve();
+    }
+  }
+
+  async #ending(outcome: DirectOutcome, close?: CloseWhy): Promise<void> {
+    this.#quiet();
+    if (this.#lostTimer !== undefined) this.#host.timers.clearTimeout(this.#lostTimer);
     this.#resumeSecret?.fill(0);
     this.#resumeSecret = undefined;
     this.#queue.length = 0;
     this.#wakeProducer();
     this.#link.stream(undefined);
     this.#host.ended(this, outcome);
-    if (close) {
-      this.#link.send({ type: 'close', operationId: this.#host.provider.randomBytes(16), ...close });
+    // The receiver has ended already if its CLOSE was heard: nothing more to tell it.
+    if (close && !this.#peerClosed) {
+      await this.#link.closeWith({ type: 'close', operationId: this.#host.provider.randomBytes(16), ...close });
+    } else {
+      await within(this.#link.flush(), outcome.state === 'completed' ? RESULT_ACK_WAIT_MS : CLOSE_ACK_WAIT_MS, this.#host.timers);
     }
-    if (close || outcome.state === 'completed') await within(this.#link.flush(), RESULT_ACK_WAIT_MS, this.#host.timers);
     if (outcome.state === 'completed' && !this.#link.closed) {
       // The receiver closes once RESULT_ACK is in (#lost then clears this).
       this.#linger = this.#host.timers.setTimeout(() => this.#link.close(), RESULT_ACK_WAIT_MS);
@@ -333,6 +514,13 @@ export class SenderSession {
     }
     this.#link.close();
   }
+}
+
+/** The CLOSE every receiver still connected is told when the send ends with `outcome`. */
+function closeOnFinish(outcome: DirectOutcome): CloseWhy | undefined {
+  if (outcome.state === 'completed') return undefined;
+  if (outcome.state === 'cancelled') return { reason: 'USER_CANCELLED' };
+  return closeFor(outcome.error) ?? { reason: 'FAILED' };
 }
 
 /** The sender's side of a direct transfer: its room, the receivers that reach it, and the one it sends to. */
@@ -351,6 +539,8 @@ export class DirectSender implements SessionHost {
   readonly #listeners = new Listeners();
   readonly #attemptListeners = new Set<(err: DropgateError) => void>();
   readonly #done = deferred<DirectOutcome>();
+  /** Every session that has ended or is ending: the room closes once each has told its receiver. */
+  readonly #ending = new Set<SenderSession>();
   #chosen: SenderSession | undefined;
   #state: DirectState = 'waiting';
   #ended = false;
@@ -378,7 +568,22 @@ export class DirectSender implements SessionHost {
   /** How it ended, once it has. */
   get done(): Promise<DirectOutcome> { return this.#done.promise; }
 
-  /** Calls `listener` whenever `state` changes. Returns a function that stops it. */
+  /** Whether `pause()` can be called now: from the chosen receiver's ACCEPT until FINISH has gone. */
+  get canPause(): boolean { return !this.#ended && (this.#chosen?.canPause ?? false); }
+
+  /** Who holds the transfer: this side, the receiver, both, or no one. */
+  get pausedBy(): PausedBy { return this.#chosen?.pausedBy ?? null; }
+
+  /** While held: when the transfer ends unless both sides resume first (ms since the epoch); else null. */
+  get deadline(): number | null { return this.#chosen?.deadline ?? null; }
+
+  /** Whether reading a file has taken 30 s or more for the block it's on. */
+  get stalled(): boolean { return this.#chosen?.stalled ?? false; }
+
+  /** The chosen receiver's last answer to a STATUS ask, if one has come. */
+  get peerStatus(): PeerStatus | undefined { return this.#chosen?.peerStatus; }
+
+  /** Calls `listener` whenever `state`, `pausedBy`, `deadline`, `stalled` or `peerStatus` changes. Returns a function that stops it. */
   onChange(listener: () => void): () => void { return this.#listeners.add(listener); }
 
   /** Calls `listener` with the error of each receiver's attempt that ends without being chosen (a wrong code, say). */
@@ -387,9 +592,34 @@ export class DirectSender implements SessionHost {
     return () => { this.#attemptListeners.delete(listener); };
   }
 
-  /** Cancels the send: every receiver's channel closed, the room closed. */
+  /** Holds the transfer: PAUSE_UNAVAILABLE unless `canPause`. */
+  pause(): void {
+    if (!this.canPause) throw cantPause();
+    (this.#chosen as SenderSession).pause();
+  }
+
+  /** Lets this side's hold go. */
+  resume(): void {
+    if (!this.#ended) this.#chosen?.resume();
+  }
+
+  /**
+   * Cancels the send: every receiver told (CLOSE, USER_CANCELLED), the room
+   * closed. Once FINISH has gone, the receiver's answer decides it: the send
+   * may turn out completed.
+   */
   cancel(): void {
+    if (this.#ended) return;
+    if (this.#chosen?.phase === 'finalising') {
+      this.#chosen.cancel();
+      return;
+    }
     this.#finish({ state: 'cancelled', by: 'self' });
+  }
+
+  /** The app is closing: every receiver told (CLOSE, APP_CLOSED, both ways, best effort), and the send ends cancelled. */
+  appClosed(): void {
+    this.#finish({ state: 'cancelled', by: 'self' }, { reason: 'APP_CLOSED' });
   }
 
   /** @internal */
@@ -404,19 +634,23 @@ export class DirectSender implements SessionHost {
   /** @internal */
   moved(session: SenderSession): void {
     if (session !== this.#chosen || this.#ended) return;
-    this.#setState(session.phase === 'finalising' ? 'finalising' : 'transferring');
+    const state = session.phase === 'finalising' || session.phase === 'closing' ? 'finalising' : 'transferring';
+    if (this.#state !== state) this.#setState(state);
+    else this.#listeners.notify();
   }
 
   /** @internal */
   ended(session: SenderSession, outcome: DirectOutcome): void {
     this.#sessions.delete(session);
+    this.#ending.add(session);
     if (this.#ended) return;
     if (session === this.#chosen) {
       this.#finish(outcome);
       return;
     }
-    // A receiver that declines ends the send.
-    if (outcome.state === 'cancelled' && outcome.by === 'peer' && outcome.declined) {
+    // A receiver that declines, or an offer no one accepted in time, ends the send.
+    if ((outcome.state === 'cancelled' && outcome.by === 'peer' && outcome.declined)
+      || (outcome.state === 'failed' && outcome.error.code === 'TIMED_OUT')) {
       this.#finish(outcome);
       return;
     }
@@ -434,7 +668,10 @@ export class DirectSender implements SessionHost {
         if (!this.#chosen) this.#finish({ state: 'failed', error: toDropgateError(err) });
         return;
       }
-      if (this.#ended) return;
+      if (this.#ended) {
+        attempt.pipe.close();
+        return;
+      }
       void this.#take(attempt);
     }
   }
@@ -442,7 +679,7 @@ export class DirectSender implements SessionHost {
   async #take(attempt: IncomingAttempt): Promise<void> {
     let channel: SecureChannel;
     try {
-      channel = await this.room.accept(attempt, { peer: this.#options.peer(), hello: this.#options.hello });
+      channel = await this.room.accept(attempt, { peer: this.#options.peer(), hello: this.#options.hello, timers: this.timers });
     } catch (err) {
       if (!this.#ended) this.#tellAttempt(toDropgateError(err));
       return;
@@ -473,14 +710,22 @@ export class DirectSender implements SessionHost {
     this.#listeners.notify();
   }
 
-  #finish(outcome: DirectOutcome): void {
+  /**
+   * Ends the send, once: every receiver still connected told (`close`, or as
+   * the outcome says), then the room closed, once those CLOSEs have gone both
+   * ways (2 s at most).
+   */
+  #finish(outcome: DirectOutcome, close?: CloseWhy): void {
     if (this.#ended) return;
     this.#ended = true;
     this.#state = outcome.state;
+    const why = close ?? closeOnFinish(outcome);
     for (const session of [...this.#sessions]) {
-      if (session !== this.#chosen || outcome.state !== 'completed') session.close();
+      if (session !== this.#chosen || outcome.state !== 'completed') void session.endWith({ state: 'cancelled', by: 'self' }, why);
     }
-    this.room.close();
+    this.#sessions.clear();
+    // Every session's CLOSE, the one that ended the send among them, goes through the room before it closes.
+    void Promise.allSettled([...this.#ending].map((session) => session.settled)).then(() => this.room.close());
     this.#done.resolve(outcome);
     this.#listeners.notify();
   }

@@ -43,13 +43,14 @@ A download only completes once its sink has closed. A sink's `write()` or `close
 
 Every upload and download runs in one **cancellation tree**. The client is its root, each operation is a node under it, and the steps an operation starts, such as its requests, run under that. Cancelling a node cancels everything under it, once, and nothing above it or beside it.
 
-There are three ways to cancel an operation, and its `cancelled` outcome says which, in `cancellation`:
+There are three ways to cancel an operation on this device, and a direct transfer's other device can cancel it too; its `cancelled` outcome says which, in `cancellation`:
 
 | `cancellation.by` | `cancellation.source` | How |
 | --- | --- | --- |
 | `self` | `hosted.upload` or `hosted.download` | The operation's own `cancel()` |
 | `parent` | `client` | `client.operations.cancelAll()`, which cancels everything running on the client |
 | `signal` | `hosted.upload` or `hosted.download` | An `AbortSignal` passed in as `signal` was aborted |
+| `peer` | a direct transfer's | The other device cancelled it, or, for a send, declined its offer (then `cancellation.declined` is `true`). Direct transfers on handles are still to come, so no operation gives it yet |
 
 `source` names what was cancelled first: the operation itself, by its kind, or the client it runs under.
 

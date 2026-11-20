@@ -71,7 +71,7 @@ async function closeHeard(channel: SecureChannel): Promise<string> {
 }
 
 /** A timer source whose timers never fire: what's checked must happen without them. */
-const NEVER: EngineTimers = { setTimeout: () => 0, clearTimeout: () => undefined };
+const NEVER: EngineTimers = { setTimeout: () => 0, clearTimeout: () => undefined, now: () => 0 };
 
 /** A whole send, and receivers by its link, all over the in-memory channel. */
 async function directInMemory(
@@ -465,8 +465,11 @@ describe('one transfer end to end, in memory', () => {
     await script.offer();
     await expect(engine.accept({ sink: () => { throw new Error('No folder.'); } })).rejects.toMatchObject({ code: 'OUTPUT_WRITE_FAILED' });
     expect(said(await engine.done)).toBe('failed OUTPUT_WRITE_FAILED');
-    const seen = await recordsUntilQuiet(script.channel, 300);
-    expect(seen.map((m) => (m === 'closed' ? m : m.type))).toEqual(['close', 'closed']);
+    // Its CLOSE is the one record sent, and once it's answered the channel closes.
+    const close = await recordOf(script.channel, 'close');
+    expect(close).toMatchObject({ reason: 'FAILED', detail: 'OUTPUT_WRITE_FAILED' });
+    await script.send({ type: 'close-ack', operationId: close.operationId, finished: false });
+    expect(await recordsUntilQuiet(script.channel, 300)).toEqual(['closed']);
   });
 
   it("a file that can't be read fails the send SOURCE_UNAVAILABLE, and the receiver hears the sender's file couldn't be read", async () => {
@@ -768,7 +771,7 @@ describe('what comes in order', () => {
 
   it("completes 2 s after RESULT if no RESULT_ACK comes: the files are saved either way", async () => {
     const pending: Array<{ run: () => void; ms: number }> = [];
-    const timers: EngineTimers = { setTimeout: (run, ms) => pending.push({ run, ms }), clearTimeout: () => undefined };
+    const timers: EngineTimers = { setTimeout: (run, ms) => pending.push({ run, ms }), clearTimeout: () => undefined, now: () => 0 };
     const t = await transfer(provider);
     const { receiver, sender } = channels(t);
     const engine = receiveDirect(provider, receiver, { timers });
@@ -936,7 +939,7 @@ describe("a CLOSE's words", () => {
   it("each reason and detail heard as the table says, in each side's words, never the other device's", () => {
     const heard = (close: Parameters<typeof outcomeOfClose>[0], side: 'sender' | 'receiver') => {
       const o = outcomeOfClose(close, side);
-      return o.state === 'failed' ? `${o.error.code}${o.error.details ? ` ${String(o.error.details.reason)}` : ''}: ${o.error.message}` : said(o);
+      return o.state === 'failed' ? `${o.error.code}${o.error.details ? ` ${String(o.error.details.reason ?? o.error.details.by)}` : ''}: ${o.error.message}` : said(o);
     };
     expect(heard({ reason: 'USER_CANCELLED' }, 'receiver')).toBe('cancelled by peer');
     expect(heard({ reason: 'USER_DECLINED' }, 'sender')).toBe('cancelled by peer, declined');
@@ -950,19 +953,28 @@ describe("a CLOSE's words", () => {
     expect(heard({ reason: 'FAILED', detail: 'INVALID_MANIFEST' }, 'sender')).toBe("PEER_FAILED INVALID_MANIFEST: The receiver couldn't read the list of files.");
     expect(heard({ reason: 'FAILED', detail: 'INVALID_MESSAGE' }, 'receiver')).toBe("PEER_FAILED INVALID_MESSAGE: The sender's device couldn't understand what this device sent.");
     expect(heard({ reason: 'FAILED', detail: 'INVALID_MESSAGE' }, 'sender')).toBe("PEER_FAILED INVALID_MESSAGE: The receiver's device couldn't understand what this device sent.");
-    expect(heard({ reason: 'APP_CLOSED' }, 'receiver')).toBe('PEER_FAILED APP_CLOSED: The sender closed Dropgate before the transfer finished.');
-    expect(heard({ reason: 'APP_CLOSED' }, 'sender')).toBe('PEER_FAILED APP_CLOSED: The receiver closed Dropgate before the transfer finished.');
-    expect(heard({ reason: 'PAUSE_LIMIT' }, 'sender')).toBe("PEER_FAILED PAUSE_LIMIT: The receiver's app ended the transfer after a pause.");
+    expect(heard({ reason: 'APP_CLOSED' }, 'receiver')).toBe('PEER_CLOSED: The sender closed Dropgate before the transfer finished.');
+    expect(heard({ reason: 'APP_CLOSED' }, 'sender')).toBe('PEER_CLOSED: The receiver closed Dropgate before the transfer finished.');
+    expect(heard({ reason: 'PAUSE_LIMIT' }, 'sender')).toBe("PAUSE_LIMIT peer: The receiver's app ended the transfer after a pause.");
+    expect(outcomeOfClose({ reason: 'PAUSE_LIMIT' }, 'receiver', 3600)).toMatchObject({
+      state: 'failed', error: { code: 'PAUSE_LIMIT', origin: 'peer', message: "The sender's app ended the transfer after a 1-hour pause.", details: { by: 'peer' } },
+    });
     expect(heard({ reason: 'FAILED' }, 'receiver')).toBe("PEER_FAILED: The sender's device reported an error.");
     expect(heard({ reason: 'FAILED', detail: 'CAPABILITY_UNSUPPORTED' }, 'receiver')).toBe("PEER_FAILED CAPABILITY_UNSUPPORTED: The sender's device reported an error.");
   });
 
-  it('a failure is told as FAILED with its detail; a lost or refused channel, or a cancel, sends no CLOSE', () => {
-    const told = (code: ConstructorParameters<typeof DropgateError>[0]['code']) => closeFor(new DropgateError({ code }));
+  it("a failure is told as FAILED with its detail, a cancel USER_CANCELLED, this side's pause limit PAUSE_LIMIT; a lost or refused channel, or the other side's end, sends no CLOSE", () => {
+    const told = (code: ConstructorParameters<typeof DropgateError>[0]['code'], details?: Record<string, unknown>) => closeFor(new DropgateError({ code, details }));
     expect(told('OUTPUT_WRITE_FAILED')).toEqual({ reason: 'FAILED', detail: 'OUTPUT_WRITE_FAILED' });
     expect(told('SOURCE_UNAVAILABLE')).toEqual({ reason: 'FAILED', detail: 'SOURCE_UNAVAILABLE' });
     expect(told('INVALID_MANIFEST')).toEqual({ reason: 'FAILED', detail: 'INVALID_MANIFEST' });
     expect(told('UNEXPECTED_ERROR')).toEqual({ reason: 'FAILED' });
-    for (const code of ['CONNECTION_LOST', 'SECURITY_POLICY_MISMATCH', 'OPERATION_CANCELLED'] as const) expect(told(code)).toBeUndefined();
+    expect(told('OUTPUT_STALLED')).toEqual({ reason: 'FAILED', detail: 'OUTPUT_STALLED' });
+    expect(told('TIMED_OUT')).toEqual({ reason: 'FAILED', detail: 'TIMED_OUT' });
+    expect(told('OPERATION_CANCELLED')).toEqual({ reason: 'USER_CANCELLED' });
+    expect(told('PAUSE_LIMIT', { by: 'self' })).toEqual({ reason: 'PAUSE_LIMIT' });
+    expect(told('PAUSE_LIMIT', { by: 'peer' })).toBeUndefined();
+    for (const code of ['CONNECTION_LOST', 'SECURITY_POLICY_MISMATCH', 'PEER_FAILED', 'PEER_CLOSED'] as const) expect(told(code)).toBeUndefined();
+    expect(closeFor(new DropgateError({ code: 'REQUEST_REJECTED', origin: 'peer' }))).toBeUndefined();
   });
 });

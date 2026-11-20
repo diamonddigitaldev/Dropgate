@@ -5,14 +5,17 @@ import { DropgateError } from './errors.js';
  * - `self`: its own `cancel()`;
  * - `parent`: what it runs under was cancelled, such as the whole
  *   client, by `client.operations.cancelAll()`;
- * - `signal`: an AbortSignal passed in with it was aborted.
+ * - `signal`: an AbortSignal passed in with it was aborted;
+ * - `peer`: the other device in a direct transfer cancelled it, or declined it.
  */
-export type CancelledBy = 'self' | 'parent' | 'signal';
+export type CancelledBy = 'self' | 'parent' | 'signal' | 'peer';
 
 export interface Cancellation {
   by: CancelledBy;
   /** What was cancelled first: the operation itself, or the one it runs under, such as `client`. */
   source: string;
+  /** A direct send whose receiver declined the offer. */
+  declined?: true;
 }
 
 /**

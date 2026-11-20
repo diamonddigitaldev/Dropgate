@@ -176,6 +176,45 @@ describe('a direct transfer end to end through the real server, over werift', ()
     expect(said(await sender.done)).toBe('failed CONNECTION_LOST');
   }, 30_000);
 
+  it('a hold mid-transfer: the receiver pauses, nothing more arrives while it holds, each side says who holds it, then it resumes and completes byte for byte', async () => {
+    const bytes = patterned(20 * MiB + 3, 98);
+    const { sender, receiver } = await direct([memoryFile('held.bin', bytes)]);
+    const sink = new MemorySink();
+    await receiver.accept({ sink });
+    const wait = async (check: () => boolean, what: string) => {
+      const deadline = Date.now() + 10_000;
+      while (!check()) {
+        if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}.`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    await wait(() => sink.bytes.byteLength >= 2 * MiB, 'some of the file');
+    receiver.pause();
+    await wait(() => sender.pausedBy === 'peer', 'the sender hearing the hold');
+    expect(receiver.pausedBy).toBe('self');
+    expect(sender.canPause).toBe(true);
+    // What was on its way lands; then nothing more.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const held = sink.bytes.byteLength;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    expect(sink.bytes.byteLength).toBe(held);
+    expect(held).toBeLessThan(bytes.byteLength);
+    receiver.resume();
+    expect(`${said(await receiver.done)} / ${said(await sender.done)}`).toBe('completed, saved / completed, saved');
+    expect(sameAs(sink.bytes, bytes)).toBe('the same');
+  }, 60_000);
+
+  it("a cancel mid-transfer is told with CLOSE: the receiver cancelled by the sender, its sink aborted", async () => {
+    const { sender, receiver } = await direct([memoryFile('a.bin', patterned(20 * MiB, 97))]);
+    const sink = new MemorySink();
+    await receiver.accept({ sink });
+    const deadline = Date.now() + 10_000;
+    while (sink.writes < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    sender.cancel();
+    expect(`${said(await receiver.done)} / ${said(await sender.done)}`).toBe('cancelled by peer / cancelled by self');
+    expect(sink.aborted).toBeTruthy();
+  }, 30_000);
+
   it('a large file, 20 MiB + 7 bytes, byte for byte: many rounds of credit and the pump', async () => {
     const bytes = patterned(20 * MiB + 7, 99);
     const { sender, receiver } = await direct([memoryFile('large.bin', bytes)]);

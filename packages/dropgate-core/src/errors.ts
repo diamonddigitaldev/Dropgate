@@ -25,6 +25,7 @@ export const ERROR_CODES = {
   PAUSE_UNAVAILABLE: { origin: 'local', retryable: false, message: "It can't be paused or resumed now." },
   SOURCE_UNAVAILABLE: { origin: 'local', retryable: false, message: "A file couldn't be read." },
   OUTPUT_WRITE_FAILED: { origin: 'local', retryable: false, message: "Received data couldn't be written." },
+  OUTPUT_STALLED: { origin: 'local', retryable: false, message: 'Saving the received files stopped for 2 minutes, so the transfer ended.' },
   ENCRYPT_FAILED: { origin: 'local', retryable: false, message: "The upload couldn't be encrypted." },
   KEY_REQUIRED: { origin: 'local', retryable: false, message: 'This upload is encrypted, and the link has no key.' },
   DECRYPT_FAILED: { origin: 'local', retryable: false, message: "This upload couldn't be decrypted. The key may be wrong." },
@@ -55,6 +56,8 @@ export const ERROR_CODES = {
   SECURITY_POLICY_MISMATCH: { origin: 'peer', retryable: false, message: "The connection couldn't be secured, so it was closed." },
   CODE_MISMATCH: { origin: 'peer', retryable: false, message: "The code didn't match, so the connection was closed." },
   PEER_FAILED: { origin: 'peer', retryable: false, message: 'The other device reported an error.' },
+  PEER_CLOSED: { origin: 'peer', retryable: false, message: 'The other device closed Dropgate before the transfer finished.' },
+  PAUSE_LIMIT: { origin: 'local', retryable: false, message: 'The transfer was paused for longer than its pause limit allows.' },
   INVALID_MESSAGE: { origin: 'peer', retryable: false, message: "The other device sent something this version of Dropgate doesn't understand." },
   UNEXPECTED_ERROR: { origin: 'local', retryable: false, message: 'Something unexpected went wrong.' },
 } as const satisfies Record<string, ErrorCodeInfo>;

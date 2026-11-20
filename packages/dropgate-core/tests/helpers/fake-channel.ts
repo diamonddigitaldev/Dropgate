@@ -141,7 +141,15 @@ export class MockRendezvous {
       this.#rooms.set(`code:${this.locator}`, room);
       return { locator: this.locator };
     },
+    // The sender's room closing closes its one socket, as the real rendezvous's does: every attempt's path on the sender's side.
+    close: () => {
+      this.senderClosed = true;
+      for (const pair of this.pipes) pair.sender.close();
+    },
   };
+
+  /** Whether the sender closed its room. */
+  senderClosed = false;
 
   readonly receiver: ReceiverRendezvous = {
     join: async (by) => {

@@ -1,20 +1,36 @@
 import { DropgateError, toDropgateError } from '../errors.js';
 import type { SecureChannel } from './channel.js';
-import { decodeMessage, encodeMessage, type Assurance, type CloseDetail, type CloseReason, type Message } from './messages.js';
+import {
+  MESSAGE_TYPE, decodeMessage, encodeMessage, type Assurance, type CloseDetail, type CloseReason, type Message, type ResultBody,
+} from './messages.js';
 import { NOISE_TAG_BYTES } from './noise.js';
+import {
+  CLOSE_ACK_WAIT_MS, Deadline, GLOBAL_TIMERS, MIN_NO_ANSWER_MS, NO_ANSWER_RTTS, PING_INTERVAL_MS, STALL_FAILED_MS, STALL_SHOWN_MS,
+  type EngineTimers,
+} from './timers.js';
 import { LOW_WATER_BYTES } from './webrtc.js';
 
+export { GLOBAL_TIMERS, type EngineTimers };
+
 // What both sides of a direct transfer's engine share, once the secure channel
-// (channel.ts) is up: one ordered pump of records each way, the generation
-// fence, and how a transfer's end is said and heard.
+// (channel.ts) is up: one ordered pump of records each way, the connection's
+// liveness, the generation fence, holds, stalls, and how a transfer's end is
+// said and heard.
 //
 // The pump. Each side has one loop that sends its records in order: control
-// records (ACCEPT, CREDIT, RESULT, RESULT_ACK, CLOSE) go ahead of whatever of
-// the sender's stream (DATA, BLOCK_END, FILE_END, FINISH) hasn't gone yet.
-// Records are encrypted in the order they're sent, up to 8 at a time, and
-// handed to the data channel strictly in that order; nothing encrypted is ever
-// dropped. The pump stops once about 1 MiB waits in the data channel's buffer,
-// and goes on once it's down to 256 KiB.
+// records (ACCEPT, CREDIT, RESULT, RESULT_ACK, HOLD, CLOSE, CLOSE_ACK, PING,
+// PONG, STATUS) go ahead of whatever of the sender's stream (DATA, BLOCK_END,
+// FILE_END, FINISH) hasn't gone yet. Records are encrypted in the order
+// they're sent, up to 8 at a time, and handed to the data channel strictly in
+// that order; nothing encrypted is ever dropped. The pump stops once about
+// 1 MiB waits in the data channel's buffer, and goes on once it's down to
+// 256 KiB.
+//
+// Liveness. A side that has sent nothing for 5 s sends a PING; each PING is
+// answered with a PONG as it arrives, whatever the side is busy with, and the
+// round trip feeds a smoothed RTT. Nothing heard from the other side for
+// max(15 s, 6 × the smoothed RTT) ends the connection, CONNECTION_LOST. It
+// keeps running while a transfer is held.
 //
 // The fence. Every effect carries the generation of the connection it came
 // from or was started on: a record, a sink's write, a file's read, a timer.
@@ -22,12 +38,15 @@ import { LOW_WATER_BYTES } from './webrtc.js';
 // is dropped and touches nothing: nothing is written, sent or ended by it. A
 // transfer has one generation until recovery makes a resume's.
 //
-// The end. A side that fails tells the other with one CLOSE, in-band, then
-// closes: FAILED with what failed, or the receiver's USER_DECLINED, or the
-// sender's TAKEN to a receiver it didn't choose. The side that hears a CLOSE
-// ends as its reason says, in its own words, and never passes on anything of
-// the other device's. A connection that's lost, or a fault in the secure
-// channel itself, ends both sides as the channel says it, with no CLOSE.
+// The end. Every end but completion and a fault in the secure channel itself
+// is one CLOSE: sent in-band and through the rendezvous (sealed, so it still
+// arrives when the data channel has gone), answered with CLOSE_ACK, waited
+// for 2 s at most. A CLOSE is heard as it arrives, by either path, ahead of
+// records still waiting their turn; a second is ignored. The side that hears
+// one ends as its reason says, in its own words, and never passes on anything
+// of the other device's. A connection that's lost waits 2 s for a CLOSE
+// through the rendezvous before it ends CONNECTION_LOST; a fault in the
+// secure channel ends both sides as the channel says it, with no CLOSE.
 
 /** The receiver's credit: at most this many bytes sent and not yet written. */
 export const CREDIT_WINDOW_BYTES = 4194304;
@@ -41,19 +60,10 @@ export const SOURCE_BLOCKS_AHEAD = 2;
 export const ENCRYPT_AHEAD = 8;
 /** File ends the sender may send while the receiver hasn't finished their files. */
 export const MAX_UNFINISHED_FILE_ENDS = 8;
-/** How long the receiver waits for RESULT_ACK before completing anyway; how long a side waits for a CLOSE to go. */
+/** How long the receiver waits for RESULT_ACK before completing anyway. */
 export const RESULT_ACK_WAIT_MS = 2000;
-
-/** A timer source: the global one, or a test's clock. */
-export interface EngineTimers {
-  setTimeout(run: () => void, ms: number): unknown;
-  clearTimeout(id: unknown): void;
-}
-
-export const GLOBAL_TIMERS: EngineTimers = Object.freeze({
-  setTimeout: (run: () => void, ms: number) => globalThis.setTimeout(run, ms),
-  clearTimeout: (id: unknown) => globalThis.clearTimeout(id as ReturnType<typeof globalThis.setTimeout>),
-});
+/** PINGs a side remembers waiting for their PONG: an older one's answer is passed over. */
+const MAX_PINGS_WAITING = 16;
 
 /** Where a direct transfer stands, for one side. */
 export type DirectState = 'connecting' | 'waiting' | 'offered' | 'transferring' | 'finalising' | 'completed' | 'cancelled' | 'failed';
@@ -63,6 +73,9 @@ export type DirectOutcome =
   | { state: 'completed'; assurance: Assurance }
   | { state: 'cancelled'; by: 'self' | 'peer'; declined?: true }
   | { state: 'failed'; error: DropgateError };
+
+/** Who holds a transfer, as one side sees it: this side, the other, both, or no one. */
+export type PausedBy = 'self' | 'peer' | 'both' | null;
 
 /** A record from the other side, with the generation of the connection it came on. */
 export interface Inbound {
@@ -75,6 +88,25 @@ export interface StreamSource {
   next(): Message | undefined;
 }
 
+export type CloseMessage = Extract<Message, { type: 'close' }>;
+export type CloseAck = Extract<Message, { type: 'close-ack' }>;
+export type StatusAnswer = Extract<Message, { type: 'status'; kind: 'answer' }>;
+/** What a CLOSE says: its reason, and with FAILED what failed. */
+export interface CloseWhy { reason: CloseReason; detail?: CloseDetail }
+
+/** Where the other side said it stood, in its last answer to a STATUS ask. */
+export interface PeerStatus {
+  /** `STATUS_STATE`'s: 1 offered, 2 transferring, 3 finalising, 4 finished; 0 anything else. */
+  state: number;
+  /** Whether the other side holds the transfer. */
+  held: boolean;
+  /** The bytes written, as the other side knows it. */
+  consumed: number;
+}
+
+/** STATUS's state byte: where the answering side stands. 0 for anything else. */
+export const STATUS_STATE = Object.freeze({ OFFERED: 1, TRANSFERRING: 2, FINALISING: 3, FINISHED: 4 });
+
 export interface LinkHandlers {
   /**
    * Each record as it arrives, before any earlier one is handled: a quick
@@ -83,13 +115,24 @@ export interface LinkHandlers {
   arrived?(record: Uint8Array): void;
   /** Each record from the other side, in order: the next waits until this one's handled. */
   record(inbound: Inbound): Promise<void>;
-  /** The channel ended under the link (closed, lost or refused), once every record that came before is handled. */
+  /**
+   * The channel ended under the link (closed, lost or refused), once every
+   * record that came before is handled. The channel is left open for a late
+   * CLOSE through the rendezvous until the side closes the link.
+   */
   ended(err: DropgateError): void;
+  /** The other side's CLOSE, in-band or through the rendezvous, as it arrives: ahead of records still waiting. */
+  close(message: CloseMessage, generation: bigint): void;
+  /** What this side answers to a STATUS ask. */
+  status(): Omit<StatusAnswer, 'type' | 'kind' | 'id'>;
+  /** The other side's answer to this side's STATUS ask. */
+  statusHeard?(answer: StatusAnswer, generation: bigint): void;
 }
 
 /**
  * One generation's secure channel, as the engine uses it: the record size both
- * hellos allow, the records read in order, and the one ordered pump.
+ * hellos allow, the records read in order, the one ordered pump, liveness,
+ * and the CLOSE both ways.
  */
 export class Link {
   readonly generation: bigint;
@@ -97,6 +140,7 @@ export class Link {
   readonly recordBytes: number;
   readonly #channel: SecureChannel;
   readonly #handlers: LinkHandlers;
+  readonly #timers: EngineTimers;
   readonly #control: Uint8Array[] = [];
   #stream: StreamSource | undefined;
   readonly #inFlight: Array<Promise<void>> = [];
@@ -105,24 +149,65 @@ export class Link {
   #wake: (() => void) | undefined;
   #busy = false;
   readonly #idle: Array<() => void> = [];
+  /** Nothing more is sent or read: the link was closed, or its channel ended. */
   #closed = false;
+  /** The channel itself closed, by the side. */
+  #released = false;
   /** Records read and not yet handled, in order. */
   readonly #inbox: Uint8Array[] = [];
   #handling = false;
   /** Why the channel ended, told once the inbox is empty. */
   #lostWith: DropgateError | undefined;
 
-  constructor(channel: SecureChannel, handlers: LinkHandlers) {
+  // Liveness.
+  #lastSent: number;
+  #lastHeard: number;
+  #srtt: number | undefined;
+  readonly #pings = new Map<bigint, number>();
+  #nextId = 1n;
+  readonly #pingTimer: Deadline;
+  readonly #answerTimer: Deadline;
+  readonly #acks = new Map<string, (ack: CloseAck | undefined) => void>();
+
+  constructor(channel: SecureChannel, handlers: LinkHandlers, timers: EngineTimers = GLOBAL_TIMERS) {
     this.#channel = channel;
     this.#handlers = handlers;
+    this.#timers = timers;
     this.generation = channel.generation;
     this.recordBytes = Math.min(channel.maxRecordBytes, channel.peerHello.maxRecord);
+    this.#lastSent = timers.now();
+    this.#lastHeard = this.#lastSent;
+    this.#pingTimer = new Deadline(timers, () => (this.#closed ? undefined : this.#lastSent + PING_INTERVAL_MS), () => this.#ping());
+    this.#answerTimer = new Deadline(timers, () => (this.#closed ? undefined : this.#lastHeard + this.noAnswerMs), () => {
+      this.#end(new DropgateError({ code: 'CONNECTION_LOST', message: "The connection was lost, so the transfer couldn't continue." }));
+    });
   }
 
-  /** Starts reading the other side's records, and the pump. */
+  /** Starts reading the other side's records (both ways), the pump and liveness. */
   start(): void {
     void this.#read();
     void this.#pump();
+    this.#pingTimer.arm();
+    this.#answerTimer.arm();
+    // The other side's CLOSE through the rendezvous: heard until the side closes the link, even once the data channel has gone.
+    this.#channel.closeReceived.then((body) => {
+      if (this.#released) return;
+      let message: Message;
+      try {
+        message = decodeMessage(body);
+      } catch {
+        return;
+      }
+      if (message.type === 'close') this.#handlers.close(message, this.generation);
+    }, () => undefined);
+  }
+
+  /** The smoothed round trip, once a PONG has come. */
+  get srtt(): number | undefined { return this.#srtt; }
+
+  /** How long nothing may be heard before the connection is lost: max(15 s, 6 × the smoothed round trip). */
+  get noAnswerMs(): number {
+    return Math.max(MIN_NO_ANSWER_MS, NO_ANSWER_RTTS * (this.#srtt ?? 0));
   }
 
   /** Sends a control record, ahead of anything of the stream not yet sent. */
@@ -143,7 +228,7 @@ export class Link {
     this.wake();
   }
 
-  /** Something changed that may let a record go: credit, a block read, a control record. */
+  /** Something changed that may let a record go: credit, a block read, a control record, a hold let go. */
   wake(): void {
     const wake = this.#wake;
     this.#wake = undefined;
@@ -158,17 +243,62 @@ export class Link {
     await Promise.allSettled([...this.#inFlight]);
   }
 
-  /** Closes the channel: nothing more is sent or read. */
+  /**
+   * Sends this side's one CLOSE: in-band (after whatever is already
+   * encrypted) and sealed through the rendezvous, then waits up to 2 s for the
+   * CLOSE_ACK, which it gives. With the data channel already gone it goes
+   * through the rendezvous alone, and nothing is waited for.
+   */
+  async closeWith(message: CloseMessage): Promise<CloseAck | undefined> {
+    const record = encodeMessage(message);
+    const key = idKey(message.operationId);
+    let resolve!: (ack: CloseAck | undefined) => void;
+    const acked = new Promise<CloseAck | undefined>((res) => { resolve = res; });
+    const inBand = !this.#closed;
+    if (inBand) {
+      this.#acks.set(key, resolve);
+      this.sendRecord(record);
+    }
+    // Sealed first, so it has gone before the side closes the rendezvous's pipe.
+    const outOfBand = this.#released ? Promise.resolve() : this.#channel.sendClose(record).catch(() => undefined);
+    if (!inBand) {
+      await outOfBand;
+      return undefined;
+    }
+    const timer = this.#timers.setTimeout(() => resolve(undefined), CLOSE_ACK_WAIT_MS);
+    const ack = await acked;
+    this.#timers.clearTimeout(timer);
+    this.#acks.delete(key);
+    await outOfBand;
+    return ack;
+  }
+
+  /** Closes the link and its channel: nothing more is sent or read, and no late CLOSE is listened for. */
   close(): void {
+    this.#stop();
+    if (this.#released) return;
+    this.#released = true;
+    for (const resolve of this.#acks.values()) resolve(undefined);
+    this.#acks.clear();
+    try {
+      this.#channel.close();
+    } catch {
+      // Gone already.
+    }
+  }
+
+  /** Whether nothing more is sent or read. */
+  get closed(): boolean { return this.#closed; }
+
+  #stop(): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#inbox.length = 0;
-    this.#channel.close();
+    this.#pingTimer.stop();
+    this.#answerTimer.stop();
     this.#settleIdle();
     this.wake();
   }
-
-  get closed(): boolean { return this.#closed; }
 
   /** Reads every record as it comes, whatever is still being handled, so each is looked at on arrival. */
   async #read(): Promise<void> {
@@ -183,10 +313,83 @@ export class Link {
         return;
       }
       if (this.#closed) return;
+      this.#lastHeard = this.#timers.now();
+      if (this.#answered(record)) continue;
       this.#handlers.arrived?.(record);
       this.#inbox.push(record);
       if (!this.#handling) void this.#handle();
     }
+  }
+
+  /**
+   * Records answered as they arrive, never waiting behind the side's work:
+   * PING (with a PONG), PONG (the round trip), STATUS, CLOSE and CLOSE_ACK.
+   * One that doesn't read is left for the side, in order, to refuse.
+   */
+  #answered(record: Uint8Array): boolean {
+    const type = record[0];
+    if (type !== MESSAGE_TYPE.PING && type !== MESSAGE_TYPE.PONG && type !== MESSAGE_TYPE.STATUS && type !== MESSAGE_TYPE.CLOSE
+      && type !== MESSAGE_TYPE.CLOSE_ACK) {
+      return false;
+    }
+    let message: Message;
+    try {
+      message = decodeMessage(record);
+    } catch {
+      return false;
+    }
+    switch (message.type) {
+      case 'ping':
+        this.send({ type: 'pong', id: message.id });
+        break;
+      case 'pong':
+        this.#pong(message.id);
+        break;
+      case 'status':
+        if (message.kind === 'ask') this.send({ type: 'status', kind: 'answer', id: message.id, ...this.#handlers.status() });
+        else this.#handlers.statusHeard?.(message, this.generation);
+        break;
+      case 'close':
+        this.#handlers.close(message, this.generation);
+        break;
+      case 'close-ack':
+        // An answer to no CLOSE of this side's is passed over.
+        this.#acks.get(idKey(message.operationId))?.(message);
+        break;
+      default:
+        return false;
+    }
+    return true;
+  }
+
+  /** Asks the other side where it stands (STATUS): its answer comes to `statusHeard`. */
+  askStatus(): void {
+    this.send({ type: 'status', kind: 'ask', id: this.#takeId() });
+  }
+
+  #takeId(): bigint {
+    const id = this.#nextId;
+    this.#nextId += 1n;
+    return id;
+  }
+
+  #ping(): void {
+    const id = this.#takeId();
+    this.#pings.set(id, this.#timers.now());
+    if (this.#pings.size > MAX_PINGS_WAITING) this.#pings.delete(this.#pings.keys().next().value as bigint);
+    this.send({ type: 'ping', id });
+    // Queued counts as sent for the next PING's time, so one goes every 5 s while nothing else does.
+    this.#lastSent = this.#timers.now();
+    this.#pingTimer.arm();
+  }
+
+  /** A PONG: the round trip into the smoothed RTT (7/8 the old, 1/8 the new). An unknown one is passed over. */
+  #pong(id: bigint): void {
+    const sentAt = this.#pings.get(id);
+    if (sentAt === undefined) return;
+    this.#pings.delete(id);
+    const rtt = this.#timers.now() - sentAt;
+    this.#srtt = this.#srtt === undefined ? rtt : (7 * this.#srtt + rtt) / 8;
   }
 
   /** Hands the records to the side, one at a time, in order. */
@@ -221,6 +424,7 @@ export class Link {
         sending.catch(() => undefined);
         this.#inFlight.push(sending);
         this.#since += record.byteLength + NOISE_TAG_BYTES;
+        this.#lastSent = this.#timers.now();
         if (this.#inFlight.length >= ENCRYPT_AHEAD) await this.#inFlight.shift();
       } catch (err) {
         this.#end(err);
@@ -238,20 +442,15 @@ export class Link {
     for (const resolve of this.#idle.splice(0)) resolve();
   }
 
-  /** The channel ended under the link. */
+  /** The channel ended under the link, or the other side went quiet: the side is told, and closes the link when it's ready. */
   #end(err: unknown): void {
     if (this.#closed) return;
-    this.#closed = true;
-    this.#inbox.length = 0;
-    this.#settleIdle();
-    try {
-      this.#channel.close();
-    } catch {
-      // Gone already.
-    }
+    this.#stop();
     this.#handlers.ended(toDropgateError(err));
   }
 }
+
+const idKey = (id: Uint8Array) => Array.from(id, (b) => b.toString(16).padStart(2, '0')).join('');
 
 /** A record from the other side, read: INVALID_MESSAGE if it isn't one of this version's. */
 export function readRecord(record: Uint8Array): Message {
@@ -272,37 +471,46 @@ export const invalidMessage = () => new DropgateError({ code: 'INVALID_MESSAGE' 
 /** What the other device sent didn't match its own hashes or the list of files. */
 export const integrityFailed = (message: string) => new DropgateError({ code: 'INTEGRITY_FAILED', origin: 'peer', message });
 
+/** No one accepted the offer in time. */
+export const offerTimedOut = () => new DropgateError({ code: 'TIMED_OUT', origin: 'local', message: "The offer wasn't accepted within 10 minutes." });
+
 const CLOSE_DETAILS = new Set<string>([
   'OUTPUT_WRITE_FAILED', 'OUTPUT_STALLED', 'SOURCE_UNAVAILABLE', 'INTEGRITY_FAILED', 'INVALID_MANIFEST', 'INVALID_MESSAGE', 'TIMED_OUT',
   'CAPABILITY_UNSUPPORTED',
 ]);
 
 /**
- * The CLOSE that tells the other side this side's failure: FAILED, with the
- * failure as its detail when it's one CLOSE names. None when the channel
- * itself has gone or failed, or this side cancelled (a cancel closes, for now).
+ * The CLOSE that tells the other side how this side ended: a cancel
+ * USER_CANCELLED; this side's own pause limit PAUSE_LIMIT; a failure FAILED,
+ * with the failure as its detail when it's one CLOSE names. None when the
+ * channel itself has gone or failed, or the end was the other side's (it has
+ * its CLOSE_ACK).
  */
-export function closeFor(err: DropgateError): { reason: CloseReason; detail?: CloseDetail } | undefined {
+export function closeFor(err: DropgateError): CloseWhy | undefined {
   switch (err.code) {
     case 'CONNECTION_LOST':
     case 'SECURITY_POLICY_MISMATCH':
-    case 'OPERATION_CANCELLED':
+    case 'PEER_FAILED':
+    case 'PEER_CLOSED':
       return undefined;
+    case 'OPERATION_CANCELLED':
+      return { reason: 'USER_CANCELLED' };
+    case 'PAUSE_LIMIT':
+      return err.details?.by === 'peer' ? undefined : { reason: 'PAUSE_LIMIT' };
     default:
+      if (err.origin === 'peer' && err.code === 'REQUEST_REJECTED') return undefined;
       return CLOSE_DETAILS.has(err.code) ? { reason: 'FAILED', detail: err.code as CloseDetail } : { reason: 'FAILED' };
   }
 }
 
 type Side = 'sender' | 'receiver';
 
-/** What the other side's failure is called, in this side's words: by what failed, else by the reason. */
+/** What the other side's failure is called, in this side's words: by what failed, else in general. */
 const PEER_FAILED_WORDS: Readonly<Record<Side, Readonly<Record<string, string>>>> = Object.freeze({
   // The receiver hears these from the sender.
   receiver: Object.freeze({
     SOURCE_UNAVAILABLE: "The sender's file couldn't be read.",
     INVALID_MESSAGE: "The sender's device couldn't understand what this device sent.",
-    APP_CLOSED: 'The sender closed Dropgate before the transfer finished.',
-    PAUSE_LIMIT: "The sender's app ended the transfer after a pause.",
     other: "The sender's device reported an error.",
   }),
   // The sender hears these from the receiver.
@@ -312,23 +520,50 @@ const PEER_FAILED_WORDS: Readonly<Record<Side, Readonly<Record<string, string>>>
     INTEGRITY_FAILED: "The file didn't arrive intact.",
     INVALID_MANIFEST: "The receiver couldn't read the list of files.",
     INVALID_MESSAGE: "The receiver's device couldn't understand what this device sent.",
-    APP_CLOSED: 'The receiver closed Dropgate before the transfer finished.',
-    PAUSE_LIMIT: "The receiver's app ended the transfer after a pause.",
     other: "The receiver's device reported an error.",
   }),
 });
 
+const OTHER: Readonly<Record<Side, Side>> = Object.freeze({ sender: 'receiver', receiver: 'sender' });
+
+/** A pause limit as words: "1-hour", "90-minute", "2-day". */
+export function pauseLimitWords(seconds: number): string {
+  const [n, unit] = seconds % 86400 === 0 ? [seconds / 86400, 'day']
+    : seconds % 3600 === 0 ? [seconds / 3600, 'hour']
+      : seconds % 60 === 0 ? [seconds / 60, 'minute'] : [seconds, 'second'];
+  return `${n}-${unit}`;
+}
+
+/** A pause limit that ran out: this side's own (`by` self), or the other side's, told by its CLOSE. */
+export function pauseLimitReached(side: Side, by: 'self' | 'peer', limitSeconds: number): DropgateError {
+  const after = limitSeconds > 0 ? `after a ${pauseLimitWords(limitSeconds)} pause` : 'after a pause';
+  return new DropgateError({
+    code: 'PAUSE_LIMIT',
+    origin: by === 'self' ? 'local' : 'peer',
+    message: by === 'self' ? `Your app ended the transfer ${after}.` : `The ${OTHER[side]}'s app ended the transfer ${after}.`,
+    details: { by },
+  });
+}
+
 /**
  * How this side ends on hearing the other's CLOSE. Its reason and detail are
  * named, never anything the other device wrote: PEER_FAILED carries what
- * failed as `details.reason`.
+ * failed as `details.reason`. A pause limit is worded by the other side's
+ * limit, from its hello.
  */
-export function outcomeOfClose(close: { reason: CloseReason; detail?: CloseDetail }, side: Side): DirectOutcome {
+export function outcomeOfClose(close: CloseWhy, side: Side, peerPauseLimitSeconds = 0): DirectOutcome {
   switch (close.reason) {
     case 'USER_CANCELLED':
       return { state: 'cancelled', by: 'peer' };
     case 'USER_DECLINED':
       return side === 'sender' ? { state: 'cancelled', by: 'peer', declined: true } : { state: 'cancelled', by: 'peer' };
+    case 'APP_CLOSED':
+      return {
+        state: 'failed',
+        error: new DropgateError({ code: 'PEER_CLOSED', message: `The ${OTHER[side]} closed Dropgate before the transfer finished.` }),
+      };
+    case 'PAUSE_LIMIT':
+      return { state: 'failed', error: pauseLimitReached(side, 'peer', peerPauseLimitSeconds) };
     case 'TAKEN':
       if (side === 'receiver') {
         return {
@@ -355,6 +590,143 @@ export function outcomeOfClose(close: { reason: CloseReason; detail?: CloseDetai
       ...(reason ? { details: { reason } } : {}),
     }),
   };
+}
+
+/**
+ * A transfer's holds, as one side sees them: its own and the other side's,
+ * each its own flag, and the pause limit. A hold by either side counts
+ * against both sides' limits from the moment the transfer stopped; the
+ * deadline both show is the earlier of the two; this side's own limit,
+ * running out, calls `limitReached`. Each new stop counts afresh.
+ */
+export class Holds {
+  self = false;
+  peer = false;
+  readonly #timers: EngineTimers;
+  readonly #ownMs: number;
+  readonly #peerMs: number;
+  readonly #limitReached: () => void;
+  #timer: unknown;
+  #deadline: number | null = null;
+
+  /** Limits in seconds, 0 for none: this side's and the other side's, from the two hellos. */
+  constructor(timers: EngineTimers, ownLimitSeconds: number, peerLimitSeconds: number, limitReached: () => void) {
+    this.#timers = timers;
+    this.#ownMs = ownLimitSeconds * 1000;
+    this.#peerMs = peerLimitSeconds * 1000;
+    this.#limitReached = limitReached;
+  }
+
+  get held(): boolean { return this.self || this.peer; }
+
+  get pausedBy(): PausedBy {
+    return this.self && this.peer ? 'both' : this.self ? 'self' : this.peer ? 'peer' : null;
+  }
+
+  /** When the transfer ends unless both sides resume first, in milliseconds since the epoch; null when not held or no limit is set. */
+  get deadline(): number | null { return this.#deadline; }
+
+  /** Sets one side's hold. Whether anything changed. */
+  set(who: 'self' | 'peer', held: boolean): boolean {
+    if (this[who] === held) return false;
+    const was = this.held;
+    this[who] = held;
+    if (!was && this.held) this.#stopped();
+    else if (was && !this.held) this.#running();
+    return true;
+  }
+
+  /** Every hold let go, and the limit's timer stopped: the transfer has ended, or is past holding. */
+  clear(): void {
+    this.self = false;
+    this.peer = false;
+    this.#running();
+  }
+
+  #stopped(): void {
+    const limits = [this.#ownMs, this.#peerMs].filter((ms) => ms > 0);
+    this.#deadline = limits.length > 0 ? Date.now() + Math.min(...limits) : null;
+    if (this.#ownMs > 0) this.#timer = this.#timers.setTimeout(() => this.#limitReached(), this.#ownMs);
+  }
+
+  #running(): void {
+    if (this.#timer !== undefined) this.#timers.clearTimeout(this.#timer);
+    this.#timer = undefined;
+    this.#deadline = null;
+  }
+}
+
+/**
+ * Watches the writes, closes or reads a side waits on: one that hasn't
+ * finished in 30 s shows as stalled (`changed` is called), and in 120 s ends
+ * the transfer (`failed`). Stopped while the transfer is held, and counted
+ * afresh when it runs again.
+ */
+export class StallWatch {
+  readonly #timers: EngineTimers;
+  readonly #changed: () => void;
+  readonly #failed: () => void;
+  #waiting = 0;
+  #held = false;
+  #stalled = false;
+  #shown: unknown;
+  #fail: unknown;
+  #stopped = false;
+
+  constructor(timers: EngineTimers, changed: () => void, failed: () => void) {
+    this.#timers = timers;
+    this.#changed = changed;
+    this.#failed = failed;
+  }
+
+  /** Whether what the side waits on has taken 30 s or more. */
+  get stalled(): boolean { return this.#stalled; }
+
+  /** `work`, watched. */
+  async during<T>(work: Promise<T>): Promise<T> {
+    this.#waiting += 1;
+    if (this.#waiting === 1) this.#start();
+    try {
+      return await work;
+    } finally {
+      this.#waiting -= 1;
+      if (this.#waiting === 0) this.#clear();
+    }
+  }
+
+  /** The transfer is held (or runs again): nothing counts as stalled while it's held. */
+  hold(held: boolean): void {
+    if (this.#held === held) return;
+    this.#held = held;
+    if (held) this.#clear();
+    else if (this.#waiting > 0) this.#start();
+  }
+
+  /** The transfer has ended: no timer runs again. */
+  stop(): void {
+    this.#stopped = true;
+    this.#clear();
+  }
+
+  #start(): void {
+    if (this.#held || this.#stopped) return;
+    this.#shown = this.#timers.setTimeout(() => {
+      this.#stalled = true;
+      this.#changed();
+    }, STALL_SHOWN_MS);
+    this.#fail = this.#timers.setTimeout(() => this.#failed(), STALL_FAILED_MS);
+  }
+
+  #clear(): void {
+    if (this.#shown !== undefined) this.#timers.clearTimeout(this.#shown);
+    if (this.#fail !== undefined) this.#timers.clearTimeout(this.#fail);
+    this.#shown = undefined;
+    this.#fail = undefined;
+    if (this.#stalled) {
+      this.#stalled = false;
+      this.#changed();
+    }
+  }
 }
 
 /** A deferred promise, its handlers outside. */
@@ -394,4 +766,9 @@ export class Listeners {
       }
     }
   }
+}
+
+/** RESULT's body, from a RESULT record. */
+export function resultBody(m: ResultBody): ResultBody {
+  return { commitId: m.commitId, assurance: m.assurance, fileCount: m.fileCount, totalSize: m.totalSize, chain: m.chain };
 }

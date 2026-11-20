@@ -1,14 +1,75 @@
 // Helpers for the direct-transfer engine's tests (src/dgdtp/engine.ts,
 // send.ts, receive.ts): files and sinks in memory, a sender played by hand
 // record by record, and the channel's records read back.
+import { setImmediate as immediate } from 'node:timers/promises';
 import type { CryptoProvider } from '../../src/crypto/index.js';
 import type { SecureChannel } from '../../src/dgdtp/channel.js';
 import {
   BLOCK_BYTES, blockCount, chainBlock, chainFileEnd, chainStart, dataBytes, decodeMessage, encodeManifest, encodeMessage, manifestHash,
   manifestRecords, type Message,
 } from '../../src/dgdtp/messages.js';
+import type { EngineTimers } from '../../src/dgdtp/timers.js';
 import type { DownloadFileInfo, DownloadSink } from '../../src/sink.js';
 import type { FileSource } from '../../src/source.js';
+
+/**
+ * A clock for the engine's timers that moves only when a test moves it: each
+ * timer runs when the clock reaches its time, in order, with the real work it
+ * starts (crypto, the in-memory pipes) let settle before the next.
+ */
+export class FakeClock implements EngineTimers {
+  #now = 0;
+  #nextId = 1;
+  readonly #timers = new Map<number, { at: number; run: () => void }>();
+
+  now(): number { return this.#now; }
+
+  setTimeout(run: () => void, ms: number): number {
+    const id = this.#nextId++;
+    this.#timers.set(id, { at: this.#now + Math.max(0, ms), run });
+    return id;
+  }
+
+  clearTimeout(id: unknown): void {
+    this.#timers.delete(id as number);
+  }
+
+  /** How far off each waiting timer is, soonest first. */
+  get waiting(): number[] {
+    return [...this.#timers.values()].map((t) => t.at - this.#now).sort((a, b) => a - b);
+  }
+
+  /** Moves the clock on by `ms`, `step` at a time (so the other side's answers come between), running each timer as its time comes. */
+  async advance(ms: number, step = ms): Promise<void> {
+    const end = this.#now + ms;
+    while (this.#now < end) {
+      const target = Math.min(end, this.#now + step);
+      for (;;) {
+        let next: [number, { at: number; run: () => void }] | undefined;
+        for (const entry of this.#timers) if (entry[1].at <= target && (!next || entry[1].at < next[1].at)) next = entry;
+        if (!next) break;
+        this.#timers.delete(next[0]);
+        this.#now = Math.max(this.#now, next[1].at);
+        next[1].run();
+        await settle();
+      }
+      this.#now = target;
+      await settle();
+    }
+  }
+}
+
+/** Lets real work started by a timer (crypto, the in-memory pipes' promises) run its course. */
+export async function settle(ms = 0.25): Promise<void> {
+  // Turns of the event loop for about `ms` of real time: the crypto runs on Node's thread pool, whose results come between
+  // turns. Work that takes longer simply finishes during a later timer's turns, as it would between a real clock's ticks.
+  const end = performance.now() + ms;
+  let turns = 0;
+  do {
+    await immediate();
+    turns += 1;
+  } while (turns < 3 || performance.now() < end);
+}
 
 /** `size` bytes that differ from block to block and file to file: a counter run through a small mix. */
 export function patterned(size: number, seed = 1): Uint8Array {
