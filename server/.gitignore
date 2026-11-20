@@ -1,6 +1,6 @@
 node_modules/
 uploads/
-package-lock.json
+data/
 *.tar
 *.tar.gz
 *.tgz

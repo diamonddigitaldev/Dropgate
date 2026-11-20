@@ -9,8 +9,12 @@ services:
       - ENABLE_UPLOAD=true
       - UPLOAD_ENABLE_E2EE=true
       - UPLOAD_MAX_FILE_SIZE_MB=100
-      # Persist uploads across restarts — requires the volume below to be mapped
+      # Keep uploads across restarts (they're in the data volume below)
       # - UPLOAD_PRESERVE_UPLOADS=true
-    # Uncomment to persist uploads across container restarts
-    # volumes:
-    #   - /path/to/uploads:/usr/src/app/uploads
+    volumes:
+      # Everything the server keeps. Uploads are cleared at each start unless
+      # UPLOAD_PRESERVE_UPLOADS=true; the server's own data always stays.
+      - dropgate-data:/app/data
+
+volumes:
+  dropgate-data:
