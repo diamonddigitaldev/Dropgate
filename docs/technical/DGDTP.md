@@ -1,6 +1,6 @@
 # DGDTP — Dropgate Direct Transfer Protocol
 
-**Protocol Version:** 4.0, in development. Its secure channel, and the engine that carries a transfer over it ([§4](#4-the-secure-channel)), are built in the core library and tested, but nothing in core's API or the apps uses them yet: today's direct transfers use version 3's messages ([§5](#5-signalling-layer) to [§18](#18-error-model)), with `hello` carrying 4
+**Protocol Version:** 4.0, in development. Its secure channel, and the engine that carries a transfer over it ([§4](#4-the-secure-channel)), are built in the core library, tested, and what core's `client.direct` runs ([§4.15](#415-in-cores-api)); the apps don't use them yet: their direct transfers use version 3's messages ([§5](#5-signalling-layer) to [§18](#18-error-model)), with `hello` carrying 4
 **Status:** In development
 **Last Updated:** November 2026
 
@@ -17,11 +17,11 @@ DGDTP 4 has two layers:
 
 ### 1.1 What's Built Now
 
-The secure channel is built in `@dropgate/core` ([`packages/dropgate-core/src/dgdtp/`](../../packages/dropgate-core/src/dgdtp/)), and tested end to end over stand-in connections, over WebRTC between two peer connections in Node, and through a real Dropgate Server's rendezvous ([§4.12](#412-test-vectors-and-tests)). Nothing in core's API uses it yet, and none of it is exported.
+The secure channel is built in `@dropgate/core` ([`packages/dropgate-core/src/dgdtp/`](../../packages/dropgate-core/src/dgdtp/)), and tested end to end over stand-in connections, over WebRTC between two peer connections in Node, and through a real Dropgate Server's rendezvous ([§4.12](#412-test-vectors-and-tests)). Core's `client.direct` runs every direct transfer over it, on handles ([§4.15](#415-in-cores-api)); none of the channel itself is exported.
 
-Today's direct transfers still run version 3's transfer messages, with `hello` carrying 4, on PeerJS, protected by WebRTC's own DTLS encryption alone ([§5](#5-signalling-layer) to [§18](#18-error-model)). They support single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§16](#16-resume-support)). What DTLS alone does and doesn't protect against is in [§19.1](#191-transport-encryption).
+The Web UI's direct transfers, and any call to core that passes PeerJS's `Peer`, still run version 3's transfer messages, with `hello` carrying 4, on PeerJS, protected by WebRTC's own DTLS encryption alone ([§5](#5-signalling-layer) to [§18](#18-error-model)). They support single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§16](#16-resume-support)). What DTLS alone does and doesn't protect against is in [§19.1](#191-transport-encryption).
 
-Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, is built, and so is core's client for it: a sender's room, its codes, its receivers' attempts by link or by code, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Core also has the transfer engine: its records, its list of files and its checkpoint chain, and the engine that sends them, one transfer end to end, from the offer to the receiver's result, with pausing from either device, its timers and liveness, and one way to end. Nothing in core's API or the apps uses them yet. Together they will carry every direct transfer over the secure channel, and their messages replace §5 to §18.
+Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, is built, and so is core's client for it: a sender's room, its codes, its receivers' attempts by link or by code, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Core also has the transfer engine: its records, its list of files and its checkpoint chain, and the engine that sends them, one transfer end to end, from the offer to the receiver's result, with pausing from either device, its timers and liveness, and one way to end. Core's `client.direct` runs on them; the apps don't yet. Once they do, they carry every direct transfer over the secure channel, and their messages replace §5 to §18.
 
 ### 1.2 Design Goals
 
@@ -91,9 +91,9 @@ Today, the sender registers its whole code with PeerJS as its peer ID, so the se
 
 ### 3.6 Links
 
-A sender's room has a link as well as an optional code. The link carries the **link secret** after its `#`: 32 random bytes from the sender's crypto provider. A browser never sends what's after a `#`, so the server never sees it, and the receiver joins the room by a room ID derived from it ([§4.4](#44-the-key-schedule)), which tells the server nothing about it. The link is separate from the code, so a wrong code never breaks it, and it can't be guessed. In the link, the secret will be URL-safe base64 with no `=`, 43 characters.
+A sender's room has a link as well as an optional code. The link carries the **link secret** after its `#`: 32 random bytes from the sender's crypto provider. A browser never sends what's after a `#`, so the server never sees it, and the receiver joins the room by a room ID derived from it ([§4.4](#44-the-key-schedule)), which tells the server nothing about it. The link is separate from the code, so a wrong code never breaks it, and it can't be guessed. The link is `https://<server>/p2p#` and the secret in URL-safe base64 with no `=`, 43 characters, with nothing else in its path and no query: core's `share()` gives it, and a receive by link refuses anything else, or a link to another server, before anything is sent.
 
-Today's links still carry the code itself, in the address's path ([§19.8](#198-code-brute-force-resistance)). The new links arrive with Dropgate 4's rendezvous.
+The Web UI's links still carry the code itself, in the address's path ([§19.8](#198-code-brute-force-resistance)), until it moves onto core's handles.
 
 ---
 
@@ -229,7 +229,7 @@ inside     type (1) ‖ length (2) ‖ body, then zero bytes to its padded size
 - A frame is checked before it's decrypted: its size, then its whole header, which must be exactly the one expected next. Once it's open, its inside must be exactly one message: a type the other side sends, padded to its own size (an answer that fits 2,048 bytes but is padded to 8,192 is refused), zero padding, and a body exactly its type's.
 - Anything else ends the attempt with `SECURITY_POLICY_MISMATCH`, both ways at once: a flipped bit, a frame from another attempt, one sent back to the device that sealed it, a replay, a gap, a reorder, the wrong size. Nothing is tried again, sealed or not.
 - At most 4,096 frames go each way. A device's 4,097th ends the attempt (`SECURITY_POLICY_MISMATCH`, origin `local`), and so does a 4,097th received.
-- The receiver's first frame must be its offer, and the sender's its answer, one each. Candidates follow as ICE finds them, then the end of them. The receiver seals its offer before it applies it, and the sender its answer, so each takes counter 0.
+- The receiver's first frame must be its offer, and the sender's its answer, one each. Candidates follow as ICE finds them, then the end of them: a candidate found before the device's own offer or answer has gone (some WebRTC stacks, libdatachannel's among them, start finding them while the description is being made) waits, and goes just after it. The receiver seals its offer before it applies it, and the sender its answer, so each takes counter 0.
 - By code, the sender opens no frame before `Ta` checks ([§4.3](#43-cpace-typed-codes)), and until the sender's first frame opens, the receiver takes an empty message as the sender's abort.
 - A candidate the connection can't use is skipped, and ICE carries on with the others. A restart is ignored until the engine handles ICE restarts.
 
@@ -380,7 +380,7 @@ All of these are built: the connection itself, the rendezvous's rooms and codes,
 - **Ends:** ICE or the connection failing, or the data channel closing, ends it with `CONNECTION_LOST`.
 - **The set-up's time:** an attempt's data channel must open within 30 seconds of the attempt starting (ICE), its handshake finish within 15 seconds of that, and the whole set-up, a code's exchange included, within 90 seconds. Running out ends that attempt `TIMED_OUT`, "Couldn't connect to the other device.", with everything it opened closed; a receiver can try again, and the sender's room goes on. A frame the rendezvous drops shows up this way, never as success.
 
-The rendezvous's rooms and codes are built on the Dropgate Server ([`server/rendezvous.js`](../../server/rendezvous.js)), beside PeerJS; core's client speaks to it, but nothing in core's API or the apps uses it yet.
+The rendezvous's rooms and codes are built on the Dropgate Server ([`server/rendezvous.js`](../../server/rendezvous.js)), beside PeerJS; core's client speaks to it, and core's `client.direct` runs on it ([§4.15](#415-in-cores-api)), but the apps don't yet.
 
 - **One WebSocket per device** at `/api/v4/rendezvous`, with nothing about a room in its address, speaking short binary messages: a type byte, then fixed fields. The sender's one socket holds its room; each receiver's attempt has a socket of its own. A text message, or one over 8,232 bytes, closes the socket.
 - **In plain, as a room is created or joined:** the DGDTP major, so a mismatch is said before any cryptography. A major other than the server's is refused with the server's version; the minor is passed over.
@@ -421,6 +421,17 @@ The engine's records are written and read by core ([`dgdtp/messages.ts`](../../p
 - **STATUS.** With credit given and no data arriving for 30 seconds, not held, the receiver asks the sender where it stands, every 30 seconds while nothing moves. Either device answers a STATUS ask as it arrives: its state (1 offered, 2 transferring, 3 finalising, 4 finished, 0 anything else), whether it holds the transfer, the bytes written as it knows them, and, once it has sent RESULT, the RESULT. An answer is kept for the device's screens, and changes nothing else.
 - **Ends: one CLOSE.** Every end but completion and a fault in the secure channel itself is one CLOSE: a cancel (`USER_CANCELLED`), a decline (`USER_DECLINED`), an app closing (`APP_CLOSED`, best effort, when a page goes for good or the desktop app quits), a pause limit (`PAUSE_LIMIT`), or a failure (`FAILED`, with what failed). It goes inside the channel after whatever is already encrypted, and through the rendezvous too, sealed ([§4.8](#48-bind-and-the-out-of-band-close)), so it arrives even when the data channel has gone. The device that hears it, by either path, ends as [§4.10](#410-errors) says, in its own words, never with the other device's text, and answers with CLOSE_ACK; the device that sent it waits up to 2 seconds for that, then closes. A second CLOSE is ignored. One that comes once the receiver has sent RESULT is answered CLOSE_ACK with the RESULT, and the receiver stays completed; one that comes while it's finishing the files is answered once they're finished. A sender that cancels once FINISH has gone waits those 2 seconds for the receiver's answer: if the files were saved already, the send is completed, not cancelled.
 - **A lost connection.** The data channel closing, or the other device going quiet, before RESULT: each device listens 2 seconds more for a CLOSE through the rendezvous, which ends it as it says (an app closed, say), and otherwise ends `CONNECTION_LOST`, never a cancel. A fault in the secure channel ends both devices as the channel says, with no CLOSE.
+
+### 4.15 In Core's API
+
+Core's `client.direct.send()` and `receive()` run the engine on handles, as hosted transfers are ([API Reference](../core/api-reference.md#clientdirect), [Direct Transfers](../core/p2p.md)). What the protocol shows through them:
+
+- **A send** checks its files and settings, connects to the server (its DGDTP major against core's, and `capabilities.p2p`), asks for a credential only when `capabilities.p2p.credentialRequired` says a send needs one ([§4.13](#413-what-the-rendezvous-and-the-engine-add)'s CREATE carries it, and nothing else does), then opens its room with a code unless asked not to. Its handle's `share()` gives the link ([§3.6](#36-links)) and the room's code: the code is `null` while none is free, or after an attempt by code until the next comes, so a code someone has typed is never shown again; both are `null` once a receiver has accepted.
+- **A receive** checks its link or code on the device (another server's link, or a code on a server with `codeLetters` 0, is refused before anything is sent), then joins: by the link's room ID, or by the code's locator. Its handle's `offer()` gives the list of files once it's whole and checked; `accept()` opens the sink, then sends ACCEPT; `decline()` sends CLOSE (`USER_DECLINED`). A cancel before the channel is up gives up the join at once and closes what it opened.
+- **The hello** carries the device's `direct` settings in whole seconds: its pause limit (0 for none) and its reconnect window. The settings are client-wide, and each transfer may override any of them; a pause limit is a whole number of seconds from one minute to one week, a reconnect window from 10 seconds to an hour, and anything else is refused before anything is sent. With `stun: false`, the device's peer connection is given no ICE servers at all; otherwise the server's `iceServers`.
+- **Snapshots** follow each device's engine: a send's `waiting`, `connecting` (a receiver's attempt being set up), `offered`, `transferring`, `finalising`; a receive's `connecting`, `offered`, `transferring`, `finalising`; and `paused` whenever either device holds the transfer, with who holds it and the shared deadline. Progress is the bytes the receiver has written: the sender knows them from CREDIT. No snapshot, outcome or error holds the link, the code, a secret or a file name; the names reach the receiving app only through `offer()`.
+- **Outcomes** are [§4.10](#410-errors)'s, each device's in its own words: a cancel, a decline or a pause limit heard through a CLOSE ends the other device `cancelled` by `peer` (`declined` for a decline) or as the CLOSE says. A completed transfer's value is its assurance (`saved` or `handed-off`, as ACCEPT said the sink would), how many files went and their total size.
+- **Runtime:** the global `RTCPeerConnection` and `WebSocket`, or, for Node, an `RTCPeerConnection` class passed as a client option; without one, a direct call is `RUNTIME_UNSUPPORTED`.
 
 ### 4.14 Constants
 
@@ -477,6 +488,8 @@ The engine's records are written and read by core ([`dgdtp/messages.ts`](../../p
 | `STALL_FAILED_MS` | 120,000 | A write, close or read this long ends the transfer. |
 | `CLOSE_ACK_WAIT_MS` | 2,000 | How long a device that sent a CLOSE waits for CLOSE_ACK. |
 | `LATE_CLOSE_WAIT_MS` | 2,000 | How long a device whose data channel has gone listens for a CLOSE through the rendezvous. |
+| `MIN_PAUSE_LIMIT_MS`, `MAX_PAUSE_LIMIT_MS` | 60,000, 604,800,000 | The shortest and longest pause limit a device can set: one minute and one week. |
+| `MIN_RECONNECT_WINDOW_MS`, `MAX_RECONNECT_WINDOW_MS` | 10,000, 3,600,000 | The shortest and longest reconnect window a device can set: 10 seconds and one hour. |
 
 ---
 

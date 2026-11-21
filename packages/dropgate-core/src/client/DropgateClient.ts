@@ -40,6 +40,12 @@ import type {
   OpenedUpload,
   UploadMetadata,
   DeleteOptions,
+  DirectOptions,
+  DirectPeerConnectionClass,
+  DirectSendOptions,
+  DirectSendHandle,
+  DirectReceiveOptions,
+  DirectReceiveHandle,
 } from '../types.js';
 import type {
   P2PSendFileOptions,
@@ -62,6 +68,8 @@ import { startP2PSend } from '../p2p/send.js';
 import { startP2PReceive } from '../p2p/receive.js';
 import { resolvePeerConfig } from '../p2p/helpers.js';
 import { StreamingZipWriter } from '../zip/stream-zip.js';
+import { DEFAULT_DIRECT_SETTINGS, directSettings, startDirectReceive, startDirectSend } from './direct.js';
+import type { DirectHost, DirectSettings } from './direct.js';
 import { createObject, openObject, checkFiles, ObjectLayout, isChunkSize, HEADER_BYTES, SECRET_BYTES, MAX_FILES } from '../object/index.js';
 import type { ObjectWriter, OpenedObject } from '../object/index.js';
 
@@ -192,16 +200,54 @@ export interface HostedApi {
 /** `client.direct`: direct transfers, from one device to another. */
 export interface DirectApi {
   /**
-   * Starts sending, and waits for the receiver to connect with the code it gives.
-   * @throws {DropgateError} VERSION_UNSUPPORTED; CAPABILITY_UNSUPPORTED if the server has direct
-   * transfer turned off; or connect()'s errors.
+   * Starts sending `files` straight to another device: the server only
+   * introduces the two, and never sees the files, their names or the keys.
+   * Resolves with the send's handle once its transfer is open on the server:
+   * `share()` gives the link (and a short code, unless `code: false` or none
+   * is free yet) for the receiver. Anyone with the link or code sees the
+   * offer; the first to accept gets the files, and nobody else can join.
+   *
+   * The handle is every operation's: `result` (completed with the receiver's
+   * assurance, `cancelled`, or `failed`; never rejects), `snapshot` and
+   * `subscribe()` (which never hold the link, the code or a name), `cancel()`,
+   * and `pause()`/`resume()` from acceptance until all the data has been sent.
+   * @throws {DropgateError} (rejects) INVALID_ARGUMENT for no files, a file that isn't one, or a
+   * `direct` setting out of range; INVALID_FILENAME; RUNTIME_UNSUPPORTED with no RTCPeerConnection
+   * or WebSocket here; VERSION_UNSUPPORTED; CAPABILITY_UNSUPPORTED if the server has direct
+   * transfers off; AUTH_REQUIRED if it needs a credential and none is given; OPERATION_CANCELLED;
+   * or connect()'s and the rendezvous's errors.
+   */
+  send(opts: DirectSendOptions): Promise<DirectSendHandle>;
+  /**
+   * Dropgate 3's PeerJS send, with its listeners and its `Peer` option: kept
+   * only until Dropgate 4's web UI moves onto handles. Not for new code.
+   * @deprecated Use `send({ files })`, which gives a handle.
    */
   send(opts: P2PSendFileOptions): Promise<P2PSendSession>;
   /**
-   * Starts receiving from the sender with this code.
-   * @throws {DropgateError} As send() does.
+   * Starts receiving from the sender's link (`https://<server>/p2p#<secret>`,
+   * from this client's server) or code, both read on this device first.
+   * Resolves with the receive's handle at once, `connecting`: `offer()`
+   * gives the files once connected, then `accept({ sink })` takes them or
+   * `decline()` refuses them. Connecting, and anything that stops it (a wrong
+   * code, a transfer that has gone), is the handle's outcome. Receiving never
+   * needs a credential.
+   * @throws {DropgateError} (rejects) INVALID_ARGUMENT for neither or both of link and code, a link
+   * that isn't one or is another server's, or a `direct` setting out of range; INVALID_CODE for a
+   * code that isn't one; RUNTIME_UNSUPPORTED with no RTCPeerConnection or WebSocket here.
+   */
+  receive(opts: DirectReceiveOptions): Promise<DirectReceiveHandle>;
+  /**
+   * Dropgate 3's PeerJS receive, with its listeners and its `Peer` option:
+   * kept only until Dropgate 4's web UI moves onto handles. Not for new code.
+   * @deprecated Use `receive({ link })` or `receive({ code })`, which give a handle.
    */
   receive(opts: P2PReceiveFileOptions): Promise<P2PReceiveSession>;
+}
+
+/** Whether a direct call is Dropgate 3's, which always passes PeerJS's `Peer`: the new calls never take one. */
+function isPeerJsCall(opts: unknown): boolean {
+  return opts !== null && typeof opts === 'object' && 'Peer' in opts;
 }
 
 /** `client.links`: sharing codes and links. */
@@ -466,6 +512,10 @@ export class DropgateClient {
   private readonly _crypto: CryptoProvider;
   /** Where a credential comes from, for a server that asks for one: private, so it's never listed or serialised. */
   readonly #auth?: CredentialProvider;
+  /** Direct transfers' settings, which each transfer's override. */
+  readonly #direct: DirectSettings;
+  /** The client's `RTCPeerConnection` option, if it was given one. */
+  readonly #RTCPeerConnection?: DirectPeerConnectionClass;
 
   /**
    * Create a new DropgateClient instance.
@@ -522,6 +572,16 @@ export class DropgateClient {
 
     this.base64 = opts.base64 || getDefaultBase64();
 
+    try {
+      this.#direct = directSettings(opts.direct as DirectOptions | undefined, DEFAULT_DIRECT_SETTINGS);
+    } catch (err) {
+      throw withTransport(err, this.transport);
+    }
+    if (opts.RTCPeerConnection !== undefined && typeof opts.RTCPeerConnection !== 'function') {
+      throw new DropgateError({ code: 'INVALID_ARGUMENT', message: 'RTCPeerConnection must be an RTCPeerConnection class.', transport: this.transport });
+    }
+    this.#RTCPeerConnection = opts.RTCPeerConnection;
+
     // Every error a method gives, thrown or rejected, says how the server is reached.
     const transport = this.transport;
     const stamped = <A extends unknown[], R>(fn: (...args: A) => R) => (...args: A): R => {
@@ -551,10 +611,15 @@ export class DropgateClient {
       validate: stamped((o: ValidateUploadOptions) => this._validate(o)),
       delete: stamped((o: DeleteOptions) => this._delete(o)),
     });
+    const directHost = this._directHost();
     this.direct = Object.freeze({
-      send: stamped((o: P2PSendFileOptions) => this._directSend(o)),
-      receive: stamped((o: P2PReceiveFileOptions) => this._directReceive(o)),
-    });
+      send: stamped((o: DirectSendOptions | P2PSendFileOptions) => (isPeerJsCall(o)
+        ? this._directSend(o as P2PSendFileOptions)
+        : startDirectSend(directHost, o as DirectSendOptions))),
+      receive: stamped((o: DirectReceiveOptions | P2PReceiveFileOptions) => (isPeerJsCall(o)
+        ? this._directReceive(o as P2PReceiveFileOptions)
+        : startDirectReceive(directHost, o as DirectReceiveOptions))),
+    }) as DirectApi;
     this.links = Object.freeze({
       resolve: stamped((value: string, o?: RequestOptions) => this._resolve(value, o)),
     });
@@ -664,8 +729,11 @@ export class DropgateClient {
     // this client, and whether it has direct transfer on.
     const compat = await this._connect(opts);
     this._requireCompatible(compat, 'dgup');
-    if (input.kind === 'direct') {
+    if (input.kind === 'direct' || input.kind === 'direct-link') {
       if (!compat.serverInfo?.capabilities?.p2p?.enabled) return refused('Direct transfer is disabled on this server.');
+      // A direct link opens its receive page with the secret after the #, never sent to the server.
+      if (input.kind === 'direct-link') return { valid: true, type: 'p2p', target: `/p2p#${input.secret}`, transport };
+      // A code opens the receive page that reads it from its path.
       return { valid: true, type: 'p2p', target: `/p2p/${encodeURIComponent(input.locator)}`, transport };
     }
     // An upload's page says whether it's there. The secret stays on the end, for that page.
@@ -1891,6 +1959,28 @@ export class DropgateClient {
     });
   }
 
+  /** What a direct transfer's handle needs of this client. */
+  private _directHost(): DirectHost {
+    const auth = this.#auth;
+    const baseUrl = this.baseUrl;
+    return Object.freeze({
+      provider: this._crypto,
+      baseUrl,
+      transport: this.transport,
+      base64: this.base64,
+      registry: this._registry,
+      settings: this.#direct,
+      RTCPeerConnection: this.#RTCPeerConnection,
+      connect: (o: RequestOptions) => this._connect(o),
+      requireDirect: (compat: ServerConnection) => this._requireCompatible(compat, 'dgdtp'),
+      credential: async (signal: AbortSignal): Promise<string> => {
+        const credentials = await OperationCredentials.required(auth, 'direct.send', baseUrl, signal);
+        return credentials.token() as string;
+      },
+    }) as DirectHost;
+  }
+
+  /** Dropgate 3's PeerJS send, for the calls that still pass its `Peer`. */
   private async _directSend(opts: P2PSendFileOptions): Promise<P2PSendSession> {
     const compat = await this._connect();
     this._requireCompatible(compat, 'dgdtp');
@@ -1914,6 +2004,7 @@ export class DropgateClient {
     return Object.assign(session, { transport: this.transport });
   }
 
+  /** Dropgate 3's PeerJS receive, for the calls that still pass its `Peer`. */
   private async _directReceive(opts: P2PReceiveFileOptions): Promise<P2PReceiveSession> {
     const compat = await this._connect();
     this._requireCompatible(compat, 'dgdtp');

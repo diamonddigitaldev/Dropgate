@@ -8,17 +8,17 @@
 - Server capability detection and version checking
 - Helpers for lifetimes, upload sizes, file names, direct transfer codes and ZIP archives
 
-This package is **headless** and **environment-agnostic** — it contains no DOM manipulation, no browser-specific APIs, and no Node.js-specific code. All environment-specific concerns (loading PeerJS, handling file streams, etc.) are handled by the consumer.
+This package is **headless** and **environment-agnostic** — it contains no DOM manipulation, no browser-specific APIs, and no Node.js-specific code. All environment-specific concerns (where received files are written, the screen, and in Node the `RTCPeerConnection` a direct transfer uses) are handled by the consumer.
 
 
 ## Contents
 
-* [Quick Start](quick-start.md): configuring a client, connecting, uploading (and file sources), metadata, downloading into a sink, what's running, links, and P2P transfers.
+* [Quick Start](quick-start.md): configuring a client, connecting, uploading (and file sources), metadata, downloading into a sink, what's running, links, and direct transfers.
 * [API Reference](api-reference.md): the client's options and its calls by feature (`client.hosted`, `client.direct`, `client.links`, `client.server`, `client.operations`), operation handles, download sinks, metadata, file sources, and the helpers.
-* [Outcomes and Cancellation](outcomes.md): how an upload or a download ends, and the cancellation tree that cancels it.
+* [Outcomes and Cancellation](outcomes.md): how an upload, a download or a direct transfer ends, on each device, and the cancellation tree that cancels it.
 * [Errors](errors.md): the one error class, and the codes it carries.
 * [Browser Usage](browser-usage.md): loading core with a `<script>` tag or as an ES module.
-* [P2P Consumer Responsibilities](p2p.md): what your code has to do for P2P transfers, and the behaviour to account for.
+* [Direct Transfers](p2p.md): sending and receiving from one device to another, what core does and what's yours (the sink, names, sharing the link and code), pausing, STUN, and Node with node-datachannel or werift.
 * [Crypto](crypto.md): which crypto provider core uses where (Web Crypto, or `@noble` in JavaScript), the `@noble` packages compiled into it, their audits and their licences.
 * [Building and Testing](building-and-testing.md): building core, its tests, the copies the server and the client load, and how it's released.
 

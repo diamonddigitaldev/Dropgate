@@ -73,9 +73,27 @@ export type {
   DownloadStatus,
   DownloadOutcome,
   DeleteOptions,
+  DirectOptions,
+  DirectPeerConnectionClass,
+  DirectSendOptions,
+  DirectReceiveOptions,
+  DirectCodeState,
+  DirectSendStatus,
+  DirectReceiveStatus,
+  DirectSnapshot,
+  DirectSendSnapshot,
+  DirectReceiveSnapshot,
+  DirectResult,
+  DirectOutcome,
+  DirectShare,
+  DirectSendHandle,
+  DirectOfferedFile,
+  DirectOffer,
+  DirectAcceptOptions,
+  DirectReceiveHandle,
 } from './types.js';
 
-// P2P Types - Consumer-facing types for client.direct
+// Dropgate 3's PeerJS direct transfer: its types, for the calls that still pass `Peer`, until it's removed
 export type {
   // State machine types
   P2PSendState,

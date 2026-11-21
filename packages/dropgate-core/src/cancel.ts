@@ -77,6 +77,17 @@ export class CancelScope {
     return true;
   }
 
+  /**
+   * The other device in a direct transfer cancelled it (or declined it): this
+   * node and everything under it are cancelled, `by: 'peer'`. Returns false if
+   * it was already cancelled or done.
+   */
+  cancelByPeer(declined = false): boolean {
+    if (this._cancellation || this.done) return false;
+    this.settle({ by: 'peer', source: this.label, ...(declined ? { declined: true as const } : {}) });
+    return true;
+  }
+
   /** Runs `listener` once, when this node is cancelled. Returns a function that removes it. */
   onCancel(listener: (cancellation: Cancellation) => void): () => void {
     if (this._cancellation) {

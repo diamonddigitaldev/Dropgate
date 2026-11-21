@@ -234,6 +234,12 @@ export class FakePeer implements PeerConnection {
   sdp: string | undefined;
   /** Whether to refuse the first candidate it's given, as a peer connection does one it can't use. */
   refuseFirstCandidate = false;
+  /**
+   * Whether it finds a candidate while it's still making its offer or answer,
+   * before the description is given back, as libdatachannel (node-datachannel)
+   * does: it sets its local description itself as it makes one.
+   */
+  gathersWhileDescribing = false;
   #listener: ((candidate: IceCandidate | null) => void) | undefined;
   readonly #pair: PeerPair;
 
@@ -244,12 +250,21 @@ export class FakePeer implements PeerConnection {
 
   async createOffer(): Promise<string> {
     if (this.role !== 'receiver') throw new Error('Only the receiver offers.');
+    this.#early();
     return this.sdp ?? fakeSdp('offer', this.fingerprint, this.ufrag);
   }
 
   async createAnswer(): Promise<string> {
     if (this.role !== 'sender' || !this.remote) throw new Error('An answer follows an offer.');
+    this.#early();
     return this.sdp ?? fakeSdp('answer', this.fingerprint, this.ufrag);
+  }
+
+  /** A candidate found as the description is made, when `gathersWhileDescribing`. */
+  #early(): void {
+    if (!this.gathersWhileDescribing) return;
+    const n = this.role === 'receiver' ? 1 : 2;
+    this.#listener?.({ candidate: `candidate:3 1 udp 2122129151 198.51.100.${n} 5200${n} typ host generation 0 ufrag ${this.ufrag}`, sdpMid: '0', sdpMLineIndex: 0, usernameFragment: this.ufrag });
   }
 
   async setLocalDescription(description: SessionDescription): Promise<void> {

@@ -1,6 +1,6 @@
 # API Reference
 
-Core's API is grouped by feature, and called as `client.<feature>.<method>()`: `client.hosted.upload()`, `client.links.resolve()`. The standalone helpers are grouped the same way, as `<group>.<name>()`: `lifetime.toMs()`, `codes.generate()`.
+Core's API is grouped by feature, and called as `client.<feature>.<method>()`: `client.hosted.upload()`, `client.links.resolve()`. The standalone helpers are grouped the same way, as `<group>.<name>()`: `lifetime.toMs()`, `codes.isLike()`.
 
 ## DropgateClient
 
@@ -17,8 +17,10 @@ The client for one Dropgate server.
 | `fetchFn` | `FetchFn` | No | Custom fetch implementation. Every request is made with `credentials: 'omit'`, so no cookies are sent, and `redirect: 'manual'`: a redirect is never followed, and fails with `REDIRECT_NOT_FOLLOWED`. |
 | `auth` | `CredentialProvider` | No | Gives a credential, for a server that asks for one ([below](#credentials)). Without it, nothing is sent |
 | `base64` | `Base64Adapter` | No | Custom base64 encoder/decoder |
+| `direct` | `{ pauseLimitMs?, reconnectWindowMs?, stun? }` | No | Direct transfers' settings, for every send and receive; each transfer can override any of them ([below](#the-direct-option)) |
+| `RTCPeerConnection` | `RTCPeerConnection` class | No | The WebRTC class direct transfers use: the global one in browsers and Electron. In Node, pass a library's ([Direct Transfers](p2p.md#in-node)) |
 
-The constructor throws a [`DropgateError`](errors.md): `INVALID_ARGUMENT` for a missing or invalid `server`, `appInfo` or `auth`, `INSECURE_TRANSPORT_NOT_ALLOWED` for an insecure server without `allowInsecure`, and `RUNTIME_UNSUPPORTED` where there's no `fetch()` or no secure random numbers (`crypto.getRandomValues()`).
+The constructor throws a [`DropgateError`](errors.md): `INVALID_ARGUMENT` for a missing or invalid `server`, `appInfo`, `auth`, `direct` or `RTCPeerConnection`, `INSECURE_TRANSPORT_NOT_ALLOWED` for an insecure server without `allowInsecure`, and `RUNTIME_UNSUPPORTED` where there's no `fetch()` or no secure random numbers (`crypto.getRandomValues()`).
 
 Core does its own encryption: there's no option for it. It uses the Web Crypto API wherever that can do everything core needs, and its own JavaScript crypto, on `@noble`, where it can't: a page with no `crypto.subtle` (one served over plain HTTP from another machine), or a Web Crypto with no X25519. Both give the same bytes, so encrypting and decrypting work in both ([Crypto](crypto.md)).
 
@@ -55,7 +57,7 @@ With `allowInsecure`, every snapshot, result, outcome and error says so, with `t
 
 ### Credentials
 
-A server can ask for a credential before it accepts an upload, for accounts or quotas. It says so in `/api/info`, with `capabilities.upload.credentialRequired: true`. Give the client an `auth` function, and core asks it for one:
+A server can ask for a credential before it accepts an upload, or opens a direct send's transfer, for accounts or quotas. It says so in `/api/info`, with `capabilities.upload.credentialRequired: true` or `capabilities.p2p.credentialRequired: true`. Give the client an `auth` function, and core asks it for one:
 
 ```javascript
 const client = new DropgateClient({
@@ -68,11 +70,12 @@ const client = new DropgateClient({
 ```
 
 * It's asked once as each upload starts (`operation: 'hosted.upload'`, `reason: 'required'`), and once more if the server says the credential has expired (`reason: 'expired'`). The request is then made again with the new one. Core keeps no credential beyond the upload it was given for.
-* It's only asked when the server asks for a credential. A server that doesn't say so is sent none, so it never learns who is uploading. Downloads, metadata, links and codes never need one: whoever holds a link can use it.
-* The token is sent only to the client's own server, only as `Authorization: Bearer <token>`, on each of the upload's requests (its cancel included). It must be [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750#section-2.1)'s token68: letters, digits and `-._~+/`, optionally ending in `=`.
+* It's asked once as each direct send starts (`operation: 'direct.send'`, `reason: 'required'`), on a server that says a send needs one. The token goes in the one message that opens the send's transfer on the server's rendezvous, and nowhere else. Receiving never asks: whoever holds a link or a code can use it.
+* It's only asked when the server asks for a credential. A server that doesn't say so is sent none, so it never learns who is uploading or sending. Downloads, metadata, links and codes never need one: whoever holds a link can use it.
+* The token is sent only to the client's own server: for an upload, only as `Authorization: Bearer <token>`, on each of its requests (its cancel included); for a direct send, only in the rendezvous message that opens it. It must be [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750#section-2.1)'s token68: letters, digits and `-._~+/`, optionally ending in `=`.
 * It never appears in a link, a snapshot, a result, an error or a URL, and a redirect is never followed, so it can't be taken anywhere else.
 
-An upload whose server asks for a credential fails with `AUTH_REQUIRED` if there's no `auth`, or it gives `null` or throws. What it threw isn't kept, not even as the `cause`, since it could quote the credential. A credential that isn't `{ token }` fails with `INVALID_ARGUMENT`, before anything is sent. The server can answer `AUTH_REQUIRED`, `AUTH_EXPIRED` (a second time), `AUTH_DENIED` or `QUOTA_EXCEEDED` ([Errors](errors.md#codes)); none is retried as it is. Direct transfers can't carry a credential yet.
+An upload whose server asks for a credential fails with `AUTH_REQUIRED` if there's no `auth`, or it gives `null` or throws. What it threw isn't kept, not even as the `cause`, since it could quote the credential. A credential that isn't `{ token }` fails with `INVALID_ARGUMENT`, before anything is sent. The server can answer `AUTH_REQUIRED`, `AUTH_EXPIRED` (a second time), `AUTH_DENIED` or `QUOTA_EXCEEDED` ([Errors](errors.md#codes)); none is retried as it is. A direct send whose server asks fails the same way, `send()` rejecting before its transfer is opened.
 
 ### client.hosted
 
@@ -173,42 +176,99 @@ Opens an upload for a page that may download it several times, its files one by 
 
 ### client.direct
 
-Direct transfers, from one device to another. See [P2P Consumer Responsibilities](p2p.md).
+Direct transfers, from one device straight to another: the server only introduces the two, and never sees the files, their names or the keys ([Direct Transfers](p2p.md), [DGDTP](../technical/DGDTP.md)).
 
 | Method | Description |
 | --- | --- |
-| `send(opts)` | Start sending, and wait for the receiver to connect with the code it gives |
-| `receive(opts)` | Start receiving from the sender with this code |
+| `send(opts)` | Offer files to whoever opens its link or types its code. A promise of the send's [handle](#direct-transfer-handles), once its transfer is open on the server |
+| `receive(opts)` | Receive from a sender's link or code. A promise of the receive's [handle](#direct-transfer-handles), at once |
 
-They throw a [`DropgateError`](errors.md): `CAPABILITY_UNSUPPORTED` if the server has direct transfer turned off, and `VERSION_UNSUPPORTED` if its DGDTP doesn't work with this client's. The session each gives, and every event given to its `on...` listeners, carry `transport`, and so does every error given to `onError`.
+```javascript
+// The sender
+const send = await client.direct.send({ files: [file1, file2] });
+const { link, code } = send.share(); // show both; read share() again when send.snapshot.code changes
+const outcome = await send.result;    // completed: { assurance, files, totalBytes }
 
-Direct transfers keep their Dropgate 3 shape, with listeners rather than a [handle](#operation-handles), until a later 4.x version moves them onto handles and outcomes, as hosted transfers are.
+// The receiver
+const receive = await client.direct.receive({ link }); // or { code: 'ABCD-1234' }
+const { files, totalSize } = await receive.offer();     // the names, sizes and types
+await receive.accept({ sink: (file) => sinkFor(file.name) }); // or { sink, asZip: true }, or receive.decline()
+await receive.result;
+```
 
-`send()` takes `file` (a browser `File`, or an array of them) and `Peer` (PeerJS's `Peer` class), and optionally:
-
-| Option | Description |
-| --- | --- |
-| `onCode(code, attempt)` | The code to give the receiver, once the sender is registered |
-| `onStatus({ phase, message })`, `onProgress({ processedBytes, totalBytes, percent })` | Where it is |
-| `onComplete()`, `onCancel({ cancelledBy })`, `onError(err)`, `onDisconnect()` | How it ended |
-| `onConnectionHealth({ iceConnectionState, rtt?, bufferedAmount?, lastActivityMs })` | The connection's health, while it runs |
-| `codeGenerator()` | Makes the code instead of `codes.generate()`; `maxAttempts` is how many codes to try if one is taken (4) |
-| `chunkSize`, `endAckTimeoutMs`, `bufferHighWaterMark`, `bufferLowWaterMark`, `heartbeatIntervalMs` (5000, 0 for none), `chunkAcknowledgments` (true), `maxUnackedChunks` (64), `iceRestartTimeoutMs` (10000) | Tuning |
-
-Its session has `code`, `sessionId`, `peer`, `stop()`, `getStatus()`, `getBytesSent()` and `getConnectedPeerId()`.
-
-`receive()` takes `code` and `Peer`, and optionally:
+`send()` takes `files` (a [file source](#file-sources), a browser `File` or `Blob`, or an array of them; empty files are sent too) and optionally:
 
 | Option | Description |
 | --- | --- |
-| `onMeta({ name, total, fileCount?, files?, totalSize?, sendReady? })` | What's being sent, before any of it. With `autoReady: false`, call `sendReady()` to start |
-| `onData(chunk)` | Each chunk received. Return a promise to hold the sender back until it's written |
-| `onFileStart({ fileIndex, name, size })`, `onFileEnd({ fileIndex, receivedBytes })` | Each file of several |
-| `onStatus`, `onProgress`, `onComplete({ received, total })`, `onCancel({ cancelledBy })`, `onError(err)`, `onDisconnect()` | As `send()`'s |
-| `autoReady` | Start as soon as `onMeta` has run (default `true`) |
-| `watchdogTimeoutMs` | Fail if no file data arrives for this long once the transfer has started (default 30000, 0 for none) |
+| `code` | Ask the server for a short code as well as the link (default `true`). The link always works |
+| `signal` | An `AbortSignal` that cancels the send, `by: 'signal'` |
+| `direct` | This send's [settings](#the-direct-option), over the client's |
 
-Its session has `peer`, `stop()`, `getStatus()`, `getBytesReceived()`, `getTotalBytes()` and `getSessionId()`. `onCancel` says only who cancelled (`sender` or `receiver`): what the other device said, if anything, isn't passed on. Every name received is checked by the [file name rule](quick-start.md#file-names); save it under `filenames.sanitize(name)`.
+`receive()` takes one of `link` (the whole `https://<server>/p2p#<secret>`) and `code` (as someone typed it: spaces, lower case and no dash are fine), and optionally `signal` and `direct`.
+
+* **Links and codes.** A send's link is `https://<server>/p2p#` and its secret: 32 random bytes in URL-safe base64 with no `=` (43 characters), made on the device, after the `#` so it never reaches the server; the transfer is found on the server by a value made from it. The link holds no code. A code is four letters (A–Z without I and O) and four digits: the server gives its first two letters (three on a server set for more transfers), and the rest is drawn on the device, the part the server never sees. The receiver's device uses only those first letters to find the transfer, and the rest to make the connection's keys with the sender's (CPace), so a code is tried once: right or wrong, the sender is given a new one, and the link keeps working.
+* **Who gets the files.** Anyone with the link or code sees the offer; the first to accept gets the files, and nobody else can join after that. A receiver that declines, or an offer nobody accepts within 10 minutes (`TIMED_OUT`), ends the send.
+* **Before anything starts,** `send()` rejects with `INVALID_ARGUMENT` for no files, one that isn't a file, or a setting out of range; `INVALID_FILENAME` for a name the [file name rule](quick-start.md#file-names) refuses; `RUNTIME_UNSUPPORTED` with no `RTCPeerConnection` or `WebSocket` here; then, from the server, `VERSION_UNSUPPORTED` if its DGDTP doesn't work with this client's, `CAPABILITY_UNSUPPORTED` if it has direct transfers off, `AUTH_REQUIRED` ([Credentials](#credentials)), or a connection's error. `receive()` rejects with `INVALID_ARGUMENT` for neither or both of `link` and `code`, a link that isn't a direct link or is another server's ("URL must be from this server."), or a setting out of range; `INVALID_CODE` for a code that isn't one; and `RUNTIME_UNSUPPORTED`. A link is never quoted in an error. Everything after that is the handle's [outcome](outcomes.md): a wrong code, say, is a receive `failed` with `CODE_MISMATCH`, and a receive by code on a server with codes off, `CAPABILITY_UNSUPPORTED`.
+
+#### Direct transfer handles
+
+Both are [operation handles](#operation-handles) (`kind` `direct.send` and `direct.receive`), listed in `client.operations` while they run. `pause()` and `resume()` work from the receiver's acceptance until all the data has been sent, on either device ([Pausing a direct transfer](#pausing-a-direct-transfer)).
+
+A send's handle also has **`share()`**: `{ link, code }` as they are now. `code` is `null` when none was asked for, none is free yet, or the last was just tried and the next is on its way; both are `null` once a receiver has accepted, or the send has ended. Its snapshot's `code` says which (`ready`, `unavailable` or `off`): read `share()` again whenever it changes.
+
+A receive's handle also has:
+
+| Method | Description |
+| --- | --- |
+| `offer()` | A promise of the sender's files, once connected and their whole list is in and checked: `{ files: [{ name, size, type }], totalSize }`. The only place a receive gives the names. It rejects if the transfer ends first |
+| `accept({ sink, asZip?, handOff? })` | Accept the offer into a [sink](#download-sinks): one sink, or a function giving one for each file (`{ name, size, index }`); several files apart take a function, and several as one ZIP (`asZip: true`) take one sink. `handOff: true` says the sink hands the files to a browser to save, as StreamSaver does: the transfer can't know they were saved, so both sides' result is `handed-off`. Resolves once accepted |
+| `decline()` | Decline it: the sender is told, this receive ends `cancelled` `by: 'self'`, and the send `cancelled` `by: 'peer'`, `declined: true` |
+
+`accept()` rejects with `INVALID_ARGUMENT`, with nothing sent and the offer still waiting, for no sink or one without `write()` and `close()`, several files apart into one sink, or a function for a ZIP. `accept()` or `decline()` after the other, a second time, or once the transfer has ended rejects with `INVALID_ARGUMENT` too. A sink that can't be had fails the receive with `OUTPUT_WRITE_FAILED` before anything is accepted. Core writes each block to the sink only once it has been checked, awaits each write, and the receive completes only once every file's sink has closed (the ZIP finished first); any other end aborts the sink.
+
+A direct transfer's snapshot (`DirectSendSnapshot`, `DirectReceiveSnapshot`) never holds the link, the code, a secret or a file name:
+
+| Field | Description |
+| --- | --- |
+| `status` | A send: `waiting` (for a receiver), `connecting` (one is being connected), `offered`, `transferring`, `paused` (either device holds it), `finalising` (all sent, the receiver finishing its files). A receive: `connecting`, `offered`, `transferring`, `paused`, `finalising`. Then the outcome's status |
+| `text` | Where it is, for people, such as `Connected. Waiting for them to accept.`, `The receiver paused the transfer.` or `Paused by both of you.` A failed one's is its error's message |
+| `code` | A send's only: `ready`, `unavailable` or `off` ([above](#direct-transfer-handles)) |
+| `percent`, `processedBytes`, `totalBytes` | The bytes the receiver has written to its sink, and of all the files (a receive's `totalBytes` is 0 until the offer is in) |
+| `fileIndex`, `totalFiles` | Which file it's on (from 0), and how many |
+| `stalled` | `true` once reading a file (sending) or saving one (receiving) has been stuck for 30 seconds. At 2 minutes the transfer fails, `SOURCE_UNAVAILABLE` or `OUTPUT_STALLED`; neither counts while it's paused |
+| `canPause` | Whether `pause()` can be called now |
+| `pausedBy` | `self`, `peer` or `both` while it's paused; `null` otherwise |
+| `deadline` | While paused with a pause limit on either device: when the transfer ends unless both resume, in milliseconds since 1970, the earlier of the two limits, so both devices show the same; `null` otherwise |
+| `transport` | `{ secure }`, as every snapshot's |
+
+A completed transfer's value, on each side, is `{ assurance, files, totalBytes, transport }`: `assurance` is `saved` once the receiver had every file closed in its sink, or `handed-off`; `files` is how many went. How it can end, on each side, is in [Outcomes](outcomes.md#direct-transfers).
+
+#### Pausing a direct transfer
+
+Either device can pause from the receiver's acceptance until all the data has been sent, and the transfer runs only while neither holds it. `pause()` resolves at once: the other device is told, no more data is sent, and what's already on its way is still received, checked and saved. Both snapshots say `paused` and who holds it. `resume()` lets this device's hold go, and rejects with `PAUSE_UNAVAILABLE` if this device hasn't paused it (the other device's hold is its own to let go). `pause()` rejects with `PAUSE_UNAVAILABLE` before acceptance and once all the data is sent.
+
+Nothing ends a pause but a pause limit: with one set on either device ([below](#the-direct-option)), the device whose limit runs out first ends the transfer, and both fail with `PAUSE_LIMIT`, worded by whose limit it was. A pause by either device counts against both limits, from the moment the transfer stopped. The connection is kept alive while paused, and a connection that drops ends the transfer (`CONNECTION_LOST`), paused or not.
+
+#### The direct option
+
+```javascript
+const client = new DropgateClient({ server, direct: { pauseLimitMs: 3_600_000 } });
+await client.direct.send({ files, direct: { pauseLimitMs: null, stun: false } }); // this send's own
+```
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `pauseLimitMs` | `null` | How long the transfer may stay paused, by either device, before this device ends it: `null` for no limit, or a whole number of seconds from one minute to one week, in milliseconds (60,000 to 604,800,000) |
+| `reconnectWindowMs` | 120,000 | How long a dropped connection may be recovered for: a whole number of seconds from 10 seconds to an hour, in milliseconds (10,000 to 3,600,000). In this version a dropped connection ends the transfer; the window is told to the other device for recovery to use |
+| `stun` | `true` | Use the server's STUN servers (`capabilities.p2p.iceServers`) to find a route between two networks. `false` gives the connection no ICE servers at all, so nothing is sent to a STUN server, and only devices that can reach each other directly, as on one network, connect |
+
+Each setting given to a send or receive wins over the client's, one by one. Each device applies its own and tells the other as they connect, in whole seconds. Anything else, an unknown setting included, is `INVALID_ARGUMENT`: from the constructor for the client's, and from `send()` or `receive()` for a transfer's.
+
+#### Dropgate 3's calls
+
+A `send()` or `receive()` that passes PeerJS's `Peer` option still runs Dropgate 3's PeerJS transfer, with its listeners (`onCode`, `onMeta`, `onData` and the rest) instead of a handle. It's kept only until the Web UI moves onto handles, and goes with PeerJS: new code shouldn't use it.
+
+**Changed in 4.0:** direct transfers are on handles and outcomes, as hosted transfers are, over Dropgate 4's own secure channel and the server's rendezvous instead of PeerJS. A send gives a link (`https://<server>/p2p#<secret>`) as well as a code, and the code's first letters come from the server, so `codes` no longer makes codes. The listeners, the `Peer` option and the sessions go with PeerJS.
 
 ### client.links
 
@@ -216,7 +276,7 @@ Its session has `peer`, `stop()`, `getStatus()`, `getBytesReceived()`, `getTotal
 | --- | --- |
 | `resolve(value, opts?)` | Resolve a sharing code or link someone typed or pasted, into where to open it on this server. It's read on the device, and nothing of it is sent: the server is only asked for its info (as `connect()` does, and kept), to check it works with this client and has direct transfer on. A link to another server is refused without a request |
 
-Its result has `valid`, and `transport`, valid or not. A valid one has `type` and `target`, the path to open on the server: `hosted` for an upload's link or ID (`/<id>`, with the secret after its `#` still on it), `bundle` for a Dropgate 3 bundle's link (`/b/<id>#<key>`), whose page says it was made with an older version, or `p2p` for a direct transfer's code (`/p2p/<code>`, the code upper case). Whether the upload is there is for the page it opens to find out. One that isn't valid has `reason`, for people. It throws `VERSION_UNSUPPORTED` if the server's DGUP doesn't work with this client's, or `connect()`'s errors.
+Its result has `valid`, and `transport`, valid or not. A valid one has `type` and `target`, the path to open on the server: `hosted` for an upload's link or ID (`/<id>`, with the secret after its `#` still on it), `bundle` for a Dropgate 3 bundle's link (`/b/<id>#<key>`), whose page says it was made with an older version, or `p2p` for a direct transfer's link, whose `target` is its path with the secret still after the `#` (`'/p2p#<secret>'`; the Web UI's page for it is still to come), or code (`/p2p/<code>`, the code upper case). Whether the upload is there is for the page it opens to find out. One that isn't valid has `reason`, for people. It throws `VERSION_UNSUPPORTED` if the server's DGUP doesn't work with this client's, or `connect()`'s errors.
 
 **Changed in 4.0:** `resolve()` asks the server nothing about the input, where 3.x sent the ID or code to the server to resolve (a Dropgate 4 server has no such route); a hosted upload's `type` is `hosted`, where 3.x said `file`.
 
@@ -241,29 +301,29 @@ The server's info (`ServerInfo`) is what it gives in `/api/info`:
 | `name`, `version` | The server's name, and its own version, for display |
 | `protocols` | `{ dgup, dgdtp }`, each `{ major, minor }` ([Versions](#versions)) |
 | `capabilities.upload` | `enabled`, `maxSizeMB` (0 for no limit), `maxLifetimeHours` (0 for unlimited), `maxFileDownloads` (the most an upload's `maxDownloads` may be, and what it is when left out; 0 for no limit), `e2ee`, `chunkSize` in bytes, `maxPauseMinutes` (how long a paused upload or download is held; 0 when pausing is off, [Pausing](#pausing)), and `credentialRequired` ([Credentials](#credentials)) |
-| `capabilities.p2p` | `enabled`, `iceServers`, `codeLetters` (how many of a code's letters are the server's, or 0 with codes off) and `credentialRequired`, for direct transfers. Today's direct transfers read `enabled` and `iceServers`, and find PeerJS at `/peerjs` |
+| `capabilities.p2p` | `enabled`, `iceServers` (its STUN servers, `[]` with STUN off), `codeLetters` (how many of a code's letters are the server's: 2 or 3, or 0 with codes off) and `credentialRequired` ([Credentials](#credentials)), for direct transfers |
 | `capabilities.webUI` | `enabled` |
 
 ### client.operations
 
-What's running on the client: every upload and download, by its handle's `id`.
+What's running on the client: every upload, download, direct send and direct receive, by its handle's `id`.
 
 | Method | Description |
 | --- | --- |
 | `get(id)` | The handle of the running operation with this ID, or `undefined` if none is running with it |
-| `list()` | What's running, in the order it started: each one's `id` and `kind` (`hosted.upload` or `hosted.download`) |
-| `cancelAll()` | Cancel everything running on the client. Each ends as `cancelled`, `by: 'parent'`; the client stays usable |
+| `list()` | What's running, in the order it started: each one's `id` and `kind` (`hosted.upload`, `hosted.download`, `direct.send` or `direct.receive`) |
+| `cancelAll()` | Cancel everything running on the client. Each ends as `cancelled`, `by: 'parent'`; the client stays usable. A direct transfer's other device is told, and ends `cancelled` `by: 'peer'` |
 
 An operation is listed from the moment it starts until the moment it ends, however it ends, and nothing about it is kept after that: keep its outcome from `result`. It has left the registry before its outcome or its last snapshot reaches you. IDs are made on the device, and never sent to a server; they don't survive a restart.
 
 ## Operation Handles
 
-`client.hosted.upload()` and `client.hosted.download()` each give a **handle**, the same shape for every operation:
+`client.hosted.upload()`, `client.hosted.download()`, `client.direct.send()` and `client.direct.receive()` each give a **handle**, the same shape for every operation (a direct transfer's has a few methods more, [above](#direct-transfer-handles)):
 
 | Member | Description |
 | --- | --- |
 | `id` | The operation's ID: a random UUID made on the device, never sent to a server. `client.operations.get(id)` gives the handle back while it runs |
-| `kind` | `hosted.upload` or `hosted.download` |
+| `kind` | `hosted.upload`, `hosted.download`, `direct.send` or `direct.receive` |
 | `result` | A promise of the operation's one [outcome](outcomes.md). It never rejects |
 | `snapshot` | Where it is now (below). A new, frozen object each time it changes |
 | `subscribe(listener)` | Calls `listener` with each new snapshot until it has ended, the last with its outcome's status. Returns a function that unsubscribes. A listener that throws doesn't stop the operation or the others |
@@ -300,7 +360,7 @@ A download's (`DownloadSnapshot`):
 | `canPause`, `pausedBy`, `deadline` | As an upload's, from the moment the server gives the download its lease. A paused download of an opened upload has no `deadline` while another under its lease runs |
 | `transport` | `{ secure }`, as an upload's |
 
-`pausedBy` is `self` for every hosted operation: a later 4.x version's direct transfers can be paused by the other device too (`peer`), or both (`both`).
+`pausedBy` is `self` for every hosted operation: a direct transfer can be paused by the other device too (`peer`), or both (`both`), and its snapshot is [its own](#direct-transfer-handles).
 
 ## Download Sinks
 
@@ -353,8 +413,7 @@ A FileSource of your own that reads files on disk should refuse a file that has 
 | `filenames.validate(name)` | Throws `INVALID_FILENAME` for a name that's empty, over 255 UTF-8 bytes, or has a control character or path separator in it: the check core makes of every name it sends and receives |
 | `filenames.sanitize(name)` | The name to save a received file under, the same on every OS: NFC, bidi and zero-width characters shown as `[U+XXXX]`, control characters and `< > : " / \ \| ? *` as `_`, no trailing dots or spaces, `_` before a Windows reserved name, within 255 UTF-8 bytes, never empty ([File Names](quick-start.md#file-names)) |
 | `filenames.unique(name, taken)` | `name` if it isn't taken, or else `name (1).ext`, `name (2).ext` and so on. `taken` is the names already used, compared without regard to case, or a function that says whether a name is |
-| `codes.generate()` | A new random direct transfer code, such as `ABCD-1234`: four of the letters A–Z without I and O, then four digits, each letter and each digit equally likely, from secure random numbers only. It throws `RUNTIME_UNSUPPORTED` where there are none |
-| `codes.isLike(value)` | Whether a value is a direct transfer code as someone might type it: spaces anywhere and lower case are fine, and the dash may be left out (`abcd 1234` is `ABCD-1234`); an I or an O, or any other character, isn't |
+| `codes.isLike(value)` | Whether a value is a direct transfer code as someone might type it: spaces anywhere and lower case are fine, and the dash may be left out (`abcd 1234` is `ABCD-1234`); an I or an O, or any other character, isn't. `codes` makes no codes: a code is made by a send, its first letters from the server |
 | `hosts.isLocalhost(hostname)` | Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`, also as `[::1]`) |
 | `hosts.isSecureForDirect(hostname, isSecureContext)` | Whether a direct transfer can run here: a secure context, or this machine |
 | `zip.writer(onData)` | A streaming ZIP writer (below) |

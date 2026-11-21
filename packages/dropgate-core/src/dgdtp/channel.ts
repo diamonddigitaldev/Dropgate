@@ -328,6 +328,13 @@ class Attempt {
   #outgoing: Promise<unknown> = Promise.resolve();
   #offer: string | undefined;
   #answer: string | undefined;
+  /**
+   * This side's candidates found before its own offer or answer has gone:
+   * some stacks (libdatachannel, under node-datachannel) start gathering as
+   * the description is made, before it's applied. They're sent just after it,
+   * so the first frame each way is always the offer or the answer.
+   */
+  #earlyCandidates: Array<IceCandidate | null> | undefined = [];
   #fail!: (err: DropgateError) => void;
   readonly #failed: Promise<never>;
   #closeBody!: (body: Uint8Array<ArrayBuffer>) => void;
@@ -390,7 +397,8 @@ class Attempt {
   start(first?: Uint8Array): void {
     this.#within(ICE_TIMEOUT_MS);
     this.#peer.onIceCandidate((candidate) => {
-      this.#sendSignal(candidate === null ? { type: 'end-of-candidates' } : { type: 'candidate', ...candidateOf(candidate) });
+      if (this.#earlyCandidates) this.#earlyCandidates.push(candidate);
+      else this.#sendCandidate(candidate);
     });
     void this.#readPipe(first);
   }
@@ -400,7 +408,20 @@ class Attempt {
     const sdp = await this.#race(this.#peer.createOffer());
     this.#offer = sdp;
     this.#sendSignal({ type: 'offer', sdp });
+    this.#described();
     await this.#race(this.#peer.setLocalDescription({ type: 'offer', sdp }));
+  }
+
+  /** One of this side's candidates, or the end of them, sealed and sent. */
+  #sendCandidate(candidate: IceCandidate | null): void {
+    this.#sendSignal(candidate === null ? { type: 'end-of-candidates' } : { type: 'candidate', ...candidateOf(candidate) });
+  }
+
+  /** This side's offer or answer has gone: the candidates found before it follow, in order, and the rest as they come. */
+  #described(): void {
+    const early = this.#earlyCandidates ?? [];
+    this.#earlyCandidates = undefined;
+    for (const candidate of early) this.#sendCandidate(candidate);
   }
 
   async #readPipe(first?: Uint8Array): Promise<void> {
@@ -480,6 +501,7 @@ class Attempt {
     const sdp = await this.#peer.createAnswer();
     this.#answer = sdp;
     this.#sendSignal({ type: 'answer', sdp });
+    this.#described();
     await this.#peer.setLocalDescription({ type: 'answer', sdp });
   }
 

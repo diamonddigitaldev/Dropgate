@@ -1,29 +1,72 @@
-# P2P Consumer Responsibilities
+# Direct Transfers
 
-The P2P methods are **headless**. The consumer is responsible for:
+A direct transfer goes from one device straight to another over WebRTC. The Dropgate server only introduces the two, through its rendezvous: it never sees the files, their names, their sizes or the keys, and it keeps nothing once the transfer has gone. How the two devices connect, secure the connection and move the files is in [DGDTP](../technical/DGDTP.md); the calls are in the [API Reference](api-reference.md#clientdirect).
 
-1. **Loading PeerJS**: Provide the `Peer` constructor to `client.direct.send()` and `client.direct.receive()`
-2. **File Writing**: Handle received chunks via `onData` callback (e.g., using streamSaver)
-3. **UI Updates**: React to callbacks (`onProgress`, `onStatus`, etc.)
+```javascript
+import { DropgateClient } from '@dropgate/core';
 
-This design allows the library to work in any environment (browser, Electron, Node.js with WebRTC).
+const client = new DropgateClient({ server: 'https://files.example.com' });
 
-Behaviour to account for in the current version:
+// The sender: share the link, or the code, however you like.
+const send = await client.direct.send({ files: [file1, file2] });
+send.subscribe((snapshot) => {
+  showProgress(snapshot.percent, snapshot.text);
+  if (snapshot.code !== shownCodeState) showShare(send.share()); // a new code, or none for now
+});
+showShare(send.share()); // { link: 'https://files.example.com/p2p#…', code: 'ABCD-1234' }
 
-- **`onCancel` also fires when the connection drops.** If the data channel closes mid-transfer, the receiver gets `cancelledBy: 'sender'` and the sender gets `cancelledBy: 'receiver'`, even if nobody cancelled. Word your UI accordingly. It says only who cancelled: what the other device said about it isn't passed on, since it could say anything.
-- **Received names are checked, not made safe.** A name that breaks the [file name rule](quick-start.md#file-names) fails the transfer with `INVALID_FILENAME`; any other is given as the sender sent it. Save a file under `filenames.sanitize(name)`.
-- **The sender is told the transfer succeeded before `onComplete` runs.** The receiver acknowledges completion first, then calls `onComplete` without waiting for it. If closing or finalising your output fails there, the sender still reports success, so handle that error yourself.
-- **Flow control only works if `onData` waits for the write.** The receiver acknowledges a chunk when `onData` resolves. `zip.writer()`'s `writeChunk()` returns immediately and queues its output, so with a slow destination, await its `drained()` before acknowledging, or that queue can grow without limit.
-- **Several files into one ZIP: start each member in `onFileStart`, with its `name` and `size`.** [`zip.writer()`](api-reference.md#zipwriter) makes the name safe and unique, and refuses a file whose bytes don't come to the size the sender gave, so a throw from `onData` or `onFileEnd` fails the transfer rather than saving an archive that looks whole but isn't.
-- **Resume is not implemented.** `onResumeRequest` is never called; an interrupted transfer has to be restarted.
-- **Security:** see [DGDTP §19](../technical/DGDTP.md#19-security-considerations) for what the P2P code and DTLS do and don't protect against. Core also has the secure channel direct transfers will run over, with sealed signalling, CPace for typed codes and an encrypted handshake ([DGDTP §4](../technical/DGDTP.md#4-the-secure-channel)), but `client.direct` doesn't use it yet, so nothing here changes until it does.
+// The receiver: the files first, then the choice.
+const receive = await client.direct.receive({ link }); // or { code }
+const offer = await receive.offer();                  // { files: [{ name, size, type }], totalSize }
+if (await askToAccept(offer)) await receive.accept({ sink: (file) => sinkFor(file.name) });
+else await receive.decline();
 
-## Large File Support
+const outcome = await receive.result; // completed, cancelled or failed: it never rejects
+```
 
-The P2P implementation is designed for **unlimited file sizes** with constant memory usage:
+## What core does, and what's yours
 
-- **Stream-through architecture**: Chunks flow immediately to `onData`, no buffering
-- **Flow control**: Sender pauses when receiver's write queue backs up
-- **WebRTC reliability**: SCTP provides reliable, ordered, checksum-verified delivery
+Core is headless: it runs the transfer, and you give it the files, somewhere to put them, and the screen.
 
-> **Note**: For large files, always use the `onData` callback approach rather than buffering in memory.
+- **The files.** `send()` takes [file sources](api-reference.md#file-sources), browser `File`s or `Blob`s. Each is read a 1 MiB block at a time, at most two blocks ahead of what's sent, so a large file never sits in memory. A read that stalls for 2 minutes fails the send with `SOURCE_UNAVAILABLE`.
+- **The sink.** `accept()` takes a [sink](api-reference.md#download-sinks), as a hosted download does: one for one file or a ZIP of several (`asZip: true`), or a function giving one for each file. Core writes each block only once it has been checked against its hash and the transfer's checkpoint chain, awaits each write (a slow disk slows the sender down, never fills memory), closes each file's sink once it's whole, and completes only once the last one has closed. Any other end aborts the sink, so a partial file is never finished as if it were whole. A write that fails is `OUTPUT_WRITE_FAILED`; one that stalls for 2 minutes, `OUTPUT_STALLED`.
+- **A browser's download.** A sink that hands the files to the browser to save, as StreamSaver does, can't know they were saved: pass `handOff: true` with it, and both sides' result says `handed-off`, never `saved`.
+- **Names.** The receiver gets the names only from `offer()`, each checked by the [file name rule](quick-start.md#file-names); no snapshot, outcome or error holds one. Save each under `filenames.sanitize(name)` (a ZIP's members are made safe and unique by core's ZIP writer). `type` is the sender's word for it, advice only.
+- **Sharing.** `send.share()` gives the link and the code as they are now. Show both: the link always works, and a code may not be free at once. A code is used once, right or wrong, so after someone tries it the sender gets a new one: read `share()` again whenever the snapshot's `code` changes, and show "Someone entered the wrong code. Here's a new one." when the receive that tried it fails with `CODE_MISMATCH`.
+- **The screen.** Each handle's `snapshot` and `subscribe()` say where it is, with `text` in words you can show ([Direct transfer handles](api-reference.md#direct-transfer-handles)); the outcome says how it ended, in each side's words ([Outcomes](outcomes.md#direct-transfers)).
+
+## Who gets the files
+
+A link or a code is a bearer capability: anyone who has it can connect, and sees the offer. The first to accept gets the files; nobody else can join after that, and any other receiver still looking at the offer fails with `REQUEST_REJECTED`, "This transfer is already going to someone else." A receiver that declines, or an offer nobody accepts within 10 minutes (`TIMED_OUT`), ends the send. Share a link or a code only with the person it's for.
+
+## Pausing
+
+Either device can pause from the receiver's acceptance until all the data has been sent: `handle.pause()` and `handle.resume()`. The transfer runs only while neither holds it, and both screens show who does (`pausedBy`: `self`, `peer` or `both`). Nothing resumes by itself. A pause limit, set with the [`direct` option](api-reference.md#the-direct-option), ends a pause that goes on too long: a pause by either device counts against both devices' limits, both show the earlier deadline, and the device whose limit runs out first ends the transfer, both with `PAUSE_LIMIT`.
+
+## Connecting, and STUN
+
+The two devices connect directly. On one network that just works. Across two networks, each asks a STUN server for its public address: the server offers its own (`capabilities.p2p.iceServers`; Cloudflare's by default, or none, as its operator sets it). A STUN server sees the device's IP address, as any server it talks to does, and nothing of the transfer. With `direct: { stun: false }`, core gives the connection no ICE servers at all, so nothing is sent to a STUN server, and only devices that can reach each other directly connect. There's no relay (TURN): two devices that can't reach each other don't connect, with `TIMED_OUT`, "Couldn't connect to the other device."
+
+A connection that drops ends the transfer with `CONNECTION_LOST`, never as a cancel: in this version it isn't recovered. Start it again.
+
+## In Node
+
+Node has a `WebSocket` (22 and later) but no `RTCPeerConnection`. Pass a library's as the client's `RTCPeerConnection` option; without one, every direct call is `RUNTIME_UNSUPPORTED`:
+
+```javascript
+import { RTCPeerConnection } from 'node-datachannel/polyfill';
+// or: import { RTCPeerConnection } from 'werift';
+
+const client = new DropgateClient({ server: 'https://files.example.com', RTCPeerConnection });
+```
+
+Core's own tests run on both, as an exact version of each:
+
+- **[node-datachannel](https://github.com/murat-dogan/node-datachannel)** (libdatachannel, native, prebuilt for each platform): fast, about 120 MiB/s on one machine. It can't restart ICE, which a later version's recovery will use. Given no ICE servers it asks no STUN server, and uses its own addresses only, so it's the private choice.
+- **[werift](https://github.com/shinyoshiaki/werift-webrtc)** (TypeScript, no native code): complete, ICE restart included, but slow, about 7.5 MiB/s on one machine. Two of its defaults matter for privacy. Given no ICE servers (`stun: false`, or a server offering none), it still asks Google's STUN server (`stun.l.google.com`) from every IPv4 address it has; a subclass passing `iceUseIpv4: false` to it keeps it on IPv6, where it asks none, as core's tests do. And it looks up another device's `.local` address with an mDNS query on the local network, as browsers do. It also gives every peer connection in a process the same DTLS certificate, unless it's given `certificates`.
+
+Neither is a dependency of core, and neither is in its builds, the Web UI or the Dropgate Client: core uses whichever you give it.
+
+## Changed in 4.0
+
+Direct transfers are on handles and outcomes, as hosted transfers are, over Dropgate 4's own secure channel and the server's rendezvous, with PeerJS gone ([DGDTP](../technical/DGDTP.md)). A send gives a link as well as a code; a receiver sees the files before anything is saved, and chooses; either device can pause; a dropped connection is `CONNECTION_LOST`, never a cancel; the receiver's files are checked before they're written, and the sender only hears the transfer completed once they're saved. Dropgate 3's listeners (`onCode`, `onMeta`, `onData` and the rest), its `Peer` option and its sessions still run for a call that passes `Peer`, until the Web UI has moved onto handles; nothing new should use them. A Dropgate 4 device never connects to a Dropgate 3 one.

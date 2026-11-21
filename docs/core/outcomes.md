@@ -2,11 +2,11 @@
 
 ## Outcomes
 
-An upload and a download each end with exactly one **outcome**, which says how it ended. The promise of it never rejects, so there's no `try`/`catch` around it: look at its `status`.
+An upload, a download, a direct send and a direct receive each end with exactly one **outcome**, which says how it ended. The promise of it never rejects, so there's no `try`/`catch` around it: look at its `status`.
 
 | `status` | Also holds | When |
 | --- | --- | --- |
-| `completed` | `value`: the operation's result (an `UploadResult` or a `DownloadResult`) | It finished |
+| `completed` | `value`: the operation's result (an `UploadResult`, a `DownloadResult` or a `DirectResult`) | It finished |
 | `cancelled` | `cancellation`: who cancelled it (below) | It was cancelled before it finished |
 | `failed` | `error`: a [`DropgateError`](errors.md) | It stopped on an error |
 
@@ -39,6 +39,29 @@ A paused upload or download hasn't ended: its outcome comes once it's resumed an
 
 A download only completes once its sink has closed. A sink's `write()` or `close()` that fails fails the download, with `OUTPUT_WRITE_FAILED`, and a download that fails or is cancelled aborts its sink, so nothing half-written is finished as if it were whole.
 
+## Direct transfers
+
+A direct transfer has an outcome on each device, and the two always agree on how it ended. The sender's completes only once the receiver has saved every file (closed every sink) and said so; its value, on both sides, is `{ assurance, files, totalBytes, transport }`, where `assurance` is `saved`, or `handed-off` for a sink that hands the files to a browser. Every other end is told to the other device, through the connection and, sealed, through the server, so a page closed mid-transfer is heard even when the connection has already gone. Each device gets its own words:
+
+| What happened | The receiver | The sender |
+| --- | --- | --- |
+| The files were saved | `completed`, `saved` | `completed`, `saved` ("The receiver has the files.") |
+| Handed to a browser to save | `completed`, `handed-off` ("Handed to your browser. Check your downloads.") | `completed`, `handed-off` ("Delivered to the receiver's browser.") |
+| This device cancelled | `cancelled`, `by: 'self'` | the same |
+| The other device cancelled | `cancelled`, `by: 'peer'` ("The sender cancelled the transfer.") | `cancelled`, `by: 'peer'` ("The receiver cancelled the transfer.") |
+| The receiver declined | `cancelled`, `by: 'self'` | `cancelled`, `by: 'peer'`, `declined: true` ("The receiver declined the transfer.") |
+| The other device's app closed | `failed`, `PEER_CLOSED` ("The sender closed Dropgate before the transfer finished.") | the mirror |
+| A pause limit ran out | `failed`, `PAUSE_LIMIT`, in the words of whose limit it was | the same |
+| The connection dropped | `failed`, `CONNECTION_LOST` ("The connection was lost, so the transfer couldn't continue.") | the same |
+| The receiver couldn't save, or saving stalled for 2 minutes | `failed`, `OUTPUT_WRITE_FAILED` or `OUTPUT_STALLED` | `failed`, `PEER_FAILED` ("The receiver couldn't save the file.", "The receiver's device stopped saving the file.") |
+| The sender's file couldn't be read | `failed`, `PEER_FAILED` ("The sender's file couldn't be read.") | `failed`, `SOURCE_UNAVAILABLE` |
+| A block or the checkpoint chain didn't match | `failed`, `INTEGRITY_FAILED` | `failed`, `PEER_FAILED` ("The file didn't arrive intact.") |
+| The other device sent something this version doesn't understand | `failed`, `INVALID_MESSAGE` | the same, or `PEER_FAILED` on the device that didn't find it |
+| A wrong code; a connection that couldn't be secured | `failed`, `CODE_MISMATCH`; `SECURITY_POLICY_MISMATCH` | the same (a wrong code fails only that receive: the send carries on, with a new code) |
+| Nobody accepted within 10 minutes | `failed`, `TIMED_OUT` | the same |
+
+A cancel that comes once all the data has been sent waits up to 2 seconds for the other device: if the receiver had already saved the files, both are `completed`, since a save can't be undone. `PEER_FAILED` says what failed in `details.reason`, never in the other device's own words. Nothing in a direct transfer's outcome, snapshot or error holds the link, the code, a secret or a file name.
+
 ## Cancellation
 
 Every upload and download runs in one **cancellation tree**. The client is its root, each operation is a node under it, and the steps an operation starts, such as its requests, run under that. Cancelling a node cancels everything under it, once, and nothing above it or beside it.
@@ -47,10 +70,10 @@ There are three ways to cancel an operation on this device, and a direct transfe
 
 | `cancellation.by` | `cancellation.source` | How |
 | --- | --- | --- |
-| `self` | `hosted.upload` or `hosted.download` | The operation's own `cancel()` |
+| `self` | the operation's kind, such as `hosted.upload` or `direct.send` | The operation's own `cancel()` (for a receive, `decline()` too) |
 | `parent` | `client` | `client.operations.cancelAll()`, which cancels everything running on the client |
-| `signal` | `hosted.upload` or `hosted.download` | An `AbortSignal` passed in as `signal` was aborted |
-| `peer` | a direct transfer's | The other device cancelled it, or, for a send, declined its offer (then `cancellation.declined` is `true`). Direct transfers on handles are still to come, so no operation gives it yet |
+| `signal` | the operation's kind | An `AbortSignal` passed in as `signal` was aborted |
+| `peer` | `direct.send` or `direct.receive` | The other device cancelled it, or, for a send, declined its offer (then `cancellation.declined` is `true`) |
 
 `source` names what was cancelled first: the operation itself, by its kind, or the client it runs under.
 
@@ -60,7 +83,7 @@ A signal you pass in feeds into the operation's own node: aborting it cancels th
 // Cancel one upload:
 upload.cancel();
 
-// Cancel every upload and download running on the client, such as when the app closes.
+// Cancel every operation running on the client, such as when the app closes.
 // Each ends as { status: 'cancelled', cancellation: { by: 'parent', source: 'client' } }.
 client.operations.cancelAll();
 

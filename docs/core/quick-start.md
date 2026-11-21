@@ -238,88 +238,46 @@ else console.log(result.reason);
 
 The text is read on the device, and nothing of it is sent to the server: the page it opens finds out whether the upload is there.
 
-## P2P File Transfer (Sender)
+## Direct Transfer (Sender)
 
 ```javascript
-const Peer = await loadPeerJS(); // Your loader function
+const send = await client.direct.send({ files: [file1, file2] });
 
-const session = await client.direct.send({
-  file: myFile,
-  Peer,
-  onCode: (code) => console.log('Share this code:', code),
-  onProgress: ({ processedBytes, totalBytes, percent }) => {
-    console.log(`Sending: ${percent.toFixed(1)}%`);
-  },
-  onComplete: () => console.log('Transfer complete!'),
-  onError: (err) => console.error('Error:', err),
-  onCancel: ({ cancelledBy }) => console.log(`Cancelled by ${cancelledBy}`),
-  onDisconnect: () => console.log('Receiver disconnected'),
+const { link, code } = send.share(); // give the receiver either
+send.subscribe((s) => {
+  console.log(s.status, `${s.percent}%`, s.text); // never the link, the code or a name
+  if (s.code === 'ready') console.log('Code:', send.share().code); // a new code after one was tried
 });
 
-// Session control
-console.log('Status:', session.getStatus());
-console.log('Bytes sent:', session.getBytesSent());
-session.stop(); // Cancel
+// Either device can pause once the receiver has accepted:
+// await send.pause(); await send.resume();
+
+const outcome = await send.result;
+if (outcome.status === 'completed') console.log(`The receiver has ${outcome.value.files} files.`);
+else if (outcome.status === 'cancelled') console.log('Cancelled by', outcome.cancellation.by); // 'peer' if they declined
+else console.error(outcome.error.code, outcome.error.message);
 ```
 
-## P2P File Transfer (Receiver)
+## Direct Transfer (Receiver)
 
 ```javascript
-const Peer = await loadPeerJS();
+import { filenames } from '@dropgate/core';
 
-const session = await client.direct.receive({
-  code: 'ABCD-1234',
-  Peer,
-  onMeta: ({ name, total, fileCount, files }) => {
-    console.log(`Receiving: ${name} (${total} bytes)`);
-    if (fileCount) console.log(`Multi-file transfer: ${fileCount} files`);
-  },
-  onData: async (chunk) => {
-    await writer.write(chunk);
-  },
-  onProgress: ({ processedBytes, totalBytes, percent }) => {
-    console.log(`Receiving: ${percent.toFixed(1)}%`);
-  },
-  // Multi-file transfers: called when each individual file starts/ends
-  onFileStart: ({ fileIndex, name, size }) => {
-    console.log(`File ${fileIndex}: ${name} (${size} bytes)`);
-  },
-  onFileEnd: ({ fileIndex, receivedBytes }) => {
-    console.log(`File ${fileIndex} complete (${receivedBytes} bytes)`);
-  },
-  onComplete: ({ received, total }) => console.log(`Complete! ${received}/${total}`),
-  onCancel: ({ cancelledBy }) => console.log(`Cancelled by ${cancelledBy}`),
-  onError: (err) => console.error('Error:', err),
-  onDisconnect: () => console.log('Sender disconnected'),
-});
+const receive = await client.direct.receive({ link }); // or { code: 'ABCD-1234' }
 
-session.stop(); // Cancel
+// The files first: show them, then let the person choose.
+const { files, totalSize } = await receive.offer();
+console.log(files.map((f) => `${f.name} (${f.size} bytes)`), totalSize);
+
+if (confirmed) {
+  // One sink for each file, or one for a ZIP of them all: { sink, asZip: true }.
+  // sinkFor() is yours: anything with write() and close() (Download Sinks, in the API Reference).
+  await receive.accept({ sink: (file) => sinkFor(filenames.sanitize(file.name)) });
+} else {
+  await receive.decline();
+}
+
+const outcome = await receive.result; // completed only once every sink has closed
 ```
 
-## P2P with File Preview (Receiver)
-
-Use `autoReady: false` to show a file preview before starting the transfer:
-
-```javascript
-const session = await client.direct.receive({
-  code: 'ABCD-1234',
-  Peer,
-  autoReady: false,
-  onMeta: ({ name, total, sendReady }) => {
-    console.log(`File: ${name} (${total} bytes)`);
-    showPreviewUI(name, total);
-
-    confirmButton.onclick = () => {
-      writer = createWriteStream(name);
-      sendReady(); // Signal sender to begin transfer
-    };
-  },
-  onData: async (chunk) => {
-    await writer.write(chunk);
-  },
-  onComplete: () => {
-    writer.close();
-    console.log('Transfer complete!');
-  },
-});
-```
+In Node, give the client an `RTCPeerConnection`, such as node-datachannel's or werift's ([Direct Transfers](p2p.md#in-node)).

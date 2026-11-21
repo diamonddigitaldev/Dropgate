@@ -191,7 +191,15 @@ export class DirectReceiver {
   /** The sender's last answer to a STATUS ask, if one has come. */
   get peerStatus(): PeerStatus | undefined { return this.#peerStatus; }
 
-  /** Calls `listener` whenever `state`, `pausedBy`, `deadline`, `stalled` or `peerStatus` changes. Returns a function that stops it. */
+  /** How far it is: the bytes written to the sink, and the file being received (0-based; the count once all are in). */
+  get progress(): { consumed: number; fileIndex: number } {
+    return { consumed: this.#consumed, fileIndex: this.#fileIndex };
+  }
+
+  /**
+   * Calls `listener` whenever `state`, `pausedBy`, `deadline`, `stalled`, `peerStatus` or `progress` changes. Returns a
+   * function that stops it.
+   */
   onChange(listener: () => void): () => void { return this.#listeners.add(listener); }
 
   /** The sender's files, once the whole list has come and been checked. Rejects if the transfer ends first. */
@@ -396,6 +404,7 @@ export class DirectReceiver {
     if (!this.#live(g)) return;
     this.#consumed += blockLength;
     this.#creditMoved(false);
+    this.#listeners.notify();
   }
 
   async #fileEnd(m: Extract<Message, { type: 'file-end' }>, g: bigint): Promise<void> {
@@ -429,6 +438,7 @@ export class DirectReceiver {
     this.#blockIndex = 0;
     // A file finished: the sender may be waiting on it.
     this.#creditMoved(true);
+    this.#listeners.notify();
   }
 
   async #finish(m: Extract<Message, { type: 'finish' }>, g: bigint): Promise<void> {

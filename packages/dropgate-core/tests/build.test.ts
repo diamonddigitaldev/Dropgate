@@ -107,9 +107,11 @@ describe("Core's builds carry no Node WebRTC library", () => {
     }
   });
 
-  it('werift is a dev dependency only, pinned exactly at the version the lockfile installs', () => {
-    expect(pkg.devDependencies.werift).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(installed('werift')).toBe(pkg.devDependencies.werift);
+  it('werift and node-datachannel are dev dependencies only, each pinned exactly at the version the lockfile installs', () => {
+    for (const library of NODE_WEBRTC) {
+      expect(pkg.devDependencies[library], library).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(installed(library), library).toBe(pkg.devDependencies[library]);
+    }
     for (const library of NODE_WEBRTC) {
       expect(pkg.dependencies?.[library], library).toBeUndefined();
       expect(pkg.peerDependencies?.[library], library).toBeUndefined();

@@ -2,7 +2,8 @@ import { blobSource, fileHandleSource } from './source.js';
 import { lifetimeToMs } from './utils/lifetime.js';
 import { estimateUploadBytes } from './utils/size.js';
 import { validateFilename, sanitizeFilename, uniqueFilename } from './utils/filename.js';
-import { generateP2PCode, isP2PCodeLike, isLocalhostHostname, isSecureContextForP2P } from './p2p/utils.js';
+import { isLocalhostHostname, isSecureContextForP2P } from './p2p/utils.js';
+import { isCodeLike } from './dgdtp/codes.js';
 import { StreamingZipWriter } from './zip/stream-zip.js';
 
 // Core's standalone helpers, grouped by what they're for, as the client's
@@ -63,17 +64,11 @@ export const filenames = Object.freeze({
 /** Direct transfer codes, such as `ABCD-1234`. */
 export const codes = Object.freeze({
   /**
-   * A new random code, every letter and digit equally likely, from secure
-   * random numbers only.
-   * @throws {DropgateError} RUNTIME_UNSUPPORTED if there are none here (no `crypto.getRandomValues()`).
-   */
-  generate: (): string => generateP2PCode(),
-  /**
    * Whether a value is a code as someone might type it: four of the letters
    * A–Z without I and O, then four digits. Spaces and lower case are fine,
    * and the dash may be left out.
    */
-  isLike: isP2PCodeLike,
+  isLike: isCodeLike,
 });
 
 /** Where a page or app is running. */

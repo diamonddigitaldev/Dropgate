@@ -509,6 +509,19 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
     expect(ending(await transfer(provider, { relay: resealer(provider, (_from, m) => [m]) }))).toBe('up / up, the same handshake hash');
   });
 
+  it('candidates found while a description is still being made (as libdatachannel finds them) wait for it: the offer and the answer still go first', async () => {
+    const t = await transfer(provider, {
+      peers: (peers) => {
+        peers.receiver.gathersWhileDescribing = true;
+        peers.sender.gathersWhileDescribing = true;
+      },
+    });
+    expect(ending(t)).toBe('up / up, the same handshake hash');
+    // Each side had the other's early candidate too, after its description.
+    expect(t.peers.receiver.remoteCandidates.some((c) => c?.candidate.includes('198.51.100.2'))).toBe(true);
+    expect(t.peers.sender.remoteCandidates.some((c) => c?.candidate.includes('198.51.100.1'))).toBe(true);
+  });
+
   it("a restart request from the sender is ignored, and a candidate the peer connection can't use is skipped", async () => {
     const { resealer } = await import('./helpers/channel-checks.js');
     const t = await transfer(provider, {

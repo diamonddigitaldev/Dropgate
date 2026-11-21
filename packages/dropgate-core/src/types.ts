@@ -41,10 +41,21 @@ export interface UploadCapabilities {
 export interface P2PCapabilities {
   /** Whether P2P transfers are enabled on the server. */
   enabled: boolean;
-  /** Path to the PeerJS signaling server. */
+  /** Path to the PeerJS signaling server: Dropgate 3's, which a Dropgate 4 server doesn't give. */
   peerjsPath?: string;
-  /** ICE servers for WebRTC connectivity. */
+  /** The STUN servers it offers for WebRTC connectivity (none when its operator turned STUN off). */
   iceServers?: RTCIceServer[];
+  /**
+   * How many letters of a code find its transfer on the server: 2, or 3 on a
+   * server set for more transfers at once; 0 when it gives no codes (links only).
+   * A code is always four letters and four digits.
+   */
+  codeLetters?: number;
+  /**
+   * Whether a direct send needs a credential to open its transfer, which the
+   * client's `auth` provider is asked for. Receiving never needs one.
+   */
+  credentialRequired?: boolean;
 }
 
 /**
@@ -298,16 +309,68 @@ export interface DropgateClientOptions {
   fetchFn?: FetchFn;
   /**
    * Gives a credential for an operation the server says needs one (an upload,
-   * where `/api/info` has `capabilities.upload.credentialRequired`), as
+   * where `/api/info` has `capabilities.upload.credentialRequired`, or a
+   * direct send, where it has `capabilities.p2p.credentialRequired`), as
    * `{ token }` or `null`. It's asked once as each such operation starts, and
-   * once more if the server says the credential has expired; it's never asked
-   * for anything else, and without it nothing is sent. The token goes only to
-   * this client's server, only as `Authorization: Bearer <token>`, and never
-   * appears in a link, snapshot, result, error or URL.
+   * once more if the server says an upload's credential has expired; it's
+   * never asked for anything else, and without it nothing is sent. The token
+   * goes only to this client's server: for an upload only as
+   * `Authorization: Bearer <token>`, for a direct send only in the message
+   * that opens its transfer on the server. It never appears in a link,
+   * snapshot, result, error or URL.
    */
   auth?: CredentialProvider;
   /** Custom base64 encoder/decoder. */
   base64?: Base64Adapter;
+  /**
+   * Direct transfers' settings, for every send and receive this client makes;
+   * each `send()` and `receive()` can override any of them. Checked here:
+   * INVALID_ARGUMENT for a value outside its range.
+   */
+  direct?: DirectOptions;
+  /**
+   * The `RTCPeerConnection` class direct transfers use. Browsers and Electron
+   * have one, used when this is left out; in Node, pass a library's, such as
+   * werift's or node-datachannel's (`node-datachannel/polyfill`). A direct
+   * transfer with none is RUNTIME_UNSUPPORTED.
+   */
+  RTCPeerConnection?: DirectPeerConnectionClass;
+}
+
+/**
+ * A W3C `RTCPeerConnection` class, as a direct transfer takes it: the
+ * browser's, or a Node library's.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type DirectPeerConnectionClass = new (configuration: { iceServers: Array<{ urls: string | string[] }> }) => any;
+
+/**
+ * Direct transfers' settings: client-wide, or for one transfer. Each side
+ * applies its own and tells the other as they connect.
+ */
+export interface DirectOptions {
+  /**
+   * How long the transfer may stay paused, by either side, before this device
+   * ends it (`PAUSE_LIMIT`): `null` for no limit (the default), or a whole
+   * number of seconds from one minute to one week, in milliseconds
+   * (60,000 to 604,800,000). Both devices show the earlier of their two limits.
+   */
+  pauseLimitMs?: number | null;
+  /**
+   * How long a dropped connection may be recovered for: a whole number of
+   * seconds from 10 seconds to an hour, in milliseconds (10,000 to
+   * 3,600,000); 2 minutes by default. In this version a dropped connection
+   * ends the transfer (`CONNECTION_LOST`); the window is told to the other
+   * device, for recovery to use later.
+   */
+  reconnectWindowMs?: number;
+  /**
+   * Whether to use the server's STUN servers to find a route between two
+   * networks (the default, true). False gives the connection no ICE servers
+   * at all: nothing is sent to a STUN server, and the two devices must reach
+   * each other directly, as on one network.
+   */
+  stun?: boolean;
 }
 
 /** The app using core, for display and local logs. */
@@ -592,3 +655,174 @@ export type DownloadOutcome = Outcome<DownloadResult>;
  * `result`, where it is as `snapshot` and through `subscribe()`, and `cancel()`.
  */
 export type DownloadHandle = OperationHandle<DownloadResult, DownloadSnapshot>;
+
+/** Options for `client.direct.send()`: the files, and how they can be reached. */
+export interface DirectSendOptions {
+  /** File(s) to send: FileSources, or browser `File`s or `Blob`s, one or an array. Empty files are sent too. */
+  files: UploadSource | UploadSource[];
+  /**
+   * Whether to ask the server for a short code as well as the link (default
+   * true). The link always works; a code may not be free at once (the
+   * snapshot's `code` is then `unavailable`, and one comes when it frees).
+   */
+  code?: boolean;
+  /** An AbortSignal that also cancels the send, as its handle's cancel() would, `by: 'signal'`. */
+  signal?: AbortSignal;
+  /** This send's direct settings, over the client's. */
+  direct?: DirectOptions;
+}
+
+/**
+ * Options for `client.direct.receive()`: the sender's link or code (one of
+ * the two), and how to receive.
+ */
+export type DirectReceiveOptions = ({ link: string; code?: undefined } | { code: string; link?: undefined }) & {
+  /** An AbortSignal that also cancels the receive, as its handle's cancel() would, `by: 'signal'`. */
+  signal?: AbortSignal;
+  /** This receive's direct settings, over the client's. */
+  direct?: DirectOptions;
+};
+
+/** Whether a direct send has a code to show: one is `ready`, none is free yet (`unavailable`), or none was asked for (`off`). */
+export type DirectCodeState = 'ready' | 'unavailable' | 'off';
+
+/** Where a direct send is: one of the steps while it runs (or `paused`), then its outcome's status. */
+export type DirectSendStatus = 'waiting' | 'connecting' | 'offered' | 'transferring' | 'paused' | 'finalising' | Outcome<unknown>['status'];
+
+/** Where a direct receive is: one of the steps while it runs (or `paused`), then its outcome's status. */
+export type DirectReceiveStatus = 'connecting' | 'offered' | 'transferring' | 'paused' | 'finalising' | Outcome<unknown>['status'];
+
+/** What every direct transfer's snapshot has. Never the link, the code, a secret or a file name. */
+export interface DirectSnapshot {
+  /** What it's doing, for people (such as "Paused by both of you."). Never a link, a code or a file name. */
+  text: string;
+  /** Completion percentage (0-100), from the bytes the receiver has written. */
+  percent: number;
+  /** Bytes the receiver has written to its sink so far. */
+  processedBytes: number;
+  /** Bytes of all the files together (0 on the receiving side until the offer is in). */
+  totalBytes: number;
+  /** Which file it's on (0-based). */
+  fileIndex: number;
+  /** How many files (0 on the receiving side until the offer is in). */
+  totalFiles: number;
+  /** Whether reading the files (sending) or saving them (receiving) has been stuck for 30 s: at 2 minutes it fails. */
+  stalled: boolean;
+  /** Whether `pause()` can be called now: from the receiver's acceptance until all the data has been sent. */
+  canPause: boolean;
+  /** Who holds it while it's paused: this device (`self`), the other (`peer`), or both. `null` while it isn't paused. */
+  pausedBy: PausedBy | null;
+  /**
+   * While paused with a pause limit set on either device: when the transfer
+   * ends unless both resume first, in milliseconds since 1970 (the earlier of
+   * the two limits, so both devices show the same). `null` otherwise.
+   */
+  deadline: number | null;
+  /** How the client reaches its server. */
+  transport: Transport;
+}
+
+/**
+ * Where a direct send is: what `handle.snapshot` holds and `subscribe()`
+ * gives. `paused` while either device holds it. Read `share()` again when
+ * `code` changes.
+ */
+export interface DirectSendSnapshot extends DirectSnapshot {
+  status: DirectSendStatus;
+  /** Whether there's a code to show: `ready`, `unavailable` while none is free (or the next is coming), `off`. */
+  code: DirectCodeState;
+}
+
+/** Where a direct receive is: what `handle.snapshot` holds and `subscribe()` gives. `paused` while either device holds it. */
+export interface DirectReceiveSnapshot extends DirectSnapshot {
+  status: DirectReceiveStatus;
+}
+
+/** What a completed direct transfer gives, on each side. */
+export interface DirectResult {
+  /** `saved` once the receiver had every file closed in its sink; `handed-off` when its sink handed them to a browser to save. */
+  assurance: 'saved' | 'handed-off';
+  /** How many files went. */
+  files: number;
+  /** Bytes of all the files together. */
+  totalBytes: number;
+  /** How the client reached its server. */
+  transport: Transport;
+}
+
+/** How a direct transfer ended: `completed` with its DirectResult, `cancelled`, or `failed`. */
+export type DirectOutcome = Outcome<DirectResult>;
+
+/** What a direct send's sender shares: the link, and the code if there is one. */
+export interface DirectShare {
+  /** `https://<server>/p2p#<secret>`: null once a receiver has accepted, or the send has ended. */
+  link: string | null;
+  /** Such as `ABCD-1234`: null when none is free or none was asked for, and once a receiver has accepted. */
+  code: string | null;
+}
+
+/** The handle `client.direct.send()` gives. */
+export interface DirectSendHandle extends OperationHandle<DirectResult, DirectSendSnapshot> {
+  /**
+   * The link and code to give the receiver, as they are now. The code
+   * changes after anyone tries it, right or wrong, and when one frees after
+   * none was: read this again when the snapshot's `code` changes.
+   */
+  share(): DirectShare;
+}
+
+/** One file a direct sender offers: its name, size, and media type (advice only: check what arrives). */
+export interface DirectOfferedFile {
+  readonly name: string;
+  readonly size: number;
+  readonly type: string;
+}
+
+/** What a direct sender offers: its files in order, and their total size. */
+export interface DirectOffer {
+  readonly files: readonly DirectOfferedFile[];
+  readonly totalSize: number;
+}
+
+/** Options for a direct receive's `accept()`: where the files go. */
+export interface DirectAcceptOptions {
+  /**
+   * Where the files go: one sink, or a function giving one for each file as
+   * it starts (it's told the file's name and size). Required. One file takes
+   * either; several files apart take a function; several as a ZIP (`asZip`)
+   * take one sink.
+   */
+  sink: DownloadSinkOption;
+  /** Every file into one ZIP archive, written to the one sink. */
+  asZip?: boolean;
+  /**
+   * The sink hands the files to a browser to save (as StreamSaver does), so
+   * the transfer can't know they were saved: both sides' result says
+   * `handed-off`, never `saved`.
+   */
+  handOff?: boolean;
+}
+
+/** The handle `client.direct.receive()` gives. */
+export interface DirectReceiveHandle extends OperationHandle<DirectResult, DirectReceiveSnapshot> {
+  /**
+   * The sender's files, once connected and the whole list is in and checked:
+   * the only place their names are given. Rejects if the transfer ends first.
+   */
+  offer(): Promise<DirectOffer>;
+  /**
+   * Accepts the offer into `sink`, once it's in. The sender is told, and the
+   * files start. Resolves once accepted.
+   * @throws {DropgateError} (rejects) INVALID_ARGUMENT, with nothing sent, for no sink, one without
+   * write() and close(), several files apart into one sink, a second accept() or decline(), or once
+   * it has ended; OUTPUT_WRITE_FAILED if the sink can't be had (the receive fails too).
+   */
+  accept(opts: DirectAcceptOptions): Promise<void>;
+  /**
+   * Declines the offer, as soon as the two devices are connected (the list of
+   * files needn't be in yet): the sender is told, and this receive ends
+   * cancelled, `by: 'self'` (the sender's `by: 'peer'`, `declined: true`).
+   * @throws {DropgateError} (rejects) INVALID_ARGUMENT after accept() or decline(), or once it has ended.
+   */
+  decline(): Promise<void>;
+}

@@ -168,6 +168,12 @@ export class SenderSession {
   /** The receiver's last answer to a STATUS ask, if one has come. */
   get peerStatus(): PeerStatus | undefined { return this.#peerStatus; }
 
+  /** The bytes the receiver has written, as its last CREDIT said. */
+  get consumed(): number { return this.#consumed; }
+
+  /** The files the receiver has finished, as its last CREDIT said. */
+  get filesDone(): number { return this.#filesDone; }
+
   /** Sends the list of files, in records the size both hellos allow, and starts reading the receiver's. The offer has 10 minutes. */
   start(): void {
     for (const record of manifestRecords(this.#host.manifest, this.#link.recordBytes)) this.#link.sendRecord(record);
@@ -278,6 +284,8 @@ export class SenderSession {
     this.#consumed = m.consumed;
     this.#filesDone = m.filesDone;
     this.#link.wake();
+    // What the receiver has written moved: the screens show it.
+    this.#host.moved(this);
   }
 
   /** Whether a receiver's result is what was sent and accepted: the same totals and chain, the files where ACCEPT said they'd go. */
@@ -544,6 +552,8 @@ export class DirectSender implements SessionHost {
   #chosen: SenderSession | undefined;
   #state: DirectState = 'waiting';
   #ended = false;
+  /** Receivers' attempts still being set up (signalling, the handshake). */
+  #connecting = 0;
 
   /** @internal sendDirect() makes these. */
   constructor(
@@ -583,7 +593,18 @@ export class DirectSender implements SessionHost {
   /** The chosen receiver's last answer to a STATUS ask, if one has come. */
   get peerStatus(): PeerStatus | undefined { return this.#chosen?.peerStatus; }
 
-  /** Calls `listener` whenever `state`, `pausedBy`, `deadline`, `stalled` or `peerStatus` changes. Returns a function that stops it. */
+  /** Whether a receiver has accepted: from then on the room takes no one else. */
+  get chosen(): boolean { return this.#chosen !== undefined; }
+
+  /** How far the chosen receiver is: the bytes it has written, and the files it has finished (both 0 until one is chosen). */
+  get progress(): { consumed: number; filesDone: number } {
+    return { consumed: this.#chosen?.consumed ?? 0, filesDone: this.#chosen?.filesDone ?? 0 };
+  }
+
+  /**
+   * Calls `listener` whenever `state`, `pausedBy`, `deadline`, `stalled`, `peerStatus` or `progress` changes. Returns a
+   * function that stops it.
+   */
   onChange(listener: () => void): () => void { return this.#listeners.add(listener); }
 
   /** Calls `listener` with the error of each receiver's attempt that ends without being chosen (a wrong code, say). */
@@ -655,7 +676,13 @@ export class DirectSender implements SessionHost {
       return;
     }
     if (outcome.state === 'failed') this.#tellAttempt(outcome.error);
-    if (!this.#chosen && this.#sessions.size === 0) this.#setState('waiting');
+    this.#settleWaiting();
+  }
+
+  /** With no receiver offered and none chosen: `connecting` while an attempt is being set up, else `waiting`. */
+  #settleWaiting(): void {
+    if (this.#chosen || this.#sessions.size > 0) return;
+    this.#setState(this.#connecting > 0 ? 'connecting' : 'waiting');
   }
 
   async #takeAttempts(): Promise<void> {
@@ -678,12 +705,19 @@ export class DirectSender implements SessionHost {
 
   async #take(attempt: IncomingAttempt): Promise<void> {
     let channel: SecureChannel;
+    this.#connecting += 1;
+    this.#settleWaiting();
     try {
       channel = await this.room.accept(attempt, { peer: this.#options.peer(), hello: this.#options.hello, timers: this.timers });
     } catch (err) {
-      if (!this.#ended) this.#tellAttempt(toDropgateError(err));
+      this.#connecting -= 1;
+      if (!this.#ended) {
+        this.#tellAttempt(toDropgateError(err));
+        this.#settleWaiting();
+      }
       return;
     }
+    this.#connecting -= 1;
     if (this.#ended || this.#chosen) {
       channel.close();
       return;

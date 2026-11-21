@@ -1,7 +1,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { inspect } from 'node:util';
 import { codes } from '../src/index.js';
-import { webCryptoProvider, type CryptoProvider } from '../src/crypto/index.js';
+import { cryptoProvider, webCryptoProvider, type CryptoProvider } from '../src/crypto/index.js';
 import {
   CODE_DIGITS, CODE_LETTERS, CodePassword, generateCode, isCodeLike, newCode, normalizeCode, parseCode,
 } from '../src/dgdtp/codes.js';
@@ -93,7 +93,7 @@ describe('code generation, by rejection sampling over one byte a character', () 
   });
 });
 
-describe('a million codes from the public generator', () => {
+describe("a million codes from core's own provider", () => {
   // Chi-squared's upper tail at one in a million: a fair generator fails a
   // check about once in a million runs. 23 degrees of freedom for 24
   // letters, 9 for 10 digits.
@@ -138,7 +138,8 @@ describe('a million codes from the public generator', () => {
     };
     const mathRandom = vi.spyOn(Math, 'random');
     vi.stubGlobal('crypto', { getRandomValues, subtle: original.subtle, randomUUID: () => original.randomUUID() });
-    const result = tally(() => codes.generate());
+    // The provider a client uses, as the global crypto gives it: what a sender's code is drawn from.
+    const result = tally(() => generateCode(cryptoProvider()));
     expect(calls).toBeGreaterThanOrEqual(2 * CODES);
     expect(mathRandom).not.toHaveBeenCalled();
     for (const [i, x] of result.letterPlaces.entries()) expect(x, `letter ${i + 1}`).toBeLessThan(LETTER_LIMIT);
@@ -157,6 +158,13 @@ describe('a million codes from the public generator', () => {
     for (const x of result.letterPlaces) expect(x).toBeGreaterThan(10 * LETTER_LIMIT);
     for (const x of result.digitPlaces) expect(x).toBeGreaterThan(3 * DIGIT_LIMIT);
   }, 60_000);
+});
+
+describe('the public codes helper', () => {
+  it('only reads a typed code: a code is made by a send, with its server-given locator, so there is no codes.generate()', () => {
+    expect(Object.keys(codes)).toEqual(['isLike']);
+    expect((codes as Record<string, unknown>).generate).toBeUndefined();
+  });
 });
 
 describe('a typed code', () => {

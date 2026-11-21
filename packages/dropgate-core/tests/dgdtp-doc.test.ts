@@ -29,9 +29,12 @@ import {
   BIND_BYTES, BLOCK_BYTES, DATA_HEADER_BYTES, HELLO_BYTES, MANIFEST_HEADER_BYTES, MANIFEST_VERSION, MAX_MANIFEST_BYTES, MAX_MANIFEST_FILES,
   MAX_MEDIA_TYPE_BYTES,
 } from '../src/dgdtp/messages.js';
+import {
+  MAX_PAUSE_LIMIT_MS, MAX_RECONNECT_WINDOW_MS, MIN_PAUSE_LIMIT_MS, MIN_RECONNECT_WINDOW_MS,
+} from '../src/client/direct.js';
 
-// DGDTP.md's table of the secure channel's, the rendezvous client's and the
-// engine's constants gives each one's value.
+// DGDTP.md's table of the secure channel's, the rendezvous client's, the
+// engine's and the handles' constants gives each one's value.
 // The docs checks read names, not values, so this holds the table to the code:
 // every constant the table names is one of these, with the value it gives, and
 // every one of these is in the table. Unpacked on its own, from a release's
@@ -54,6 +57,7 @@ const CONSTANTS: Record<string, number | bigint | string> = {
   ENCRYPT_AHEAD, MAX_UNFINISHED_FILE_ENDS, RESULT_ACK_WAIT_MS,
   ICE_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, SETUP_TIMEOUT_MS, OFFER_TIMEOUT_MS, PING_INTERVAL_MS, MIN_NO_ANSWER_MS, NO_ANSWER_RTTS,
   NO_PROGRESS_MS, STALL_SHOWN_MS, STALL_FAILED_MS, CLOSE_ACK_WAIT_MS, LATE_CLOSE_WAIT_MS,
+  MIN_PAUSE_LIMIT_MS, MAX_PAUSE_LIMIT_MS, MIN_RECONNECT_WINDOW_MS, MAX_RECONNECT_WINDOW_MS,
 };
 
 /** A value as the table writes it: `a string`, 8,230, or 2⁶⁴ − 1. */

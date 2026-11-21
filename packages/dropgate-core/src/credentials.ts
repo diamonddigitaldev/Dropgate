@@ -8,8 +8,11 @@ import { DropgateError } from './errors.js';
 // puts it in a link, a manifest, a snapshot, a result, an error or a URL.
 // Receivers never need one: links and codes are bearer capabilities.
 
-/** The operations a server can ask a credential for. */
-export type CredentialOperation = 'hosted.upload';
+/**
+ * The operations a server can ask a credential for: a hosted upload, and
+ * opening a direct send's room on the rendezvous.
+ */
+export type CredentialOperation = 'hosted.upload' | 'direct.send';
 
 /** What the credential provider is told when core asks it for a credential. */
 export interface CredentialRequest {
@@ -81,6 +84,11 @@ export class OperationCredentials {
     const credentials = new OperationCredentials(provider, operation, baseUrl);
     credentials.#token = await credentials.#ask('required', signal);
     return credentials;
+  }
+
+  /** The token alone, for the one place a direct send carries it (its CREATE message): null if there isn't one. */
+  token(): string | null {
+    return this.#token;
   }
 
   /** The headers that carry the credential: none if there isn't one. */

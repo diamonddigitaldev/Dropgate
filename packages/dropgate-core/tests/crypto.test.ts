@@ -4,7 +4,8 @@ import { join, relative } from 'node:path';
 import { inspect } from 'node:util';
 import { createCipheriv, createHash, createHmac, createPrivateKey, createPublicKey, diffieHellman, hkdfSync } from 'node:crypto';
 import * as ed25519 from '@noble/curves/ed25519.js';
-import { DropgateClient, codes } from '../src/index.js';
+import { DropgateClient } from '../src/index.js';
+import { generateCode } from '../src/dgdtp/codes.js';
 import { cryptoProvider, nobleProvider, webCryptoProvider, type NamedCryptoProvider } from '../src/crypto/index.js';
 import { newOperationId } from '../src/operation.js';
 import { CHUNK_SIZE, fakeV4 } from './helpers/fake-v4.js';
@@ -584,7 +585,7 @@ describe('On a page served over plain HTTP (no crypto.subtle, no randomUUID)', (
 
   it('codes, operation IDs and uploads work; an encrypted upload is sealed on @noble and opens with WebCrypto', async () => {
     vi.stubGlobal('crypto', plainHttpCrypto());
-    expect(codes.generate()).toMatch(/^[A-Z]{4}-\d{4}$/);
+    expect(generateCode(cryptoProvider())).toMatch(/^[A-Z]{4}-\d{4}$/);
     expect(newOperationId()).toMatch(UUID_V4);
 
     const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
@@ -629,7 +630,7 @@ describe('With no secure random numbers at all', () => {
     const random = vi.spyOn(Math, 'random');
     expect(() => new DropgateClient({ server: 'https://files.example', fetchFn: async () => new Response() }))
       .toThrow(expect.objectContaining({ code: 'RUNTIME_UNSUPPORTED' }));
-    expect(() => codes.generate()).toThrow(expect.objectContaining({ code: 'RUNTIME_UNSUPPORTED' }));
+    expect(() => generateCode(cryptoProvider())).toThrow(expect.objectContaining({ code: 'RUNTIME_UNSUPPORTED' }));
     expect(random).not.toHaveBeenCalled();
   });
 });

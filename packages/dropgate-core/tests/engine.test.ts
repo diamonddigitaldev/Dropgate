@@ -789,14 +789,39 @@ describe('what comes in order', () => {
     expect(said(await engine.done)).toBe('completed, saved');
   });
 
-  it("the sender's state runs offered, transferring, finalising, completed", async () => {
-    const run = await directInMemory([memoryFile('a.bin', patterned(2 * MiB, 32))]);
+  it("the sender's state runs waiting, connecting, offered, transferring, finalising, completed; the receiver's progress is told as it moves", async () => {
+    const run = await directInMemory([memoryFile('a.bin', patterned(5 * MiB, 32))]);
     const states: string[] = [run.sender.state];
-    run.sender.onChange(() => states.push(run.sender.state));
+    const consumed: number[] = [];
+    run.sender.onChange(() => {
+      if (states[states.length - 1] !== run.sender.state) states.push(run.sender.state);
+      consumed.push(run.sender.progress.consumed);
+    });
     const { receiver } = await run.receive();
+    const written: number[] = [];
+    receiver.onChange(() => written.push(receiver.progress.consumed));
     await receiver.accept({ sink: new MemorySink() });
     await run.sender.done;
-    expect(states).toEqual(['waiting', 'offered', 'transferring', 'finalising', 'completed']);
+    expect(states).toEqual(['waiting', 'connecting', 'offered', 'transferring', 'finalising', 'completed']);
+    // Each CREDIT tells the sender how much is written, and each written block tells the receiver's listeners.
+    for (let n = 1; n <= 5; n++) {
+      expect(consumed, `${n} MiB, as the sender heard it`).toContain(n * MiB);
+      expect(written, `${n} MiB, as the receiver wrote it`).toContain(n * MiB);
+    }
+    // The last file is closed after FINISH, so no CREDIT counts it done.
+    expect(run.sender.progress).toEqual({ consumed: 5 * MiB, filesDone: 0 });
+    expect(receiver.progress).toEqual({ consumed: 5 * MiB, fileIndex: 1 });
+  });
+
+  it("the sender is connecting while a receiver's attempt is set up, and waiting again if it fails", async () => {
+    const run = await directInMemory([memoryFile('a.bin', patterned(10, 33))]);
+    const states: string[] = [run.sender.state];
+    run.sender.onChange(() => { if (states[states.length - 1] !== run.sender.state) states.push(run.sender.state); });
+    // A receiver of another major: its attempt is set up, then refused.
+    await expect(run.receive({ major: 5 })).rejects.toMatchObject({ code: 'VERSION_UNSUPPORTED' });
+    await until(() => run.sender.state === 'waiting', 'the sender waiting again');
+    expect(states).toEqual(['waiting', 'connecting', 'waiting']);
+    run.sender.cancel();
   });
 
   it('a receiver that reaches the room once another is chosen is never offered', async () => {

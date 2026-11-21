@@ -6,7 +6,6 @@ import { parseServerUrl, buildBaseUrl } from '../src/utils/network.js';
 const lifetimeToMs = lifetime.toMs;
 const isLocalhostHostname = hosts.isLocalhost;
 const isSecureContextForP2P = hosts.isSecureForDirect;
-const generateP2PCode = codes.generate;
 const isP2PCodeLike = codes.isLike;
 import { DropgateError } from '../src/errors.js';
 
@@ -102,22 +101,6 @@ describe('P2P utilities', () => {
 
     it('returns false for non-localhost without secure context', () => {
       expect(isSecureContextForP2P('dropgate.link', false)).toBe(false);
-    });
-  });
-
-  describe('codes.generate', () => {
-    it('generates codes in correct format', () => {
-      const code = generateP2PCode();
-      expect(code).toMatch(/^[A-Z]{4}-\d{4}$/);
-    });
-
-    it('generates different codes each time', () => {
-      const codes = new Set<string>();
-      for (let i = 0; i < 10; i++) {
-        codes.add(generateP2PCode());
-      }
-      // With cryptographic randomness, collisions should be extremely rare
-      expect(codes.size).toBeGreaterThan(5);
     });
   });
 

@@ -4,12 +4,13 @@
 export interface ShareInput {
   /**
    * What it opens: a hosted upload (`/<id>`), a bundle's older link
-   * (`/b/<id>`), or a direct transfer's code.
+   * (`/b/<id>`), a direct transfer's code (typed, or in an older `/p2p/<code>`
+   * link), or a direct transfer's link (`/p2p#<secret>`).
    */
-  kind: 'hosted' | 'bundle' | 'direct';
-  /** The upload's ID, or the code, upper case. Never a whole link, and never anything after a #. */
+  kind: 'hosted' | 'bundle' | 'direct' | 'direct-link';
+  /** The upload's ID, or the code, upper case; empty for a direct link. Never a whole link, and never anything after a #. */
   locator: string;
-  /** Everything after the #, if there was one: an encrypted upload's secret. Never sent anywhere. */
+  /** Everything after the #, if there was one: an encrypted upload's secret, or a direct link's. Never sent anywhere. */
   secret?: string;
   /** The host the link was for (host and port), when the input was a link. */
   linkHost?: string;
@@ -17,6 +18,8 @@ export interface ShareInput {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CODE_RE = /^[A-Z]{4}-\d{4}$/;
+/** A direct link's secret: 32 bytes as URL-safe base64, no `=`. */
+const DIRECT_SECRET_RE = /^[A-Za-z0-9_-]{43}$/;
 
 /**
  * Read a sharing code or link on the device, with no request. A link is
@@ -52,6 +55,11 @@ export function parseShareInput(value: string): ShareInput | null {
     return null;
   }
 
+  if (path === '/p2p') {
+    // A direct link: the secret after the #, nothing else in the address.
+    if (url.search !== '' || !secret || !DIRECT_SECRET_RE.test(secret)) return null;
+    return { kind: 'direct-link', locator: '', linkHost: url.host, secret };
+  }
   if (path.startsWith('/p2p/')) {
     const code = path.slice('/p2p/'.length).replace(/\s+/g, '').toUpperCase();
     return CODE_RE.test(code) ? { kind: 'direct', locator: code, linkHost: url.host } : null;

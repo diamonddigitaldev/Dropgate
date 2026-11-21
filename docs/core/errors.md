@@ -80,6 +80,6 @@ When the server answers with an error, the message is the server's own, if it se
 | `INVALID_MESSAGE` | peer | No | A direct transfer's other device sent something this version of Dropgate doesn't understand: a record of a type it doesn't use, or not the exact length its type has, or with a field outside what its type allows. Nothing it held is passed on |
 | `UNEXPECTED_ERROR` | local | No | Anything else, with the error underneath as its `cause` |
 
-`SECURITY_POLICY_MISMATCH`, `CODE_MISMATCH`, `INVALID_MESSAGE`, `OUTPUT_STALLED`, `PEER_CLOSED` and `PAUSE_LIMIT` are the secure channel's and its engine's ([DGDTP §4.10](../technical/DGDTP.md#410-errors)). Core has the channel and its client for the server's rendezvous, but `client.direct` doesn't run over them yet, so no call gives these codes for now, and a direct transfer's `INVALID_CODE` and `CONNECTION_LOST` are still today's.
+`SECURITY_POLICY_MISMATCH`, `CODE_MISMATCH`, `INVALID_MESSAGE`, `OUTPUT_STALLED`, `PEER_CLOSED` and `PAUSE_LIMIT` are the secure channel's and its engine's ([DGDTP §4.10](../technical/DGDTP.md#410-errors)), given by `client.direct`'s handles; which device gets which, in its own words, is in [Outcomes](outcomes.md#direct-transfers). A Dropgate 3 call that passes PeerJS's `Peer` gives none of them.
 
 `retryable` says whether the same request could work later. Core's own retries are narrower, and an upload or a download only fails with one of these once they're over: see [Retries](api-reference.md#retries).
