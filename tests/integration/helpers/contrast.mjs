@@ -90,6 +90,8 @@ export function contrastRatio(a, b) {
  * Expect every place the keyboard's focus goes, Tab by Tab from the top (or
  * round a modal, which keeps the focus), to be visible and to show a solid
  * ring at least 2px wide, at 3:1 or more against the page, in both themes.
+ * The sharing code's input shows its ring on the box where the next
+ * character goes, so that box is measured for it.
  * Leaves the page in the light theme.
  * @param {import('@playwright/test').Page} page
  * @param {string} what - The page, or the state it's in, for the failure message.
@@ -102,11 +104,15 @@ export async function expectFocusRings(page, what) {
         const seen = [];
         for (let i = 0; i < 40; i++) {
             await page.keyboard.press('Tab');
-            const stop = await page.evaluate(() => {
+            const stop = await page.evaluate(async () => {
+                // A frame for anything the page draws in step with the focus.
+                await new Promise(requestAnimationFrame);
                 const el = document.activeElement;
                 if (!el || el === document.body) return null;
-                const s = getComputedStyle(el);
-                const box = el.getBoundingClientRect();
+                // The sharing code's input is drawn as boxes: its ring is on the box the next character goes in.
+                const ringed = el.closest('.code-field')?.querySelector('.code-cell.is-active') ?? el;
+                const s = getComputedStyle(ringed);
+                const box = ringed.getBoundingClientRect();
                 return {
                     name: el.id ? `#${el.id}` : `${el.tagName.toLowerCase()} "${(el.getAttribute('aria-label') || el.textContent).trim().slice(0, 30)}"`,
                     focusVisible: el.matches(':focus-visible'),

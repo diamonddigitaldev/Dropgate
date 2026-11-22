@@ -4,7 +4,7 @@
 // - A link's page (/p2p#<secret>) asks nothing of anyone until Connect, even
 //   left open, and the sender learns someone is there only then; the files'
 //   names and sizes show only once connected.
-// - A code after the # (/p2p#<code>: Go on the home page, or opened as it is)
+// - A code after the # (/p2p#<code>: typed on the home page, or opened as it is)
 //   is out of the address before the page asks anything, and connects with
 //   no click; it never reaches the server, but for its locator.
 // - Pause and Resume from each page, each saying who paused; Cancel each way;
@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import { madeUpFile, summary } from '../helpers/files.mjs';
 import { secretsOf } from '../helpers/privacy.mjs';
 import { expect, savedName, test } from '../helpers/test.mjs';
-import { download, openDirectLink, openReceivePage, sendDirectFromHomePage, typeTheCode, nextCode } from '../helpers/webui.mjs';
+import { download, openDirectLink, openReceivePage, sendDirectFromHomePage, typeIntoCodeBoxes, typeTheCode, nextCode } from '../helpers/webui.mjs';
 import { openRoom } from '../../../server/test/helpers/rendezvous.mjs';
 
 test.use({ localStun: true });
@@ -91,10 +91,10 @@ async function underWay(page, otherContext, file) {
 test.describe("a link's page", () => {
     // Every file the receive page loads itself: nothing else, before Connect.
     const PAGE_FILES = new Set([
-        '/p2p', '/css/bootstrap-base.css', '/css/download-common.css', '/vendor/bootstrap/bootstrap.min.css',
+        '/p2p', '/css/bootstrap-base.css', '/css/download-common.css', '/css/code-input.css', '/vendor/bootstrap/bootstrap.min.css',
         '/vendor/material-icons/round.css', '/vendor/material-icons/material-icons-round.woff2', '/vendor/material-icons/material-icons-round.woff',
         '/vendor/streamsaver/streamsaver.js', '/js/theme.js', '/js/download-p2p.js', '/js/dropgate-core.js', '/js/page-common.js',
-        '/js/status-card.js', '/assets/icon.png', '/assets/favicon.ico', '/manifest.json',
+        '/js/status-card.js', '/js/code-input.js', '/assets/icon.png', '/assets/favicon.ico', '/manifest.json',
     ]);
 
     test('asks nothing of anyone until Connect, even 30 s on, shows nothing of the files, and the sender learns of the receiver only after Connect', async ({ page, otherContext, server }) => {
@@ -206,7 +206,7 @@ test.describe('a code after the #', () => {
         expect(summary(got.bytes)).toEqual(summary(file.buffer));
     });
 
-    test("Go on the home page opens /p2p#<code>, which connects at once; the code is out of the address before anything is asked", async ({ page, otherContext, server }) => {
+    test("a code typed on the home page opens /p2p#<code>, which connects at once; the code is out of the address before anything is asked", async ({ page, otherContext, server }) => {
         const file = madeUpFile('From the home page.bin', 300_000, 43);
         const sent = await sendDirectFromHomePage(page, [file]);
         await recordAsks(otherContext);
@@ -232,14 +232,13 @@ test.describe('a code after the #', () => {
         await openReceivePage(receiver, `${server.baseUrl}/p2p#${wrong}`);
         await receiverSays(receiver, 'Transfer Failed');
         await expect(receiver.locator('#code-card')).toBeVisible();
-        await expect(receiver.locator('#code-error')).toHaveText('Ask the sender for the code their page shows now.');
+        await expect(receiver.locator('#code-status')).toHaveText('Ask the sender for the code their page shows now.');
 
         const fresh = await nextCode(page, sent.code);
         await expect(page.locator('#p2pCodeNote')).toHaveText("Someone entered the wrong code. Here's a new one.");
         await expect(page.locator('#p2pWaitTitle')).toHaveText('Awaiting connection…');
 
-        await receiver.locator('#codeInput').fill(fresh.toLowerCase());
-        await receiver.locator('#codeGo').click();
+        await typeIntoCodeBoxes(receiver, fresh.toLowerCase());
         await expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 });
         await receiver.locator('#decline-button').click();
         await senderEnded(page, 'Transfer Declined', 'The receiver declined the transfer.');

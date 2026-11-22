@@ -504,7 +504,7 @@ The Web UI, the desktop app and the core library upload one file or several the 
 
 - **`id`** is the upload's ID, as the finish gives it ([§5.5](#55-finish)): the only thing in the path.
 - **The secret** is 32 random bytes, in URL-safe base64 with no `=`: 43 characters of `A–Z a–z 0–9 - _`. It isn't a key: the upload's keys are made from it ([§4.3](#43-the-keys)). Browsers never send what's after the `#`, and the clients never send it either: not in a request, a log or an error.
-- **Reading a link:** a whole link pasted into the Web UI's "enter a sharing code" box, or passed to the core library's `client.links.resolve()`, is read on the device, and nothing of it is sent: the download page opens with the secret still on its address, and that page asks the server about the upload. A link to another server is refused without asking this one.
+- **Reading a link:** a whole link pasted into the Web UI's "Enter Sharing Code" boxes, which opens it at once, or passed to the core library's `client.links.resolve()`, is read on the device, and nothing of it is sent: the download page opens with the secret still on its address, and that page asks the server about the upload. A link to another server is refused without asking this one.
 - **A Dropgate 3 link** says it was made with an older version ([§13](#13-dropgate-3-clients-and-links)). Any other link to an upload that isn't there says it isn't there.
 
 ### 9.2 The Download Page

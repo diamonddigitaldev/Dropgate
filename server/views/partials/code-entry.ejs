@@ -1,0 +1,17 @@
+<%# The sharing code: one real input, drawn as eight boxes (code-input.js). There's no Go: once all eight are in, it goes. %>
+<div class="code-entry" id="code-entry">
+  <label class="visually-hidden" for="codeInput">Sharing code</label>
+  <div class="code-row">
+    <div class="code-field">
+      <div class="code-cells" aria-hidden="true">
+        <span class="code-cell"></span><span class="code-cell"></span><span class="code-cell"></span><span class="code-cell"></span>
+        <span class="code-dash"></span>
+        <span class="code-cell"></span><span class="code-cell"></span><span class="code-cell"></span><span class="code-cell"></span>
+      </div>
+      <input id="codeInput" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters"
+        autocorrect="off" spellcheck="false" aria-describedby="code-hint code-status" />
+    </div>
+  </div>
+  <div id="code-status" class="code-status" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span class="code-status-text"></span></div>
+  <div id="code-hint" class="form-text code-hint">Four letters, then four digits. It opens once all eight are in. You can paste a code or a link.</div>
+</div>

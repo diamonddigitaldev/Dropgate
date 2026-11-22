@@ -115,7 +115,7 @@ export async function expectGone(page, link) {
  * see loseNavigations().
  *
  * A receiver who types the code opens the home page this way too (`what` says
- * which page it is, for the log), then waits for its Go with receiverReaches().
+ * which page it is, for the log), then waits for what it opens with receiverReaches().
  * @param {import('@playwright/test').Page} page
  * @param {string} link
  * @param {{ loseNavigation?: boolean, what?: string }} [opts]
@@ -136,7 +136,7 @@ export async function openReceivePage(page, link, { loseNavigation = process.env
 
 /**
  * Wait for a receiver's page to go to `link` by itself (the home page to a
- * code's receive page, once Go is clicked), and carry the test on as
+ * code's receive page, once the code is typed), and carry the test on as
  * openReceivePage() does if Playwright loses that navigation: where the page
  * is, is asked of the page itself, never of Playwright's frame, which may
  * still be at the page before, or at about:blank.
@@ -330,13 +330,40 @@ export async function openDirectLink(page, link, { connect = true, loseNavigatio
 }
 
 /**
- * As the receiver, open the home page, type the code and press Go, and wait
- * until the page is at the receive page, whether or not Playwright hears
- * either navigation (openReceivePage(), receiverReaches()). The code goes
- * after the # (/p2p#ABCD-1234), and the receive page takes it out of the
- * address at once, so it's waited for at /p2p. Go's click doesn't wait for the
- * navigation it starts, as a click otherwise does: one Playwright never hears
- * commit would hold it until the test runs out.
+ * Type into the sharing code's boxes key by key, as a person does: its eighth
+ * character sends it, with no Go to press. A key doesn't wait for a
+ * navigation it starts, so one Playwright never hears commit can't hold it.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} text - As it's shown (ABCD-1234): the dash is passed over.
+ */
+export async function typeIntoCodeBoxes(page, text) {
+    await page.locator('#codeInput').pressSequentially(text);
+}
+
+/**
+ * Paste `text` into a field: the paste event a browser fires, carrying it.
+ * (Firefox gives an event made by script its own, empty, clipboardData, so
+ * the text is put on the event itself.)
+ * @param {import('@playwright/test').Locator} field
+ * @param {string} text
+ */
+export async function pasteInto(field, text) {
+    await field.focus();
+    await field.evaluate((el, pasted) => {
+        const data = new DataTransfer();
+        data.setData('text/plain', pasted);
+        const event = new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true });
+        Object.defineProperty(event, 'clipboardData', { value: data });
+        el.dispatchEvent(event);
+    }, text);
+}
+
+/**
+ * As the receiver, open the home page and type the code, and wait until the
+ * page is at the receive page, whether or not Playwright hears either
+ * navigation (openReceivePage(), receiverReaches()). The code goes after the #
+ * (/p2p#ABCD-1234), and the receive page takes it out of the address at once,
+ * so it's waited for at /p2p.
  * @param {import('@playwright/test').Page} page
  * @param {string} baseUrl
  * @param {string} code
@@ -344,8 +371,7 @@ export async function openDirectLink(page, link, { connect = true, loseNavigatio
  */
 export async function typeTheCode(page, baseUrl, code, { loseNavigation } = {}) {
     await openReceivePage(page, new URL('/', baseUrl).href, { loseNavigation, what: 'the home page' });
-    await page.locator('#codeInput').fill(code);
-    await page.locator('#codeGo').click({ noWaitAfter: true });
+    await typeIntoCodeBoxes(page, code);
     await receiverReaches(page, new URL('/p2p', baseUrl).href);
 }
 

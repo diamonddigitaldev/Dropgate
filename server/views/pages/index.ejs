@@ -4,6 +4,7 @@
 <head>
   <%- include('../partials/head-meta') %>
     <link rel="stylesheet" href="/css/index.css" />
+    <link rel="stylesheet" href="/css/code-input.css" />
     <link rel="stylesheet" href="/css/tooltips.css" />
 
     <script src="/js/theme.js" defer></script>
@@ -192,12 +193,7 @@
             <div class="text-center">
               <h2 class="h5 fw-semibold mb-3">Enter Sharing Code</h2>
             </div>
-            <div class="input-group">
-              <input id="codeInput" class="form-control" type="text" placeholder="ABCD-1234, file ID, or URL" />
-              <button id="codeGo" class="btn btn-primary" type="button" aria-label="Go">
-                <span class="material-icons-round">arrow_forward</span>
-              </button>
-            </div>
+            <%- include('../partials/code-entry') %>
           </div>
         </div>
     </div>

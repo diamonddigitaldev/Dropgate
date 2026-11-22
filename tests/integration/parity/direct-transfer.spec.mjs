@@ -24,6 +24,7 @@ import { holdsPlaintext, madeUpFile, readZip, summary } from '../helpers/files.m
 import { expect, savedName, test } from '../helpers/test.mjs';
 import {
     DIRECT_LINK, describePeers, download, openDirectLink, openReceivePage, peerConnections, receiverReaches, recordPeerConnections, sendDirectFromHomePage,
+    typeIntoCodeBoxes,
     typeTheCode,
 } from '../helpers/webui.mjs';
 
@@ -197,7 +198,7 @@ test("a file sent by direct transfer arrives intact when the receiver opens the 
 });
 
 // The same for a receiver who types the code: Playwright loses the home page's
-// navigation, and then the receive page's, once Go is clicked. (It hears the
+// navigation, and then the receive page's, once the code is typed. (It hears the
 // receive page take the code out of its address, at once, so that page's
 // loss shows only in what Playwright waits for.)
 test("a file sent by direct transfer arrives intact when the receiver types the code and Playwright never hears either page's navigation finish", async ({ page, otherContext, browserName, server }) => {
@@ -209,8 +210,7 @@ test("a file sent by direct transfer arrives intact when the receiver types the 
     const receiver = await otherContext.newPage();
     await openReceivePage(receiver, new URL('/', server.baseUrl).href, { loseNavigation: true, what: 'the home page' });
     expect(receiver.url(), "where Playwright's frame thinks the receiver is").toBe('about:blank');
-    await receiver.locator('#codeInput').fill(sent.code);
-    await receiver.locator('#codeGo').click({ noWaitAfter: true });
+    await typeIntoCodeBoxes(receiver, sent.code);
     await receiverReaches(receiver, new URL('/p2p', server.baseUrl).href);
 
     await receiveAndCompare(receiver, page, file);

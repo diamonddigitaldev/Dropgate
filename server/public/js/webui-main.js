@@ -1,4 +1,5 @@
 import { DropgateError, hosts, lifetime, sizes } from './dropgate-core.js';
+import { NOT_A_CODE, mountCodeInput } from './code-input.js';
 import { countOf, formatBytes, formatDeadline, pageClient } from './page-common.js';
 
 const $ = (id) => document.getElementById(id);
@@ -82,8 +83,7 @@ const els = {
   qrModal: $('qrModal'),
   qrCanvas: $('qrCanvas'),
 
-  codeInput: $('codeInput'),
-  codeGo: $('codeGo'),
+  codeEntry: $('code-entry'),
   toastHost: $('toast-host'),
 };
 
@@ -252,18 +252,6 @@ function setSelected(btnA, btnB, aSelected) {
   btnB?.classList.toggle("active", !aSelected);
   btnA?.setAttribute("aria-selected", aSelected ? "true" : "false");
   btnB?.setAttribute("aria-selected", !aSelected ? "true" : "false");
-}
-
-function normalizeCode(raw) {
-  const s = String(raw || '').trim();
-  if (!s) return '';
-  // If a full URL was pasted, keep it as-is
-  if (/^https?:\/\//i.test(s)) return s;
-  // Strip spaces
-  const compact = s.replace(/\s+/g, '');
-  // Uppercase codes like abcd-1234
-  if (/^[a-z0-9-]{4,20}$/i.test(compact)) return compact.toUpperCase();
-  return compact;
 }
 
 function showPanels(which) {
@@ -1402,41 +1390,31 @@ function wireUI() {
   els.newUpload?.addEventListener('click', resetToMain);
   els.deleteUpload?.addEventListener('click', deleteUploaded);
 
-  // Enter code
-  const goWithCode = async () => {
-    const value = normalizeCode(els.codeInput.value);
-    if (!value) return;
-
-    setDisabled(els.codeGo, true);
+  // The sharing code: once all eight are in it opens the receive page
+  // (/p2p#<code>); a pasted link opens its own page. Core reads either here,
+  // and asks the server only whether it works with this page and has direct
+  // transfer on: nothing of the code or link is sent.
+  const openShare = async (value, message) => {
+    codeEntry.setStatus({ message, busy: true });
     try {
-      const result = await coreClient.links.resolve(value, {
-        timeoutMs: 5000,
-      });
+      const result = await coreClient.links.resolve(value, { timeoutMs: 5000 });
       if (!result?.valid || !result?.target) {
-        showToast(result?.reason || 'That sharing code could not be validated.', 'warning');
+        const reason = result?.reason;
+        codeEntry.setStatus({ message: !reason || reason.startsWith('Unrecognised') ? NOT_A_CODE : reason, error: true });
         return;
       }
       window.location.href = result.target;
     } catch (err) {
       console.error(err);
-      showToast(err?.message || 'Failed to validate sharing code.', 'warning');
-    } finally {
-      setDisabled(els.codeGo, false);
+      codeEntry.setStatus({ message: err?.message || "That code or link couldn't be checked.", error: true });
     }
   };
-
-  els.codeGo?.addEventListener('click', () => {
-    void goWithCode();
+  const codeEntry = mountCodeInput(els.codeEntry, {
+    onGo: (code) => void openShare(code, 'Opening the transfer…'),
+    onLink: (link) => void openShare(link, 'Opening the link…'),
   });
-  els.codeInput?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') void goWithCode();
-  });
-  els.codeInput?.addEventListener('input', () => {
-    const hasValue = els.codeInput.value.trim().length > 0;
-    setDisabled(els.codeGo, !hasValue);
-  });
-  // Initial state
-  setDisabled(els.codeGo, true);
+  // Back from the back-forward cache, the page it opened was left: the code can be used again.
+  window.addEventListener('pageshow', (event) => { if (event.persisted) codeEntry.setStatus(null); });
 
   // Escape closes the modal that's open, as Cancel, wherever the focus is,
   // and does nothing else; it's caught first, so Bootstrap's own handler on

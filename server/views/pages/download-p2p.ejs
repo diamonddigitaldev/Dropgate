@@ -4,6 +4,7 @@
 <head>
   <%- include('../partials/head-meta') %>
   <link rel="stylesheet" href="/css/download-common.css" />
+  <link rel="stylesheet" href="/css/code-input.css" />
 
   <script src="/vendor/streamsaver/streamsaver.js"></script>
   <script nonce="<%= nonce %>">if (window.streamSaver) streamSaver.mitm = '/vendor/streamsaver/mitm.html';</script>
@@ -77,19 +78,11 @@
         </div>
       </div>
 
-      <%# A bare /p2p: the code entry, until the eight-box input. %>
-      <div class="card shadow-sm mt-4 text-start" id="code-card" hidden>
+      <%# A bare /p2p, or a code that didn't connect: the code entry. %>
+      <div class="card shadow-sm mt-4" id="code-card" hidden>
         <div class="card-body p-4">
-          <div class="text-center">
-            <h2 class="h5 fw-semibold mb-3">Enter Sharing Code</h2>
-          </div>
-          <div class="input-group">
-            <input id="codeInput" class="form-control" type="text" placeholder="ABCD-1234, or a link" aria-label="Sharing code" autocomplete="off" spellcheck="false" />
-            <button id="codeGo" class="btn btn-primary" type="button" aria-label="Go" disabled>
-              <span class="material-icons-round">arrow_forward</span>
-            </button>
-          </div>
-          <div id="code-error" class="form-text text-danger-emphasis" role="status"></div>
+          <h2 class="h5 fw-semibold mb-3">Enter Sharing Code</h2>
+          <%- include('../partials/code-entry') %>
         </div>
       </div>
 

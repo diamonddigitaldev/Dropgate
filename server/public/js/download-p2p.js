@@ -1,3 +1,4 @@
+import { NOT_A_CODE, mountCodeInput } from './code-input.js';
 import { DropgateError, codes, filenames, hosts } from './dropgate-core.js';
 import { bundleZipName, countOf, formatBytes, formatDeadline, pageClient, saveStream, showServerVersion } from './page-common.js';
 import { setStatusError, setStatusSuccess, setStatusWarning, StatusType, Icons, updateStatusCard, clearStatusBorder } from './status-card.js';
@@ -69,9 +70,6 @@ const elResume = $('resume-button');
 const elCancel = $('cancel-button');
 const elRetry = $('retry-button');
 const elCodeCard = $('code-card');
-const elCodeInput = $('codeInput');
-const elCodeGo = $('codeGo');
-const elCodeError = $('code-error');
 
 const client = pageClient();
 
@@ -149,30 +147,21 @@ function askForCode(message) {
   clearStatusBorder(card);
   showStatus({ icon: Icons.WIFI_TETHERING, title: 'Receive Files', message: message ?? 'Enter the sharing code the sender gave you.' });
   show(elCodeCard, true);
-  elCodeInput.value = '';
-  elCodeGo.disabled = true;
-  setText(elCodeError, '');
+  codeEntry.clear();
 }
 
-/** Go in the code entry: a code connects here at once; a link opens its own page. */
-async function goWithCode() {
-  const value = elCodeInput.value.trim();
-  if (!value) return;
-  setText(elCodeError, '');
-  if (codes.isLike(value)) {
-    void receive({ code: value });
-    return;
-  }
-  elCodeGo.disabled = true;
+/** A link pasted into the code entry: another direct link's Ready to Connect, here; any other its own page. */
+async function openPastedLink(link) {
+  codeEntry.setStatus({ message: 'Opening the link…', busy: true });
   try {
-    const result = await client.links.resolve(value, { timeoutMs: 5000 });
+    const result = await client.links.resolve(link, { timeoutMs: 5000 });
     if (!result?.valid || !result?.target) {
-      setText(elCodeError, result?.reason || "That isn't a code or a Dropgate link.");
+      const reason = result?.reason;
+      codeEntry.setStatus({ message: !reason || reason.startsWith('Unrecognised') ? NOT_A_CODE : reason, error: true });
       return;
     }
     const target = new URL(result.target, location.origin);
     if (target.pathname === location.pathname && DIRECT_LINK_SECRET.test(target.hash.slice(1))) {
-      // Another direct link: its own Ready to Connect, here.
       history.replaceState(null, '', target.href);
       readyToConnect(target.hash.slice(1));
       return;
@@ -180,9 +169,7 @@ async function goWithCode() {
     window.location.href = target.href;
   } catch (err) {
     console.error(err);
-    setText(elCodeError, err?.message || "That code or link couldn't be checked.");
-  } finally {
-    elCodeGo.disabled = !elCodeInput.value.trim();
+    codeEntry.setStatus({ message: err?.message || "That code or link couldn't be checked.", error: true });
   }
 }
 
@@ -403,18 +390,20 @@ function showEnded(outcome, { declined = false, retry, files = 0 } = {}) {
   } else {
     // A code is spent once tried: the sender has a new one.
     show(elCodeCard, true);
-    elCodeInput.value = '';
-    elCodeGo.disabled = true;
-    setText(elCodeError, DropgateError.is(error, 'CODE_MISMATCH') || DropgateError.is(error, 'NOT_FOUND')
-      ? 'Ask the sender for the code their page shows now.' : '');
+    codeEntry.clear();
+    if (DropgateError.is(error, 'CODE_MISMATCH') || DropgateError.is(error, 'NOT_FOUND')) {
+      codeEntry.setStatus({ message: 'Ask the sender for the code their page shows now.', error: true });
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
 
-elCodeInput.addEventListener('input', () => { elCodeGo.disabled = !elCodeInput.value.trim(); });
-elCodeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') void goWithCode(); });
-elCodeGo.addEventListener('click', () => void goWithCode());
+// The code entry: once all eight are in, the code connects here; a pasted link opens.
+const codeEntry = mountCodeInput($('code-entry'), {
+  onGo: (code) => void receive({ code }),
+  onLink: (link) => void openPastedLink(link),
+});
 
 // Closing the page, or leaving it, ends the transfer, and tells the sender so (best effort).
 window.addEventListener('pagehide', () => client.direct.appClosing());

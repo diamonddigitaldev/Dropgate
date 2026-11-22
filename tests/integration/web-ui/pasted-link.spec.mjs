@@ -1,11 +1,11 @@
-// A whole share link pasted into the home page's "Enter Sharing Code" box. Core
+// A whole share link pasted into the home page's "Enter Sharing Code" boxes opens at once. Core
 // reads the link in the page and asks the server nothing about it: it opens the
 // download page, with the secret after the # still on it, and that page asks
 // about the upload.
 import { madeUpFile } from '../helpers/files.mjs';
 import { expectNoSecretsSent, expectNothingStored } from '../helpers/privacy.mjs';
 import { expect, test } from '../helpers/test.mjs';
-import { uploadFromHomePage } from '../helpers/webui.mjs';
+import { pasteInto, uploadFromHomePage } from '../helpers/webui.mjs';
 
 test("pasting an end-to-end encrypted link into Enter Sharing Code sends nothing of it to the server", async ({ page, server, secrets }) => {
     const file = madeUpFile('Pasted link é.bin', 50_000, 90);
@@ -15,8 +15,7 @@ test("pasting an end-to-end encrypted link into Enter Sharing Code sends nothing
 
     await page.goto('/');
     const before = server.requests().length;
-    await page.locator('#codeInput').fill(link);
-    await page.locator('#codeGo').click();
+    await pasteInto(page.locator('#codeInput'), link);
     await page.waitForURL((url) => url.pathname === pathname);
     await expect(page.locator('#file-name')).toHaveText(file.name);
 
@@ -39,8 +38,7 @@ test('pasting an end-to-end encrypted link into Enter Sharing Code opens its dow
     // Behind the TLS proxy these tests stand in for, the page's own link would
     // start with https://, and the server takes its origin from the proxy. So
     // the link is pasted as that proxy would have given it.
-    await page.locator('#codeInput').fill(link.replace(/^http:/, 'https:'));
-    await page.locator('#codeGo').click();
+    await pasteInto(page.locator('#codeInput'), link.replace(/^http:/, 'https:'));
     await page.waitForURL((url) => url.pathname === pathname);
 
     expect(new URL(page.url()).hash, "the key in the download page's address").toBe(hash);

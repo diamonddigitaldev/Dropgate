@@ -7,7 +7,7 @@
 import crypto from 'node:crypto';
 import { secretsOf } from '../helpers/privacy.mjs';
 import { expect, test } from '../helpers/test.mjs';
-import { openLink } from '../helpers/webui.mjs';
+import { openLink, pasteInto } from '../helpers/webui.mjs';
 
 /** A Dropgate 3 file key: 32 bytes in standard base64, here starting with + and /, as some do. */
 function v3Key() {
@@ -38,8 +38,7 @@ test("a Dropgate 3 direct transfer's link shows the older-version page, opened o
     await expectOlderVersion(page);
 
     await page.goto('/');
-    await page.locator('#codeInput').fill(`${server.baseUrl}/p2p/ABCD-1234`);
-    await page.locator('#codeGo').click();
+    await pasteInto(page.locator('#codeInput'), `${server.baseUrl}/p2p/ABCD-1234`);
     await expect(page).toHaveURL(`${server.baseUrl}/p2p/ABCD-1234`);
     await expectOlderVersion(page);
 });
@@ -64,8 +63,7 @@ test("a Dropgate 3 single file's link pasted into Enter Sharing Code opens the s
     const link = `${server.baseUrl}/${crypto.randomUUID()}#${v3Key()}`;
     secretsOf(page).addLink(link);
     await page.goto('/');
-    await page.locator('#codeInput').fill(link);
-    await page.locator('#codeGo').click();
+    await pasteInto(page.locator('#codeInput'), link);
     await expect(page).toHaveURL(link);
     await expectOlderVersion(page);
 });
