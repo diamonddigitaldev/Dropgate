@@ -128,7 +128,7 @@ export async function openReceivePage(page, link, { loseNavigation = process.env
     });
     if (!reported) {
         const at = await askWhere(page);
-        if (at !== link) throw new Error(`${capitalised(what)} never opened in 15 s: the page says it's at ${at ?? '(no answer in 10 s)'}.`);
+        if (!isAt(at, link)) throw new Error(`${capitalised(what)} never opened in 15 s: the page says it's at ${at ?? '(no answer in 10 s)'}.`);
         console.log(`Playwright never reported ${what}'s navigation in 15 s, but the page is at its link.`);
     }
     await carryOn(page, link, what);
@@ -176,9 +176,22 @@ async function carryOn(page, link, what) {
     const settled = await page.locator(':root').waitFor({ state: 'attached', timeout: 2_000 }).then(() => true, () => false);
     if (settled) return;
     const at = await askWhere(page);
-    if (at !== link) throw new Error(`Playwright is still waiting for ${what}'s navigation, and the page says it's at ${at ?? '(no answer in 10 s)'}.`);
+    if (!isAt(at, link)) throw new Error(`Playwright is still waiting for ${what}'s navigation, and the page says it's at ${at ?? '(no answer in 10 s)'}.`);
     skipNavigationCheckForThisTest();
     console.log(`Playwright is still waiting for ${what}'s navigation to finish, but the page is at its link: its wait before each step is off for the rest of this test.`);
+}
+
+/**
+ * Whether a page that says it's at `at` is at `link`. The receive page takes
+ * a code (anything but a link's 43-character secret) out of its address as
+ * it opens, so /p2p#ABCD-1234 is soon /p2p, and that's the same page.
+ */
+function isAt(at, link) {
+    if (at === link || !at) return at === link;
+    const opened = new URL(link);
+    const said = new URL(at);
+    const clears = opened.pathname === '/p2p' && opened.hash !== '' && !/^#[A-Za-z0-9_-]{43}$/.test(opened.hash);
+    return clears && said.origin === opened.origin && said.pathname === '/p2p' && said.search === '' && said.hash === '';
 }
 
 /** The page's own location, asked of the page, or null if it doesn't answer in 10 s. */
