@@ -242,7 +242,10 @@ export interface ShareTargetResult {
   /** Type of share target (e.g., 'p2p', 'file'). */
   type?: string;
   /**
-   * Where to open it, as a path on the server (e.g. '/<id>', '/b/<id>', '/p2p/<code>').
+   * Where to open it, as a path on the server (e.g. '/<id>', '/b/<id>', '/p2p#<secret>').
+   * A typed code is '/p2p#<code>', read by that page and never sent to the server;
+   * an older version's '/p2p/<code>' link is its own path, which a Dropgate 4 server
+   * answers with its older-version page.
    * When a pasted link carried a key after its #, the key is on the end of this
    * path; it was never sent to the server.
    */

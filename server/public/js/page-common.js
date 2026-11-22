@@ -67,9 +67,25 @@ export function countOf(n, one) {
   return `${digits} ${n === 1 ? one : `${one}s`}`;
 }
 
-(async () => {
+/** When something paused ends (an upload's server stops holding it, a direct transfer's pause limit), as a local time: "14:32", or "14:32 tomorrow". */
+export function formatDeadline(ms) {
+  const at = new Date(ms);
+  const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const today = new Date();
+  if (at.toDateString() === today.toDateString()) return time;
+  const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  if (at.toDateString() === tomorrow.toDateString()) return `${time} tomorrow`;
+  return at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/**
+ * Shows the server's version in the footer, from its info: one request, to
+ * /api/info. A page that must make no request until someone asks it to (a
+ * direct transfer's link, before Connect) calls this only then.
+ * @param {import('./dropgate-core.js').DropgateClient} [client]
+ */
+export async function showServerVersion(client = pageClient()) {
   try {
-    const client = pageClient();
     const serverInfo = await client.server.info({ timeoutMs: 5000 });
     const v = serverInfo?.version ? `v${serverInfo.version}` : '';
 
@@ -81,4 +97,4 @@ export function countOf(n, one) {
   } catch {
     // ignore
   }
-})();
+}

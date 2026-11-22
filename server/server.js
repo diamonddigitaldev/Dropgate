@@ -1579,11 +1579,18 @@ if (enableP2P) server.on('upgrade', (req, socket, head) => {
     socket.destroy();
 });
 
-// P2P receiver page
-app.get('/p2p/:code', limiter, (req, res) => {
+// A direct transfer's receive page. It's the same page for every request:
+// what it receives is after the # (a link's secret, or a typed code), which a
+// browser never sends, so nothing about the transfer reaches the server here.
+app.get('/p2p', limiter, (_req, res) => {
     if (!enableP2P) return res.status(404).render('pages/404', { serverName });
-    return res.status(200).render('pages/download-p2p', { code: req.params.code, serverName });
+    return res.status(200).render('pages/download-p2p', { serverName });
 });
+
+// A Dropgate 3 direct transfer's link, with its code in the path. Nothing
+// Dropgate 4 makes has one, and no Dropgate 3 sender can reach this server's
+// receivers, so the page says it's from an older version.
+app.get('/p2p/:code', limiter, (_req, res) => res.status(410).render('pages/older-version', { serverName }));
 
 // Web UI landing page
 app.get('/', limiter, (req, res) => {

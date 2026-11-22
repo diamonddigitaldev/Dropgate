@@ -1,5 +1,5 @@
 import { DropgateError, hosts, lifetime, sizes } from './dropgate-core.js';
-import { countOf, formatBytes, pageClient } from './page-common.js';
+import { countOf, formatBytes, formatDeadline, pageClient } from './page-common.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -55,7 +55,10 @@ const els = {
   cancelP2PSend: $('cancelP2PSend'),
 
   p2pWaitCard: $('p2pWaitCard'),
+  p2pWaitTitle: $('p2pWaitTitle'),
+  p2pWaitSub: $('p2pWaitSub'),
   p2pCode: $('p2pCode'),
+  p2pCodeNote: $('p2pCodeNote'),
   p2pLinkLabel: $('p2pLinkLabel'),
   p2pLink: $('p2pLink'),
   copyP2PLink: $('copyP2PLink'),
@@ -96,9 +99,8 @@ const state = {
   maxLifetimeHours: null,
   maxFileDownloads: 1,
   e2ee: false,
-  peerjsPath: '/peerjs',
-  iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }],
-  p2pSession: null,
+  // The direct send under way: its handle, while it runs.
+  direct: null,
   p2pSecureOk: true,
   upload: null,
   // The upload just finished, with the manage token that deletes it: held in
@@ -654,8 +656,6 @@ async function loadServerInfo() {
 
   const p2p = info?.capabilities?.p2p;
   state.p2pEnabled = Boolean(p2p?.enabled);
-  if (p2p?.peerjsPath) state.peerjsPath = p2p.peerjsPath;
-  if (Array.isArray(p2p?.iceServers) && p2p.iceServers.length) state.iceServers = p2p.iceServers;
 
   updateCapabilitiesUI();
   applyLifetimeDefaults();
@@ -848,9 +848,14 @@ function resetToMain() {
   updateStartEnabled();
 }
 
+/** Ends the direct send under way, if there is one, its outcome unshown: the page is starting again. */
 function stopP2P() {
-  try { state.p2pSession?.stop(); } catch { }
-  state.p2pSession = null;
+  const send = state.direct;
+  state.direct = null;
+  send?.cancel();
+  hidePauseControls();
+  els.cancelP2PSend.style.display = 'none';
+  resetTitleProgress();
 }
 
 function showQRModal(url, opener) {
@@ -1085,17 +1090,6 @@ async function pauseOrResume(upload, action) {
   }
 }
 
-/** When a paused upload's server stops holding it, as a local time: "14:32", or "14:32 tomorrow". */
-function formatDeadline(ms) {
-  const at = new Date(ms);
-  const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  const today = new Date();
-  if (at.toDateString() === today.toDateString()) return time;
-  const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
-  if (at.toDateString() === tomorrow.toDateString()) return `${time} tomorrow`;
-  return at.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
-}
-
 function showUploadFailed(err, totalSize) {
   console.error(err);
   const reason = sentence(err?.message || 'The upload stopped.');
@@ -1103,22 +1097,128 @@ function showUploadFailed(err, totalSize) {
   showToast(`Upload failed: ${reason}`, 'danger');
 }
 
-async function loadPeerJS() {
-  if (globalThis.Peer) return globalThis.Peer;
+/**
+ * The direct send's wait card: the code (large) and the link, while it waits
+ * for a receiver; the line under it says what's happening.
+ */
+function showDirectWaiting(send, snapshot, shown) {
+  showPanels('p2pwait');
+  const { status, text, code: codeState } = snapshot;
+  const waiting = status === 'waiting';
+  const connected = status === 'offered';
+  const { link, code } = send.share();
 
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = '/vendor/peerjs/peerjs.min.js';
-    script.async = true;
-    script.onload = () => {
-      if (globalThis.Peer) resolve(globalThis.Peer);
-      else reject(new Error('PeerJS failed to initialize'));
-    };
-    script.onerror = () => reject(new Error('Failed to load PeerJS'));
-    document.head.appendChild(script);
-  });
+  if (connected) {
+    els.p2pWaitTitle.textContent = 'Connected';
+    els.p2pWaitSub.textContent = 'Connected. Waiting for them to accept.';
+  } else if (status === 'connecting') {
+    els.p2pWaitTitle.textContent = 'Connecting…';
+    els.p2pWaitSub.textContent = tidy(text);
+  } else {
+    els.p2pWaitTitle.textContent = 'Awaiting connection…';
+    els.p2pWaitSub.textContent = code ? 'Provide your recipient with the code below:' : 'Share this link with your recipient:';
+  }
+
+  // A code once tried, right or wrong, is spent, and never shown again; core
+  // asks for the next at once, so it can come while that try is still
+  // connecting. Whether the try was wrong is known only once the send is
+  // waiting again: a wrong code never gets as far as the offer (a receiver who
+  // connected and left before accepting had the right one). With none free,
+  // the link works. A note stays until the code changes again.
+  if (shown.code && code !== shown.code && !shown.spent) {
+    shown.spent = true;
+    shown.offered = false;
+  }
+  if (connected) shown.offered = true;
+  if (shown.spent && waiting && code) {
+    shown.note = shown.offered ? '' : "Someone entered the wrong code. Here's a new one.";
+    shown.spent = false;
+    shown.code = code;
+  } else if (code && !shown.code) {
+    shown.code = code;
+  } else if (!code && codeState === 'unavailable' && !shown.code) {
+    shown.note = 'No short code is free right now. The link works, and a code will show here when one frees.';
+  }
+  const note = waiting ? shown.note : '';
+
+  els.p2pCode.textContent = code ?? '';
+  setHidden(els.p2pCode, connected || !code);
+  els.p2pCodeNote.textContent = note;
+  setHidden(els.p2pCodeNote, connected || !note);
+  els.p2pLinkLabel.textContent = code ? 'or share this link:' : 'Link:';
+  setHidden(els.p2pLinkLabel, connected || !link);
+  if (link) els.p2pLink.value = link;
+  for (const el of [els.p2pLink, els.copyP2PLink, els.qrP2PLink]) setHidden(el, connected || !link);
 }
 
+/** The direct send's progress card, once a receiver has accepted. */
+function showDirectProgress(snapshot) {
+  const { status, text, percent, processedBytes, totalBytes, pausedBy, deadline, stalled, canPause } = snapshot;
+  const paused = status === 'paused';
+  let sub = 'Keep this tab open until the transfer completes.';
+  if (paused) {
+    // Who paused it, and with a pause limit, when it ends.
+    sub = deadline ? `${text} The transfer ends at ${formatDeadline(deadline)} unless it's resumed.` : text;
+  } else if (status === 'finalising') {
+    sub = tidy(text);
+  }
+  if (stalled) sub = `Stalled. ${sub}`;
+  const view = paused
+    ? { title: 'Transfer Paused', icon: 'pause_circle', iconColor: 'text-secondary' }
+    : { title: 'Sending…', icon: 'sync_alt', iconColor: 'text-primary' };
+
+  if (paused) document.title = `Paused - ${originalTitle}`;
+  else updateTitleProgress(percent);
+  currentTransferProgress = {
+    percent,
+    doneBytes: processedBytes,
+    totalBytes,
+    showProgress: (pct, done, total) => showProgress({ ...view, sub, percent: pct, doneBytes: done, totalBytes: total }),
+  };
+  showProgress({ ...view, sub, percent, doneBytes: processedBytes, totalBytes });
+
+  // Pause while it runs, Resume while this side holds it; the other side's hold is its own.
+  const ownHold = pausedBy === 'self' || pausedBy === 'both';
+  const running = status === 'transferring' || paused;
+  setHidden(els.pauseStandardUpload, !running || ownHold);
+  setDisabled(els.pauseStandardUpload, !canPause);
+  setHidden(els.resumeStandardUpload, !running || !ownHold);
+  setDisabled(els.resumeStandardUpload, false);
+  els.cancelStandardUpload.style.display = 'none';
+  els.cancelP2PSend.style.display = 'inline-block';
+}
+
+/** Pauses or resumes a direct send. Its snapshots show the result. */
+async function directPauseOrResume(send, action) {
+  setDisabled(action === 'pause' ? els.pauseStandardUpload : els.resumeStandardUpload, true);
+  try {
+    await send[action]();
+  } catch (err) {
+    // It moved on before the click landed.
+    if (!DropgateError.is(err, 'PAUSE_UNAVAILABLE')) console.error(err);
+  } finally {
+    if (state.direct === send) showDirectProgress(send.snapshot);
+  }
+}
+
+/** How a direct send ended, on the share card, with Send More Files. */
+function showDirectEnd({ icon, color, title, sub }) {
+  showPanels('share');
+  setShareIcon(icon, color);
+  els.shareTitle.textContent = title;
+  els.shareSub.textContent = sub;
+  setHidden(els.shareLinkGroup, true);
+  setHidden(els.deleteUpload, true);
+  els.shareCard.classList.remove('border-danger', 'border-success', 'border-primary', 'border-secondary', 'border-warning');
+  els.shareCard.classList.add('border', color.replace('text-', 'border-'));
+}
+
+/**
+ * Sends the chosen files straight to another device, on core's direct send:
+ * its code and link while it waits, its progress once a receiver accepts,
+ * Pause, Resume and Cancel, and how it ended, in core's words. The web UI
+ * passes no direct settings, so core's own apply (no pause limit).
+ */
 async function startP2PSendFlow() {
   if (!state.p2pEnabled) {
     showToast('Direct transfer is disabled on this server.', 'warning');
@@ -1128,134 +1228,65 @@ async function startP2PSendFlow() {
     showToast('Direct transfer requires HTTPS (or localhost).', 'warning');
     return;
   }
-
   if (!state.files.length) {
     showToast('Select at least one file first.', 'warning');
     return;
   }
 
-  const file = state.files.length === 1 ? state.files[0] : state.files;
-  const p2pTotalSize = state.files.reduce((sum, f) => sum + f.size, 0);
+  const files = [...state.files];
+  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+  els.tagline.textContent = 'Direct Transfer (P2P)';
+  showProgress({ title: 'Starting…', sub: 'Opening the transfer…', percent: 0, doneBytes: 0, totalBytes: totalSize, icon: 'sync_alt', iconColor: 'text-primary' });
+  hidePauseControls();
 
-  // Load PeerJS before starting P2P
-  let Peer;
+  let send;
   try {
-    Peer = await loadPeerJS();
+    send = await coreClient.direct.send({ files });
   } catch (err) {
-    showToast('Failed to load P2P library.', 'danger');
     console.error(err);
+    showDirectEnd({ icon: 'error', color: 'text-danger', title: 'Transfer Failed', sub: sentence(err?.message || "The transfer couldn't start.") });
     return;
   }
+  state.direct = send;
 
-  els.tagline.textContent = 'Direct Transfer (P2P)';
-  // Copy and the QR code read the link as it's shown, so they work as soon as
-  // the code shows, which is before the send below resolves.
+  // Copy and the QR code read the link as it's shown.
   els.copyP2PLink.onclick = () => copyToClipboard(els.p2pLink.value).then(() => showToast('Link copied.', 'success'));
   els.qrP2PLink.onclick = () => showQRModal(els.p2pLink.value, els.qrP2PLink);
-  state.p2pSession = await coreClient.direct.send({
-    file,
-    Peer,
-    onCode: (id) => {
-      showPanels('p2pwait');
-      // Reset visibility of share elements for new session
-      setHidden(els.p2pCode, false);
-      setHidden(els.p2pLinkLabel, false);
-      setHidden(els.p2pLink, false);
-      setHidden(els.copyP2PLink, false);
-      setHidden(els.qrP2PLink, false);
-      // Reset title/subtitle
-      const waitTitle = els.p2pWaitCard?.querySelector('h5');
-      const waitSub = els.p2pWaitCard?.querySelector('.text-body-secondary');
-      if (waitTitle) waitTitle.textContent = 'Awaiting connection…';
-      if (waitSub) waitSub.textContent = 'Provide your recipient with the code below:';
-      els.p2pCode.textContent = id;
-      const link = `${location.origin}/p2p/${encodeURIComponent(id)}`;
-      els.p2pLink.value = link;
-    },
-    onStatus: ({ phase, message }) => {
-      if (phase === 'waiting') {
-        // Update p2pWaitCard title/subtitle to show waiting status
-        const waitTitle = els.p2pWaitCard?.querySelector('h5');
-        const waitSub = els.p2pWaitCard?.querySelector('.text-body-secondary');
-        if (waitTitle) waitTitle.textContent = 'Connected!';
-        if (waitSub) waitSub.textContent = tidy(message);
-        setHidden(els.p2pCode, true);
-        setHidden(els.p2pLinkLabel, true);
-        setHidden(els.p2pLink, true);
-        setHidden(els.copyP2PLink, true);
-        setHidden(els.qrP2PLink, true);
-      } else if (phase === 'transferring') {
-        // Switch to progress card when transfer actually starts
-        showProgress({ title: 'Sending…', sub: tidy(message), percent: 0, doneBytes: 0, totalBytes: p2pTotalSize, icon: 'sync_alt', iconColor: 'text-primary' });
-        // Show P2P cancel button
-        els.cancelP2PSend.style.display = 'inline-block';
-        els.cancelStandardUpload.style.display = 'none';
-      } else {
-        // Default behaviour for other statuses
-        showProgress({ title: 'Sending…', sub: tidy(message), percent: 0, doneBytes: 0, totalBytes: p2pTotalSize, icon: 'sync_alt', iconColor: 'text-primary' });
-      }
-    },
-    onProgress: ({ processedBytes, totalBytes, percent }) => {
-      // Update title and store progress for visibility handler
-      updateTitleProgress(percent);
-      currentTransferProgress = {
-        percent,
-        doneBytes: processedBytes,
-        totalBytes,
-        showProgress: (pct, done, total) => {
-          showProgress({ title: 'Sending…', sub: 'Keep this tab open until the transfer completes.', percent: pct, doneBytes: done, totalBytes: total, icon: 'sync_alt', iconColor: 'text-primary' });
-        }
-      };
+  els.cancelP2P.onclick = () => send.cancel();
+  els.cancelP2PSend.onclick = () => send.cancel();
+  els.pauseStandardUpload.onclick = () => directPauseOrResume(send, 'pause');
+  els.resumeStandardUpload.onclick = () => directPauseOrResume(send, 'resume');
 
-      showProgress({ title: 'Sending…', sub: 'Keep this tab open until the transfer completes.', percent, doneBytes: processedBytes, totalBytes, icon: 'sync_alt', iconColor: 'text-primary' });
-    },
-    onComplete: () => {
-      resetTitleProgress();
-      els.cancelP2PSend.style.display = 'none';
-      stopP2P();
-      state.uploaded = null;
-      showShare({
-        title: 'Transfer Complete',
-        sub: Array.isArray(file) ? `Your recipient has received the ${countOf(file.length, 'file')}.` : 'Your recipient has received the file.',
-        showLinkGroup: false,
-      });
-    },
-    onError: (err) => {
-      console.error(err);
-      resetTitleProgress();
-      els.cancelP2PSend.style.display = 'none';
-      showProgress({ title: 'Transfer Failed', sub: err?.message || 'An error occurred during transfer.', percent: 0, doneBytes: 0, totalBytes: p2pTotalSize, icon: 'error', iconColor: 'text-danger' });
-      stopP2P();
-    },
-    onDisconnect: () => {
-      resetTitleProgress();
-      els.cancelP2PSend.style.display = 'none';
-      showToast('The receiver disconnected.', 'warning');
-      resetToMain();
-    },
-    onCancel: (evt) => {
-      resetTitleProgress();
-      els.cancelP2PSend.style.display = 'none';
-      const msg = evt?.cancelledBy === 'receiver'
-        ? 'The receiver cancelled the transfer.'
-        : 'Transfer cancelled.';
-      showToast(msg, 'warning');
-      resetToMain();
-    },
-  });
+  const shown = { code: null, note: '', spent: false, offered: false };
+  const render = (snapshot) => {
+    if (state.direct !== send) return;
+    if (['waiting', 'connecting', 'offered'].includes(snapshot.status)) showDirectWaiting(send, snapshot, shown);
+    else if (['transferring', 'paused', 'finalising'].includes(snapshot.status)) showDirectProgress(snapshot);
+  };
+  send.subscribe(render);
+  render(send.snapshot);
 
-  els.cancelP2P.onclick = () => {
-    resetTitleProgress();
-    stopP2P();
+  const outcome = await send.result;
+  if (state.direct !== send) return;
+  state.direct = null;
+  els.cancelP2PSend.style.display = 'none';
+  hidePauseControls();
+  resetTitleProgress();
+  const { text } = send.snapshot;
+
+  if (outcome.status === 'completed') {
+    state.uploaded = null;
+    showShare({ title: 'Transfer Complete', sub: text, showLinkGroup: false });
+  } else if (outcome.status === 'cancelled' && outcome.cancellation.by !== 'peer') {
     showToast('Transfer cancelled.', 'warning');
     resetToMain();
-  };
-  els.cancelP2PSend.onclick = () => {
-    resetTitleProgress();
-    stopP2P();
-    showToast('Transfer cancelled.', 'warning');
-    resetToMain();
-  };
+  } else if (outcome.status === 'cancelled') {
+    const declined = outcome.cancellation.declined === true;
+    showDirectEnd({ icon: 'cancel', color: 'text-secondary', title: declined ? 'Transfer Declined' : 'Transfer Cancelled', sub: text });
+  } else {
+    console.error(outcome.error);
+    showDirectEnd({ icon: 'error', color: 'text-danger', title: 'Transfer Failed', sub: sentence(outcome.error?.message || 'The transfer stopped.') });
+  }
 }
 
 function wireUI() {
@@ -1410,8 +1441,8 @@ function wireUI() {
   // Escape closes the modal that's open, as Cancel, wherever the focus is,
   // and does nothing else; it's caught first, so Bootstrap's own handler on
   // the modal never sees it. With no modal, Escape resets the page, but
-  // never under an upload, whose card (and, paused, its Resume) would go
-  // while it carries on.
+  // never under an upload or a direct send, whose card (and, paused, its
+  // Resume) would go while it carries on: Cancel ends a direct send.
   window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (openModal) {
@@ -1420,8 +1451,11 @@ function wireUI() {
       closeOpenModal();
       return;
     }
-    if (!state.upload) resetToMain();
+    if (!state.upload && !state.direct) resetToMain();
   }, true);
+
+  // Closing the page, or leaving it, ends a direct send, and tells its receiver so (best effort).
+  window.addEventListener('pagehide', () => coreClient.direct.appClosing());
 }
 
 async function init() {

@@ -6,8 +6,9 @@
 // - the server's origin holds no cookies, localStorage, sessionStorage,
 //   IndexedDB or Cache Storage, and at most one service worker registration
 //   (the one the download pages use to stream files to disk);
-// - no request that reached the server had a file name or a key in its URL,
-//   headers or body, and no WebSocket message did either. The one exception is
+// - no request that reached the server had a file name, a key or a direct
+//   transfer's code (or its password) in its URL, headers or body, and no
+//   WebSocket message did either. The one exception is
 //   a file uploaded without encryption: the server stores its name, so the
 //   upload's own requests may carry it in their bodies.
 import { expect } from '@playwright/test';
@@ -36,6 +37,20 @@ export class Secrets {
     addLink(link) {
         const url = new URL(link);
         if (url.hash.length > 1) this.keys.set(url.pathname, url.hash.slice(1));
+    }
+
+    /** Direct transfer codes, such as ABCD-1234, that only the two browsers may hold. */
+    codes = new Set();
+
+    /**
+     * Note a direct transfer's code. Its locator (its first 2 letters, or 3 on
+     * a server set for more codes) is how the rendezvous finds the sender's
+     * room, so it goes to the server; the whole code, and its password (the
+     * rest), must never.
+     * @param {string} code
+     */
+    addCode(code) {
+        this.codes.add(code);
     }
 }
 
@@ -78,6 +93,16 @@ function lookFor(secrets, { storedNames }) {
     const names = storedNames ? [...secrets.names, ...secrets.storedNames] : secrets.names;
     for (const name of names) {
         wanted.push({ what: `the file name "${name}"`, forms: spellings(name).map((s) => Buffer.from(s)) });
+    }
+    for (const code of secrets.codes) {
+        const compact = code.replace('-', '');
+        // The password after a 2-letter locator: its 2 letters and 4 digits, as CPace takes it (and as typed).
+        const password = compact.slice(2);
+        const forms = [code, compact, `${code.slice(0, 4)} ${code.slice(5)}`, password, `${password.slice(0, 2)}-${password.slice(2)}`];
+        wanted.push({
+            what: `the code ${code} or its password`,
+            forms: [...new Set(forms.flatMap((f) => [f, f.toLowerCase()]))].flatMap(spellings).map((s) => Buffer.from(s)),
+        });
     }
     for (const [path, key] of secrets.keys) {
         const raw = Buffer.from(key, 'base64');

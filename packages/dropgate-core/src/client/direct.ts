@@ -143,6 +143,18 @@ export interface DirectHost {
   requireDirect(compat: { serverInfo: ServerInfo; dgdtp: { compatible: boolean } }): void;
   /** The token of a direct send's credential, asked of the client's `auth` provider (AUTH_REQUIRED without one). */
   credential(signal: AbortSignal): Promise<string>;
+  /** What each running direct transfer does as the app closes, for `client.direct.appClosing()`: there from its start to its end. */
+  readonly appClosers: Set<() => void>;
+}
+
+/**
+ * The app is closing: every direct transfer `host` runs ends at once, each
+ * telling its other side so (CLOSE, APP_CLOSED, best effort), and ends
+ * cancelled by this side. One still opening its room, or still connecting,
+ * has nobody to tell, and is cancelled.
+ */
+export function appClosing(host: DirectHost): void {
+  for (const close of [...host.appClosers]) close();
 }
 
 /** What the server says about its direct transfers, checked. */
@@ -301,10 +313,12 @@ export async function startDirectSend(host: DirectHost, opts: DirectSendOptions)
   const settings = directSettings(opts.direct, host.settings);
   const RTCPeerConnection = peerConnectionClass(host.RTCPeerConnection);
   const WebSocket = webSocketClass();
-  const { transport } = host;
 
   const scope = new CancelScope('direct.send', { parent: host.registry.scope, signal: opts.signal });
-  let sender: DirectSender;
+  let sender: DirectSender | undefined;
+  // Still opening its room, there's nobody to tell: the send is cancelled, and the room closed once open.
+  const closeForApp = () => (sender ? sender.appClosed() : scope.cancel());
+  host.appClosers.add(closeForApp);
   try {
     scope.throwIfCancelled();
     const server = directServer(host, await host.connect({ signal: scope.signal }));
@@ -325,12 +339,17 @@ export async function startDirectSend(host: DirectHost, opts: DirectSendOptions)
     opening.then((opened) => { if (scope.cancellation) opened.cancel(); }, () => undefined);
     sender = await untilAborted(opening, scope.signal);
   } catch (err) {
+    host.appClosers.delete(closeForApp);
     const reason = scope.cancellation ? scope.signal.reason : err;
     scope.finish();
     throw reason;
   }
+  return sendHandle(host, scope, sender, files.length, closeForApp);
+}
 
-  const count = files.length;
+/** A send's handle, once its room is open. */
+function sendHandle(host: DirectHost, scope: CancelScope, sender: DirectSender, count: number, closeForApp: () => void): DirectSendHandle {
+  const { transport } = host;
   const totalBytes = sender.totalSize;
   scope.onCancel(() => sender.cancel());
 
@@ -394,7 +413,10 @@ export async function startDirectSend(host: DirectHost, opts: DirectSendOptions)
       }
     },
     finalSnapshot: (outcome, last) => finalFields('sender', outcome, { ...last, code: sender.room.codeState as DirectCodeState }),
-    onEnd: (handle) => host.registry.remove(handle),
+    onEnd: (handle) => {
+      host.appClosers.delete(closeForApp);
+      host.registry.remove(handle);
+    },
     extend: () => ({ share }),
   })) as DirectSendHandle;
 }
@@ -587,6 +609,7 @@ export async function startDirectReceive(host: DirectHost, opts: DirectReceiveOp
     finalSnapshot: (outcome, last) => finalFields('receiver', outcome, last),
     onEnd: (h) => {
       ended = true;
+      host.appClosers.delete(closeForApp);
       host.registry.remove(h);
     },
     extend: () => ({
@@ -595,6 +618,12 @@ export async function startDirectReceive(host: DirectHost, opts: DirectReceiveOp
       decline: stamped(transport, decline),
     }),
   });
+  // Still connecting, there's nobody to tell: the receive is cancelled, its join given up.
+  function closeForApp(): void {
+    if (receiver) receiver.appClosed();
+    else handle.cancel();
+  }
+  if (!ended) host.appClosers.add(closeForApp);
   // Ended before the channel was up: an offer, an accept or a decline waiting for it hears how.
   void handle.result.then((outcome) => {
     engine.reject(outcome.status === 'failed' ? outcome.error : new DropgateError({ code: 'OPERATION_CANCELLED', details: { cancellation: outcome.status === 'cancelled' ? outcome.cancellation : undefined } }));

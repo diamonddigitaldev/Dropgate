@@ -418,8 +418,11 @@ const HANDLE_CANCEL: Record<string, (client: DropgateClient) => { cancel(): void
   'hosted.download': (client) => client.hosted.download({ id: FILE_ID, sink: nullSink() }),
 };
 
-/** What the client offers that isn't an operation, and so gives no snapshot, result or error of its own. */
-const NOT_OPERATIONS = new Set(['server.on', 'operations.get', 'operations.list']);
+/**
+ * What the client offers that isn't an operation, and so gives no snapshot, result or error of its own.
+ * direct.appClosing() ends direct handles, whose outcomes are theirs (tests/direct-handles.test.ts).
+ */
+const NOT_OPERATIONS = new Set(['server.on', 'operations.get', 'operations.list', 'direct.appClosing']);
 
 describe('transport.secure on every snapshot, result and error', () => {
   it('every public method is in the table, or listed as not an operation', () => {

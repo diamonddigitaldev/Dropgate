@@ -247,6 +247,74 @@ describe('client.direct on handles, through the real server over werift', () => 
     }
   }, 60_000);
 
+  it("client.direct.appClosing() each way mid-transfer: that side cancelled by itself, the other failed PEER_CLOSED in its words; it returns at once, and the client goes on", async () => {
+    for (const who of ['sender', 'receiver'] as const) {
+      const sending = clientOf(server);
+      const receiving = clientOf(server);
+      const send = await sending.direct.send({ files: memoryFile('a.bin', patterned(20 * MiB, 15)) });
+      const receive = await receiving.direct.receive({ link: send.share().link as string });
+      const sink = new MemorySink();
+      await receive.accept({ sink });
+      await until(() => sink.writes >= 1, 'a write');
+      const closing = who === 'sender' ? sending : receiving;
+      expect(closing.direct.appClosing()).toBeUndefined();
+      const [r, s] = await Promise.all([receive.result, send.result]);
+      if (who === 'sender') {
+        expect(`${said(r)} / ${said(s)}`).toBe('failed PEER_CLOSED / cancelled by self');
+        expect(receive.snapshot.text).toBe('The sender closed Dropgate before the transfer finished.');
+      } else {
+        expect(`${said(r)} / ${said(s)}`).toBe('cancelled by self / failed PEER_CLOSED');
+        expect(send.snapshot.text).toBe('The receiver closed Dropgate before the transfer finished.');
+      }
+      expect(sink.aborted).toBeTruthy();
+      expect(closing.operations.list()).toEqual([]);
+      // Nothing is left to close: a second call does nothing, and the client still sends.
+      closing.direct.appClosing();
+      const next = await closing.direct.send({ files: memoryFile('b.bin', patterned(10, 16)) });
+      expect(next.snapshot.status).toBe('waiting');
+      next.cancel();
+      await next.result;
+    }
+  }, 60_000);
+
+  it('client.direct.appClosing() ends every direct transfer the client runs, a send waiting and a receive still connecting among them, and nothing of another client', async () => {
+    const client = clientOf(server);
+    const other = clientOf(server);
+    const waiting = await client.direct.send({ files: memoryFile('a.bin', patterned(10, 17)) });
+    const othersSend = await other.direct.send({ files: memoryFile('a.bin', patterned(10, 18)) });
+    class Stalled extends LoopbackPeerConnection {
+      createOffer(): never { return new Promise(() => undefined) as never; }
+    }
+    const stalled = new DropgateClient({ server: server.baseUrl, RTCPeerConnection: Stalled as unknown as DirectPeerConnectionClass });
+    const connecting = await stalled.direct.receive({ link: othersSend.share().link as string });
+    const offered = await other.direct.send({ files: memoryFile('a.bin', patterned(10, 19)) });
+    const receive = await client.direct.receive({ link: offered.share().link as string });
+    await receive.offer();
+    await until(() => othersSend.snapshot.status === 'connecting', 'the other send connecting the stalled attempt');
+
+    client.direct.appClosing();
+    stalled.direct.appClosing();
+    const started = Date.now();
+    expect(said(await waiting.result)).toBe('cancelled by self');
+    expect(said(await receive.result)).toBe('cancelled by self');
+    // Still connecting, the receive had nobody to tell: it's cancelled at once.
+    expect(said(await connecting.result)).toBe('cancelled by self');
+    expect(Date.now() - started).toBeLessThan(2000);
+    // Neither receiver had accepted, so each send waits again for another: its link still works.
+    await until(() => othersSend.snapshot.status === 'waiting' && offered.snapshot.status === 'waiting', 'the other sends waiting again', 3000);
+    expect(other.operations.list().map((o) => o.kind)).toEqual(['direct.send', 'direct.send']);
+    other.operations.cancelAll();
+    await Promise.all([othersSend.result, offered.result]);
+  }, 60_000);
+
+  it('a send whose room is still opening when the app closes rejects OPERATION_CANCELLED', async () => {
+    const client = clientOf(server);
+    const opening = client.direct.send({ files: memoryFile('a.bin', patterned(10, 20)) });
+    client.direct.appClosing();
+    await expect(opening).rejects.toMatchObject({ code: 'OPERATION_CANCELLED' });
+    expect(client.operations.list()).toEqual([]);
+  }, 30_000);
+
   it('a decline: the receiver cancelled by itself, the sender by the peer, declined; nothing is written', async () => {
     const send = await clientOf(server).direct.send({ files: memoryFile('a.bin', patterned(10, 9)) });
     const receive = await clientOf(server).direct.receive({ link: send.share().link as string });
@@ -647,7 +715,7 @@ describe('links.resolve() for direct links', () => {
   }, 30_000);
   afterAll(async () => { await server?.stop(); });
 
-  it('a direct link opens its receive page with the secret after the #; another server\'s is refused; a typed code and an older link keep their path', async () => {
+  it('a direct link opens its receive page with the secret after the #, and a typed code with the code after it; another server\'s is refused; an older link keeps its path', async () => {
     const client = new DropgateClient({ server: server.baseUrl });
     const secret = Buffer.alloc(32, 9).toString('base64url');
     expect(await client.links.resolve(` ${server.baseUrl}/p2p#${secret} `)).toEqual({ valid: true, type: 'p2p', target: `/p2p#${secret}`, transport: { secure: true } });
@@ -655,7 +723,14 @@ describe('links.resolve() for direct links', () => {
     for (const bad of [`${server.baseUrl}/p2p#${secret.slice(2)}`, `${server.baseUrl}/p2p`, `${server.baseUrl}/p2p?a=1#${secret}`]) {
       expect(await client.links.resolve(bad), bad).toMatchObject({ valid: false, reason: 'Unrecognised sharing link.' });
     }
-    expect(await client.links.resolve('abcd-1234')).toMatchObject({ valid: true, type: 'p2p', target: '/p2p/ABCD-1234' });
+    // A typed code, however it's typed, opens the receive page with the code after the #.
+    for (const typed of ['abcd-1234', 'ABCD1234', ' abcd 1234 ', 'AbCd-1234']) {
+      expect(await client.links.resolve(typed), typed).toMatchObject({ valid: true, type: 'p2p', target: '/p2p#ABCD-1234' });
+    }
+    // I and O are never in a code.
+    for (const typed of ['ABCI-1234', 'OBCD-1234', 'ABCD-123', 'ABCD-12345']) {
+      expect(await client.links.resolve(typed), typed).toMatchObject({ valid: false, reason: 'Unrecognised sharing code.' });
+    }
     expect(await client.links.resolve(`${server.baseUrl}/p2p/ABCD-1234`)).toMatchObject({ valid: true, type: 'p2p', target: '/p2p/ABCD-1234' });
   });
 });

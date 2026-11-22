@@ -1,4 +1,5 @@
-// Links made by Dropgate 3. A bundle's (/b/<id>) gets the older-version page.
+// Links made by Dropgate 3. A bundle's (/b/<id>) gets the older-version page,
+// as does a direct transfer's (/p2p/<code>), opened or pasted.
 // A single file's (/<id>#<key>, the key 44 characters of standard base64)
 // names an upload a Dropgate 4 server never has, so its page finds nothing,
 // sees the older key, and says the same, without sending the key anywhere.
@@ -28,6 +29,18 @@ async function expectOlderVersion(page) {
 test("a Dropgate 3 bundle's link shows the older-version page", async ({ page }) => {
     const response = await openLink(page, `/b/${crypto.randomUUID()}`);
     expect(response?.status()).toBe(410);
+    await expectOlderVersion(page);
+});
+
+test("a Dropgate 3 direct transfer's link shows the older-version page, opened or pasted into Enter Sharing Code", async ({ page, server }) => {
+    const response = await openLink(page, '/p2p/ABCD-1234');
+    expect(response?.status()).toBe(410);
+    await expectOlderVersion(page);
+
+    await page.goto('/');
+    await page.locator('#codeInput').fill(`${server.baseUrl}/p2p/ABCD-1234`);
+    await page.locator('#codeGo').click();
+    await expect(page).toHaveURL(`${server.baseUrl}/p2p/ABCD-1234`);
     await expectOlderVersion(page);
 });
 

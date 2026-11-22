@@ -251,13 +251,17 @@ export async function dropFromDisk(page, target, paths) {
     for (const type of ['dragenter', 'dragover', 'drop']) await target.dispatchEvent(type, { dataTransfer });
 }
 
+/** A direct transfer's link: the server's /p2p, then # and a 32-byte secret in URL-safe base64. */
+export const DIRECT_LINK = /^https?:\/\/[^/]+\/p2p#[A-Za-z0-9_-]{43}$/;
+
 /**
  * Start a direct transfer from the home page, and return the code and link it
  * gives. The page has to stay open until the receiver has everything.
  * @param {import('@playwright/test').Page} page
  * @param {{ name: string, mimeType: string, buffer: Buffer }[]} files
+ * @param {{ code?: boolean }} [opts] - With `code: false`, expect no code: none free, or codes off.
  */
-export async function sendDirectFromHomePage(page, files) {
+export async function sendDirectFromHomePage(page, files, { code = true } = {}) {
     // The names only ever go to the other browser.
     secretsOf(page).addFiles(files);
     await page.goto('/');
@@ -270,12 +274,66 @@ export async function sendDirectFromHomePage(page, files) {
     await page.locator('#startBtn').click();
 
     await expect(page.locator('#p2pWaitCard')).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('#p2pCode')).toHaveText(/^[A-Z]{4}-\d{4}$/);
-    await expect(page.locator('#p2pLink')).toHaveValue(/\/p2p\//);
-    return {
-        code: await page.locator('#p2pCode').innerText(),
-        link: await page.locator('#p2pLink').inputValue(),
-    };
+    await expect(page.locator('#p2pLink')).toHaveValue(DIRECT_LINK);
+    const link = await page.locator('#p2pLink').inputValue();
+    secretsOf(page).addLink(link);
+    if (!code) {
+        await expect(page.locator('#p2pCode')).toBeHidden();
+        return { code: null, link };
+    }
+    await expect(page.locator('#p2pCode')).toHaveText(/^[A-HJ-NP-Z]{4}-\d{4}$/);
+    const shown = await page.locator('#p2pCode').innerText();
+    secretsOf(page).addCode(shown);
+    return { code: shown, link };
+}
+
+/**
+ * The code the sending page shows now, once it has changed from `before`
+ * (a wrong code spends it), noted as a secret.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} before
+ */
+export async function nextCode(page, before) {
+    await expect(page.locator('#p2pCode')).not.toHaveText(before, { timeout: 15_000 });
+    await expect(page.locator('#p2pCode')).toHaveText(/^[A-HJ-NP-Z]{4}-\d{4}$/);
+    const code = await page.locator('#p2pCode').innerText();
+    secretsOf(page).addCode(code);
+    return code;
+}
+
+/**
+ * As the receiver, open a direct transfer's link: its page says "Ready to
+ * Connect" and connects only once Connect is clicked, which this does unless
+ * `connect: false`.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} link
+ * @param {{ connect?: boolean, loseNavigation?: boolean }} [opts]
+ */
+export async function openDirectLink(page, link, { connect = true, loseNavigation } = {}) {
+    await openReceivePage(page, link, { loseNavigation });
+    await expect(page.locator('#title')).toHaveText(/ready to connect/i);
+    if (!connect) return;
+    await page.locator('#connect-button').click();
+}
+
+/**
+ * As the receiver, open the home page, type the code and press Go, and wait
+ * until the page is at the receive page, whether or not Playwright hears
+ * either navigation (openReceivePage(), receiverReaches()). The code goes
+ * after the # (/p2p#ABCD-1234), and the receive page takes it out of the
+ * address at once, so it's waited for at /p2p. Go's click doesn't wait for the
+ * navigation it starts, as a click otherwise does: one Playwright never hears
+ * commit would hold it until the test runs out.
+ * @param {import('@playwright/test').Page} page
+ * @param {string} baseUrl
+ * @param {string} code
+ * @param {{ loseNavigation?: boolean }} [opts]
+ */
+export async function typeTheCode(page, baseUrl, code, { loseNavigation } = {}) {
+    await openReceivePage(page, new URL('/', baseUrl).href, { loseNavigation, what: 'the home page' });
+    await page.locator('#codeInput').fill(code);
+    await page.locator('#codeGo').click({ noWaitAfter: true });
+    await receiverReaches(page, new URL('/p2p', baseUrl).href);
 }
 
 /**

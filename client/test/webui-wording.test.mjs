@@ -152,7 +152,7 @@ function mismatches(pairs, words) {
 }
 
 test('the checks read every script and page of the Web UI\'s own, with their words: its EJS read as a browser shows it', () => {
-    assert.deepEqual(webSources().sort(), ['public/js/download-bundle.js', 'public/js/download-p2p.js', 'public/js/download.js', 'public/js/not-found.js', 'public/js/page-common.js',
+    assert.deepEqual(webSources().sort(), ['public/js/download-bundle.js', 'public/js/download-p2p.js', 'public/js/download.js', 'public/js/not-found.js', 'public/js/page-common.js', 'public/js/server-version.js',
         'public/js/status-card.js', 'public/js/theme.js', 'public/js/tooltips.js', 'public/js/webui-main.js', 'views/pages/404.ejs', 'views/pages/download-p2p.ejs', 'views/pages/download.ejs',
         'views/pages/index.ejs', 'views/pages/older-version.ejs', 'views/partials/footer.ejs', 'views/partials/head-meta.ejs', 'views/partials/header.ejs', 'views/partials/older-version.ejs']);
     assert.deepEqual(pageText('<p class="a">Drag &amp; Drop <%# a comment %>Files Here</p><%- include(\'x\') %><b title="It&#39;s">x</b>').map(({ text }) => text),

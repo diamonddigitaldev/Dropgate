@@ -68,7 +68,7 @@ import { startP2PSend } from '../p2p/send.js';
 import { startP2PReceive } from '../p2p/receive.js';
 import { resolvePeerConfig } from '../p2p/helpers.js';
 import { StreamingZipWriter } from '../zip/stream-zip.js';
-import { DEFAULT_DIRECT_SETTINGS, directSettings, startDirectReceive, startDirectSend } from './direct.js';
+import { DEFAULT_DIRECT_SETTINGS, appClosing, directSettings, startDirectReceive, startDirectSend } from './direct.js';
 import type { DirectHost, DirectSettings } from './direct.js';
 import { createObject, openObject, checkFiles, ObjectLayout, isChunkSize, HEADER_BYTES, SECRET_BYTES, MAX_FILES } from '../object/index.js';
 import type { ObjectWriter, OpenedObject } from '../object/index.js';
@@ -243,6 +243,17 @@ export interface DirectApi {
    * @deprecated Use `receive({ link })` or `receive({ code })`, which give a handle.
    */
   receive(opts: P2PReceiveFileOptions): Promise<P2PReceiveSession>;
+  /**
+   * The app is closing (a page's `pagehide`, a desktop app quitting): every
+   * direct transfer this client is running ends at once, and each tells its
+   * other device so, which reads that this side closed Dropgate before the
+   * transfer finished. Each ends `cancelled`, `by: 'self'`. One still opening
+   * its room or still connecting has nobody to tell, and is cancelled. It
+   * returns at once: telling the other device is best effort, since a page
+   * being closed may not live long enough for the message to go. The client
+   * stays usable.
+   */
+  appClosing(): void;
 }
 
 /** Whether a direct call is Dropgate 3's, which always passes PeerJS's `Peer`: the new calls never take one. */
@@ -619,6 +630,7 @@ export class DropgateClient {
       receive: stamped((o: DirectReceiveOptions | P2PReceiveFileOptions) => (isPeerJsCall(o)
         ? this._directReceive(o as P2PReceiveFileOptions)
         : startDirectReceive(directHost, o as DirectReceiveOptions))),
+      appClosing: () => appClosing(directHost),
     }) as DirectApi;
     this.links = Object.freeze({
       resolve: stamped((value: string, o?: RequestOptions) => this._resolve(value, o)),
@@ -733,8 +745,10 @@ export class DropgateClient {
       if (!compat.serverInfo?.capabilities?.p2p?.enabled) return refused('Direct transfer is disabled on this server.');
       // A direct link opens its receive page with the secret after the #, never sent to the server.
       if (input.kind === 'direct-link') return { valid: true, type: 'p2p', target: `/p2p#${input.secret}`, transport };
-      // A code opens the receive page that reads it from its path.
-      return { valid: true, type: 'p2p', target: `/p2p/${encodeURIComponent(input.locator)}`, transport };
+      // An older version's link, /p2p/<code>: its own path, which the server answers with the older-version page.
+      if (input.linkHost !== undefined) return { valid: true, type: 'p2p', target: `/p2p/${encodeURIComponent(input.locator)}`, transport };
+      // A typed code opens the receive page with the code after the #, never sent to the server.
+      return { valid: true, type: 'p2p', target: `/p2p#${input.locator}`, transport };
     }
     // An upload's page says whether it's there. The secret stays on the end, for that page.
     const path = input.kind === 'bundle' ? `/b/${input.locator}` : `/${input.locator}`;
@@ -1973,6 +1987,7 @@ export class DropgateClient {
       RTCPeerConnection: this.#RTCPeerConnection,
       connect: (o: RequestOptions) => this._connect(o),
       requireDirect: (compat: ServerConnection) => this._requireCompatible(compat, 'dgdtp'),
+      appClosers: new Set<() => void>(),
       credential: async (signal: AbortSignal): Promise<string> => {
         const credentials = await OperationCredentials.required(auth, 'direct.send', baseUrl, signal);
         return credentials.token() as string;

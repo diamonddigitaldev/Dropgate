@@ -34,10 +34,11 @@ Core is headless: it runs the transfer, and you give it the files, somewhere to 
 - **Names.** The receiver gets the names only from `offer()`, each checked by the [file name rule](quick-start.md#file-names); no snapshot, outcome or error holds one. Save each under `filenames.sanitize(name)` (a ZIP's members are made safe and unique by core's ZIP writer). `type` is the sender's word for it, advice only.
 - **Sharing.** `send.share()` gives the link and the code as they are now. Show both: the link always works, and a code may not be free at once. A code is used once, right or wrong, so after someone tries it the sender gets a new one: read `share()` again whenever the snapshot's `code` changes, and show "Someone entered the wrong code. Here's a new one." when the receive that tried it fails with `CODE_MISMATCH`.
 - **The screen.** Each handle's `snapshot` and `subscribe()` say where it is, with `text` in words you can show ([Direct transfer handles](api-reference.md#direct-transfer-handles)); the outcome says how it ended, in each side's words ([Outcomes](outcomes.md#direct-transfers)).
+- **Closing.** When your page or app goes for good, call `client.direct.appClosing()` (in a browser, from `pagehide`): each transfer tells its other device that this side closed Dropgate before it finished, rather than leaving it to see a lost connection. It's best effort, since a page being closed may be gone before the message is.
 
 ## Who gets the files
 
-A link or a code is a bearer capability: anyone who has it can connect, and sees the offer. The first to accept gets the files; nobody else can join after that, and any other receiver still looking at the offer fails with `REQUEST_REJECTED`, "This transfer is already going to someone else." A receiver that declines, or an offer nobody accepts within 10 minutes (`TIMED_OUT`), ends the send. Share a link or a code only with the person it's for.
+A link or a code is a bearer capability: anyone who has it can connect, and sees the offer. The first to accept gets the files; nobody else can join after that, and any other receiver still looking at the offer fails with `REQUEST_REJECTED`, "This transfer is already going to someone else." A receiver that declines, or an offer nobody accepts within 10 minutes (`TIMED_OUT`), ends the send; one that leaves before accepting doesn't, and the send waits for another. Share a link or a code only with the person it's for.
 
 ## Pausing
 

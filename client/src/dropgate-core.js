@@ -4625,8 +4625,7 @@ function parseShareInput(value) {
   if (!/^https?:\/\//i.test(before)) {
     const typed = before.replace(/\s+/g, "");
     if (UUID_RE.test(typed)) return { kind: "hosted", locator: typed.toLowerCase(), ...secret ? { secret } : {} };
-    const code = typed.toUpperCase();
-    return CODE_RE.test(code) ? { kind: "direct", locator: code } : null;
+    return isCodeLike(typed) ? { kind: "direct", locator: normalizeCode(typed) } : null;
   }
   let url;
   try {
@@ -12140,6 +12139,9 @@ function linkSecret(link, baseUrl, base64) {
   if (!secret) throw notALink();
   return secret;
 }
+function appClosing(host) {
+  for (const close of [...host.appClosers]) close();
+}
 function directServer(host, compat) {
   host.requireDirect(compat);
   const p2p = compat.serverInfo?.capabilities?.p2p;
@@ -12260,9 +12262,10 @@ async function startDirectSend(host, opts) {
   const settings = directSettings(opts.direct, host.settings);
   const RTCPeerConnection = peerConnectionClass(host.RTCPeerConnection);
   const WebSocket = webSocketClass();
-  const { transport } = host;
   const scope = new CancelScope("direct.send", { parent: host.registry.scope, signal: opts.signal });
   let sender;
+  const closeForApp = () => sender ? sender.appClosed() : scope.cancel();
+  host.appClosers.add(closeForApp);
   try {
     scope.throwIfCancelled();
     const server = directServer(host, await host.connect({ signal: scope.signal }));
@@ -12286,11 +12289,15 @@ async function startDirectSend(host, opts) {
     }, () => void 0);
     sender = await untilAborted(opening, scope.signal);
   } catch (err) {
+    host.appClosers.delete(closeForApp);
     const reason = scope.cancellation ? scope.signal.reason : err;
     scope.finish();
     throw reason;
   }
-  const count = files.length;
+  return sendHandle(host, scope, sender, files.length, closeForApp);
+}
+function sendHandle(host, scope, sender, count, closeForApp) {
+  const { transport } = host;
   const totalBytes = sender.totalSize;
   scope.onCancel(() => sender.cancel());
   const fields = () => {
@@ -12351,7 +12358,10 @@ async function startDirectSend(host, opts) {
       }
     },
     finalSnapshot: (outcome, last) => finalFields("sender", outcome, { ...last, code: sender.room.codeState }),
-    onEnd: (handle) => host.registry.remove(handle),
+    onEnd: (handle) => {
+      host.appClosers.delete(closeForApp);
+      host.registry.remove(handle);
+    },
     extend: () => ({ share })
   }));
 }
@@ -12527,6 +12537,7 @@ async function startDirectReceive(host, opts) {
     finalSnapshot: (outcome, last) => finalFields("receiver", outcome, last),
     onEnd: (h) => {
       ended = true;
+      host.appClosers.delete(closeForApp);
       host.registry.remove(h);
     },
     extend: () => ({
@@ -12535,6 +12546,11 @@ async function startDirectReceive(host, opts) {
       decline: stamped(transport, decline)
     })
   });
+  function closeForApp() {
+    if (receiver) receiver.appClosed();
+    else handle.cancel();
+  }
+  if (!ended) host.appClosers.add(closeForApp);
   void handle.result.then((outcome) => {
     engine.reject(outcome.status === "failed" ? outcome.error : new DropgateError({ code: "OPERATION_CANCELLED", details: { cancellation: outcome.status === "cancelled" ? outcome.cancellation : void 0 } }));
   });
@@ -13243,7 +13259,8 @@ var DropgateClient = class {
     const directHost = this._directHost();
     this.direct = Object.freeze({
       send: stamped2((o) => isPeerJsCall(o) ? this._directSend(o) : startDirectSend(directHost, o)),
-      receive: stamped2((o) => isPeerJsCall(o) ? this._directReceive(o) : startDirectReceive(directHost, o))
+      receive: stamped2((o) => isPeerJsCall(o) ? this._directReceive(o) : startDirectReceive(directHost, o)),
+      appClosing: () => appClosing(directHost)
     });
     this.links = Object.freeze({
       resolve: stamped2((value, o) => this._resolve(value, o))
@@ -13342,7 +13359,8 @@ var DropgateClient = class {
     if (input.kind === "direct" || input.kind === "direct-link") {
       if (!compat.serverInfo?.capabilities?.p2p?.enabled) return refused2("Direct transfer is disabled on this server.");
       if (input.kind === "direct-link") return { valid: true, type: "p2p", target: `/p2p#${input.secret}`, transport };
-      return { valid: true, type: "p2p", target: `/p2p/${encodeURIComponent(input.locator)}`, transport };
+      if (input.linkHost !== void 0) return { valid: true, type: "p2p", target: `/p2p/${encodeURIComponent(input.locator)}`, transport };
+      return { valid: true, type: "p2p", target: `/p2p#${input.locator}`, transport };
     }
     const path = input.kind === "bundle" ? `/b/${input.locator}` : `/${input.locator}`;
     return { valid: true, type: input.kind, target: input.secret ? `${path}#${input.secret}` : path, transport };
@@ -14432,6 +14450,7 @@ var DropgateClient = class {
       RTCPeerConnection: __privateGet(this, _RTCPeerConnection),
       connect: (o) => this._connect(o),
       requireDirect: (compat) => this._requireCompatible(compat, "dgdtp"),
+      appClosers: /* @__PURE__ */ new Set(),
       credential: async (signal) => {
         const credentials = await OperationCredentials.required(auth, "direct.send", baseUrl, signal);
         return credentials.token();

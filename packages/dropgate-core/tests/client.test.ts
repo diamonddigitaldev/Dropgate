@@ -290,7 +290,7 @@ describe('DropgateClient', () => {
     const server = fakeServer();
     const client = createClient(server.fetchFn);
 
-    expect(await client.links.resolve(' abcd-1234 ')).toEqual({ valid: true, type: 'p2p', target: '/p2p/ABCD-1234', transport });
+    expect(await client.links.resolve(' abcd-1234 ')).toEqual({ valid: true, type: 'p2p', target: '/p2p#ABCD-1234', transport });
     expect(await client.links.resolve(`${FILE_ID.toUpperCase()}#${LINK_SECRET}`))
       .toEqual({ valid: true, type: 'hosted', target: `/${FILE_ID}#${LINK_SECRET}`, transport });
     expect(server.paths()).toEqual(['GET /api/info']);

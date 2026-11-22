@@ -1,6 +1,7 @@
 // Parity: a file sent by direct transfer from the home page reaches a receiver
 // in another browser context byte for byte, whether they type the code into the
-// home page or open the link. Several files sent together arrive as one ZIP.
+// home page (which opens /p2p#<code>, connecting at once) or open the link
+// (/p2p#<secret>, then Connect). Several files sent together arrive as one ZIP.
 //
 // The server offers one ICE server: the tests' own STUN server on this machine
 // (localStun), so the two peers only use this machine's own addresses, and
@@ -21,7 +22,10 @@
 import os from 'node:os';
 import { holdsPlaintext, madeUpFile, readZip, summary } from '../helpers/files.mjs';
 import { expect, savedName, test } from '../helpers/test.mjs';
-import { describePeers, download, openReceivePage, peerConnections, receiverReaches, recordPeerConnections, sendDirectFromHomePage } from '../helpers/webui.mjs';
+import {
+    DIRECT_LINK, describePeers, download, openDirectLink, openReceivePage, peerConnections, receiverReaches, recordPeerConnections, sendDirectFromHomePage,
+    typeTheCode,
+} from '../helpers/webui.mjs';
 
 test.use({ localStun: true });
 
@@ -131,20 +135,6 @@ const takeDownload = (receiver, sender) => explained('What the peers did', recei
     return got;
 });
 
-/**
- * As the receiver, open the home page, type the code and press Go, and wait
- * until the page is at the code's receive page, whether or not Playwright
- * hears either navigation (openReceivePage(), receiverReaches()). Go's click
- * doesn't wait for the navigation it starts, as a click otherwise does: one
- * Playwright never hears commit would hold it until the test runs out.
- */
-async function typeTheCode(receiver, server, code, { loseNavigation } = {}) {
-    await openReceivePage(receiver, new URL('/', server.baseUrl).href, { loseNavigation, what: 'the home page' });
-    await receiver.locator('#codeInput').fill(code);
-    await receiver.locator('#codeGo').click({ noWaitAfter: true });
-    await receiverReaches(receiver, new URL(`/p2p/${code}`, server.baseUrl).href);
-}
-
 /** On the receive page: check what's offered, take it, and compare it with what was sent. */
 async function receiveAndCompare(receiver, sender, file) {
     await expectConnected(receiver, sender);
@@ -163,7 +153,7 @@ test('a file sent by direct transfer arrives intact when the receiver types the 
     const sent = await sendDirectFromHomePage(page, [file]);
 
     const receiver = await otherContext.newPage();
-    await typeTheCode(receiver, server, sent.code);
+    await typeTheCode(receiver, server.baseUrl, sent.code);
 
     await receiveAndCompare(receiver, page, file);
     await expectOnlyLocalCandidates(stun, browserName, page, receiver);
@@ -176,10 +166,11 @@ test('a file sent by direct transfer arrives intact when the receiver opens the 
     const file = madeUpFile('Sketches (linked) é.bin', SIZE, 31);
 
     const sent = await sendDirectFromHomePage(page, [file]);
-    expect(new URL(sent.link).pathname).toBe(`/p2p/${sent.code}`);
+    expect(sent.link).toMatch(DIRECT_LINK);
+    expect(sent.link, 'the link holds nothing of the code').not.toContain(sent.code.replace('-', ''));
 
     const receiver = await otherContext.newPage();
-    await openReceivePage(receiver, sent.link);
+    await openDirectLink(receiver, sent.link);
 
     await receiveAndCompare(receiver, page, file);
     await expectOnlyLocalCandidates(stun, browserName, page, receiver);
@@ -197,14 +188,18 @@ test("a file sent by direct transfer arrives intact when the receiver opens the 
     const sent = await sendDirectFromHomePage(page, [file]);
 
     const receiver = await otherContext.newPage();
-    await openReceivePage(receiver, sent.link, { loseNavigation: true });
+    await openDirectLink(receiver, sent.link, { loseNavigation: true, connect: false });
+    // Before Connect, which takes the secret out of the address: Playwright hears that change.
     expect(receiver.url(), "where Playwright's frame thinks the receiver is").toBe('about:blank');
+    await receiver.locator('#connect-button').click();
 
     await receiveAndCompare(receiver, page, file);
 });
 
 // The same for a receiver who types the code: Playwright loses the home page's
-// navigation, and then the receive page's, once Go is clicked.
+// navigation, and then the receive page's, once Go is clicked. (It hears the
+// receive page take the code out of its address, at once, so that page's
+// loss shows only in what Playwright waits for.)
 test("a file sent by direct transfer arrives intact when the receiver types the code and Playwright never hears either page's navigation finish", async ({ page, otherContext, browserName, server }) => {
     test.skip(browserName !== 'firefox', 'Only Firefox is seen to lose it, and only its page can be made to');
     const file = madeUpFile('Sketches (lost, typed) é.bin', SIZE, 36);
@@ -212,8 +207,11 @@ test("a file sent by direct transfer arrives intact when the receiver types the 
     const sent = await sendDirectFromHomePage(page, [file]);
 
     const receiver = await otherContext.newPage();
-    await typeTheCode(receiver, server, sent.code, { loseNavigation: true });
+    await openReceivePage(receiver, new URL('/', server.baseUrl).href, { loseNavigation: true, what: 'the home page' });
     expect(receiver.url(), "where Playwright's frame thinks the receiver is").toBe('about:blank');
+    await receiver.locator('#codeInput').fill(sent.code);
+    await receiver.locator('#codeGo').click({ noWaitAfter: true });
+    await receiverReaches(receiver, new URL('/p2p', server.baseUrl).href);
 
     await receiveAndCompare(receiver, page, file);
 });
@@ -229,9 +227,9 @@ test('several files sent together by direct transfer arrive intact as one ZIP, a
     const sent = await sendDirectFromHomePage(page, files);
 
     const receiver = await otherContext.newPage();
-    await openReceivePage(receiver, sent.link);
+    await openDirectLink(receiver, sent.link);
     await expectConnected(receiver, page);
-    await expect(receiver.locator('#file-name')).toHaveText(String(files.length));
+    await expect(receiver.locator('#file-name')).toHaveText(`${files.length} files`);
 
     const zip = await takeDownload(receiver, page);
     expect(zip.name).toMatch(/^dropgate-bundle-\d{8}-\d{6}\.zip$/);

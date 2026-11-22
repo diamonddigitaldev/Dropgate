@@ -106,10 +106,22 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
   - Some networks/NATs need a **TURN** server to relay traffic (currently not supported).
 - **The server stops at startup over `P2P_STUN_SERVERS`, `P2P_LOCATOR_LETTERS` or `P2P_MAX_CODES_PER_IP`:** its log says which, and what it takes. In 4.0, `P2P_STUN_SERVERS` set to nothing is an error, where 3.x quietly used Cloudflare's STUN server: remove it for Cloudflare's, or set it to `none` for no STUN server. A `turn:` address is refused too. An app template that passes the setting through empty needs the same change.
 - **`PEERJS_DEBUG` was removed in Dropgate 4:** the server warns that it's ignored, and starts. Remove it to quiet the warning.
+- **A reverse proxy has to pass WebSocket upgrades to `/api/v4/rendezvous`**, where the two devices find each other. Without that, a send fails as it starts and a receiver's Connect fails, both saying the server couldn't be reached.
 
-**"The sender cancelled the transfer" (or "The receiver cancelled…") when nobody did**
-- Currently, if the connection drops mid-transfer for any reason (network change, Wi-Fi drop, a closed or sleeping device), it's reported as the other side cancelling. See [DGDTP §15.4](./technical/DGDTP.md#154-connection-loss).
-- Interrupted transfers can't be resumed. Start the transfer again, ideally on a more stable connection.
+**The receive page, `/p2p`**
+- **"Ready to Connect", and nothing happens:** a link opens on Connect, by design. Until it's clicked, the page asks nothing of the server or anyone else, so a link previewed by a chat app or opened by mistake doesn't tell the sender anyone came. Click Connect.
+- **The address bar says just `/p2p`:** the page takes the link's secret out of the address once Connect is clicked, and a typed code (which the home page opens as `/p2p#ABCD-1234`) as soon as the page opens. Both stay in the page's memory only. A reload after that shows the code box: open the link again, or ask the sender for the code their page shows now (a code is spent once tried).
+- **"No transfer has that code or link. It may have ended, or the code was used.":** the sender's page was closed or the transfer ended, or the code was typed once already. Ask the sender to send again. A link's page offers Retry, for when the sender's page was only reloading.
+- **"This browser can't save the download here.":** the page couldn't load what saves the download (StreamSaver), or the browser refused it, such as in some private windows. Nothing was accepted: a link's page never connected, and a code wasn't spent. Try another browser, or a normal window. If it comes at Download, the sender's page waits for another receiver, and the link still works.
+- **"Secure Connection Required":** direct transfers need the page over HTTPS (or `localhost`).
+- **"Someone entered the wrong code. Here's a new one." on the sending page:** a code takes one try. The receiver who typed it wrong sees the transfer fail; give them the new code. **"No short code is free right now…":** every code the server can hand out is held by other senders. The link works; a code shows by itself once one frees.
+
+**How a transfer ended**
+- **"The sender cancelled the transfer." / "The receiver cancelled the transfer." / "The receiver declined the transfer.":** the other person clicked Cancel or Decline.
+- **"The sender closed Dropgate before the transfer finished." (or the receiver):** their page was closed or left mid-transfer. It's best effort: Firefox can close a page before that message has gone, so the other side reads "The connection was lost, so the transfer couldn't continue." instead. Either way the transfer has ended on both sides.
+- **"The connection was lost, so the transfer couldn't continue.":** the connection dropped (a network change, a sleeping device) or the other page closed. Interrupted transfers can't be resumed yet: start again, ideally on a steadier connection.
+- **"Transfer Paused" with "The sender paused the transfer." (or the receiver):** only the side that paused can resume. Either side can pause too; the transfer runs once neither holds it.
+- **The receiver's page said "Handed to your browser. Check your downloads.":** the page has handed the file (several as one ZIP) to the browser's own downloads, which finish writing it. If it isn't there, look at the browser's downloads list.
 
 ## 6) Rate limiting
 

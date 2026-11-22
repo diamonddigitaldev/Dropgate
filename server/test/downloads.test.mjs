@@ -124,6 +124,57 @@ describe('the download page', () => {
     });
 });
 
+describe("a direct transfer's receive page", () => {
+    let server;
+    before(async () => { server = await startServer({ env: BASE }); });
+    after(() => server?.stop());
+
+    const page = async (route) => {
+        const res = await fetch(server.baseUrl + route, { redirect: 'manual' });
+        const html = await res.text();
+        const which = html.includes('src="/js/download-p2p.js"') ? 'receive'
+            : html.includes('File Not Found') ? '404'
+                : html.includes('Link From an Older Version') ? 'older version' : 'something else';
+        return { status: res.status, which, html };
+    };
+
+    test('/p2p is the same page whatever comes with it, and holds nothing of a transfer', async () => {
+        const plain = await page('/p2p');
+        assert.deepEqual({ status: plain.status, which: plain.which }, { status: 200, which: 'receive' });
+        for (const route of ['/p2p/', '/p2p?x=WXYZ-9876']) {
+            const other = await page(route);
+            assert.deepEqual({ status: other.status, which: other.which }, { status: 200, which: 'receive' }, route);
+            // Only the script nonce differs from one answer to the next: nothing of the query is in the page.
+            const nonceless = (html) => html.replace(/nonce="[^"]*"/g, 'nonce=""');
+            assert.equal(nonceless(other.html), nonceless(plain.html), route);
+        }
+        assert.ok(!/data-code=/.test(plain.html), 'no code attribute');
+    });
+
+    test("a Dropgate 3 direct transfer's link, /p2p/<code>, is 410, with a page saying it's from an older version", async () => {
+        for (const route of ['/p2p/ABCD-1234', '/p2p/abcd1234', '/p2p/anything']) {
+            const { status, which } = await page(route);
+            assert.deepEqual({ status, which }, { status: 410, which: 'older version' }, route);
+        }
+    });
+
+    test('with direct transfer off, /p2p is the 404 page, and a Dropgate 3 link is still the older-version page', async () => {
+        const off = await startServer({ env: { ...BASE, ENABLE_P2P: 'false' } });
+        try {
+            const res = await fetch(`${off.baseUrl}/p2p`);
+            assert.equal(res.status, 404);
+            assert.match(await res.text(), /File Not Found/);
+            const old = await fetch(`${off.baseUrl}/p2p/ABCD-1234`);
+            assert.equal(old.status, 410);
+            const html = await old.text();
+            assert.match(html, /Link From an Older Version/);
+            assert.doesNotMatch(html, /File Not Found/);
+        } finally {
+            await off.stop();
+        }
+    });
+});
+
 test('an expired upload is gone from every route at once, open leases included, and its bytes go at the next sweep', async (t) => {
     const server = await startServer({ env: BASE, clock: true });
     t.after(server.stop);

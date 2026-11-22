@@ -1,3 +1,5 @@
+import { isCodeLike, normalizeCode } from '../dgdtp/codes.js';
+
 /**
  * What someone typed or pasted to open a share, read without the network.
  */
@@ -37,8 +39,8 @@ export function parseShareInput(value: string): ShareInput | null {
   if (!/^https?:\/\//i.test(before)) {
     const typed = before.replace(/\s+/g, '');
     if (UUID_RE.test(typed)) return { kind: 'hosted', locator: typed.toLowerCase(), ...(secret ? { secret } : {}) };
-    const code = typed.toUpperCase();
-    return CODE_RE.test(code) ? { kind: 'direct', locator: code } : null;
+    // A code as anyone might type it: either case, the dash left out.
+    return isCodeLike(typed) ? { kind: 'direct', locator: normalizeCode(typed) } : null;
   }
 
   let url: URL;

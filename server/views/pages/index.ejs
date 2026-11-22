@@ -10,7 +10,7 @@
     <script src="/js/tooltips.js" defer></script>
     <script src="/vendor/bootstrap/bootstrap.min.js" defer></script>
     <script src="/vendor/qr-code-styling/qr-code-styling.js" defer></script>
-    <script type="module" src="/js/page-common.js"></script>
+    <script type="module" src="/js/server-version.js"></script>
     <script type="module" src="/js/webui-main.js"></script>
 </head>
 
@@ -142,10 +142,11 @@
         <div id="p2pWaitCard" class="card shadow-sm mt-4 border border-primary" hidden>
           <div class="card-body p-4 text-center">
             <div class="text-primary mb-2"><span class="material-icons-round">wifi_tethering</span></div>
-            <h5 class="mb-2">Awaiting connection…</h5>
-            <div class="text-body-secondary">Provide your recipient with the code below:</div>
+            <h5 class="mb-2" id="p2pWaitTitle">Awaiting connection…</h5>
+            <div class="text-body-secondary" id="p2pWaitSub">Provide your recipient with the code below:</div>
 
-            <div class="code-box my-3" id="p2pCode">ABCD-1234</div>
+            <div class="code-box my-3" id="p2pCode"></div>
+            <div class="small text-body-secondary mb-3" id="p2pCodeNote" role="status" hidden></div>
 
             <div class="small text-body-secondary mb-2" id="p2pLinkLabel">or share this link:</div>
             <div class="input-group">

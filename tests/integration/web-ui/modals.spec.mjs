@@ -136,6 +136,15 @@ test.describe('a direct transfer', () => {
         await expect(page.locator('#p2pWaitCard')).toBeVisible();
         await expect(page.locator('#p2pCode')).toHaveText(code);
     });
+
+    test('without a modal, Escape leaves a direct send waiting for its receiver: only Cancel ends it', async ({ page }) => {
+        const { code } = await sendDirectFromHomePage(page, [madeUpFile('Still waiting é.bin', 2_000, 86)]);
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#p2pWaitCard')).toBeVisible();
+        await expect(page.locator('#p2pCode')).toHaveText(code);
+        await page.locator('#cancelP2P').click();
+        await expect(page.locator('#codeCard')).toBeVisible();
+    });
 });
 
 test('without a modal, Escape leaves an upload under way on its card', async ({ page }) => {

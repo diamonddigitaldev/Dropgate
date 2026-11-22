@@ -10,7 +10,7 @@ import { expectContrast, expectFocusRings, settled } from '../helpers/contrast.m
 import { madeUpFile } from '../helpers/files.mjs';
 import { secretsOf } from '../helpers/privacy.mjs';
 import { expect, test } from '../helpers/test.mjs';
-import { download, openLink, openReceivePage, sendDirectFromHomePage, uploadFromHomePage } from '../helpers/webui.mjs';
+import { download, openDirectLink, openLink, sendDirectFromHomePage, uploadFromHomePage } from '../helpers/webui.mjs';
 
 /** Open the home page, once it has the server's settings. */
 async function openHome(page) {
@@ -167,7 +167,9 @@ test.describe('direct transfer', () => {
         await expectContrast(page, "the sender's card");
 
         const receiver = await otherContext.newPage();
-        await openReceivePage(receiver, link);
+        await openDirectLink(receiver, link, { connect: false });
+        await expectContrast(receiver, 'the receive page, ready to connect');
+        await receiver.locator('#connect-button').click();
         await expect(receiver.locator('#download-button')).toBeVisible({ timeout: 30_000 });
         await receiver.locator('#p2p-toggle-file-list').click();
         await expect(receiver.locator('#p2p-file-list')).toBeVisible();
@@ -206,7 +208,7 @@ test('the home page with end-to-end encryption, and the download page for one fi
     await expectContrast(page, 'the download page, for a wrong link');
 });
 
-test("the not-found page, a Dropgate 3 link, the older-version page, and a direct transfer code that isn't there", async ({ page }) => {
+test("the not-found page, a Dropgate 3 link, the older-version page, and the receive page asking for a code and for a code that isn't there", async ({ page }) => {
     const id = '00000000-0000-4000-8000-000000000000';
     await page.goto(`/${id}`);
     await expect(page.locator('#status-title')).toHaveText(/file not found/i);
@@ -221,6 +223,19 @@ test("the not-found page, a Dropgate 3 link, the older-version page, and a direc
     await expectContrast(page, 'the older-version page');
 
     await page.goto('/p2p/ABCD-1234');
-    await expect(page.locator('#title')).not.toHaveText(/connecting/i, { timeout: 30_000 });
-    await expectContrast(page, "the receive page, for a code that isn't there");
+    await expect(page.locator('#status-title')).toHaveText(/older version/i);
+    await expectContrast(page, "the older-version page, for a Dropgate 3 direct transfer's link");
+
+    // A browser with no RTCPeerConnection (Playwright's WebKit on Windows) is told it can't, instead of being asked for a code.
+    await page.goto('/p2p');
+    const canConnect = await page.evaluate(() => typeof window.RTCPeerConnection === 'function');
+    await expect(canConnect ? page.locator('#code-card') : page.locator('#title')).toBeVisible();
+    if (!canConnect) await expect(page.locator('#title')).toHaveText("Browser Can't Connect");
+    await expectContrast(page, canConnect ? 'the receive page, asking for a code' : "the receive page, in a browser that can't connect");
+
+    if (canConnect) {
+        await openLink(page, '/p2p#ABCD-1234');
+        await expect(page.locator('#title')).not.toHaveText(/connecting/i, { timeout: 30_000 });
+        await expectContrast(page, "the receive page, for a code that isn't there");
+    }
 });
