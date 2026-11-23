@@ -115,6 +115,10 @@ export const test = base.extend({
     // Set it with test.use({ serverClock: true }).
     serverClock: [false, { option: true }],
 
+    // Let the test ask what the server's rendezvous holds, with server.rendezvousHeld().
+    // Set it with test.use({ serverHeld: true }).
+    serverHeld: [false, { option: true }],
+
     // Have the server offer the tests' own STUN server, on this machine, as its only
     // ICE server. Set it with test.use({ localStun: true }), or to startStunServer()'s options.
     localStun: [false, { option: true }],
@@ -157,10 +161,11 @@ export const test = base.extend({
         await use(new Secrets());
     },
 
-    server: async ({ serverEnv, serverClock, stun, secrets }, use, testInfo) => {
+    server: async ({ serverEnv, serverClock, serverHeld, stun, secrets }, use, testInfo) => {
         const server = await startServer({
             env: { ENABLE_UPLOAD: 'true', P2P_STUN_SERVERS: stun?.url ?? NO_ICE_SERVERS, ...serverEnv },
             clock: serverClock,
+            held: serverHeld,
             requests: true,
         });
         try {

@@ -120,9 +120,9 @@ test('the transfer window is hidden, sandboxed, isolated and without Node, in it
     assert.match(host, /win\.loadFile\(path\.join\(__dirname, 'transfer\.html'\)\);/);
 });
 
-test('the transfer page allows nothing but its own scripts and requests to servers, and has no Node and no bridge but window.engine', () => {
+test('the transfer page allows nothing but its own scripts, requests to servers and WebSockets to them, and has no Node and no bridge but window.engine', () => {
     const [, csp] = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)">/) ?? [];
-    assert.equal(csp, "default-src 'none'; script-src 'self'; connect-src http: https:");
+    assert.equal(csp, "default-src 'none'; script-src 'self'; connect-src http: https: ws: wss:");
     assert.deepEqual([...html.matchAll(/<script[^>]*>/g)].map((m) => m[0]), ['<script type="module" src="transfer.js">']);
     assert.match(page, /^import \{ DropgateClient, DropgateError, lifetime \} from '\.\/dropgate-core\.js';/);
     assert.match(page, /const engine = window\.engine;/);

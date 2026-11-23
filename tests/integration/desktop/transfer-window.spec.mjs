@@ -49,9 +49,9 @@ test('the transfer window is hidden, sandboxed and isolated, in a session that k
     expect(await transfer.evaluate(() => [typeof require, typeof process, typeof window.kitAPI, typeof window.electronAPI, typeof window.engine]),
         'require, process, kitAPI, electronAPI and engine in its page').toEqual(['undefined', 'undefined', 'undefined', 'undefined', 'object']);
 
-    // Its CSP: nothing but its own scripts, and requests to servers over HTTP(S).
+    // Its CSP: nothing but its own scripts, requests to servers over HTTP(S), and WebSockets to a server's rendezvous.
     await expect(transfer.locator('meta[http-equiv="Content-Security-Policy"]'))
-        .toHaveAttribute('content', "default-src 'none'; script-src 'self'; connect-src http: https:");
+        .toHaveAttribute('content', "default-src 'none'; script-src 'self'; connect-src http: https: ws: wss:");
     // Enforced: an inline script added to the page doesn't run, and nothing loads but from a server.
     // (Not eval: the test's own evaluation is allowed it, whatever the page's CSP.)
     expect(await transfer.evaluate(() => {
