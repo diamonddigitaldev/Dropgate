@@ -36,13 +36,11 @@ export interface UploadCapabilities {
 }
 
 /**
- * Server P2P (direct transfer) capabilities.
+ * The server's direct transfer capabilities: `/api/info`'s `capabilities.p2p`.
  */
-export interface P2PCapabilities {
-  /** Whether P2P transfers are enabled on the server. */
+export interface DirectCapabilities {
+  /** Whether direct transfers are on on the server. */
   enabled: boolean;
-  /** Path to the PeerJS signaling server: Dropgate 3's, which a Dropgate 4 server doesn't give. */
-  peerjsPath?: string;
   /** The STUN servers it offers for WebRTC connectivity (none when its operator turned STUN off). */
   iceServers?: RTCIceServer[];
   /**
@@ -72,8 +70,8 @@ export interface WebUICapabilities {
 export interface ServerCapabilities {
   /** Hosted upload capabilities. */
   upload?: UploadCapabilities;
-  /** P2P transfer capabilities. */
-  p2p?: P2PCapabilities;
+  /** Direct transfer capabilities. */
+  p2p?: DirectCapabilities;
   /** Web UI capabilities. */
   webUI?: WebUICapabilities;
 }
@@ -97,7 +95,7 @@ export interface ServerInfo {
 
 /**
  * Base progress event with common fields for all transfer operations.
- * Provides a consistent interface for upload, download, and P2P progress tracking.
+ * Provides a consistent interface for upload, download, and direct transfer progress tracking.
  */
 export interface BaseProgressEvent {
   /** Completion percentage (0-100). */

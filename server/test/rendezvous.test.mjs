@@ -620,17 +620,17 @@ describe('the rendezvous upgrade', () => {
         await heldBecomes(server, NOTHING_HELD);
     });
 
-    test('is at its one path only: any other is refused, and PeerJS keeps its own', async (t) => {
+    test("is at its one path only: any other is refused, and Dropgate 3's PeerJS socket is told to update", async (t) => {
         const server = await startServer({ held: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
         t.after(server.stop);
-        for (const path of ['/api/v4/rendezvous/', '/api/v4/rendezvous/abc', '/api/v4/rendezvousx', '/api/v4', '/', '/p2p']) {
+        for (const path of ['/api/v4/rendezvous/', '/api/v4/rendezvous/abc', '/api/v4/rendezvousx', '/api/v4', '/', '/p2p', '/peerjsx']) {
             assert.notEqual(await upgradeRefused(server, { path }), null, path);
         }
         assert.equal(await upgradeRefused(server, { path: '/api/v4/rendezvous?x=1' }), null, 'a query is ignored');
-        // PeerJS's signalling socket still opens, and still says OPEN.
-        const peer = await connect(server, { path: '/peerjs/peerjs?key=peerjs&id=zq7PEER&token=zq7TOKEN' });
-        assert.equal(JSON.parse((await peer.next()).toString()).type, 'OPEN');
-        peer.close();
+        assert.deepEqual(await upgradeRefused(server, { path: '/peerjs/peerjs?key=peerjs&id=zq7PEER&token=zq7TOKEN' }), {
+            status: 410, body: JSON.stringify({ code: 'VERSION_UNSUPPORTED', error: 'This server runs Dropgate 4. Update the app to use it.' }),
+        });
+        await heldBecomes(server, NOTHING_HELD);
     });
 
     test('with direct transfer off, is answered as any other request: there\'s nothing there', async (t) => {

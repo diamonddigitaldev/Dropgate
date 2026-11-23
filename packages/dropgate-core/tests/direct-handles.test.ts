@@ -735,26 +735,52 @@ describe('links.resolve() for direct links', () => {
   });
 });
 
-describe("Dropgate 3's PeerJS calls, until they're removed", () => {
+describe("Dropgate 3's direct transfers: none of its codes, links or calls works", () => {
   let server: Server;
   beforeAll(async () => {
-    server = (await startServer({ env: { RATE_LIMIT_MAX_REQUESTS: '0', P2P_STUN_SERVERS: 'none' } })) as Server;
+    server = (await startServer({ env: { RATE_LIMIT_MAX_REQUESTS: '0', P2P_STUN_SERVERS: 'none' }, requests: true })) as Server;
   }, 30_000);
   afterAll(async () => { await server?.stop(); });
 
-  it('a call passing `Peer` still goes to the PeerJS session, not a handle', async () => {
-    const made: string[] = [];
-    class FakePeer {
-      constructor(id: string) {
-        made.push(id);
-        throw new Error('PeerJS stands in here.');
+  it("a call made Dropgate 3's way, passing a Peer class, is refused INVALID_ARGUMENT, saying what changed, with nothing made or sent", async () => {
+    const made: unknown[] = [];
+    class V3Peer {
+      constructor(...args: unknown[]) {
+        made.push(args);
       }
     }
-    const client = new DropgateClient({ server: server.baseUrl });
-    const sending = client.direct.send({ file: new File([new Uint8Array(3)], 'a.bin'), Peer: FakePeer as never } as never);
-    await expect(sending).rejects.toBeTruthy();
-    expect(made.length).toBeGreaterThan(0);
+    const client = clientOf(server);
+    const before = server.requests().length;
+    const words = "Dropgate 4's direct transfers take no Peer option: use the handle that send() or receive() gives.";
+    for (const call of [
+      () => client.direct.send({ file: memoryFile('a.bin', patterned(3, 1)), Peer: V3Peer, onCode: () => {} } as never),
+      () => client.direct.send({ files: memoryFile('a.bin', patterned(3, 1)), Peer: V3Peer } as never),
+      () => client.direct.receive({ code: 'ABCD-1234', Peer: V3Peer, onMeta: () => {} } as never),
+      () => client.direct.receive({ code: 'ABCD-1234', Peer: undefined } as never),
+    ]) {
+      await expect(call()).rejects.toMatchObject({ code: 'INVALID_ARGUMENT', message: words, transport: { secure: true } });
+    }
+    expect(made, 'Peer made').toEqual([]);
     expect(client.operations.list()).toEqual([]);
+    expect(server.requests().slice(before), 'what reached the server').toEqual([]);
+  });
+
+  it("a Dropgate 3 sender's code finds nothing: Dropgate 4's rendezvous knows only its own, so the receive fails NOT_FOUND", async () => {
+    // A Dropgate 3 code has the same look as a Dropgate 4 one: four letters, four digits.
+    const receive = await clientOf(server).direct.receive({ code: 'WXYZ-4821' });
+    const outcome = await receive.result;
+    expect(outcome.status === 'failed' && [outcome.error.code, outcome.error.message])
+      .toEqual(['NOT_FOUND', 'No transfer has that code or link. It may have ended, or the code was used.']);
+  });
+
+  it("a Dropgate 3 sender's link (/p2p/<code>) isn't a direct link: receive() refuses it before anything is sent, and links.resolve() gives the older-version page's path", async () => {
+    const client = clientOf(server);
+    const before = server.requests().length;
+    for (const link of [`${server.baseUrl}/p2p/WXYZ-4821`, `${server.baseUrl}/p2p/WXYZ-4821#key`]) {
+      await expect(client.direct.receive({ link }), link).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    }
+    expect(server.requests().slice(before), 'what reached the server').toEqual([]);
+    expect(await client.links.resolve(`${server.baseUrl}/p2p/WXYZ-4821`)).toMatchObject({ valid: true, type: 'p2p', target: '/p2p/WXYZ-4821' });
   });
 });
 

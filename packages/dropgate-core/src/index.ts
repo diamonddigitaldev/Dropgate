@@ -35,7 +35,7 @@ export type { StreamingZipWriter } from './zip/stream-zip.js';
 // Types
 export type {
   UploadCapabilities,
-  P2PCapabilities,
+  DirectCapabilities,
   WebUICapabilities,
   ServerCapabilities,
   ServerInfo,
@@ -92,32 +92,3 @@ export type {
   DirectAcceptOptions,
   DirectReceiveHandle,
 } from './types.js';
-
-// Dropgate 3's PeerJS direct transfer: its types, for the calls that still pass `Peer`, until it's removed
-export type {
-  // State machine types
-  P2PSendState,
-  P2PReceiveState,
-  // PeerJS types (needed by consumers who provide Peer constructor)
-  PeerConstructor,
-  PeerInstance,
-  PeerInstanceEvents,
-  PeerOptions,
-  DataConnection,
-  DataConnectionEvents,
-  // P2P event types
-  P2PStatusEvent,
-  P2PSendProgressEvent,
-  P2PReceiveProgressEvent,
-  P2PMetadataEvent,
-  P2PReceiveCompleteEvent,
-  P2PConnectionHealthEvent,
-  P2PResumeInfo,
-  P2PCancellationEvent,
-  // Client P2P options and sessions
-  P2PFile,
-  P2PSendFileOptions,
-  P2PReceiveFileOptions,
-  P2PSendSession,
-  P2PReceiveSession,
-} from './p2p/index.js';

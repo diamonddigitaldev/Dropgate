@@ -68,8 +68,6 @@ const express = require('express');
 const { default: rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const helmet = require('helmet').default;
 const cors = require('cors');
-const { ExpressPeerServer } = require('peer');
-const { WebSocketServer } = require('ws');
 const { RENDEZVOUS_PATH, createRendezvous } = require('./rendezvous');
 const { create: contentDisposition } = require('content-disposition');
 const { QuickDB, MemoryDriver, SqliteDriver } = require('quick.db');
@@ -91,8 +89,11 @@ log('info', `Upload Protocol Enabled: ${enableUpload}`);
 log('info', `Peer-to-Peer (P2P) Enabled: ${enableP2P}`);
 log('info', `Web UI Enabled: ${enableWebUI}`);
 
+// Where Dropgate 3 mounted PeerJS, its direct transfers' signalling. Dropgate 4
+// answers anything there with "update" (fromDropgate3, below).
+const PEERJS_PATH = '/peerjs';
+
 // ===== P2P (WebRTC) configuration exposed to clients via /api/info =====
-const PEERJS_MOUNT_PATH = '/peerjs';
 
 const parseList = (raw) => {
     if (!raw) return [];
@@ -208,7 +209,8 @@ if (enableP2P && process.env.P2P_MAX_CODES_PER_IP !== undefined) {
     }
 }
 
-// PeerJS's own debug output was never on in Dropgate's builds, and PeerJS goes in Dropgate 4.
+// Dropgate 3's setting for PeerJS's debug output, which was never on in its
+// builds. Dropgate 4 has no PeerJS, so it's ignored, with one warning.
 if (process.env.PEERJS_DEBUG !== undefined) {
     log('warn', 'PEERJS_DEBUG was removed in Dropgate 4 and is ignored.');
 }
@@ -230,8 +232,8 @@ if (enableP2P) {
 }
 
 const app = express();
-// We create the HTTP server manually so we can attach a PeerServer
-// to the same port/path (fixed mount: /peerjs).
+// The HTTP server is made here so the rendezvous can take its WebSocket
+// upgrades on the same port.
 const server = http.createServer(app);
 
 // Everything the server keeps is in data/, one folder to map and back up. Its
@@ -483,31 +485,8 @@ app.disable('x-powered-by');
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 
-// The API answers any origin: the desktop app and other integrators call it
-// from their own, and no cookie is ever set or sent, so there's nothing for
-// another site to borrow. It allows the headers Dropgate's requests send, and
-// lets a script read the ones its answers carry. Pages get no CORS headers.
-const API_CORS = {
-    allowedHeaders: ['Content-Type', 'Content-Digest', 'Range', 'If-Range', 'Authorization', 'Dropgate-Upload', 'Dropgate-Lease', 'Dropgate-Manage-Token'],
-    exposedHeaders: ['ETag', 'Content-Range', 'Accept-Ranges', 'Retry-After', 'Content-Length'],
-};
-app.use('/api', cors(API_CORS));
-
-// Dropgate 3's API paths. A Dropgate 3 client stops before them, at /api/info,
-// which says this server speaks version 4; anything that asks anyway is told
-// to update, whatever it sent, before any body is read.
-const fromDropgate3 = (_req, res) => {
-    res.set('Cache-Control', 'no-store');
-    res.status(410).json({ code: 'VERSION_UNSUPPORTED', error: 'This server runs Dropgate 4. Update the app to use it.' });
-};
-app.use('/upload', cors(API_CORS));
-app.use('/upload', fromDropgate3);
-app.use('/api/file', fromDropgate3);
-app.use('/api/bundle', fromDropgate3);
-// An upload's start carries its sealed file list, up to 1 MiB before base64url.
-const jsonBody = express.json({ limit: '1mb' });
-const uploadStartBody = express.json({ limit: '2mb' });
-app.use((req, res, next) => (req.path === '/api/v4/uploads' ? uploadStartBody : jsonBody)(req, res, next));
+// Every answer's security headers come first, so the ones given before any
+// route below (Dropgate 3's paths) carry them too.
 app.use((req, res, next) => {
     res.locals.nonce = crypto.randomBytes(16).toString('base64');
     next();
@@ -547,6 +526,37 @@ app.use((req, res, next) => {
     next();
 });
 
+// The API answers any origin: the desktop app and other integrators call it
+// from their own, and no cookie is ever set or sent, so there's nothing for
+// another site to borrow. It allows the headers Dropgate's requests send, and
+// lets a script read the ones its answers carry. Pages get no CORS headers.
+const API_CORS = {
+    allowedHeaders: ['Content-Type', 'Content-Digest', 'Range', 'If-Range', 'Authorization', 'Dropgate-Upload', 'Dropgate-Lease', 'Dropgate-Manage-Token'],
+    exposedHeaders: ['ETag', 'Content-Range', 'Accept-Ranges', 'Retry-After', 'Content-Length'],
+};
+app.use('/api', cors(API_CORS));
+
+// Dropgate 3's API paths. A Dropgate 3 client stops before them, at /api/info,
+// which says this server speaks version 4; anything that asks anyway is told
+// to update, whatever it sent, before any body is read.
+const fromDropgate3 = (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.status(410).json({ code: 'VERSION_UNSUPPORTED', error: 'This server runs Dropgate 4. Update the app to use it.' });
+};
+app.use('/upload', cors(API_CORS));
+app.use('/upload', fromDropgate3);
+// Dropgate 3's direct transfers signalled through PeerJS here. Dropgate 4 has
+// no PeerJS: its rendezvous is its own (rendezvous.js). A WebSocket opened here
+// is told the same, below.
+app.use(PEERJS_PATH, cors(API_CORS));
+app.use(PEERJS_PATH, fromDropgate3);
+app.use('/api/file', fromDropgate3);
+app.use('/api/bundle', fromDropgate3);
+// An upload's start carries its sealed file list, up to 1 MiB before base64url.
+const jsonBody = express.json({ limit: '1mb' });
+const uploadStartBody = express.json({ limit: '2mb' });
+app.use((req, res, next) => (req.path === '/api/v4/uploads' ? uploadStartBody : jsonBody)(req, res, next));
+
 // Static assets (after Helmet so headers apply)
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -574,7 +584,6 @@ app.get('/vendor/streamsaver/sw.js', serveVendorFile('streamsaver/sw.js', 'appli
 // would have the browser save that page as the file, marked complete, so the
 // connection is dropped, and the browser marks the download failed.
 app.use('/vendor/streamsaver/', (req) => req.socket.destroy());
-app.get('/vendor/peerjs/peerjs.min.js', serveVendorFile('peerjs/dist/peerjs.min.js', 'application/javascript; charset=utf-8'));
 app.get('/vendor/qr-code-styling/qr-code-styling.js', serveVendorFile('qr-code-styling/lib/qr-code-styling.js', 'application/javascript; charset=utf-8'));
 app.get('/vendor/material-icons/round.css', serveVendorFile('material-icons/iconfont/round.css', 'text/css; charset=utf-8'));
 app.get('/vendor/material-icons/material-icons-round.woff2', serveVendorFile('material-icons/iconfont/material-icons-round.woff2', 'font/woff2'));
@@ -1497,23 +1506,6 @@ app.use('/api/v4', v4Router);
 app.use('/api/v4', apiNotFound);
 app.use('/api', apiRouter);
 
-// ===== PeerJS signalling server (PeerServer) =====
-// Mounted at a fixed path: /peerjs. Its WebSocket server takes only the
-// upgrades sent to it below, beside the rendezvous's.
-let peerSocketServer = null;
-if (enableP2P) {
-    const peerServer = ExpressPeerServer(server, {
-        path: '/',
-        proxied: true,
-        createWebSocketServer: (options) => {
-            peerSocketServer = new WebSocketServer({ path: options.path, noServer: true });
-            return peerSocketServer;
-        },
-    });
-    app.use(PEERJS_MOUNT_PATH, peerServer);
-    log('info', `PeerServer mounted at ${PEERJS_MOUNT_PATH}`);
-}
-
 // ===== Dropgate 4's rendezvous for direct transfers (rendezvous.js) =====
 const rendezvous = enableP2P ? createRendezvous({
     version: PROTOCOLS.dgdtp,
@@ -1525,8 +1517,10 @@ const rendezvous = enableP2P ? createRendezvous({
 /**
  * Runs the rate limiter on a WebSocket upgrade, as on any request: its address
  * is read with the server's own rule (`trust proxy`), which the raw request
- * Node hands an upgrade doesn't have. Calls `next` with Express's request if
- * it may go on; otherwise it has been answered 429, and the socket closed.
+ * Node hands an upgrade doesn't have. Calls `next` with Express's request and
+ * response if it may go on, the response still able to answer it over the
+ * socket (detach the socket from it to hand it on); otherwise it has been
+ * answered 429, and the socket closed. Once answered, the socket closes.
  */
 const limitUpgrade = (req, socket, next) => {
     const request = Object.assign(Object.create(app.request), {
@@ -1541,8 +1535,7 @@ const limitUpgrade = (req, socket, next) => {
     response.once('finish', () => socket.destroy());
     limiter(request, response, (err) => {
         if (err || socket.destroyed) return socket.destroy();
-        response.detachSocket(socket);
-        next(request);
+        next(request, response);
     });
 };
 
@@ -1556,9 +1549,9 @@ function destroyOnError() {
     this.destroy();
 }
 
-// Each upgrade goes to its own WebSocket server by its path; any other is refused.
-// With direct transfer off there are none, and an upgrade is answered as any
-// other request.
+// The rendezvous takes its own upgrades; Dropgate 3's PeerJS path is told to
+// update; any other is refused. With direct transfer off there's no listener,
+// and an upgrade is answered as any other request (so PeerJS's still gets 410).
 if (enableP2P) server.on('upgrade', (req, socket, head) => {
     socket.on('error', destroyOnError);
     let pathname;
@@ -1571,10 +1564,14 @@ if (enableP2P) server.on('upgrade', (req, socket, head) => {
         // The rendezvous counts a sender's codes by the address the rate limiter
         // counts it by: an IPv4 address, or an IPv6 address's /56 network, which
         // one line is often given whole. It keeps only a keyed hash of it.
-        return limitUpgrade(req, socket, (request) => rendezvous.handleUpgrade(req, socket, head, ipKeyGenerator(request.ip)));
+        return limitUpgrade(req, socket, (request, response) => {
+            response.detachSocket(socket);
+            rendezvous.handleUpgrade(req, socket, head, ipKeyGenerator(request.ip));
+        });
     }
-    if (pathname === PEERJS_MOUNT_PATH || pathname.startsWith(`${PEERJS_MOUNT_PATH}/`)) {
-        return peerSocketServer.handleUpgrade(req, socket, head, (ws) => peerSocketServer.emit('connection', ws, req));
+    if (pathname === PEERJS_PATH || pathname.startsWith(`${PEERJS_PATH}/`)) {
+        // Dropgate 3's PeerJS socket: told to update, as its requests there are.
+        return limitUpgrade(req, socket, fromDropgate3);
     }
     socket.destroy();
 });

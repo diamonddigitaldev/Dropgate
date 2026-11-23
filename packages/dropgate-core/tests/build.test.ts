@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { ROOT, inRepository } from '../scripts/copy-contents.mjs';
 import { NOBLE, buildBanner, licenceOf, noticesFile } from '../scripts/third-party.mjs';
 
@@ -13,6 +13,8 @@ import { NOBLE, buildBanner, licenceOf, noticesFile } from '../scripts/third-par
 // docs/core/crypto.md names another version than the lockfile's.
 // And no build imports werift or node-datachannel, the Node WebRTC libraries
 // core's tests run on: dev dependencies only, which an integrator passes in.
+// And Dropgate 4 has no PeerJS: nothing it ships names it, and no lockfile
+// installs it.
 // CI builds before it tests; locally, run npm run build first.
 
 const PACKAGE = new URL('../package.json', import.meta.url);
@@ -20,7 +22,7 @@ const LOCK = new URL('../package-lock.json', import.meta.url);
 const NOTICES = new URL('../THIRD-PARTY-NOTICES.md', import.meta.url);
 const AUDIT_NOTE = new URL('docs/core/crypto.md', ROOT);
 
-const BUILDS = ['index.js', 'index.cjs', 'index.browser.js', 'p2p/index.js', 'p2p/index.cjs'];
+const BUILDS = ['index.js', 'index.cjs', 'index.browser.js'];
 const COPIES = ['server/public/js/dropgate-core.js', 'client/src/dropgate-core.js'];
 
 /** An import or require of a @noble/ module: static, dynamic or CommonJS. */
@@ -117,6 +119,72 @@ describe("Core's builds carry no Node WebRTC library", () => {
       expect(pkg.peerDependencies?.[library], library).toBeUndefined();
       expect(pkg.optionalDependencies?.[library], library).toBeUndefined();
     }
+  });
+});
+
+/**
+ * PeerJS, by any of its names: `peerjs`, `PeerJS`, its path `/peerjs`. Dropgate 3's
+ * direct transfers signalled through it; Dropgate 4's have their own rendezvous.
+ */
+const NAMES_PEERJS = /peerjs/i;
+
+/** Every file under `dir` (a URL ending in /), as URLs. */
+function filesUnder(dir: URL): URL[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory()
+    ? filesUnder(new URL(`${entry.name}/`, dir))
+    : [new URL(entry.name, dir)]));
+}
+
+/** Where a lockfile installs PeerJS or its server, peer: each path that does. */
+function installsPeerJs(lockfile: { packages?: Record<string, unknown> }): string[] {
+  return Object.keys(lockfile.packages ?? {}).filter((path) => /(^|\/)node_modules\/(peer|peerjs)$/.test(path));
+}
+
+describe('No PeerJS in anything Dropgate ships', () => {
+  // Core's builds as published: the code, its type declarations, and its source maps, which hold its sources.
+  const dist = new URL('../dist/', import.meta.url);
+  const builds = existsSync(dist) ? filesUnder(dist).filter((url) => /\.(js|cjs|d\.ts|d\.cts|map)$/.test(url.pathname)) : [];
+
+  it("core's builds, their types and their source maps never name it", () => {
+    expect(builds.map((url) => url.pathname.split('/dist/')[1]).sort(), 'run npm run build first').toEqual(expect.arrayContaining([...BUILDS, 'index.d.ts', 'index.js.map']));
+    expect(builds.filter((url) => NAMES_PEERJS.test(readFileSync(url, 'utf8'))).map((url) => url.pathname.split('/dist/')[1])).toEqual([]);
+    expect(existsSync(new URL('p2p/', dist)), "a build of core's old ./p2p entry").toBe(false);
+  });
+
+  it('its package has no ./p2p entry and no dependency on it of any kind', () => {
+    expect(Object.keys(pkg.exports)).toEqual(['.']);
+    expect(NAMES_PEERJS.test(JSON.stringify(pkg)), 'package.json names it').toBe(false);
+  });
+
+  describe.runIf(inRepository())('in the repository', () => {
+    it("the web UI's files (its pages, scripts, styles and copy of core) and the desktop app's copy of core never name it", () => {
+      const webUi = ['server/public/', 'server/views/'].flatMap((dir) => filesUnder(new URL(dir, ROOT)))
+        .filter((url) => /\.(js|mjs|css|ejs|html|json)$/.test(url.pathname));
+      expect(webUi.length, "the web UI's files").toBeGreaterThan(20);
+      const files = [...webUi, ...COPIES.map((name) => new URL(name, ROOT))];
+      const naming = files.filter((url) => NAMES_PEERJS.test(readFileSync(url, 'utf8')));
+      expect(naming.map((url) => decodeURIComponent(url.pathname).split('/Dropgate/').pop())).toEqual([]);
+    });
+
+    it('no lockfile installs peerjs or peer: the server, core, the desktop app and the integration suite', () => {
+      for (const name of ['server/package-lock.json', 'packages/dropgate-core/package-lock.json', 'client/package-lock.json', 'tests/integration/package-lock.json']) {
+        const lockfile = JSON.parse(readFileSync(new URL(name, ROOT), 'utf8'));
+        expect(Object.keys(lockfile.packages ?? {}).length, `${name}'s packages`).toBeGreaterThan(1);
+        expect(installsPeerJs(lockfile), name).toEqual([]);
+        for (const [path, entry] of Object.entries(lockfile.packages as Record<string, { dependencies?: object; peerDependencies?: object }>)) {
+          for (const field of ['dependencies', 'peerDependencies'] as const) {
+            expect(Object.keys(entry[field] ?? {}).filter((dep) => dep === 'peer' || dep === 'peerjs'), `${name}: ${path || 'the package'}'s ${field}`).toEqual([]);
+          }
+        }
+      }
+    });
+  });
+
+  it('the checks themselves find each of its names, and a lockfile installing either, at any depth', () => {
+    for (const line of ['import Peer from "peerjs";', '// PeerJS signalling', "fetch('/peerjs/id')", 'PEERJS_DEBUG']) expect(NAMES_PEERJS.test(line), line).toBe(true);
+    for (const line of ['peer: true', 'PeerConnection', 'peer-to-peer']) expect(NAMES_PEERJS.test(line), line).toBe(false);
+    expect(installsPeerJs({ packages: { '': {}, 'node_modules/peer': {}, 'node_modules/a/node_modules/peerjs': {}, 'node_modules/peerjs-js-binarypack': {}, 'node_modules/@x/peer': {} } }))
+      .toEqual(['node_modules/peer', 'node_modules/a/node_modules/peerjs']);
   });
 });
 

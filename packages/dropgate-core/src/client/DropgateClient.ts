@@ -1,5 +1,5 @@
 import { DEFAULT_CHUNK_SIZE } from '../constants.js';
-import { DropgateError, directTransferDisabled, errorFromStatus, toDropgateError, withTransport } from '../errors.js';
+import { DropgateError, errorFromStatus, toDropgateError, withTransport } from '../errors.js';
 import { guardedFetch, insecureTransportNotAllowed, isSecureServerUrl } from '../transport.js';
 import type { Transport } from '../transport.js';
 import { CORE_VERSION, PROTOCOLS, checkProtocol } from '../version.js';
@@ -47,12 +47,6 @@ import type {
   DirectReceiveOptions,
   DirectReceiveHandle,
 } from '../types.js';
-import type {
-  P2PSendFileOptions,
-  P2PReceiveFileOptions,
-  P2PSendSession,
-  P2PReceiveSession,
-} from '../p2p/types.js';
 import { getDefaultFetch, getDefaultBase64 } from '../adapters/defaults.js';
 import { makeAbortSignal, makeWaitSignal, fetchJson, sleep, buildBaseUrl, parseServerUrl } from '../utils/network.js';
 import type { FetchJsonOptions, FetchJsonResult } from '../utils/network.js';
@@ -64,9 +58,6 @@ import { cryptoProvider } from '../crypto/index.js';
 import type { CryptoProvider } from '../crypto/index.js';
 import { OperationCredentials, credentialExpired } from '../credentials.js';
 import type { CredentialProvider } from '../credentials.js';
-import { startP2PSend } from '../p2p/send.js';
-import { startP2PReceive } from '../p2p/receive.js';
-import { resolvePeerConfig } from '../p2p/helpers.js';
 import { StreamingZipWriter } from '../zip/stream-zip.js';
 import { DEFAULT_DIRECT_SETTINGS, appClosing, directSettings, startDirectReceive, startDirectSend } from './direct.js';
 import type { DirectHost, DirectSettings } from './direct.js';
@@ -219,12 +210,6 @@ export interface DirectApi {
    */
   send(opts: DirectSendOptions): Promise<DirectSendHandle>;
   /**
-   * Dropgate 3's PeerJS send, with its listeners and its `Peer` option: kept
-   * only until Dropgate 4's web UI moves onto handles. Not for new code.
-   * @deprecated Use `send({ files })`, which gives a handle.
-   */
-  send(opts: P2PSendFileOptions): Promise<P2PSendSession>;
-  /**
    * Starts receiving from the sender's link (`https://<server>/p2p#<secret>`,
    * from this client's server) or code, both read on this device first.
    * Resolves with the receive's handle at once, `connecting`: `offer()`
@@ -238,12 +223,6 @@ export interface DirectApi {
    */
   receive(opts: DirectReceiveOptions): Promise<DirectReceiveHandle>;
   /**
-   * Dropgate 3's PeerJS receive, with its listeners and its `Peer` option:
-   * kept only until Dropgate 4's web UI moves onto handles. Not for new code.
-   * @deprecated Use `receive({ link })` or `receive({ code })`, which give a handle.
-   */
-  receive(opts: P2PReceiveFileOptions): Promise<P2PReceiveSession>;
-  /**
    * The app is closing (a page's `pagehide`, a desktop app quitting): every
    * direct transfer this client is running ends at once, and each tells its
    * other device so, which reads that this side closed Dropgate before the
@@ -256,9 +235,16 @@ export interface DirectApi {
   appClosing(): void;
 }
 
-/** Whether a direct call is Dropgate 3's, which always passes PeerJS's `Peer`: the new calls never take one. */
-function isPeerJsCall(opts: unknown): boolean {
-  return opts !== null && typeof opts === 'object' && 'Peer' in opts;
+/**
+ * A direct call made Dropgate 3's way, which always passed a `Peer` class:
+ * refused, saying what changed, rather than run as something it isn't.
+ */
+function dropgate3DirectCall(opts: unknown): DropgateError | null {
+  if (opts === null || typeof opts !== 'object' || !('Peer' in opts)) return null;
+  return new DropgateError({
+    code: 'INVALID_ARGUMENT',
+    message: "Dropgate 4's direct transfers take no Peer option: use the handle that send() or receive() gives.",
+  });
 }
 
 /** `client.links`: sharing codes and links. */
@@ -293,12 +279,6 @@ function serverChunkSize(serverInfo: ServerInfo, fallback: number): number {
   const size = serverInfo?.capabilities?.upload?.chunkSize;
   return Number.isFinite(size) && size! > 0 ? size! : fallback;
 }
-
-/** The listeners of a direct transfer whose events are given `transport`. */
-const DIRECT_EVENTS = [
-  'onStatus', 'onProgress', 'onMeta', 'onComplete', 'onCancel', 'onConnectionHealth',
-  'onFileStart', 'onFileEnd', 'onResumeRequest',
-] as const;
 
 /** An upload's ID, as a Dropgate server makes them. It's put in a URL's path, so nothing else is. */
 const UPLOAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -624,12 +604,14 @@ export class DropgateClient {
     });
     const directHost = this._directHost();
     this.direct = Object.freeze({
-      send: stamped((o: DirectSendOptions | P2PSendFileOptions) => (isPeerJsCall(o)
-        ? this._directSend(o as P2PSendFileOptions)
-        : startDirectSend(directHost, o as DirectSendOptions))),
-      receive: stamped((o: DirectReceiveOptions | P2PReceiveFileOptions) => (isPeerJsCall(o)
-        ? this._directReceive(o as P2PReceiveFileOptions)
-        : startDirectReceive(directHost, o as DirectReceiveOptions))),
+      send: stamped((o: DirectSendOptions) => {
+        const refused = dropgate3DirectCall(o);
+        return refused ? Promise.reject(refused) : startDirectSend(directHost, o);
+      }),
+      receive: stamped((o: DirectReceiveOptions) => {
+        const refused = dropgate3DirectCall(o);
+        return refused ? Promise.reject(refused) : startDirectReceive(directHost, o);
+      }),
       appClosing: () => appClosing(directHost),
     }) as DirectApi;
     this.links = Object.freeze({
@@ -1993,72 +1975,6 @@ export class DropgateClient {
         return credentials.token() as string;
       },
     }) as DirectHost;
-  }
-
-  /** Dropgate 3's PeerJS send, for the calls that still pass its `Peer`. */
-  private async _directSend(opts: P2PSendFileOptions): Promise<P2PSendSession> {
-    const compat = await this._connect();
-    this._requireCompatible(compat, 'dgdtp');
-
-    const { serverInfo } = compat;
-    const p2pCaps = serverInfo?.capabilities?.p2p;
-    if (!p2pCaps?.enabled) throw directTransferDisabled();
-
-    const { host, port, secure } = parseServerUrl(this.baseUrl);
-    const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
-
-    const session = await startP2PSend({
-      ...this._directEvents(opts),
-      host,
-      port,
-      secure,
-      peerjsPath,
-      iceServers,
-      serverInfo,
-    });
-    return Object.assign(session, { transport: this.transport });
-  }
-
-  /** Dropgate 3's PeerJS receive, for the calls that still pass its `Peer`. */
-  private async _directReceive(opts: P2PReceiveFileOptions): Promise<P2PReceiveSession> {
-    const compat = await this._connect();
-    this._requireCompatible(compat, 'dgdtp');
-
-    const { serverInfo } = compat;
-    const p2pCaps = serverInfo?.capabilities?.p2p;
-    if (!p2pCaps?.enabled) throw directTransferDisabled();
-
-    const { host, port, secure } = parseServerUrl(this.baseUrl);
-    const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
-
-    const session = await startP2PReceive({
-      ...this._directEvents(opts),
-      host,
-      port,
-      secure,
-      peerjsPath,
-      iceServers,
-      serverInfo,
-    });
-    return Object.assign(session, { transport: this.transport });
-  }
-
-  /**
-   * A direct transfer's options, with each event its listeners are given
-   * carrying `transport`, and each error carrying it too, as every snapshot,
-   * result and error a client gives does.
-   */
-  private _directEvents<O extends object>(opts: O): O {
-    const transport = this.transport;
-    const out = { ...opts } as Record<string, unknown>;
-    for (const name of DIRECT_EVENTS) {
-      const listener = out[name];
-      if (typeof listener !== 'function') continue;
-      out[name] = (evt: unknown) => listener(evt && typeof evt === 'object' ? { ...evt, transport } : evt);
-    }
-    const onError = out.onError;
-    if (typeof onError === 'function') out.onError = (err: unknown) => onError(withTransport(err, transport));
-    return out as O;
   }
 
   /**

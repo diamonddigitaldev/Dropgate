@@ -19,8 +19,8 @@ const productErrorCodes = errorCodes(productFiles);
 const routes = serverRoutes();
 const statuses = statusesSent();
 
-// The web UI's copies of its libraries (Bootstrap, StreamSaver, PeerJS and so
-// on), served from the server's node_modules. Like the files in public/, the
+// The web UI's copies of its libraries (Bootstrap, StreamSaver and so on),
+// served from the server's node_modules. Like the files in public/, the
 // pages load them; they aren't endpoints anyone calls.
 const isLibraryFile = (route) => route.path.startsWith('/vendor/');
 

@@ -9,6 +9,7 @@ import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { startServer, waitFor } from './helpers/harness.mjs';
 import { answer, downloads, startBody, uploads } from './helpers/dgup4.mjs';
+import { upgradeRefused } from './helpers/rendezvous.mjs';
 
 const UPDATE = { code: 'VERSION_UNSUPPORTED', error: 'This server runs Dropgate 4. Update the app to use it.' };
 const ORIGIN = 'https://integrator.example';
@@ -82,6 +83,53 @@ describe("a Dropgate 3 client's requests", () => {
                 const res = await fetch(`${server.baseUrl}/api/info`);
                 assert.equal(res.status, 200);
                 assert.deepEqual((await res.json()).protocols, { dgup: { major: 4, minor: 0 }, dgdtp: { major: 4, minor: 0 } });
+            });
+        });
+    }
+});
+
+// ===== Dropgate 3's direct transfers, which signalled through PeerJS =====
+
+/** What a Dropgate 3 app asked of PeerJS at /peerjs: its ID, its socket's address, and the HTTP fallback's offer. */
+const PEERJS_REQUESTS = [
+    ['/peerjs', {}],
+    ['/peerjs/', {}],
+    ['/peerjs/peerjs/id?ts=17000000000000.123', {}],
+    ['/peerjs/peerjs?key=peerjs&id=ABCD-1234&token=zq7token', {}],
+    ['/peerjs/peerjs/ABCD-1234/zq7token/offer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"type":"OFFER"}' }],
+];
+
+describe("Dropgate 3's PeerJS signalling, gone", () => {
+    for (const [what, env] of [['direct transfer on', {}], ['direct transfer off', { ENABLE_P2P: 'false', ENABLE_UPLOAD: 'true' }]]) {
+        describe(`with ${what}`, () => {
+            let server;
+            before(async () => {
+                server = await startServer({ env: { ...env, RATE_LIMIT_MAX_REQUESTS: '0' } });
+            });
+            after(() => server?.stop());
+
+            test('every request under /peerjs answers 410 VERSION_UNSUPPORTED in JSON, saying to update, uncached and readable cross-origin', async () => {
+                for (const [route, init] of PEERJS_REQUESTS) {
+                    const res = await fetch(server.baseUrl + route, { ...init, headers: { ...init.headers, Origin: ORIGIN } });
+                    const where = `${init.method ?? 'GET'} ${route}`;
+                    assert.match(res.headers.get('content-type') ?? '', /^application\/json/, where);
+                    assert.equal(res.headers.get('cache-control'), 'no-store', where);
+                    assert.equal(res.headers.get('access-control-allow-origin'), '*', where);
+                    assert.deepEqual(await answer(res), { status: 410, body: UPDATE }, where);
+                }
+                // A path that only starts with the same letters isn't PeerJS's.
+                assert.equal((await fetch(`${server.baseUrl}/peerjsx`)).status, 404);
+            });
+
+            test("PeerJS's WebSocket is answered the same, and never opens", async () => {
+                for (const path of ['/peerjs/peerjs?key=peerjs&id=ABCD-1234&token=zq7token', '/peerjs']) {
+                    assert.deepEqual(await upgradeRefused(server, { path }), { status: 410, body: JSON.stringify(UPDATE) }, path);
+                }
+            });
+
+            test("PeerJS's script is gone, and nothing at startup names PeerJS", async () => {
+                assert.equal((await fetch(`${server.baseUrl}/vendor/peerjs/peerjs.min.js`)).status, 404);
+                assert.deepEqual(ownLines(server.output).filter((line) => /peer(js|server)/i.test(line)), []);
             });
         });
     }

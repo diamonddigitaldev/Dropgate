@@ -2,7 +2,7 @@ import { blobSource, fileHandleSource } from './source.js';
 import { lifetimeToMs } from './utils/lifetime.js';
 import { estimateUploadBytes } from './utils/size.js';
 import { validateFilename, sanitizeFilename, uniqueFilename } from './utils/filename.js';
-import { isLocalhostHostname, isSecureContextForP2P } from './p2p/utils.js';
+import { isLocalhostHostname } from './transport.js';
 import { isCodeLike } from './dgdtp/codes.js';
 import { StreamingZipWriter } from './zip/stream-zip.js';
 
@@ -76,7 +76,7 @@ export const hosts = Object.freeze({
   /** Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`, also as `[::1]`). */
   isLocalhost: isLocalhostHostname,
   /** Whether a direct transfer can run here: a secure context, or this machine. */
-  isSecureForDirect: isSecureContextForP2P,
+  isSecureForDirect: (hostname?: string, isSecureContext?: boolean): boolean => Boolean(isSecureContext) || isLocalhostHostname(hostname || ''),
 });
 
 /** ZIP archives, written as they stream. */

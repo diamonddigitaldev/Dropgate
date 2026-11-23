@@ -1,7 +1,7 @@
 {
   "name": "@dropgate/core",
   "version": "3.0.13",
-  "description": "Headless Dropgate client library for file uploads and P2P transfers.",
+  "description": "Headless Dropgate client library for file uploads and direct transfers.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -15,16 +15,6 @@
       "require": {
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
-      }
-    },
-    "./p2p": {
-      "import": {
-        "types": "./dist/p2p/index.d.ts",
-        "default": "./dist/p2p/index.js"
-      },
-      "require": {
-        "types": "./dist/p2p/index.d.cts",
-        "default": "./dist/p2p/index.cjs"
       }
     }
   },
@@ -43,14 +33,6 @@
     "lint": "eslint src",
     "notices": "node scripts/write-notices.mjs",
     "prepublishOnly": "npm run build"
-  },
-  "peerDependencies": {
-    "peerjs": "^1.5.0"
-  },
-  "peerDependenciesMeta": {
-    "peerjs": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@noble/ciphers": "2.4.0",

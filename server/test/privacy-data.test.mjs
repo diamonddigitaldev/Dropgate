@@ -175,7 +175,7 @@ describe('responses, and what is left after the download limit', () => {
     before(async () => {
         server = await startServer({ env: { ENABLE_UPLOAD: 'true' } });
         fixture = await runFixture(server);
-        for (const route of ['/js/theme.js', '/vendor/bootstrap/bootstrap.min.css', '/vendor/streamsaver/mitm.html', '/peerjs/peerjs/id', '/no-such-page']) {
+        for (const route of ['/js/theme.js', '/vendor/bootstrap/bootstrap.min.css', '/vendor/streamsaver/mitm.html', '/peerjs/peerjs/id', '/upload/init', '/no-such-page']) {
             await (await fixture.fetch(server.baseUrl + route)).arrayBuffer();
         }
     });

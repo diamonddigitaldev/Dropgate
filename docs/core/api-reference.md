@@ -267,9 +267,9 @@ Each setting given to a send or receive wins over the client's, one by one. Each
 
 #### Dropgate 3's calls
 
-A `send()` or `receive()` that passes PeerJS's `Peer` option still runs Dropgate 3's PeerJS transfer, with its listeners (`onCode`, `onMeta`, `onData` and the rest) instead of a handle. Nothing of Dropgate's own makes one any more (the Web UI is on handles), and it goes with PeerJS: new code shouldn't use it.
+A `send()` or `receive()` made Dropgate 3's way, passing PeerJS's `Peer` option, is refused with `INVALID_ARGUMENT` before anything is made or sent: "Dropgate 4's direct transfers take no Peer option: use the handle that send() or receive() gives." Its listeners (`onCode`, `onMeta`, `onData` and the rest) and its sessions are gone; the handles above do what they did.
 
-**Changed in 4.0:** direct transfers are on handles and outcomes, as hosted transfers are, over Dropgate 4's own secure channel and the server's rendezvous instead of PeerJS. A send gives a link (`https://<server>/p2p#<secret>`) as well as a code, and the code's first letters come from the server, so `codes` no longer makes codes. The listeners, the `Peer` option and the sessions go with PeerJS.
+**Changed in 4.0:** direct transfers are on handles and outcomes, as hosted transfers are, over Dropgate 4's own secure channel and the server's rendezvous instead of PeerJS. A send gives a link (`https://<server>/p2p#<secret>`) as well as a code, and the code's first letters come from the server, so `codes` no longer makes codes. The listeners, the `Peer` option and the sessions are gone with PeerJS, and so are the `@dropgate/core/p2p` entry point, every `P2P*` and `Peer*` type and the `peerjs` peer dependency. `capabilities.p2p`'s type is `DirectCapabilities` (it was `P2PCapabilities`), without `peerjsPath`. Nothing of Dropgate 3's direct transfers works with Dropgate 4: a Dropgate 3 sender's code finds no transfer (`NOT_FOUND`), and its link (`/p2p/<code>`) isn't a direct link ([DGDTP §4.17](../technical/DGDTP.md#417-no-compatibility-with-dropgate-3)).
 
 ### client.links
 

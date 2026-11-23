@@ -17,6 +17,9 @@
 // such a name. WebKit can't be, so its pages drop the names they're given
 // (recordPeerConnections()), and none may reach it.
 //
+// With the server set to offer no STUN server (P2P_STUN_SERVERS=none), the
+// last test has no ICE server at all: each peer finds only its host candidates.
+//
 // If the peers never connect, or the transfer fails after they do, the failure
 // says what each page saw.
 import os from 'node:os';
@@ -62,6 +65,8 @@ const isMdnsName = (address) => /\.local\.?$/i.test(address ?? '');
  * an address the STUN server saw, so it has to be one of this machine's own; so
  * does a host candidate, unless it's hidden behind an mDNS name, which only a
  * browser that can't be told otherwise may give. A browser may never take one.
+ * With no STUN server (`stun` null), each had no ICE server, and found host
+ * candidates only.
  */
 async function expectOnlyLocalCandidates(stun, browserName, ...pages) {
     const ownAddresses = Object.values(os.networkInterfaces()).flat().map((i) => i?.address);
@@ -70,10 +75,10 @@ async function expectOnlyLocalCandidates(stun, browserName, ...pages) {
         const where = new URL(page.url()).pathname;
         expect(started?.length, `peer connections started on ${where}`).toBeGreaterThan(0);
         for (const pc of started ?? []) {
-            expect(pc.iceServers.flatMap((s) => [s.urls].flat()), `ICE servers a peer connection on ${where} had`).toEqual([stun.url]);
+            expect(pc.iceServers.flatMap((s) => [s.urls].flat()), `ICE servers a peer connection on ${where} had`).toEqual(stun ? [stun.url] : []);
             expect(pc.candidates.length, `candidates a peer connection on ${where} found`).toBeGreaterThan(0);
             for (const c of pc.candidates) {
-                expect(['host', 'srflx'], `the kind of a candidate a peer connection on ${where} found`).toContain(c.type);
+                expect(stun ? ['host', 'srflx'] : ['host'], `the kind of a candidate a peer connection on ${where} found`).toContain(c.type);
                 if (isMdnsName(c.address)) {
                     expect(hidesAddresses(browserName), `a peer connection on ${where} found a ${c.type} candidate under an mDNS name`).toBe(true);
                     continue;
@@ -240,4 +245,29 @@ test('several files sent together by direct transfer arrive intact as one ZIP, a
     }
     await expectOnlyLocalCandidates(stun, browserName, page, receiver);
     expect(bytesSent(server, secrets, files), "the files' bytes the server got").toEqual([]);
+});
+
+test.describe('with the server offering no STUN server (P2P_STUN_SERVERS=none)', () => {
+    test.use({ localStun: false });
+
+    test.beforeEach(({ browserName }) => {
+        test.skip(browserName === 'webkit', "Playwright's WebKit can't resolve the other side's mDNS host candidates, so with no ICE server its peers never connect");
+    });
+
+    test('a file sent by direct transfer arrives intact with no ICE server at all: the server offers none, and every peer connection finds only host candidates', async ({ page, otherContext, stun, browserName, server, secrets }) => {
+        expect(stun, "the tests' own STUN server").toBeNull();
+        await recordBoth(browserName, page.context(), otherContext);
+        const info = await (await page.request.get('/api/info')).json();
+        expect(info.capabilities.p2p, "the server's direct transfer settings").toMatchObject({ enabled: true, iceServers: [] });
+        const file = madeUpFile('Sketches (no STUN) é.bin', SIZE, 37);
+
+        const sent = await sendDirectFromHomePage(page, [file]);
+
+        const receiver = await otherContext.newPage();
+        await typeTheCode(receiver, server.baseUrl, sent.code);
+
+        await receiveAndCompare(receiver, page, file);
+        await expectOnlyLocalCandidates(null, browserName, page, receiver);
+        expect(bytesSent(server, secrets, [file]), "the file's bytes the server got").toEqual([]);
+    });
 });

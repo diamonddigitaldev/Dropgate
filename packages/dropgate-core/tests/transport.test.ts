@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DropgateClient, DropgateError } from '../src/index.js';
-import type { DownloadSink, PeerConstructor } from '../src/index.js';
-import { FakePeer } from './helpers/fake-peer.js';
+import type { DirectPeerConnectionClass, DownloadSink } from '../src/index.js';
+import { LoopbackPeerConnection } from './helpers/werift-loopback.js';
 import { CHUNK_SIZE, MANAGE_TOKEN_HASH, MANAGE_TOKEN, fakeV4 } from './helpers/fake-v4.js';
 
 // The insecure-transport policy: no automatic fallback to
@@ -19,7 +19,7 @@ const INFO = {
   protocols: { dgup: { major: 4, minor: 0 }, dgdtp: { major: 4, minor: 0 } },
   capabilities: {
     upload: { enabled: true, maxSizeMB: 0, maxLifetimeHours: 0, e2ee: true, chunkSize: CHUNK_SIZE },
-    p2p: { enabled: true, peerjsPath: '/peerjs', iceServers: [] },
+    p2p: { enabled: true, iceServers: [], codeLetters: 2, credentialRequired: false },
   },
 };
 
@@ -76,9 +76,33 @@ async function errorFrom(run: () => unknown): Promise<unknown> {
   throw new Error('It did not fail.');
 }
 
-beforeEach(() => {
-  FakePeer.reset();
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
+
+/**
+ * A WebSocket that never reaches the server: it fails at once, as one to a
+ * server that isn't there does, so a direct transfer's rendezvous is never
+ * reached and nothing leaves this machine.
+ */
+class UnreachableSocket {
+  binaryType = 'blob';
+  readyState = 0;
+  readonly #listeners = new Map<string, Array<(event: unknown) => void>>();
+  constructor(_url: string) {
+    setTimeout(() => {
+      this.readyState = 3;
+      for (const type of ['error', 'close']) for (const listener of this.#listeners.get(type) ?? []) listener({});
+    }, 0);
+  }
+  addEventListener(type: string, listener: (event: unknown) => void): void {
+    this.#listeners.set(type, [...(this.#listeners.get(type) ?? []), listener]);
+  }
+  send(): void {
+    throw new Error('Nothing is sent to a server that was never reached.');
+  }
+  close(): void {}
+}
 
 describe('No automatic fallback to plain HTTP', () => {
   it('a server that only answers on http:// is never tried there: connect() fails with a network error', async () => {
@@ -256,13 +280,6 @@ const MODES: Mode[] = [
   { label: 'insecure (http:// on the LAN, allowed)', url: LAN_URL, secure: false },
 ];
 
-/** Waits for the client to make its fake peer, then lets the signalling server accept it. */
-async function peerOpens(id: string): Promise<FakePeer> {
-  await expect.poll(() => FakePeer.instances.length).toBeGreaterThan(0);
-  const peer = FakePeer.latest();
-  peer.simulateOpen(id);
-  return peer;
-}
 
 /**
  * Every public operation, each run once succeeding and once failing (or
@@ -360,43 +377,35 @@ const OPERATIONS: Record<string, (make: Make) => Promise<Collected>> = {
     errors: [await errorFrom(() => make().hosted.validate({ files: fileNamed('a.txt'), lifetimeMs: 0, serverInfo: { version: '4.0.0' } }))],
   }),
   'direct.send': async (make) => {
-    const events: unknown[] = [];
-    const errors: unknown[] = [];
-    const sending = make().direct.send({
-      file: fileNamed('a.txt'),
-      Peer: FakePeer as unknown as PeerConstructor,
-      codeGenerator: () => 'ABCD-1234',
-      onStatus: (e) => events.push(e),
-      onError: (e) => errors.push(e),
-    });
-    const peer = await peerOpens('ABCD-1234');
-    const session = await sending;
-    // A receiver older than Dropgate 4 says hello: it's refused, through onError.
-    const conn = peer.simulateConnection();
-    conn.simulateOpen();
-    await conn.deliver({ t: 'hello', protocolVersion: 3, sessionId: '' });
-    await expect.poll(() => errors.length).toBeGreaterThan(0);
-    session.stop();
-    errors.push(await errorFrom(() => make({ p2p: false }).direct.send({ file: fileNamed('a.txt'), Peer: FakePeer as unknown as PeerConstructor })));
-    expect(events.length, 'status events').toBeGreaterThan(0);
-    return { snapshots: events, results: [session], errors };
+    vi.stubGlobal('WebSocket', UnreachableSocket);
+    const files = fileNamed('a.txt');
+    return {
+      snapshots: [],
+      results: [],
+      errors: [
+        // The rendezvous can't be reached; direct transfer is off; a Dropgate 3 call.
+        await errorFrom(() => make().direct.send({ files })),
+        await errorFrom(() => make({ p2p: false }).direct.send({ files })),
+        await errorFrom(() => make().direct.send({ file: files, Peer: class {} } as never)),
+      ],
+    };
   },
   'direct.receive': async (make) => {
-    const events: unknown[] = [];
-    const receiving = make().direct.receive({
-      code: 'ABCD-1234',
-      Peer: FakePeer as unknown as PeerConstructor,
-      watchdogTimeoutMs: 0,
-      onStatus: (e) => events.push(e),
-    });
-    const peer = await peerOpens('receiver');
-    const session = await receiving;
-    // The receiver's connection to the sender opens.
-    peer.connections[0].simulateOpen();
-    session.stop();
-    const err = await errorFrom(() => make({ p2p: false }).direct.receive({ code: 'ABCD-1234', Peer: FakePeer as unknown as PeerConstructor }));
-    expect(events.length, 'status events').toBeGreaterThan(0);
-    return { snapshots: events, results: [session], errors: [err] };
+    vi.stubGlobal('WebSocket', UnreachableSocket);
+    const snapshots: unknown[] = [];
+    const receive = await make().direct.receive({ code: 'ABCD-1234' });
+    snapshots.push(receive.snapshot);
+    receive.subscribe((s) => snapshots.push(s));
+    const outcome = await receive.result;
+    expect(outcome.status, 'the rendezvous never reached').toBe('failed');
+    return {
+      snapshots,
+      results: [outcome],
+      errors: [
+        await errorFrom(() => make().direct.receive({ code: 'ABCI-1234' })),
+        await errorFrom(() => make().direct.receive({ code: 'ABCD-1234', Peer: class {} } as never)),
+      ],
+    };
   },
   'operations.cancelAll': async (make) => {
     const server = fakeServer();
@@ -447,7 +456,7 @@ describe('transport.secure on every snapshot, result and error', () => {
       for (const [name, run] of Object.entries(OPERATIONS)) {
         it(`${name}: every snapshot, result and error has transport.secure ${mode.secure}`, async () => {
           const make = (opts: Parameters<typeof fakeServer>[0] = {}, fetchFn = fakeServer(opts).fetchFn) =>
-            new DropgateClient({ server: mode.url, fetchFn, allowInsecure: !mode.secure });
+            new DropgateClient({ server: mode.url, fetchFn, allowInsecure: !mode.secure, RTCPeerConnection: LoopbackPeerConnection as unknown as DirectPeerConnectionClass });
           const collected = await run(make);
           const all = [...collected.snapshots, ...collected.results, ...collected.errors];
           expect(collected.results.length + collected.errors.length, 'something to check').toBeGreaterThan(0);

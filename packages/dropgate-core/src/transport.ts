@@ -1,6 +1,5 @@
 import { DropgateError } from './errors.js';
 import type { FetchFn } from './types.js';
-import { isLocalhostHostname } from './p2p/utils.js';
 
 /**
  * How a client reaches its server. Every snapshot, result and error a client
@@ -15,6 +14,15 @@ export interface Transport {
    * or `[::1]`), which never leaves it.
    */
   readonly secure: boolean;
+}
+
+/**
+ * Whether a hostname is this machine: `localhost`, `127.0.0.1` or `::1`
+ * (`[::1]` too, as a URL's hostname gives it).
+ */
+export function isLocalhostHostname(hostname: string): boolean {
+  const host = String(hostname || '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
 }
 
 /**

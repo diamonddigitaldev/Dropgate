@@ -37,8 +37,6 @@
     "express-rate-limit": "^8.7.0",
     "helmet": "^8.3.0",
     "material-icons": "^1.13.14",
-    "peer": "^1.0.2",
-    "peerjs": "^1.5.5",
     "qr-code-styling": "^1.9.2",
     "quick.db": "^9.1.7",
     "streamsaver": "^2.0.6",

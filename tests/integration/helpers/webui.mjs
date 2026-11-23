@@ -423,16 +423,9 @@ export async function recordPeerConnections(context, { dropMdnsNames = false } =
             return { type, protocol: protocol?.toLowerCase(), address, port: Number(port) };
         };
         const isMdnsName = (candidate) => /\.local\.?$/i.test(candidate.address ?? '');
-        // Which Dropgate message a data channel message is, from its type field
-        // (PeerJS packs { t: 'meta' } as b1 't' b4 'meta'), and nothing else.
-        const types = ['hello', 'file_list', 'meta', 'ready', 'chunk_ack', 'chunk', 'file_end_ack', 'file_end',
-            'end_ack', 'end', 'ping', 'pong', 'error', 'cancelled', 'resume_ack', 'resume'];
-        const kindOf = (data) => {
-            if (!(data instanceof ArrayBuffer || ArrayBuffer.isView(data))) return typeof data;
-            const bytes = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data);
-            const head = String.fromCharCode(...bytes.subarray(0, 64));
-            return types.find((t) => head.includes(`\xb1t${String.fromCharCode(0xb0 + t.length)}${t}`)) ?? 'binary';
-        };
+        // What kind a data channel message is: binary, as every record of the
+        // secure channel is (sealed, so nothing more can be told of it), or not.
+        const kindOf = (data) => (data instanceof ArrayBuffer || ArrayBuffer.isView(data) ? 'binary' : typeof data);
         const watch = (channel, note, record) => {
             for (const event of ['open', 'close', 'error']) {
                 channel.addEventListener(event, () => note(`data channel ${channel.label} ${event}`));
@@ -490,8 +483,7 @@ export async function recordPeerConnections(context, { dropMdnsNames = false } =
             }
 
             // A peer connection only contacts ICE servers once it gathers candidates,
-            // which starts here. One that never gets this far, like PeerJS's own
-            // feature check, contacts nothing.
+            // which starts here. One that never gets this far contacts nothing.
             setLocalDescription(...args) {
                 if (!this.#record.started) {
                     this.#record.started = true;

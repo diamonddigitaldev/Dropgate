@@ -178,6 +178,371 @@ function toDropgateError(err, fallback = "UNEXPECTED_ERROR", message) {
   return new DropgateError({ code: fallback, cause: err, ...message ? { message } : {} });
 }
 
+// src/transport.ts
+function isLocalhostHostname(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+}
+function isSecureServerUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  return url.protocol === "https:" || isLocalhostHostname(url.hostname);
+}
+function insecureTransportNotAllowed() {
+  return new DropgateError({ code: "INSECURE_TRANSPORT_NOT_ALLOWED", transport: { secure: false } });
+}
+function guardedFetch(fetchFn) {
+  return async (input, init) => {
+    const res = await fetchFn(input, { ...init, credentials: "omit", redirect: "manual" });
+    if (res.type === "opaqueredirect" || res.status >= 300 && res.status < 400 && res.headers.has("location")) {
+      throw new DropgateError({ code: "REDIRECT_NOT_FOLLOWED", status: res.status || void 0 });
+    }
+    return res;
+  };
+}
+
+// src/version.ts
+var CORE_VERSION = true ? "3.0.13" : "0.0.0-dev";
+var PROTOCOLS = Object.freeze({
+  dgup: Object.freeze({ major: 4, minor: 0 }),
+  dgdtp: Object.freeze({ major: 4, minor: 0 })
+});
+function protocolVersion(value) {
+  if (!value || typeof value !== "object") return null;
+  const { major, minor } = value;
+  if (!Number.isInteger(major) || !Number.isInteger(minor) || major < 0 || minor < 0) return null;
+  return Object.freeze({ major, minor });
+}
+function checkProtocol(client, given) {
+  const server = protocolVersion(given);
+  if (!server || server.major < client.major) {
+    return {
+      compatible: false,
+      client,
+      server,
+      update: "server",
+      message: "Update required: this server runs an older version of Dropgate. Its operator needs to update it."
+    };
+  }
+  if (server.major > client.major) {
+    return {
+      compatible: false,
+      client,
+      server,
+      update: "client",
+      message: "Update required: this server runs a newer version of Dropgate. Update this app to use it."
+    };
+  }
+  return { compatible: true, client, server, message: "This server works with this version of Dropgate." };
+}
+
+// src/utils/network.ts
+function parseServerUrl(urlStr) {
+  let normalized = String(urlStr ?? "").trim();
+  if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) {
+    normalized = "https://" + normalized;
+  }
+  let url;
+  try {
+    url = new URL(normalized);
+  } catch (err) {
+    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "The server address is not a valid URL.", cause: err });
+  }
+  return {
+    host: url.hostname,
+    port: url.port ? Number(url.port) : void 0,
+    secure: url.protocol === "https:"
+  };
+}
+function buildBaseUrl(opts) {
+  const { host, port, secure } = opts;
+  if (!host || typeof host !== "string") {
+    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "Server host is required." });
+  }
+  const protocol = secure === false ? "http" : "https";
+  const portSuffix = port ? `:${port}` : "";
+  return `${protocol}://${host}${portSuffix}`;
+}
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(signal.reason || new DropgateError({ code: "OPERATION_CANCELLED" }));
+    }
+    const t = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(t);
+          reject(signal.reason || new DropgateError({ code: "OPERATION_CANCELLED" }));
+        },
+        { once: true }
+      );
+    }
+  });
+}
+function makeAbortSignal(parentSignal, timeoutMs) {
+  const controller = new AbortController();
+  let timeoutId = null;
+  const abort = (reason) => {
+    if (!controller.signal.aborted) {
+      controller.abort(reason);
+    }
+  };
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      abort(parentSignal.reason);
+    } else {
+      parentSignal.addEventListener("abort", () => abort(parentSignal.reason), {
+        once: true
+      });
+    }
+  }
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    timeoutId = setTimeout(() => {
+      abort(new DropgateError({ code: "TIMED_OUT" }));
+    }, timeoutMs);
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  };
+}
+function makeWaitSignal(parentSignal, timeoutMs) {
+  const controller = new AbortController();
+  const abort = (reason) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+  };
+  const onParentAbort = () => abort(parentSignal.reason);
+  if (parentSignal.aborted) abort(parentSignal.reason);
+  else parentSignal.addEventListener("abort", onParentAbort, { once: true });
+  const timed = Number.isFinite(timeoutMs) && timeoutMs > 0;
+  let timeoutId = null;
+  const stopTimer = () => {
+    if (timeoutId) clearTimeout(timeoutId);
+    timeoutId = null;
+  };
+  return {
+    signal: controller.signal,
+    async waiting(start) {
+      if (timed) timeoutId = setTimeout(() => abort(new DropgateError({ code: "TIMED_OUT" })), timeoutMs);
+      try {
+        return await start();
+      } finally {
+        stopTimer();
+      }
+    },
+    cleanup: () => {
+      stopTimer();
+      parentSignal.removeEventListener("abort", onParentAbort);
+    }
+  };
+}
+async function fetchJson(fetchFn, url, opts = {}) {
+  const { timeoutMs, signal, ...rest } = opts;
+  const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
+  try {
+    let res;
+    try {
+      res = await fetchFn(url, { ...rest, signal: s });
+    } catch (err) {
+      throw toDropgateError(err, "SERVER_UNREACHABLE");
+    }
+    let text;
+    try {
+      text = await res.text();
+    } catch (err) {
+      throw toDropgateError(err, "CONNECTION_LOST");
+    }
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+    }
+    return { res, json, text };
+  } finally {
+    cleanup();
+  }
+}
+
+// src/retry.ts
+var QUIET_MS = 5 * 60 * 1e3;
+var MAX_BACKOFF_MS = 3e4;
+function retryPolicy(retry = {}) {
+  const whole = (value) => Number.isFinite(value) && value >= 0;
+  return {
+    ...whole(retry.retries) ? { retries: Math.floor(retry.retries) } : {},
+    backoffMs: whole(retry.backoffMs) ? retry.backoffMs : 1e3,
+    maxBackoffMs: Math.min(whole(retry.maxBackoffMs) ? retry.maxBackoffMs : MAX_BACKOFF_MS, MAX_BACKOFF_MS)
+  };
+}
+var retryAfter = /* @__PURE__ */ new WeakMap();
+function withRetryAfter(err, res) {
+  const header2 = res.headers.get("Retry-After");
+  const seconds = header2 === null || header2.trim() === "" ? NaN : Number(header2);
+  if (Number.isFinite(seconds) && seconds >= 0) retryAfter.set(err, Math.min(seconds, 60) * 1e3);
+  return err;
+}
+function isRecoverable(err) {
+  if (!(err instanceof DropgateError) || err.code === "OPERATION_CANCELLED") return false;
+  if (err.status === void 0) return err.code === "SERVER_UNREACHABLE" || err.code === "CONNECTION_LOST" || err.code === "TIMED_OUT";
+  return err.status === 408 || err.status === 429 || err.status >= 500 && err.status !== 507;
+}
+var _end;
+var RetryWindow = class {
+  constructor() {
+    __privateAdd(this, _end);
+    __privateSet(this, _end, Date.now() + QUIET_MS);
+  }
+  /** The server answered: it waits 5 more minutes, or until the `deadline` it gave, if that's later. */
+  heard(deadline) {
+    const quiet = Date.now() + QUIET_MS;
+    __privateSet(this, _end, typeof deadline === "number" && Number.isFinite(deadline) ? Math.max(deadline, quiet) : quiet);
+  }
+  /** When the server stops waiting, in milliseconds since 1970. */
+  get end() {
+    return __privateGet(this, _end);
+  }
+};
+_end = new WeakMap();
+function backoffMs(policy, attempt, random) {
+  const full = Math.min(policy.backoffMs * 2 ** Math.min(attempt - 1, 30), policy.maxBackoffMs);
+  const [a, b, c, d] = random(4);
+  const fraction = ((a << 24 >>> 0) + (b << 16) + (c << 8) + d) / 2 ** 32;
+  return Math.round(full / 2 + fraction * (full / 2));
+}
+async function retrying(run, o) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run(attempt);
+    } catch (thrown) {
+      if (o.signal.aborted) throw o.signal.reason ?? new DropgateError({ code: "OPERATION_CANCELLED" });
+      const err = toDropgateError(thrown);
+      if (!isRecoverable(err)) throw err;
+      if (o.policy.retries !== void 0 && attempt > o.policy.retries) throw err;
+      const left = o.window.end - Date.now();
+      if (left <= 0) throw o.expired ? o.expired(err) : err;
+      let remaining = Math.min(retryAfter.get(err) ?? backoffMs(o.policy, attempt, o.random), left);
+      while (remaining > 0) {
+        o.waiting?.({ attempt, remainingMs: remaining });
+        const tick = Math.min(100, remaining);
+        await sleep(tick, o.signal);
+        remaining -= tick;
+      }
+      o.retrying?.(attempt);
+    }
+  }
+}
+
+// src/cancel.ts
+var CancelScope = class _CancelScope {
+  constructor(label, opts = {}) {
+    __publicField(this, "label");
+    __publicField(this, "controller", new AbortController());
+    __publicField(this, "children", /* @__PURE__ */ new Set());
+    __publicField(this, "listeners", /* @__PURE__ */ new Set());
+    __publicField(this, "parent", null);
+    __publicField(this, "detachSignal", null);
+    __publicField(this, "_cancellation", null);
+    __publicField(this, "done", false);
+    this.label = label;
+    const { parent, signal } = opts;
+    if (parent) {
+      if (parent._cancellation) {
+        this.settle({ by: "parent", source: parent._cancellation.source });
+        return;
+      }
+      this.parent = parent;
+      parent.children.add(this);
+    }
+    if (signal) {
+      if (signal.aborted) {
+        this.settle({ by: "signal", source: label });
+        return;
+      }
+      const onAbort = () => this.settle({ by: "signal", source: label });
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.detachSignal = () => signal.removeEventListener("abort", onAbort);
+    }
+  }
+  /** Aborts when this node is cancelled, with an OPERATION_CANCELLED DropgateError as its reason. */
+  get signal() {
+    return this.controller.signal;
+  }
+  /** How it was cancelled, or null while it hasn't been. */
+  get cancellation() {
+    return this._cancellation;
+  }
+  /** A new node under this one. */
+  child(label) {
+    return new _CancelScope(label, { parent: this });
+  }
+  /** Cancels this node and everything under it. Returns false if it was already cancelled or done. */
+  cancel() {
+    if (this._cancellation || this.done) return false;
+    this.settle({ by: "self", source: this.label });
+    return true;
+  }
+  /**
+   * The other device in a direct transfer cancelled it (or declined it): this
+   * node and everything under it are cancelled, `by: 'peer'`. Returns false if
+   * it was already cancelled or done.
+   */
+  cancelByPeer(declined = false) {
+    if (this._cancellation || this.done) return false;
+    this.settle({ by: "peer", source: this.label, ...declined ? { declined: true } : {} });
+    return true;
+  }
+  /** Runs `listener` once, when this node is cancelled. Returns a function that removes it. */
+  onCancel(listener) {
+    if (this._cancellation) {
+      listener(this._cancellation);
+      return () => {
+      };
+    }
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  /** Throws its OPERATION_CANCELLED error if this node has been cancelled. */
+  throwIfCancelled() {
+    if (this._cancellation) throw this.controller.signal.reason;
+  }
+  /**
+   * Takes this node out of the tree, once its operation has ended: a later
+   * cancel above it no longer reaches it, and its own cancel() does nothing.
+   */
+  finish() {
+    if (this.done) return;
+    this.done = true;
+    this.parent?.children.delete(this);
+    this.parent = null;
+    this.detachSignal?.();
+    this.detachSignal = null;
+    this.listeners.clear();
+  }
+  settle(cancellation) {
+    if (this._cancellation || this.done) return;
+    this._cancellation = cancellation;
+    this.detachSignal?.();
+    this.detachSignal = null;
+    this.parent?.children.delete(this);
+    this.parent = null;
+    this.controller.abort(new DropgateError({ code: "OPERATION_CANCELLED", details: { cancellation } }));
+    const listeners = [...this.listeners];
+    this.listeners.clear();
+    for (const listener of listeners) {
+      try {
+        listener(cancellation);
+      } catch {
+      }
+    }
+    const children = [...this.children];
+    this.children.clear();
+    for (const child of children) child.settle({ by: "parent", source: cancellation.source });
+  }
+};
+
 // node_modules/@noble/hashes/_u64.js
 var U32_MASK64 = /* @__PURE__ */ (() => BigInt(2 ** 32 - 1))();
 var _32n = /* @__PURE__ */ BigInt(32);
@@ -1928,11 +2293,11 @@ var ScalarMultiplier = class {
       table[i] = table[i - 1].add(point);
     const windows = Math.ceil(bits / W);
     let acc = this.ZERO;
-    for (let window2 = windows - 1; window2 >= 0; window2--) {
-      if (window2 !== windows - 1)
+    for (let window = windows - 1; window >= 0; window--) {
+      if (window !== windows - 1)
         for (let d = 0; d < W; d++)
           acc = acc.double();
-      const digit = Number(n >> BigInt(window2 * W) & mask);
+      const digit = Number(n >> BigInt(window * W) & mask);
       let sel = table[0];
       for (let i = 1; i < size; i++)
         sel = i === digit ? table[i] : sel;
@@ -3616,478 +3981,6 @@ function cryptoProvider() {
   return runtime;
 }
 
-// src/dgdtp/codes.ts
-var CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
-var CODE_DIGITS = "0123456789";
-var CODE_LETTER_COUNT = 4;
-var CODE_DIGIT_COUNT = 4;
-var DEFAULT_LOCATOR_LETTERS = 2;
-var LETTER_BYTE_LIMIT = 240;
-var DIGIT_BYTE_LIMIT = 250;
-var TYPED_CODE = /^([A-HJ-NP-Za-hj-np-z]{4})-?([0-9]{4})$/;
-var ascii = (text) => new TextEncoder().encode(text);
-var invalidCode = () => new DropgateError({ code: "INVALID_CODE" });
-var _bytes;
-var _CodePassword = class _CodePassword {
-  constructor(bytes) {
-    __privateAdd(this, _bytes);
-    __privateSet(this, _bytes, bytes);
-    Object.freeze(this);
-  }
-  /** A password of these characters. */
-  static of(characters) {
-    return new _CodePassword(ascii(characters));
-  }
-  /**
-   * The password's bytes, for the one CPace exchange that uses it: the caller
-   * overwrites them once used. Undefined if it was spent or forgotten.
-   */
-  static spend(password) {
-    if (!(password instanceof _CodePassword)) return void 0;
-    const bytes = __privateGet(password, _bytes);
-    __privateSet(password, _bytes, void 0);
-    return bytes;
-  }
-  /** Overwrites the bytes, if they weren't spent. */
-  forget() {
-    __privateGet(this, _bytes)?.fill(0);
-    __privateSet(this, _bytes, void 0);
-  }
-  toJSON() {
-    return "[CodePassword]";
-  }
-  toString() {
-    return "[CodePassword]";
-  }
-  [/* @__PURE__ */ Symbol.for("nodejs.util.inspect.custom")]() {
-    return "[CodePassword]";
-  }
-};
-_bytes = new WeakMap();
-var CodePassword = _CodePassword;
-function checkLetters(letters) {
-  if (letters !== 2 && letters !== 3) {
-    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "A code has 2 or 3 locator letters." });
-  }
-}
-function draw(provider, alphabet, limit, count) {
-  let out = "";
-  while (out.length < count) {
-    const bytes = provider.randomBytes(count - out.length);
-    for (const byte of bytes) {
-      if (byte < limit) out += alphabet[byte % alphabet.length];
-    }
-    bytes.fill(0);
-  }
-  return out;
-}
-var drawLetters = (provider, count) => draw(provider, CODE_LETTERS, LETTER_BYTE_LIMIT, count);
-var drawDigits = (provider, count) => draw(provider, CODE_DIGITS, DIGIT_BYTE_LIMIT, count);
-var codeOf = (letters, digits) => `${letters}-${digits}`;
-function generateCode(provider) {
-  return codeOf(drawLetters(provider, CODE_LETTER_COUNT), drawDigits(provider, CODE_DIGIT_COUNT));
-}
-function newCode(provider, locator, letters = DEFAULT_LOCATOR_LETTERS) {
-  checkLetters(letters);
-  if (typeof locator !== "string" || locator.length !== letters || [...locator].some((c) => !CODE_LETTERS.includes(c))) {
-    throw new DropgateError({ code: "INVALID_ARGUMENT", message: `A locator is ${letters} of a code's letters.` });
-  }
-  const passwordLetters = drawLetters(provider, CODE_LETTER_COUNT - letters);
-  const digits = drawDigits(provider, CODE_DIGIT_COUNT);
-  const parts = { locator, password: CodePassword.of(passwordLetters + digits) };
-  Object.defineProperty(parts, "code", { value: codeOf(locator + passwordLetters, digits), enumerable: false });
-  return Object.freeze(parts);
-}
-function normalizeCode(value) {
-  const match = typeof value === "string" ? TYPED_CODE.exec(value.replace(/\s+/g, "")) : null;
-  if (!match) throw invalidCode();
-  return codeOf(match[1].toUpperCase(), match[2]);
-}
-function isCodeLike(value) {
-  return typeof value === "string" && TYPED_CODE.test(value.replace(/\s+/g, ""));
-}
-function parseCode(value, letters = DEFAULT_LOCATOR_LETTERS) {
-  checkLetters(letters);
-  const code = normalizeCode(value);
-  return Object.freeze({
-    locator: code.slice(0, letters),
-    password: CodePassword.of(code.slice(letters).replace("-", ""))
-  });
-}
-
-// src/p2p/utils.ts
-function isLocalhostHostname(hostname) {
-  const host = String(hostname || "").toLowerCase();
-  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
-}
-function isSecureContextForP2P(hostname, isSecureContext) {
-  return Boolean(isSecureContext) || isLocalhostHostname(hostname || "");
-}
-function generateP2PCode(provider = cryptoProvider()) {
-  return generateCode(provider);
-}
-
-// src/transport.ts
-function isSecureServerUrl(baseUrl) {
-  const url = new URL(baseUrl);
-  return url.protocol === "https:" || isLocalhostHostname(url.hostname);
-}
-function insecureTransportNotAllowed() {
-  return new DropgateError({ code: "INSECURE_TRANSPORT_NOT_ALLOWED", transport: { secure: false } });
-}
-function guardedFetch(fetchFn) {
-  return async (input, init) => {
-    const res = await fetchFn(input, { ...init, credentials: "omit", redirect: "manual" });
-    if (res.type === "opaqueredirect" || res.status >= 300 && res.status < 400 && res.headers.has("location")) {
-      throw new DropgateError({ code: "REDIRECT_NOT_FOLLOWED", status: res.status || void 0 });
-    }
-    return res;
-  };
-}
-
-// src/version.ts
-var CORE_VERSION = true ? "3.0.13" : "0.0.0-dev";
-var PROTOCOLS = Object.freeze({
-  dgup: Object.freeze({ major: 4, minor: 0 }),
-  dgdtp: Object.freeze({ major: 4, minor: 0 })
-});
-function protocolVersion(value) {
-  if (!value || typeof value !== "object") return null;
-  const { major, minor } = value;
-  if (!Number.isInteger(major) || !Number.isInteger(minor) || major < 0 || minor < 0) return null;
-  return Object.freeze({ major, minor });
-}
-function checkProtocol(client, given) {
-  const server = protocolVersion(given);
-  if (!server || server.major < client.major) {
-    return {
-      compatible: false,
-      client,
-      server,
-      update: "server",
-      message: "Update required: this server runs an older version of Dropgate. Its operator needs to update it."
-    };
-  }
-  if (server.major > client.major) {
-    return {
-      compatible: false,
-      client,
-      server,
-      update: "client",
-      message: "Update required: this server runs a newer version of Dropgate. Update this app to use it."
-    };
-  }
-  return { compatible: true, client, server, message: "This server works with this version of Dropgate." };
-}
-
-// src/utils/network.ts
-function parseServerUrl(urlStr) {
-  let normalized = String(urlStr ?? "").trim();
-  if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) {
-    normalized = "https://" + normalized;
-  }
-  let url;
-  try {
-    url = new URL(normalized);
-  } catch (err) {
-    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "The server address is not a valid URL.", cause: err });
-  }
-  return {
-    host: url.hostname,
-    port: url.port ? Number(url.port) : void 0,
-    secure: url.protocol === "https:"
-  };
-}
-function buildBaseUrl(opts) {
-  const { host, port, secure } = opts;
-  if (!host || typeof host !== "string") {
-    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "Server host is required." });
-  }
-  const protocol = secure === false ? "http" : "https";
-  const portSuffix = port ? `:${port}` : "";
-  return `${protocol}://${host}${portSuffix}`;
-}
-function sleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      return reject(signal.reason || new DropgateError({ code: "OPERATION_CANCELLED" }));
-    }
-    const t = setTimeout(resolve, ms);
-    if (signal) {
-      signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(t);
-          reject(signal.reason || new DropgateError({ code: "OPERATION_CANCELLED" }));
-        },
-        { once: true }
-      );
-    }
-  });
-}
-function makeAbortSignal(parentSignal, timeoutMs) {
-  const controller = new AbortController();
-  let timeoutId = null;
-  const abort = (reason) => {
-    if (!controller.signal.aborted) {
-      controller.abort(reason);
-    }
-  };
-  if (parentSignal) {
-    if (parentSignal.aborted) {
-      abort(parentSignal.reason);
-    } else {
-      parentSignal.addEventListener("abort", () => abort(parentSignal.reason), {
-        once: true
-      });
-    }
-  }
-  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-    timeoutId = setTimeout(() => {
-      abort(new DropgateError({ code: "TIMED_OUT" }));
-    }, timeoutMs);
-  }
-  return {
-    signal: controller.signal,
-    cleanup: () => {
-      if (timeoutId) clearTimeout(timeoutId);
-    }
-  };
-}
-function makeWaitSignal(parentSignal, timeoutMs) {
-  const controller = new AbortController();
-  const abort = (reason) => {
-    if (!controller.signal.aborted) controller.abort(reason);
-  };
-  const onParentAbort = () => abort(parentSignal.reason);
-  if (parentSignal.aborted) abort(parentSignal.reason);
-  else parentSignal.addEventListener("abort", onParentAbort, { once: true });
-  const timed = Number.isFinite(timeoutMs) && timeoutMs > 0;
-  let timeoutId = null;
-  const stopTimer = () => {
-    if (timeoutId) clearTimeout(timeoutId);
-    timeoutId = null;
-  };
-  return {
-    signal: controller.signal,
-    async waiting(start) {
-      if (timed) timeoutId = setTimeout(() => abort(new DropgateError({ code: "TIMED_OUT" })), timeoutMs);
-      try {
-        return await start();
-      } finally {
-        stopTimer();
-      }
-    },
-    cleanup: () => {
-      stopTimer();
-      parentSignal.removeEventListener("abort", onParentAbort);
-    }
-  };
-}
-async function fetchJson(fetchFn, url, opts = {}) {
-  const { timeoutMs, signal, ...rest } = opts;
-  const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
-  try {
-    let res;
-    try {
-      res = await fetchFn(url, { ...rest, signal: s });
-    } catch (err) {
-      throw toDropgateError(err, "SERVER_UNREACHABLE");
-    }
-    let text;
-    try {
-      text = await res.text();
-    } catch (err) {
-      throw toDropgateError(err, "CONNECTION_LOST");
-    }
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-    }
-    return { res, json, text };
-  } finally {
-    cleanup();
-  }
-}
-
-// src/retry.ts
-var QUIET_MS = 5 * 60 * 1e3;
-var MAX_BACKOFF_MS = 3e4;
-function retryPolicy(retry = {}) {
-  const whole = (value) => Number.isFinite(value) && value >= 0;
-  return {
-    ...whole(retry.retries) ? { retries: Math.floor(retry.retries) } : {},
-    backoffMs: whole(retry.backoffMs) ? retry.backoffMs : 1e3,
-    maxBackoffMs: Math.min(whole(retry.maxBackoffMs) ? retry.maxBackoffMs : MAX_BACKOFF_MS, MAX_BACKOFF_MS)
-  };
-}
-var retryAfter = /* @__PURE__ */ new WeakMap();
-function withRetryAfter(err, res) {
-  const header2 = res.headers.get("Retry-After");
-  const seconds = header2 === null || header2.trim() === "" ? NaN : Number(header2);
-  if (Number.isFinite(seconds) && seconds >= 0) retryAfter.set(err, Math.min(seconds, 60) * 1e3);
-  return err;
-}
-function isRecoverable(err) {
-  if (!(err instanceof DropgateError) || err.code === "OPERATION_CANCELLED") return false;
-  if (err.status === void 0) return err.code === "SERVER_UNREACHABLE" || err.code === "CONNECTION_LOST" || err.code === "TIMED_OUT";
-  return err.status === 408 || err.status === 429 || err.status >= 500 && err.status !== 507;
-}
-var _end;
-var RetryWindow = class {
-  constructor() {
-    __privateAdd(this, _end);
-    __privateSet(this, _end, Date.now() + QUIET_MS);
-  }
-  /** The server answered: it waits 5 more minutes, or until the `deadline` it gave, if that's later. */
-  heard(deadline) {
-    const quiet = Date.now() + QUIET_MS;
-    __privateSet(this, _end, typeof deadline === "number" && Number.isFinite(deadline) ? Math.max(deadline, quiet) : quiet);
-  }
-  /** When the server stops waiting, in milliseconds since 1970. */
-  get end() {
-    return __privateGet(this, _end);
-  }
-};
-_end = new WeakMap();
-function backoffMs(policy, attempt, random) {
-  const full = Math.min(policy.backoffMs * 2 ** Math.min(attempt - 1, 30), policy.maxBackoffMs);
-  const [a, b, c, d] = random(4);
-  const fraction = ((a << 24 >>> 0) + (b << 16) + (c << 8) + d) / 2 ** 32;
-  return Math.round(full / 2 + fraction * (full / 2));
-}
-async function retrying(run, o) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await run(attempt);
-    } catch (thrown) {
-      if (o.signal.aborted) throw o.signal.reason ?? new DropgateError({ code: "OPERATION_CANCELLED" });
-      const err = toDropgateError(thrown);
-      if (!isRecoverable(err)) throw err;
-      if (o.policy.retries !== void 0 && attempt > o.policy.retries) throw err;
-      const left = o.window.end - Date.now();
-      if (left <= 0) throw o.expired ? o.expired(err) : err;
-      let remaining = Math.min(retryAfter.get(err) ?? backoffMs(o.policy, attempt, o.random), left);
-      while (remaining > 0) {
-        o.waiting?.({ attempt, remainingMs: remaining });
-        const tick = Math.min(100, remaining);
-        await sleep(tick, o.signal);
-        remaining -= tick;
-      }
-      o.retrying?.(attempt);
-    }
-  }
-}
-
-// src/cancel.ts
-var CancelScope = class _CancelScope {
-  constructor(label, opts = {}) {
-    __publicField(this, "label");
-    __publicField(this, "controller", new AbortController());
-    __publicField(this, "children", /* @__PURE__ */ new Set());
-    __publicField(this, "listeners", /* @__PURE__ */ new Set());
-    __publicField(this, "parent", null);
-    __publicField(this, "detachSignal", null);
-    __publicField(this, "_cancellation", null);
-    __publicField(this, "done", false);
-    this.label = label;
-    const { parent, signal } = opts;
-    if (parent) {
-      if (parent._cancellation) {
-        this.settle({ by: "parent", source: parent._cancellation.source });
-        return;
-      }
-      this.parent = parent;
-      parent.children.add(this);
-    }
-    if (signal) {
-      if (signal.aborted) {
-        this.settle({ by: "signal", source: label });
-        return;
-      }
-      const onAbort = () => this.settle({ by: "signal", source: label });
-      signal.addEventListener("abort", onAbort, { once: true });
-      this.detachSignal = () => signal.removeEventListener("abort", onAbort);
-    }
-  }
-  /** Aborts when this node is cancelled, with an OPERATION_CANCELLED DropgateError as its reason. */
-  get signal() {
-    return this.controller.signal;
-  }
-  /** How it was cancelled, or null while it hasn't been. */
-  get cancellation() {
-    return this._cancellation;
-  }
-  /** A new node under this one. */
-  child(label) {
-    return new _CancelScope(label, { parent: this });
-  }
-  /** Cancels this node and everything under it. Returns false if it was already cancelled or done. */
-  cancel() {
-    if (this._cancellation || this.done) return false;
-    this.settle({ by: "self", source: this.label });
-    return true;
-  }
-  /**
-   * The other device in a direct transfer cancelled it (or declined it): this
-   * node and everything under it are cancelled, `by: 'peer'`. Returns false if
-   * it was already cancelled or done.
-   */
-  cancelByPeer(declined = false) {
-    if (this._cancellation || this.done) return false;
-    this.settle({ by: "peer", source: this.label, ...declined ? { declined: true } : {} });
-    return true;
-  }
-  /** Runs `listener` once, when this node is cancelled. Returns a function that removes it. */
-  onCancel(listener) {
-    if (this._cancellation) {
-      listener(this._cancellation);
-      return () => {
-      };
-    }
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-  /** Throws its OPERATION_CANCELLED error if this node has been cancelled. */
-  throwIfCancelled() {
-    if (this._cancellation) throw this.controller.signal.reason;
-  }
-  /**
-   * Takes this node out of the tree, once its operation has ended: a later
-   * cancel above it no longer reaches it, and its own cancel() does nothing.
-   */
-  finish() {
-    if (this.done) return;
-    this.done = true;
-    this.parent?.children.delete(this);
-    this.parent = null;
-    this.detachSignal?.();
-    this.detachSignal = null;
-    this.listeners.clear();
-  }
-  settle(cancellation) {
-    if (this._cancellation || this.done) return;
-    this._cancellation = cancellation;
-    this.detachSignal?.();
-    this.detachSignal = null;
-    this.parent?.children.delete(this);
-    this.parent = null;
-    this.controller.abort(new DropgateError({ code: "OPERATION_CANCELLED", details: { cancellation } }));
-    const listeners = [...this.listeners];
-    this.listeners.clear();
-    for (const listener of listeners) {
-      try {
-        listener(cancellation);
-      } catch {
-      }
-    }
-    const children = [...this.children];
-    this.children.clear();
-    for (const child of children) child.settle({ by: "parent", source: cancellation.source });
-  }
-};
-
 // src/outcome.ts
 async function settle(scope, work, transport) {
   try {
@@ -4612,6 +4505,102 @@ function getDefaultFetch() {
   return globalThis.fetch?.bind(globalThis);
 }
 
+// src/dgdtp/codes.ts
+var CODE_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+var CODE_DIGITS = "0123456789";
+var CODE_LETTER_COUNT = 4;
+var CODE_DIGIT_COUNT = 4;
+var DEFAULT_LOCATOR_LETTERS = 2;
+var LETTER_BYTE_LIMIT = 240;
+var DIGIT_BYTE_LIMIT = 250;
+var TYPED_CODE = /^([A-HJ-NP-Za-hj-np-z]{4})-?([0-9]{4})$/;
+var ascii = (text) => new TextEncoder().encode(text);
+var invalidCode = () => new DropgateError({ code: "INVALID_CODE" });
+var _bytes;
+var _CodePassword = class _CodePassword {
+  constructor(bytes) {
+    __privateAdd(this, _bytes);
+    __privateSet(this, _bytes, bytes);
+    Object.freeze(this);
+  }
+  /** A password of these characters. */
+  static of(characters) {
+    return new _CodePassword(ascii(characters));
+  }
+  /**
+   * The password's bytes, for the one CPace exchange that uses it: the caller
+   * overwrites them once used. Undefined if it was spent or forgotten.
+   */
+  static spend(password) {
+    if (!(password instanceof _CodePassword)) return void 0;
+    const bytes = __privateGet(password, _bytes);
+    __privateSet(password, _bytes, void 0);
+    return bytes;
+  }
+  /** Overwrites the bytes, if they weren't spent. */
+  forget() {
+    __privateGet(this, _bytes)?.fill(0);
+    __privateSet(this, _bytes, void 0);
+  }
+  toJSON() {
+    return "[CodePassword]";
+  }
+  toString() {
+    return "[CodePassword]";
+  }
+  [/* @__PURE__ */ Symbol.for("nodejs.util.inspect.custom")]() {
+    return "[CodePassword]";
+  }
+};
+_bytes = new WeakMap();
+var CodePassword = _CodePassword;
+function checkLetters(letters) {
+  if (letters !== 2 && letters !== 3) {
+    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "A code has 2 or 3 locator letters." });
+  }
+}
+function draw(provider, alphabet, limit, count) {
+  let out = "";
+  while (out.length < count) {
+    const bytes = provider.randomBytes(count - out.length);
+    for (const byte of bytes) {
+      if (byte < limit) out += alphabet[byte % alphabet.length];
+    }
+    bytes.fill(0);
+  }
+  return out;
+}
+var drawLetters = (provider, count) => draw(provider, CODE_LETTERS, LETTER_BYTE_LIMIT, count);
+var drawDigits = (provider, count) => draw(provider, CODE_DIGITS, DIGIT_BYTE_LIMIT, count);
+var codeOf = (letters, digits) => `${letters}-${digits}`;
+function newCode(provider, locator, letters = DEFAULT_LOCATOR_LETTERS) {
+  checkLetters(letters);
+  if (typeof locator !== "string" || locator.length !== letters || [...locator].some((c) => !CODE_LETTERS.includes(c))) {
+    throw new DropgateError({ code: "INVALID_ARGUMENT", message: `A locator is ${letters} of a code's letters.` });
+  }
+  const passwordLetters = drawLetters(provider, CODE_LETTER_COUNT - letters);
+  const digits = drawDigits(provider, CODE_DIGIT_COUNT);
+  const parts = { locator, password: CodePassword.of(passwordLetters + digits) };
+  Object.defineProperty(parts, "code", { value: codeOf(locator + passwordLetters, digits), enumerable: false });
+  return Object.freeze(parts);
+}
+function normalizeCode(value) {
+  const match = typeof value === "string" ? TYPED_CODE.exec(value.replace(/\s+/g, "")) : null;
+  if (!match) throw invalidCode();
+  return codeOf(match[1].toUpperCase(), match[2]);
+}
+function isCodeLike(value) {
+  return typeof value === "string" && TYPED_CODE.test(value.replace(/\s+/g, ""));
+}
+function parseCode(value, letters = DEFAULT_LOCATOR_LETTERS) {
+  checkLetters(letters);
+  const code = normalizeCode(value);
+  return Object.freeze({
+    locator: code.slice(0, letters),
+    password: CodePassword.of(code.slice(letters).replace("-", ""))
+  });
+}
+
 // src/utils/share-link.ts
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var CODE_RE = /^[A-Z]{4}-\d{4}$/;
@@ -5025,1108 +5014,6 @@ __publicField(_OperationCredentials, "none", new _OperationCredentials(null, "ho
 var OperationCredentials = _OperationCredentials;
 function credentialExpired(status, json) {
   return status === 401 && Boolean(json) && typeof json === "object" && json.code === "AUTH_EXPIRED";
-}
-
-// src/p2p/helpers.ts
-function resolvePeerConfig(userConfig, serverCaps) {
-  return {
-    path: userConfig.peerjsPath ?? serverCaps?.peerjsPath ?? "/peerjs",
-    iceServers: userConfig.iceServers ?? serverCaps?.iceServers ?? []
-  };
-}
-function buildPeerOptions(config = {}) {
-  const { host, port, peerjsPath = "/peerjs", secure = false, iceServers = [] } = config;
-  const peerOpts = {
-    host,
-    path: peerjsPath,
-    secure,
-    config: { iceServers },
-    debug: 0
-  };
-  if (port) {
-    peerOpts.port = port;
-  }
-  return peerOpts;
-}
-async function createPeerWithRetries(opts) {
-  const { code, codeGenerator, maxAttempts, buildPeer, onCode } = opts;
-  let nextCode = code || codeGenerator();
-  let peer = null;
-  let lastError = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    onCode?.(nextCode, attempt);
-    try {
-      peer = await new Promise((resolve, reject) => {
-        const instance = buildPeer(nextCode);
-        instance.on("open", () => resolve(instance));
-        instance.on("error", (err) => {
-          try {
-            instance.destroy();
-          } catch {
-          }
-          reject(err);
-        });
-      });
-      return { peer, code: nextCode };
-    } catch (err) {
-      lastError = err;
-      nextCode = codeGenerator();
-    }
-  }
-  throw lastError || new DropgateError({ code: "SERVER_UNREACHABLE", message: "Could not establish PeerJS connection." });
-}
-
-// src/p2p/protocol.ts
-var P2P_PROTOCOL_VERSION = PROTOCOLS.dgdtp.major;
-function isP2PMessage(value) {
-  if (!value || typeof value !== "object") return false;
-  const msg = value;
-  return typeof msg.t === "string" && [
-    "hello",
-    "file_list",
-    "meta",
-    "ready",
-    "chunk",
-    "chunk_ack",
-    "file_end",
-    "file_end_ack",
-    "end",
-    "end_ack",
-    "ping",
-    "pong",
-    "error",
-    "cancelled",
-    "resume",
-    "resume_ack"
-  ].includes(msg.t);
-}
-var P2P_CHUNK_SIZE = 64 * 1024;
-var P2P_MAX_UNACKED_CHUNKS = 64;
-var P2P_END_ACK_TIMEOUT_MS = 15e3;
-var P2P_END_ACK_RETRIES = 3;
-var P2P_END_ACK_RETRY_DELAY_MS = 100;
-var P2P_CLOSE_GRACE_PERIOD_MS = 2e3;
-
-// src/p2p/send.ts
-var P2P_UNACKED_CHUNK_TIMEOUT_MS = 6e4;
-function generateSessionId() {
-  return cryptoProvider().randomUUID();
-}
-var ALLOWED_TRANSITIONS = {
-  initializing: ["listening", "closed"],
-  listening: ["handshaking", "closed", "cancelled"],
-  handshaking: ["negotiating", "closed", "cancelled"],
-  negotiating: ["transferring", "closed", "cancelled"],
-  transferring: ["finishing", "closed", "cancelled"],
-  finishing: ["awaiting_ack", "closed", "cancelled"],
-  awaiting_ack: ["completed", "closed", "cancelled"],
-  completed: ["closed"],
-  cancelled: ["closed"],
-  closed: []
-};
-async function startP2PSend(opts) {
-  const {
-    file,
-    Peer,
-    serverInfo,
-    host,
-    port,
-    peerjsPath,
-    secure = false,
-    iceServers,
-    codeGenerator,
-    maxAttempts = 4,
-    chunkSize = P2P_CHUNK_SIZE,
-    endAckTimeoutMs = P2P_END_ACK_TIMEOUT_MS,
-    bufferHighWaterMark = 8 * 1024 * 1024,
-    bufferLowWaterMark = 2 * 1024 * 1024,
-    heartbeatIntervalMs = 5e3,
-    chunkAcknowledgments = true,
-    maxUnackedChunks = P2P_MAX_UNACKED_CHUNKS,
-    onCode,
-    onStatus,
-    onProgress,
-    onComplete,
-    onError,
-    onDisconnect,
-    onCancel,
-    onConnectionHealth
-  } = opts;
-  const files = Array.isArray(file) ? file : [file];
-  const isMultiFile = files.length > 1;
-  const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-  if (!files.length) {
-    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "At least one file is required." });
-  }
-  files.forEach((f, index) => validateFilename(f.name, { index }));
-  if (!Peer) {
-    throw new DropgateError({
-      code: "INVALID_ARGUMENT",
-      message: "PeerJS Peer constructor is required. Install peerjs and pass it as the Peer option."
-    });
-  }
-  const p2pCaps = serverInfo?.capabilities?.p2p;
-  if (serverInfo && !p2pCaps?.enabled) {
-    throw directTransferDisabled();
-  }
-  const { path: finalPath, iceServers: finalIceServers } = resolvePeerConfig(
-    { peerjsPath, iceServers },
-    p2pCaps
-  );
-  const peerOpts = buildPeerOptions({
-    host,
-    port,
-    peerjsPath: finalPath,
-    secure,
-    iceServers: finalIceServers
-  });
-  const finalCodeGenerator = codeGenerator || (() => generateP2PCode());
-  const buildPeer = (id) => new Peer(id, peerOpts);
-  const { peer, code } = await createPeerWithRetries({
-    code: null,
-    codeGenerator: finalCodeGenerator,
-    maxAttempts,
-    buildPeer,
-    onCode
-  });
-  const sessionId = generateSessionId();
-  let state = "listening";
-  let activeConn = null;
-  let sentBytes = 0;
-  let heartbeatTimer = null;
-  let healthCheckTimer = null;
-  let lastActivityTime = Date.now();
-  const unackedChunks = /* @__PURE__ */ new Map();
-  let nextSeq = 0;
-  let ackResolvers = [];
-  let lastReportedBytes = 0;
-  let transferEverStarted = false;
-  const connectionAttempts = [];
-  const MAX_CONNECTION_ATTEMPTS = 10;
-  const CONNECTION_RATE_WINDOW_MS = 1e4;
-  const transitionTo = (newState) => {
-    if (!ALLOWED_TRANSITIONS[state].includes(newState)) {
-      console.warn(`[P2P Send] Invalid state transition: ${state} -> ${newState}`);
-      return false;
-    }
-    state = newState;
-    return true;
-  };
-  const reportProgress = (data) => {
-    if (isStopped()) return;
-    const safeTotal = Number.isFinite(data.total) && data.total > 0 ? data.total : totalSize;
-    const safeReceived = Math.min(Number(data.received) || 0, safeTotal || 0);
-    if (safeReceived < lastReportedBytes) return;
-    lastReportedBytes = safeReceived;
-    const percent = safeTotal ? safeReceived / safeTotal * 100 : 0;
-    onProgress?.({ processedBytes: safeReceived, totalBytes: safeTotal, percent });
-  };
-  const safeError = (err) => {
-    if (state === "closed" || state === "completed" || state === "cancelled") return;
-    transitionTo("closed");
-    onError?.(err);
-    cleanup();
-  };
-  const safeComplete = () => {
-    if (state !== "awaiting_ack" && state !== "finishing") return;
-    transitionTo("completed");
-    onComplete?.();
-    cleanup();
-  };
-  const cleanup = () => {
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer);
-      heartbeatTimer = null;
-    }
-    if (healthCheckTimer) {
-      clearInterval(healthCheckTimer);
-      healthCheckTimer = null;
-    }
-    ackResolvers.forEach((resolve) => resolve());
-    ackResolvers = [];
-    unackedChunks.clear();
-    if (typeof window !== "undefined") {
-      window.removeEventListener("beforeunload", handleUnload);
-    }
-    try {
-      activeConn?.close();
-    } catch {
-    }
-    try {
-      peer.destroy();
-    } catch {
-    }
-  };
-  const handleUnload = () => {
-    try {
-      activeConn?.send({ t: "error", message: "Sender closed the connection." });
-    } catch {
-    }
-    stop();
-  };
-  if (typeof window !== "undefined") {
-    window.addEventListener("beforeunload", handleUnload);
-  }
-  const stop = () => {
-    if (state === "closed" || state === "cancelled") return;
-    if (state === "completed") {
-      cleanup();
-      return;
-    }
-    const wasActive = state === "transferring" || state === "finishing" || state === "awaiting_ack";
-    transitionTo("cancelled");
-    try {
-      if (activeConn && activeConn.open) {
-        activeConn.send({ t: "cancelled", message: "Sender cancelled the transfer." });
-      }
-    } catch {
-    }
-    if (wasActive && onCancel) {
-      onCancel({ cancelledBy: "sender" });
-    }
-    cleanup();
-  };
-  const isStopped = () => state === "closed" || state === "cancelled";
-  const startHealthMonitoring = (conn) => {
-    if (!onConnectionHealth) return;
-    healthCheckTimer = setInterval(() => {
-      if (isStopped()) return;
-      const dc = conn._dc;
-      if (!dc) return;
-      const health = {
-        iceConnectionState: dc.readyState === "open" ? "connected" : "disconnected",
-        bufferedAmount: dc.bufferedAmount,
-        lastActivityMs: Date.now() - lastActivityTime
-      };
-      onConnectionHealth(health);
-    }, 2e3);
-  };
-  const handleChunkAck = (msg) => {
-    lastActivityTime = Date.now();
-    unackedChunks.delete(msg.seq);
-    reportProgress({ received: msg.received, total: totalSize });
-    const resolver = ackResolvers.shift();
-    if (resolver) resolver();
-  };
-  const waitForAck = () => {
-    return new Promise((resolve) => {
-      ackResolvers.push(resolve);
-    });
-  };
-  const sendChunk = async (conn, data, offset, fileTotal) => {
-    if (chunkAcknowledgments) {
-      while (unackedChunks.size >= maxUnackedChunks) {
-        const now = Date.now();
-        for (const [_seq, chunk] of unackedChunks) {
-          if (now - chunk.sentAt > P2P_UNACKED_CHUNK_TIMEOUT_MS) {
-            const bufferedBytes = conn._dc?.bufferedAmount ?? 0;
-            if (bufferedBytes >= 1024 * 1024) {
-              throw new DropgateError({
-                code: "CONNECTION_LOST",
-                message: "Connection is too unstable. Data is queued locally but not being delivered to the receiver."
-              });
-            }
-            throw new DropgateError({
-              code: "CONNECTION_LOST",
-              message: "Receiver stopped responding. No acknowledgments received for over " + P2P_UNACKED_CHUNK_TIMEOUT_MS + " ms."
-            });
-          }
-        }
-        await Promise.race([
-          waitForAck(),
-          sleep(1e3)
-          // Timeout to prevent deadlock
-        ]);
-        if (isStopped()) return;
-      }
-    }
-    const seq = nextSeq++;
-    if (chunkAcknowledgments) {
-      unackedChunks.set(seq, { offset, size: data.byteLength, sentAt: Date.now() });
-    }
-    conn.send({ t: "chunk", seq, offset, size: data.byteLength, total: fileTotal ?? totalSize });
-    conn.send(data);
-    sentBytes += data.byteLength;
-    const dc = conn._dc;
-    if (dc && bufferHighWaterMark > 0) {
-      while (dc.bufferedAmount > bufferHighWaterMark) {
-        await new Promise((resolve) => {
-          const fallback = setTimeout(resolve, 60);
-          try {
-            dc.addEventListener(
-              "bufferedamountlow",
-              () => {
-                clearTimeout(fallback);
-                resolve();
-              },
-              { once: true }
-            );
-          } catch {
-          }
-        });
-        if (isStopped()) return;
-      }
-    }
-  };
-  const waitForEndAck = async (conn, ackPromise) => {
-    const baseTimeout = endAckTimeoutMs;
-    for (let attempt = 0; attempt < P2P_END_ACK_RETRIES; attempt++) {
-      conn.send({ t: "end", attempt });
-      const timeout = baseTimeout * Math.pow(1.5, attempt);
-      const result = await Promise.race([
-        ackPromise,
-        sleep(timeout).then(() => null)
-      ]);
-      if (result && result.t === "end_ack") {
-        return result;
-      }
-      if (isStopped()) {
-        throw new DropgateError({ code: "CONNECTION_LOST", message: "Connection closed during completion." });
-      }
-    }
-    throw new DropgateError({ code: "CONNECTION_LOST", message: "Receiver did not confirm completion after retries." });
-  };
-  peer.on("connection", (conn) => {
-    if (isStopped()) return;
-    const now = Date.now();
-    while (connectionAttempts.length > 0 && connectionAttempts[0] < now - CONNECTION_RATE_WINDOW_MS) {
-      connectionAttempts.shift();
-    }
-    if (connectionAttempts.length >= MAX_CONNECTION_ATTEMPTS) {
-      console.warn("[P2P Send] Connection rate limit exceeded, rejecting connection");
-      try {
-        conn.send({ t: "error", message: "Too many connection attempts. Please wait." });
-      } catch {
-      }
-      try {
-        conn.close();
-      } catch {
-      }
-      return;
-    }
-    connectionAttempts.push(now);
-    if (activeConn) {
-      const isOldConnOpen = activeConn.open !== false;
-      if (isOldConnOpen && state === "transferring") {
-        try {
-          conn.send({ t: "error", message: "Transfer already in progress." });
-        } catch {
-        }
-        try {
-          conn.close();
-        } catch {
-        }
-        return;
-      } else if (!isOldConnOpen) {
-        try {
-          activeConn.close();
-        } catch {
-        }
-        activeConn = null;
-        if (transferEverStarted) {
-          try {
-            conn.send({ t: "error", message: "Transfer already started with another receiver. Cannot reconnect." });
-          } catch {
-          }
-          try {
-            conn.close();
-          } catch {
-          }
-          return;
-        }
-        state = "listening";
-        sentBytes = 0;
-        nextSeq = 0;
-        unackedChunks.clear();
-      } else {
-        try {
-          conn.send({ t: "error", message: "Another receiver is already connected." });
-        } catch {
-        }
-        try {
-          conn.close();
-        } catch {
-        }
-        return;
-      }
-    }
-    activeConn = conn;
-    transitionTo("handshaking");
-    if (!isStopped()) onStatus?.({ phase: "connected", message: "Receiver connected." });
-    lastActivityTime = Date.now();
-    let helloResolve = null;
-    let readyResolve = null;
-    let endAckResolve = null;
-    let fileEndAckResolve = null;
-    let started = false;
-    const helloPromise = new Promise((resolve) => {
-      helloResolve = resolve;
-    });
-    const readyPromise = new Promise((resolve) => {
-      readyResolve = resolve;
-    });
-    const endAckPromise = new Promise((resolve) => {
-      endAckResolve = resolve;
-    });
-    conn.on("data", (data) => {
-      lastActivityTime = Date.now();
-      if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
-        return;
-      }
-      if (!isP2PMessage(data)) return;
-      const msg = data;
-      switch (msg.t) {
-        case "hello":
-          helloResolve?.(msg.protocolVersion);
-          break;
-        case "ready":
-          if (!isStopped()) onStatus?.({ phase: "transferring", message: "Receiver accepted. Starting transfer..." });
-          readyResolve?.();
-          break;
-        case "chunk_ack":
-          handleChunkAck(msg);
-          break;
-        case "file_end_ack":
-          fileEndAckResolve?.(msg);
-          break;
-        case "end_ack":
-          endAckResolve?.(msg);
-          break;
-        case "pong":
-          break;
-        case "error":
-          safeError(new DropgateError({ code: "PEER_FAILED", message: "The receiver reported an error." }));
-          break;
-        case "cancelled":
-          if (state === "cancelled" || state === "closed" || state === "completed") return;
-          transitionTo("cancelled");
-          onCancel?.({ cancelledBy: "receiver" });
-          cleanup();
-          break;
-      }
-    });
-    conn.on("open", async () => {
-      try {
-        if (started || isStopped()) return;
-        started = true;
-        startHealthMonitoring(conn);
-        const receiverVersion = await Promise.race([
-          helloPromise,
-          sleep(1e4).then(() => null)
-        ]);
-        if (isStopped()) return;
-        if (receiverVersion === null) {
-          throw new DropgateError({ code: "TIMED_OUT", origin: "peer", message: "Receiver did not respond to handshake." });
-        } else if (receiverVersion !== P2P_PROTOCOL_VERSION) {
-          throw new DropgateError({
-            code: "VERSION_UNSUPPORTED",
-            origin: "peer",
-            message: `Protocol version mismatch: sender v${P2P_PROTOCOL_VERSION}, receiver v${receiverVersion}`
-          });
-        }
-        conn.send({
-          t: "hello",
-          protocolVersion: P2P_PROTOCOL_VERSION,
-          sessionId
-        });
-        transitionTo("negotiating");
-        if (!isStopped()) onStatus?.({ phase: "waiting", message: "Connected. Waiting for receiver to accept..." });
-        if (isMultiFile) {
-          conn.send({
-            t: "file_list",
-            fileCount: files.length,
-            files: files.map((f) => ({ name: f.name, size: f.size, mime: f.type || "application/octet-stream" })),
-            totalSize
-          });
-        }
-        conn.send({
-          t: "meta",
-          sessionId,
-          name: files[0].name,
-          size: files[0].size,
-          mime: files[0].type || "application/octet-stream",
-          ...isMultiFile ? { fileIndex: 0 } : {}
-        });
-        const dc = conn._dc;
-        if (dc && Number.isFinite(bufferLowWaterMark)) {
-          try {
-            dc.bufferedAmountLowThreshold = bufferLowWaterMark;
-          } catch {
-          }
-        }
-        await readyPromise;
-        if (isStopped()) return;
-        if (heartbeatIntervalMs > 0) {
-          heartbeatTimer = setInterval(() => {
-            if (state === "transferring" || state === "finishing" || state === "awaiting_ack") {
-              try {
-                conn.send({ t: "ping", timestamp: Date.now() });
-              } catch {
-              }
-            }
-          }, heartbeatIntervalMs);
-        }
-        transitionTo("transferring");
-        transferEverStarted = true;
-        let overallSentBytes = 0;
-        for (let fi = 0; fi < files.length; fi++) {
-          const currentFile = files[fi];
-          if (isMultiFile && fi > 0) {
-            conn.send({
-              t: "meta",
-              sessionId,
-              name: currentFile.name,
-              size: currentFile.size,
-              mime: currentFile.type || "application/octet-stream",
-              fileIndex: fi
-            });
-          }
-          for (let offset = 0; offset < currentFile.size; offset += chunkSize) {
-            if (isStopped()) return;
-            const slice = currentFile.slice(offset, offset + chunkSize);
-            const buf = await slice.arrayBuffer();
-            if (isStopped()) return;
-            await sendChunk(conn, buf, offset, currentFile.size);
-            overallSentBytes += buf.byteLength;
-            reportProgress({ received: overallSentBytes, total: totalSize });
-          }
-          if (isStopped()) return;
-          if (isMultiFile) {
-            const fileEndAckPromise = new Promise((resolve) => {
-              fileEndAckResolve = resolve;
-            });
-            conn.send({ t: "file_end", fileIndex: fi });
-            const feAck = await Promise.race([
-              fileEndAckPromise,
-              sleep(endAckTimeoutMs).then(() => null)
-            ]);
-            if (isStopped()) return;
-            if (!feAck) {
-              throw new DropgateError({ code: "CONNECTION_LOST", message: `Receiver did not confirm receipt of file ${fi + 1}/${files.length}.` });
-            }
-          }
-        }
-        if (isStopped()) return;
-        transitionTo("finishing");
-        transitionTo("awaiting_ack");
-        const ackResult = await waitForEndAck(conn, endAckPromise);
-        if (isStopped()) return;
-        const ackTotal = Number(ackResult.total) || totalSize;
-        const ackReceived = Number(ackResult.received) || 0;
-        if (ackTotal && ackReceived < ackTotal) {
-          throw new DropgateError({ code: "PEER_FAILED", message: "Receiver reported an incomplete transfer." });
-        }
-        reportProgress({ received: ackReceived || ackTotal, total: ackTotal });
-        safeComplete();
-      } catch (err) {
-        safeError(err);
-      }
-    });
-    conn.on("error", (err) => {
-      safeError(err);
-    });
-    conn.on("close", () => {
-      if (state === "closed" || state === "completed" || state === "cancelled") {
-        cleanup();
-        return;
-      }
-      if (state === "awaiting_ack") {
-        setTimeout(() => {
-          if (state === "awaiting_ack") {
-            safeError(new DropgateError({ code: "CONNECTION_LOST", message: "Connection closed while awaiting confirmation." }));
-          }
-        }, P2P_CLOSE_GRACE_PERIOD_MS);
-        return;
-      }
-      if (state === "transferring" || state === "finishing") {
-        transitionTo("cancelled");
-        onCancel?.({ cancelledBy: "receiver" });
-        cleanup();
-      } else {
-        activeConn = null;
-        state = "listening";
-        sentBytes = 0;
-        nextSeq = 0;
-        unackedChunks.clear();
-        onDisconnect?.();
-      }
-    });
-  });
-  return {
-    peer,
-    code,
-    sessionId,
-    stop,
-    getStatus: () => state,
-    getBytesSent: () => sentBytes,
-    getConnectedPeerId: () => {
-      if (!activeConn) return null;
-      return activeConn.peer || null;
-    }
-  };
-}
-
-// src/p2p/receive.ts
-var ALLOWED_TRANSITIONS2 = {
-  initializing: ["connecting", "closed"],
-  connecting: ["handshaking", "closed", "cancelled"],
-  handshaking: ["negotiating", "closed", "cancelled"],
-  negotiating: ["transferring", "closed", "cancelled"],
-  transferring: ["completed", "closed", "cancelled"],
-  completed: ["closed"],
-  cancelled: ["closed"],
-  closed: []
-};
-async function startP2PReceive(opts) {
-  const {
-    code,
-    Peer,
-    serverInfo,
-    host,
-    port,
-    peerjsPath,
-    secure = false,
-    iceServers,
-    autoReady = true,
-    watchdogTimeoutMs = 3e4,
-    onStatus,
-    onMeta,
-    onData,
-    onProgress,
-    onFileStart,
-    onFileEnd,
-    onComplete,
-    onError,
-    onDisconnect,
-    onCancel
-  } = opts;
-  if (!code) {
-    throw new DropgateError({ code: "INVALID_ARGUMENT", message: "No sharing code was provided." });
-  }
-  if (!Peer) {
-    throw new DropgateError({
-      code: "INVALID_ARGUMENT",
-      message: "PeerJS Peer constructor is required. Install peerjs and pass it as the Peer option."
-    });
-  }
-  const p2pCaps = serverInfo?.capabilities?.p2p;
-  if (serverInfo && !p2pCaps?.enabled) throw directTransferDisabled();
-  let normalizedCode;
-  try {
-    normalizedCode = normalizeCode(String(code));
-  } catch {
-    throw new DropgateError({ code: "INVALID_CODE", message: "Invalid direct transfer code." });
-  }
-  const { path: finalPath, iceServers: finalIceServers } = resolvePeerConfig(
-    { peerjsPath, iceServers },
-    p2pCaps
-  );
-  const peerOpts = buildPeerOptions({
-    host,
-    port,
-    peerjsPath: finalPath,
-    secure,
-    iceServers: finalIceServers
-  });
-  const peer = new Peer(void 0, peerOpts);
-  let state = "initializing";
-  let total = 0;
-  let received = 0;
-  let currentSessionId = null;
-  let writeQueue = Promise.resolve();
-  let watchdogTimer = null;
-  let activeConn = null;
-  let pendingChunk = null;
-  let fileList = null;
-  let currentFileReceived = 0;
-  let totalReceivedAllFiles = 0;
-  let expectedChunkSeq = 0;
-  let writeQueueDepth = 0;
-  const MAX_WRITE_QUEUE_DEPTH = 100;
-  const MAX_FILE_COUNT = 1e4;
-  let lastSenderActivityMs = 0;
-  const transitionTo = (newState) => {
-    if (!ALLOWED_TRANSITIONS2[state].includes(newState)) {
-      console.warn(`[P2P Receive] Invalid state transition: ${state} -> ${newState}`);
-      return false;
-    }
-    state = newState;
-    return true;
-  };
-  const isStopped = () => state === "closed" || state === "cancelled";
-  const resetWatchdog = () => {
-    if (watchdogTimeoutMs <= 0) return;
-    if (watchdogTimer) {
-      clearTimeout(watchdogTimer);
-    }
-    watchdogTimer = setTimeout(() => {
-      if (state === "transferring") {
-        const sinceActivity = Date.now() - lastSenderActivityMs;
-        if (sinceActivity < 1e4) {
-          safeError(new DropgateError({
-            code: "CONNECTION_LOST",
-            message: "Connection is too unstable. Sender is reachable but file data has stopped arriving."
-          }));
-        } else {
-          safeError(new DropgateError({
-            code: "CONNECTION_LOST",
-            message: "Sender stopped responding. No file data or heartbeats received for over " + watchdogTimeoutMs + " ms."
-          }));
-        }
-      }
-    }, watchdogTimeoutMs);
-  };
-  const clearWatchdog = () => {
-    if (watchdogTimer) {
-      clearTimeout(watchdogTimer);
-      watchdogTimer = null;
-    }
-  };
-  const safeError = (err) => {
-    if (state === "closed" || state === "completed" || state === "cancelled") return;
-    transitionTo("closed");
-    onError?.(err);
-    cleanup();
-  };
-  const safeComplete = (completeData) => {
-    if (state !== "transferring") return;
-    transitionTo("completed");
-    onComplete?.(completeData);
-  };
-  const cleanup = () => {
-    clearWatchdog();
-    if (typeof window !== "undefined") {
-      window.removeEventListener("beforeunload", handleUnload);
-    }
-    try {
-      peer.destroy();
-    } catch {
-    }
-  };
-  const handleUnload = () => {
-    try {
-      activeConn?.send({ t: "error", message: "Receiver closed the connection." });
-    } catch {
-    }
-    stop();
-  };
-  if (typeof window !== "undefined") {
-    window.addEventListener("beforeunload", handleUnload);
-  }
-  const stop = () => {
-    if (state === "closed" || state === "cancelled") return;
-    if (state === "completed") {
-      cleanup();
-      return;
-    }
-    const wasActive = state === "transferring";
-    transitionTo("cancelled");
-    try {
-      if (activeConn && activeConn.open) {
-        activeConn.send({ t: "cancelled", reason: "Receiver cancelled the transfer." });
-      }
-    } catch {
-    }
-    if (wasActive && onCancel) {
-      onCancel({ cancelledBy: "receiver" });
-    }
-    cleanup();
-  };
-  const sendChunkAck = (conn, seq) => {
-    try {
-      conn.send({ t: "chunk_ack", seq, received });
-    } catch {
-    }
-  };
-  peer.on("error", (err) => {
-    safeError(err);
-  });
-  peer.on("open", () => {
-    transitionTo("connecting");
-    const conn = peer.connect(normalizedCode, { reliable: true });
-    activeConn = conn;
-    conn.on("open", () => {
-      transitionTo("handshaking");
-      onStatus?.({ phase: "connected", message: "Connected." });
-      conn.send({
-        t: "hello",
-        protocolVersion: P2P_PROTOCOL_VERSION,
-        sessionId: ""
-      });
-    });
-    conn.on("data", async (data) => {
-      lastSenderActivityMs = Date.now();
-      try {
-        if (data instanceof ArrayBuffer || ArrayBuffer.isView(data) || typeof Blob !== "undefined" && data instanceof Blob) {
-          if (state !== "transferring") {
-            throw new DropgateError({
-              code: "INTEGRITY_FAILED",
-              origin: "peer",
-              message: "Received binary data before transfer was accepted. Possible malicious sender."
-            });
-          }
-          resetWatchdog();
-          if (writeQueueDepth >= MAX_WRITE_QUEUE_DEPTH) {
-            throw new DropgateError({ code: "OUTPUT_WRITE_FAILED", message: "Write queue overflow - receiver cannot keep up" });
-          }
-          let bufPromise;
-          if (data instanceof ArrayBuffer) {
-            bufPromise = Promise.resolve(new Uint8Array(data));
-          } else if (ArrayBuffer.isView(data)) {
-            bufPromise = Promise.resolve(
-              new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-            );
-          } else if (typeof Blob !== "undefined" && data instanceof Blob) {
-            bufPromise = data.arrayBuffer().then((buffer) => new Uint8Array(buffer));
-          } else {
-            return;
-          }
-          const chunkSeq = pendingChunk?.seq ?? -1;
-          const expectedSize = pendingChunk?.size;
-          pendingChunk = null;
-          writeQueueDepth++;
-          writeQueue = writeQueue.then(async () => {
-            const buf = await bufPromise;
-            if (expectedSize !== void 0 && buf.byteLength !== expectedSize) {
-              throw new DropgateError({
-                code: "INTEGRITY_FAILED",
-                origin: "peer",
-                message: `Chunk size mismatch: expected ${expectedSize}, got ${buf.byteLength}`
-              });
-            }
-            const newReceived = received + buf.byteLength;
-            if (total > 0 && newReceived > total) {
-              throw new DropgateError({
-                code: "INTEGRITY_FAILED",
-                origin: "peer",
-                message: `Received more data than expected: ${newReceived} > ${total}`
-              });
-            }
-            if (onData) {
-              await onData(buf);
-            }
-            received += buf.byteLength;
-            currentFileReceived += buf.byteLength;
-            const progressReceived = fileList ? totalReceivedAllFiles + currentFileReceived : received;
-            const progressTotal = fileList ? fileList.totalSize : total;
-            const percent = progressTotal ? Math.min(100, progressReceived / progressTotal * 100) : 0;
-            if (!isStopped()) onProgress?.({ processedBytes: progressReceived, totalBytes: progressTotal, percent });
-            if (chunkSeq >= 0) {
-              sendChunkAck(conn, chunkSeq);
-            }
-          }).catch((err) => {
-            try {
-              conn.send({
-                t: "error",
-                message: err?.message || "Receiver write failed."
-              });
-            } catch {
-            }
-            safeError(err);
-          }).finally(() => {
-            writeQueueDepth--;
-          });
-          return;
-        }
-        if (!isP2PMessage(data)) return;
-        const msg = data;
-        switch (msg.t) {
-          case "hello":
-            currentSessionId = msg.sessionId || null;
-            transitionTo("negotiating");
-            onStatus?.({ phase: "waiting", message: "Waiting for file details..." });
-            break;
-          case "file_list": {
-            const fileListMsg = msg;
-            if (fileListMsg.fileCount > MAX_FILE_COUNT) {
-              throw new DropgateError({ code: "INVALID_MANIFEST", message: `Too many files: ${fileListMsg.fileCount}` });
-            }
-            const sumSize = fileListMsg.files.reduce((sum, f) => sum + f.size, 0);
-            if (sumSize !== fileListMsg.totalSize) {
-              throw new DropgateError({
-                code: "INVALID_MANIFEST",
-                message: `File list size mismatch: declared ${fileListMsg.totalSize}, actual sum ${sumSize}`
-              });
-            }
-            fileListMsg.files.forEach((f, index) => validateFilename(f.name, { index, origin: "peer" }));
-            fileList = fileListMsg;
-            total = fileListMsg.totalSize;
-            break;
-          }
-          case "meta": {
-            if (state !== "negotiating" && !(state === "transferring" && fileList)) {
-              return;
-            }
-            if (currentSessionId && msg.sessionId && msg.sessionId !== currentSessionId) {
-              try {
-                conn.send({ t: "error", message: "Busy with another session." });
-              } catch {
-              }
-              return;
-            }
-            if (msg.sessionId) {
-              currentSessionId = msg.sessionId;
-            }
-            const name = String(msg.name || "file");
-            const fileSize = Number(msg.size) || 0;
-            const fi = msg.fileIndex;
-            validateFilename(name, { origin: "peer", ...typeof fi === "number" ? { index: fi } : {} });
-            if (fileList && typeof fi === "number" && fi > 0) {
-              currentFileReceived = 0;
-              onFileStart?.({ fileIndex: fi, name, size: fileSize });
-              break;
-            }
-            received = 0;
-            currentFileReceived = 0;
-            totalReceivedAllFiles = 0;
-            if (!fileList) {
-              total = fileSize;
-            }
-            writeQueue = Promise.resolve();
-            const sendReady = () => {
-              transitionTo("transferring");
-              resetWatchdog();
-              if (fileList) {
-                onFileStart?.({ fileIndex: 0, name, size: fileSize });
-              }
-              try {
-                conn.send({ t: "ready" });
-              } catch {
-              }
-            };
-            const metaEvt = { name, total };
-            if (fileList) {
-              metaEvt.fileCount = fileList.fileCount;
-              metaEvt.files = fileList.files.map((f) => ({ name: f.name, size: f.size }));
-              metaEvt.totalSize = fileList.totalSize;
-            }
-            if (autoReady) {
-              if (!isStopped()) {
-                onMeta?.(metaEvt);
-                onProgress?.({ processedBytes: received, totalBytes: total, percent: 0 });
-              }
-              sendReady();
-            } else {
-              metaEvt.sendReady = sendReady;
-              if (!isStopped()) {
-                onMeta?.(metaEvt);
-                onProgress?.({ processedBytes: received, totalBytes: total, percent: 0 });
-              }
-            }
-            break;
-          }
-          case "chunk": {
-            const chunkMsg = msg;
-            if (state !== "transferring") {
-              throw new DropgateError({
-                code: "INTEGRITY_FAILED",
-                origin: "peer",
-                message: "Received chunk message before transfer was accepted."
-              });
-            }
-            if (chunkMsg.seq !== expectedChunkSeq) {
-              throw new DropgateError({
-                code: "INTEGRITY_FAILED",
-                origin: "peer",
-                message: `Chunk sequence error: expected ${expectedChunkSeq}, got ${chunkMsg.seq}`
-              });
-            }
-            expectedChunkSeq++;
-            pendingChunk = chunkMsg;
-            break;
-          }
-          case "ping":
-            try {
-              conn.send({ t: "pong", timestamp: Date.now() });
-            } catch {
-            }
-            break;
-          case "file_end": {
-            clearWatchdog();
-            await writeQueue;
-            const feIdx = msg.fileIndex;
-            onFileEnd?.({ fileIndex: feIdx, receivedBytes: currentFileReceived });
-            try {
-              conn.send({ t: "file_end_ack", fileIndex: feIdx, received: currentFileReceived, size: currentFileReceived });
-            } catch {
-            }
-            totalReceivedAllFiles += currentFileReceived;
-            currentFileReceived = 0;
-            resetWatchdog();
-            break;
-          }
-          case "end":
-            clearWatchdog();
-            await writeQueue;
-            const finalReceived = fileList ? totalReceivedAllFiles + currentFileReceived : received;
-            const finalTotal = fileList ? fileList.totalSize : total;
-            if (finalTotal && finalReceived < finalTotal) {
-              const err = new DropgateError({
-                code: "CONNECTION_LOST",
-                message: "Transfer ended before all data was received."
-              });
-              try {
-                conn.send({ t: "error", message: err.message });
-              } catch {
-              }
-              throw err;
-            }
-            try {
-              conn.send({ t: "end_ack", received: finalReceived, total: finalTotal });
-            } catch {
-            }
-            safeComplete({ received: finalReceived, total: finalTotal });
-            (async () => {
-              for (let i = 0; i < 2; i++) {
-                await sleep(P2P_END_ACK_RETRY_DELAY_MS);
-                try {
-                  conn.send({ t: "end_ack", received: finalReceived, total: finalTotal });
-                } catch {
-                  break;
-                }
-              }
-            })().catch(() => {
-            });
-            break;
-          case "error":
-            throw new DropgateError({ code: "PEER_FAILED", message: "The sender reported an error." });
-          case "cancelled":
-            if (state === "cancelled" || state === "closed" || state === "completed") return;
-            transitionTo("cancelled");
-            onCancel?.({ cancelledBy: "sender" });
-            cleanup();
-            break;
-        }
-      } catch (err) {
-        safeError(err);
-      }
-    });
-    conn.on("close", () => {
-      if (state === "closed" || state === "completed" || state === "cancelled") {
-        cleanup();
-        return;
-      }
-      if (state === "transferring") {
-        transitionTo("cancelled");
-        onCancel?.({ cancelledBy: "sender" });
-        cleanup();
-      } else if (state === "negotiating") {
-        transitionTo("closed");
-        cleanup();
-        onDisconnect?.();
-      } else {
-        safeError(new DropgateError({ code: "CONNECTION_LOST", message: "Sender disconnected before file details were received." }));
-      }
-    });
-  });
-  return {
-    peer,
-    stop,
-    getStatus: () => state,
-    getBytesReceived: () => received,
-    getTotalBytes: () => total,
-    getSessionId: () => currentSessionId
-  };
 }
 
 // src/zip/crc32.ts
@@ -13027,8 +11914,12 @@ async function openObject(provider, opts) {
 }
 
 // src/client/DropgateClient.ts
-function isPeerJsCall(opts) {
-  return opts !== null && typeof opts === "object" && "Peer" in opts;
+function dropgate3DirectCall(opts) {
+  if (opts === null || typeof opts !== "object" || !("Peer" in opts)) return null;
+  return new DropgateError({
+    code: "INVALID_ARGUMENT",
+    message: "Dropgate 4's direct transfers take no Peer option: use the handle that send() or receive() gives."
+  });
 }
 function resolveServerToBaseUrl(server) {
   if (typeof server === "string") {
@@ -13040,17 +11931,6 @@ function serverChunkSize(serverInfo, fallback) {
   const size = serverInfo?.capabilities?.upload?.chunkSize;
   return Number.isFinite(size) && size > 0 ? size : fallback;
 }
-var DIRECT_EVENTS = [
-  "onStatus",
-  "onProgress",
-  "onMeta",
-  "onComplete",
-  "onCancel",
-  "onConnectionHealth",
-  "onFileStart",
-  "onFileEnd",
-  "onResumeRequest"
-];
 var UPLOAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function hostedTarget(opts) {
   const { id } = opts ?? {};
@@ -13258,8 +12138,14 @@ var DropgateClient = class {
     });
     const directHost = this._directHost();
     this.direct = Object.freeze({
-      send: stamped2((o) => isPeerJsCall(o) ? this._directSend(o) : startDirectSend(directHost, o)),
-      receive: stamped2((o) => isPeerJsCall(o) ? this._directReceive(o) : startDirectReceive(directHost, o)),
+      send: stamped2((o) => {
+        const refused2 = dropgate3DirectCall(o);
+        return refused2 ? Promise.reject(refused2) : startDirectSend(directHost, o);
+      }),
+      receive: stamped2((o) => {
+        const refused2 = dropgate3DirectCall(o);
+        return refused2 ? Promise.reject(refused2) : startDirectReceive(directHost, o);
+      }),
       appClosing: () => appClosing(directHost)
     });
     this.links = Object.freeze({
@@ -13685,8 +12571,8 @@ var DropgateClient = class {
       throw new DropgateError({ code: "INVALID_RESPONSE", message: "The server's answer to starting the upload wasn't understood." });
     }
     p.started(uploadId);
-    const window2 = new RetryWindow();
-    window2.heard(deadline);
+    const window = new RetryWindow();
+    window.heard(deadline);
     const sizes2 = files.map((f) => f.size);
     const totalChunks = layout.chunkCount;
     let held = new Uint8Array(totalChunks);
@@ -13705,12 +12591,12 @@ var DropgateClient = class {
       throw err.code === "NOT_FOUND" ? dropped(err) : withRetryAfter(err, out.res);
     }, {
       policy: p.policy,
-      window: window2,
+      window,
       signal,
       random: (length) => this._crypto.randomBytes(length),
       waiting: ({ remainingMs }) => progress({
         text: `${route === "pause" ? "Pausing" : "Resuming"} failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s...`,
-        deadline: window2.end
+        deadline: window.end
       }),
       expired: unreachableTooLong
     });
@@ -13718,7 +12604,7 @@ var DropgateClient = class {
       pause: async () => {
         const said = await pauseRequest("pause", droppedUpload);
         const until = pausedUntil(said.deadline, pauseMs);
-        window2.heard(until);
+        window.heard(until);
         return until;
       },
       resume: async () => {
@@ -13732,7 +12618,7 @@ var DropgateClient = class {
             writer?.confirm(i);
           }
         }
-        window2.heard(said.deadline);
+        window.heard(said.deadline);
       },
       expired: () => droppedPausedUpload()
     };
@@ -13794,7 +12680,7 @@ var DropgateClient = class {
             },
             body: new Blob([body])
           },
-          { policy: p.policy, window: window2, timeoutMs: timeouts.chunkMs ?? 6e4, signal: p.pausing.signal, progress, chunkIndex: i, credentials: p.credentials }
+          { policy: p.policy, window, timeoutMs: timeouts.chunkMs ?? 6e4, signal: p.pausing.signal, progress, chunkIndex: i, credentials: p.credentials }
         );
       } catch (err) {
         if (p.pausing.interrupted) continue;
@@ -13819,10 +12705,10 @@ var DropgateClient = class {
       throw err.code === "NOT_FOUND" ? droppedUpload(err) : withRetryAfter(err, out.res);
     }, {
       policy: p.policy,
-      window: window2,
+      window,
       signal,
       random: (length) => this._crypto.randomBytes(length),
-      waiting: ({ remainingMs }) => progress({ text: `Finalising failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s...`, deadline: window2.end }),
+      waiting: ({ remainingMs }) => progress({ text: `Finalising failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s...`, deadline: window.end }),
       retrying: () => progress({ text: "Finalising upload..." }),
       expired: unreachableTooLong
     });
@@ -14100,13 +12986,13 @@ var DropgateClient = class {
       progress({ status: "downloading", totalBytes: totalSize, ...several ? { totalFiles: indexes.length } : {} });
       taken = await o.how.lease.take(baseUrl, { timeoutMs, signal: downloadSignal, progress });
       const lease = taken;
-      const window2 = new RetryWindow();
-      window2.heard(lease.deadline);
+      const window = new RetryWindow();
+      window.heard(lease.deadline);
       const pausing = ctx.pausing;
       const pauseMs = pauseLength(compat.serverInfo);
       const run = {
         policy: o.policy,
-        window: window2,
+        window,
         signal: downloadSignal,
         progress,
         deadline: (deadline) => pausing.extend(deadline === null ? null : pausedUntil(deadline, pauseMs))
@@ -14236,7 +13122,7 @@ var DropgateClient = class {
               throw failed(err, "SERVER_UNREACHABLE");
             }
             if (!res.ok) throw withRetryAfter(errorFromStatus(res.status, await res.json().catch(() => null), "Download failed."), res);
-            window2.heard();
+            window.heard();
             if (reconnecting) {
               reconnecting = false;
               progress({ deadline: null });
@@ -14273,7 +13159,7 @@ var DropgateClient = class {
                 }
                 if (waitSignal.aborted) throw waitSignal.reason;
                 if (next.done) return;
-                window2.heard();
+                window.heard();
                 yield next.value;
               }
             }
@@ -14305,13 +13191,13 @@ var DropgateClient = class {
           try {
             await retrying(fetchRest, {
               policy: o.policy,
-              window: window2,
+              window,
               signal: pausing.signal,
               random: (length) => this._crypto.randomBytes(length),
               // While it waits, the snapshot gives when the server stops holding the lease.
               waiting: ({ remainingMs }) => {
                 reconnecting = true;
-                progress({ text: `The connection was lost. Reconnecting in ${(remainingMs / 1e3).toFixed(1)}s...`, deadline: window2.end });
+                progress({ text: `The connection was lost. Reconnecting in ${(remainingMs / 1e3).toFixed(1)}s...`, deadline: window.end });
               },
               retrying: () => progress({ text: "Reconnecting..." })
             });
@@ -14457,70 +13343,13 @@ var DropgateClient = class {
       }
     });
   }
-  /** Dropgate 3's PeerJS send, for the calls that still pass its `Peer`. */
-  async _directSend(opts) {
-    const compat = await this._connect();
-    this._requireCompatible(compat, "dgdtp");
-    const { serverInfo } = compat;
-    const p2pCaps = serverInfo?.capabilities?.p2p;
-    if (!p2pCaps?.enabled) throw directTransferDisabled();
-    const { host, port, secure } = parseServerUrl(this.baseUrl);
-    const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
-    const session = await startP2PSend({
-      ...this._directEvents(opts),
-      host,
-      port,
-      secure,
-      peerjsPath,
-      iceServers,
-      serverInfo
-    });
-    return Object.assign(session, { transport: this.transport });
-  }
-  /** Dropgate 3's PeerJS receive, for the calls that still pass its `Peer`. */
-  async _directReceive(opts) {
-    const compat = await this._connect();
-    this._requireCompatible(compat, "dgdtp");
-    const { serverInfo } = compat;
-    const p2pCaps = serverInfo?.capabilities?.p2p;
-    if (!p2pCaps?.enabled) throw directTransferDisabled();
-    const { host, port, secure } = parseServerUrl(this.baseUrl);
-    const { path: peerjsPath, iceServers } = resolvePeerConfig({}, p2pCaps);
-    const session = await startP2PReceive({
-      ...this._directEvents(opts),
-      host,
-      port,
-      secure,
-      peerjsPath,
-      iceServers,
-      serverInfo
-    });
-    return Object.assign(session, { transport: this.transport });
-  }
-  /**
-   * A direct transfer's options, with each event its listeners are given
-   * carrying `transport`, and each error carrying it too, as every snapshot,
-   * result and error a client gives does.
-   */
-  _directEvents(opts) {
-    const transport = this.transport;
-    const out = { ...opts };
-    for (const name of DIRECT_EVENTS) {
-      const listener = out[name];
-      if (typeof listener !== "function") continue;
-      out[name] = (evt) => listener(evt && typeof evt === "object" ? { ...evt, transport } : evt);
-    }
-    const onError = out.onError;
-    if (typeof onError === "function") out.onError = (err) => onError(withTransport(err, transport));
-    return out;
-  }
   /**
    * Sends one chunk, the same bytes on every try. A try that can recover is
    * made again, after its backoff or the server's Retry-After, until the server
    * stops waiting for the upload; anything else the server says fails at once.
    */
   async _attemptChunkUpload(url, fetchOptions, opts) {
-    const { policy, window: window2, timeoutMs, signal, progress, chunkIndex, credentials } = opts;
+    const { policy, window, timeoutMs, signal, progress, chunkIndex, credentials } = opts;
     const counted = (attempt) => policy.retries !== void 0 ? `(${attempt}/${policy.retries})` : `(retry ${attempt})`;
     await retrying(async () => {
       for (; ; ) {
@@ -14541,7 +13370,7 @@ var DropgateClient = class {
           } catch {
           }
           if (res.ok) {
-            window2.heard(said?.deadline);
+            window.heard(said?.deadline);
             return;
           }
           const err = errorFromStatus(res.status, said, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
@@ -14554,14 +13383,14 @@ var DropgateClient = class {
       }
     }, {
       policy,
-      window: window2,
+      window,
       signal,
       random: (length) => this._crypto.randomBytes(length),
       // While it waits, the snapshot gives when the server stops waiting for the upload.
       waiting: ({ attempt, remainingMs }) => progress({
         phase: "retry-wait",
         text: `Chunk upload failed. Retrying in ${(remainingMs / 1e3).toFixed(1)}s... ${counted(attempt)}`,
-        deadline: window2.end
+        deadline: window.end
       }),
       retrying: (attempt) => progress({ phase: "retry", text: `Chunk upload failed. Retrying now... ${counted(attempt)}` }),
       expired: unreachableTooLong
@@ -14653,7 +13482,7 @@ var hosts = Object.freeze({
   /** Whether a hostname is this machine (`localhost`, `127.0.0.1` or `::1`, also as `[::1]`). */
   isLocalhost: isLocalhostHostname,
   /** Whether a direct transfer can run here: a secure context, or this machine. */
-  isSecureForDirect: isSecureContextForP2P
+  isSecureForDirect: (hostname, isSecureContext) => Boolean(isSecureContext) || isLocalhostHostname(hostname || "")
 });
 var zip = Object.freeze({
   /**

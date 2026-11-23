@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { DropgateClient, DropgateError } from '../src/index.js';
-import type { PeerConstructor } from '../src/index.js';
-import { P2P_PROTOCOL_VERSION } from '../src/p2p/index.js';
+import type { DirectPeerConnectionClass } from '../src/index.js';
+import { PROTOCOLS } from '../src/version.js';
 
 // Hard requirement 6: core knows its own version and its protocol versions,
 // and works out with each server whether they work together, each protocol on
@@ -17,6 +17,9 @@ const json = (status: number, value: unknown): Response =>
   new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 
 /** A fake server whose /api/info gives `info`, recording every request in full. */
+/** A direct send asks the server before it makes a peer connection, so a class that's never made stands in. */
+const StandIn = class {} as unknown as DirectPeerConnectionClass;
+
 function serverGiving(info: Record<string, unknown>) {
   const requests: Array<{ url: string; headers: string; body: string }> = [];
   const fetchFn = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
@@ -32,7 +35,7 @@ function serverGiving(info: Record<string, unknown>) {
 
 const CAPABILITIES = {
   upload: { enabled: true, maxSizeMB: 0, maxLifetimeHours: 0, e2ee: true, chunkSize: 64 * 1024 },
-  p2p: { enabled: true, peerjsPath: '/peerjs', iceServers: [] },
+  p2p: { enabled: true, iceServers: [], codeLetters: 2, credentialRequired: false },
 };
 const v = (major: number, minor = 0) => ({ major, minor });
 const infoWith = (protocols: unknown, version = '4.0.0') => ({ name: 'Test server', version, protocols, capabilities: CAPABILITIES });
@@ -49,8 +52,8 @@ describe('Core knows its own versions', () => {
     expect(Object.isFrozen(DropgateClient.protocols.dgdtp)).toBe(true);
   });
 
-  it("a direct transfer's hello carries the DGDTP major", () => {
-    expect(P2P_PROTOCOL_VERSION).toBe(DropgateClient.protocols.dgdtp.major);
+  it("a direct transfer's hello and rendezvous carry the DGDTP version the client gives", () => {
+    expect(PROTOCOLS.dgdtp).toEqual(DropgateClient.protocols.dgdtp);
   });
 
   it('a client is made without any version: clientVersion is gone, and passing it changes nothing', async () => {
@@ -91,7 +94,7 @@ describe('Version negotiation', () => {
 
   it('a server older than Dropgate 4, which gives no protocols, is refused for everything: the server needs updating', async () => {
     const server = serverGiving({ name: 'Old server', version: '3.0.13', capabilities: CAPABILITIES });
-    const client = new DropgateClient({ server: BASE_URL, fetchFn: server.fetchFn });
+    const client = new DropgateClient({ server: BASE_URL, fetchFn: server.fetchFn, RTCPeerConnection: StandIn });
 
     const connection = await client.server.connect();
     for (const protocol of ['dgup', 'dgdtp'] as const) {
@@ -108,7 +111,7 @@ describe('Version negotiation', () => {
     const upload = await client.hosted.upload({ files: new File([new Uint8Array(4)], 'a.txt'), lifetimeMs: 60_000 }).result;
     expect(upload.status === 'failed' && upload.error.code).toBe('VERSION_UNSUPPORTED');
     await expect(client.links.resolve(FILE_ID)).rejects.toMatchObject({ code: 'VERSION_UNSUPPORTED' });
-    await expect(client.direct.receive({ code: 'ABCD-1234', Peer: class {} as unknown as PeerConstructor }))
+    await expect(client.direct.send({ files: new File([new Uint8Array(4)], 'a.txt') }))
       .rejects.toMatchObject({ code: 'VERSION_UNSUPPORTED', details: { component: 'dgdtp', update: 'server' } });
 
     // Nothing but the server's info was asked for.
@@ -128,13 +131,13 @@ describe('Version negotiation', () => {
   });
 
   it('each protocol is negotiated on its own: hosted transfers work while direct ones need an update', async () => {
-    const client = new DropgateClient({ server: BASE_URL, fetchFn: serverGiving(infoWith({ dgup: v(4), dgdtp: v(5) })).fetchFn });
+    const client = new DropgateClient({ server: BASE_URL, fetchFn: serverGiving(infoWith({ dgup: v(4), dgdtp: v(5) })).fetchFn, RTCPeerConnection: StandIn });
     const connection = await client.server.connect();
     expect(connection.dgup.compatible).toBe(true);
     expect(connection.dgdtp).toMatchObject({ compatible: false, update: 'client' });
 
     await expect(client.hosted.metadata({ id: FILE_ID })).resolves.toMatchObject({ files: [{ name: 'notes.txt', size: 4 }] });
-    await expect(client.direct.receive({ code: 'ABCD-1234', Peer: class {} as unknown as PeerConstructor }))
+    await expect(client.direct.send({ files: new File([new Uint8Array(4)], 'a.txt') }))
       .rejects.toMatchObject({ code: 'VERSION_UNSUPPORTED', details: { component: 'dgdtp' } });
   });
 

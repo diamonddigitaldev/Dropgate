@@ -1,6 +1,6 @@
 # DGDTP — Dropgate Direct Transfer Protocol
 
-**Protocol Version:** 4.0, in development. Its secure channel, and the engine that carries a transfer over it ([§4](#4-the-secure-channel)), are built in the core library, tested, and what core's `client.direct` runs ([§4.15](#415-in-cores-api)); the apps don't use them yet: their direct transfers use version 3's messages ([§5](#5-signalling-layer) to [§18](#18-error-model)), with `hello` carrying 4
+**Protocol Version:** 4.0, in development. Its secure channel, and the engine that carries a transfer over it ([§4](#4-the-secure-channel)), are built in the core library, tested, and what core's `client.direct` and the Web UI run ([§4.15](#415-in-cores-api), [§4.16](#416-in-the-web-ui)); the desktop app's direct transfers come later. PeerJS, and Dropgate 3's messages on it, are gone ([§4.17](#417-no-compatibility-with-dropgate-3)).
 **Status:** In development
 **Last Updated:** November 2026
 
@@ -19,17 +19,19 @@ DGDTP 4 has two layers:
 
 The secure channel is built in `@dropgate/core` ([`packages/dropgate-core/src/dgdtp/`](../../packages/dropgate-core/src/dgdtp/)), and tested end to end over stand-in connections, over WebRTC between two peer connections in Node, and through a real Dropgate Server's rendezvous ([§4.12](#412-test-vectors-and-tests)). Core's `client.direct` runs every direct transfer over it, on handles ([§4.15](#415-in-cores-api)); none of the channel itself is exported.
 
-The Web UI's direct transfers run over it too, on core's handles: the home page's send and the receive page, `/p2p` ([§4.16](#416-in-the-web-ui)). Only a call to core that passes PeerJS's `Peer` still runs version 3's transfer messages, with `hello` carrying 4, on PeerJS, protected by WebRTC's own DTLS encryption alone ([§5](#5-signalling-layer) to [§18](#18-error-model)); nothing of Dropgate's own makes one any more, and it goes with PeerJS. They support single-file transfers, multi-file transfers (streamed into a ZIP archive on the receiving end), flow control with chunk-level acknowledgements, and connection health monitoring. Resume messages are reserved but not implemented (see [§16](#16-resume-support)). What DTLS alone does and doesn't protect against is in [§19.1](#191-transport-encryption).
+The Web UI's direct transfers run over it too, on core's handles: the home page's send and the receive page, `/p2p` ([§4.16](#416-in-the-web-ui)).
 
-Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, is built, and so is core's client for it: a sender's room, its codes, its receivers' attempts by link or by code, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Core also has the transfer engine: its records, its list of files and its checkpoint chain, and the engine that sends them, one transfer end to end, from the offer to the receiver's result, with pausing from either device, its timers and liveness, and one way to end. Core's `client.direct` runs on them, and so does the Web UI; the desktop app doesn't yet. Once it does, every direct transfer is carried over the secure channel, and its messages replace §5 to §18.
+Dropgate 4's own rendezvous on the Dropgate Server is built, and so is core's client for it: a sender's room, its codes, its receivers' attempts by link or by code, and the sealed frames between them ([§4.13](#413-what-the-rendezvous-and-the-engine-add)). Core also has the transfer engine: its records, its list of files and its checkpoint chain, and the engine that sends them, one transfer end to end, from the offer to the receiver's result, with pausing from either device, its timers and liveness, and one way to end. Core's `client.direct` runs on them, and so does the Web UI; the desktop app's direct transfers come later. Every direct transfer is carried over the secure channel.
+
+**PeerJS is gone.** Dropgate 3's direct transfers signalled through PeerJS, protected by WebRTC's own DTLS encryption alone; Dropgate 4 has none of it, and works with nothing of Dropgate 3's ([§4.17](#417-no-compatibility-with-dropgate-3) has what each of its parts gets). [§5](#5-signalling-layer) to [§18](#18-error-model) still describe Dropgate 3's messages, until they're rewritten as the engine's.
 
 ### 1.2 Design Goals
 
 - **Zero server storage** — file data never touches the server's filesystem or memory.
-- **End-to-end security** — over the secure channel, only the two devices can read a transfer or the messages that set up its connection, and a server that tampers with either ends the connection instead of reading it. Today's transfers rely on DTLS alone, which a malicious signalling server can get between (see [§19.1](#191-transport-encryption)).
+- **End-to-end security** — only the two devices can read a transfer or the messages that set up its connection, and a server that tampers with either ends the connection instead of reading it. Dropgate 3's transfers relied on DTLS alone, which a malicious signalling server could get between (see [§19.1](#191-transport-encryption)).
 - **Flow control** — chunk acknowledgements and buffer monitoring prevent fast senders from overwhelming slow receivers.
-- **Minimal signalling** — the server only relays what sets up the connection: today PeerJS's messages, and over the secure channel, sealed frames it can't read. Once the data channel is established, the server is no longer involved.
-- **Human-readable codes** — peers are identified by short, pronounceable codes rather than opaque UUIDs or IP addresses. Over the secure channel, only a code's first two letters ever reach the server.
+- **Minimal signalling** — the server only relays what sets up the connection, as sealed frames it can't read. Once the data channel is established, the server is no longer involved.
+- **Human-readable codes** — peers are identified by short, pronounceable codes rather than opaque UUIDs or IP addresses. Only a code's first two letters ever reach the server.
 
 ---
 
@@ -39,8 +41,8 @@ Dropgate 4's own rendezvous on the Dropgate Server, in place of PeerJS, is built
 |------|---------|
 | **Sender** | The peer that holds the file(s) and initiates the DGDTP session. |
 | **Receiver** | The peer that connects to the sender's code and receives file data. |
-| **Signalling Server** | The Dropgate Server component that relays WebRTC signalling messages (PeerJS, today). |
-| **Rendezvous** | Dropgate 4's signalling on the Dropgate Server, in place of PeerJS: it puts a sender and a receiver in touch and relays the sealed messages that set up their connection. |
+| **Signalling Server** | The Dropgate Server component that relays what sets up a WebRTC connection: its rendezvous. (Dropgate 3's was PeerJS.) |
+| **Rendezvous** | Dropgate 4's signalling on the Dropgate Server: it puts a sender and a receiver in touch and relays the sealed messages that set up their connection. |
 | **Data Channel** | The WebRTC RTCDataChannel over which DGDTP messages and binary data are sent. |
 | **P2P Code** | A human-readable identifier in the format `XXXX-0000` (4 letters + 4 digits). |
 | **Locator** | A code's first two letters (three on a server set for more rooms at once), which the rendezvous hands out and knows the sender's room by. The only part of a code that leaves the device. |
@@ -77,7 +79,7 @@ Over the secure channel, a code is two parts. The **locator**, its first two let
 
 Codes are generated from secure random numbers (`crypto.getRandomValues()`, which every browser has, even on a page served over plain HTTP), and never from anything weaker: where there are none, no code is made. Each character comes from one random byte by rejection sampling, so every letter and every digit is equally likely: a letter from a byte under 240, taken mod 24, and a digit from a byte under 250, taken mod 10; a byte at or over the limit is thrown away and another drawn. Every random byte is overwritten once used.
 
-Today, the sender registers its whole code with PeerJS, up to **4 times** (configurable), drawing a new one when it's taken. Over the secure channel, the sender asks the rendezvous for a locator, and draws the password's letters and digits on its own device the same way.
+The sender asks the rendezvous for a locator, and draws the password's letters and digits on its own device. (Dropgate 3's sender drew a whole code and registered it with PeerJS, drawing another when it was taken.)
 
 ### 3.4 Validation
 
@@ -87,13 +89,12 @@ Codes are normalised before use: whitespace anywhere is removed, letters are con
 
 Over the secure channel, only a code's locator is sent: the receiver joins the sender's room by it. The password goes only into CPace ([§4.3](#43-cpace-typed-codes)), on each device, and is never sent, logged or kept: its bytes can be read once, by the exchange that uses them, and are overwritten as soon as they've made CPace's generator. Core's tests search every byte both devices send, through the server and over the connection, for the code and its password in every form (with and without the dash, in either case, as UTF-8 and as UTF-16): neither is there.
 
-Today, the sender registers its whole code with PeerJS as its peer ID, so the server sees it ([§19.8](#198-code-brute-force-resistance)).
+Dropgate 3's sender registered its whole code with PeerJS as its peer ID, so the server saw it ([§19.8](#198-code-brute-force-resistance)). A Dropgate 3 sender's code finds nothing on a Dropgate 4 server: its rendezvous knows only its own rooms, so a receive by such a code ends `NOT_FOUND` ([§4.17](#417-no-compatibility-with-dropgate-3)).
 
 ### 3.6 Links
 
 A sender's room has a link as well as an optional code. The link carries the **link secret** after its `#`: 32 random bytes from the sender's crypto provider. A browser never sends what's after a `#`, so the server never sees it, and the receiver joins the room by a room ID derived from it ([§4.4](#44-the-key-schedule)), which tells the server nothing about it. The link is separate from the code, so a wrong code never breaks it, and it can't be guessed. The link is `https://<server>/p2p#` and the secret in URL-safe base64 with no `=`, 43 characters, with nothing else in its path and no query: core's `share()` gives it, and a receive by link refuses anything else, or a link to another server, before anything is sent.
 
-The Web UI's links still carry the code itself, in the address's path ([§19.8](#198-code-brute-force-resistance)), until it moves onto core's handles.
 
 ---
 
@@ -380,7 +381,7 @@ All of these are built: the connection itself, the rendezvous's rooms and codes,
 - **Ends:** ICE or the connection failing, or the data channel closing, ends it with `CONNECTION_LOST`.
 - **The set-up's time:** an attempt's data channel must open within 30 seconds of the attempt starting (ICE), its handshake finish within 15 seconds of that, and the whole set-up, a code's exchange included, within 90 seconds. Running out ends that attempt `TIMED_OUT`, "Couldn't connect to the other device.", with everything it opened closed; a receiver can try again, and the sender's room goes on. A frame the rendezvous drops shows up this way, never as success.
 
-The rendezvous's rooms and codes are built on the Dropgate Server ([`server/rendezvous.js`](../../server/rendezvous.js)), beside PeerJS; core's client speaks to it, and core's `client.direct` runs on it ([§4.15](#415-in-cores-api)), but the apps don't yet.
+The rendezvous's rooms and codes are built on the Dropgate Server ([`server/rendezvous.js`](../../server/rendezvous.js)); core's client speaks to it, core's `client.direct` runs on it ([§4.15](#415-in-cores-api)), and so does the Web UI ([§4.16](#416-in-the-web-ui)).
 
 - **One WebSocket per device** at `/api/v4/rendezvous`, with nothing about a room in its address, speaking short binary messages: a type byte, then fixed fields. The sender's one socket holds its room; each receiver's attempt has a socket of its own. A text message, or one over 8,232 bytes, closes the socket.
 - **In plain, as a room is created or joined:** the DGDTP major, so a mismatch is said before any cryptography. A major other than the server's is refused with the server's version; the minor is passed over.
@@ -448,6 +449,16 @@ The Web UI runs its direct transfers on core's handles ([§4.15](#415-in-cores-a
 - **Leaving a page:** each page calls `client.direct.appClosing()` on `pagehide`, best effort. The other page reads "The sender closed Dropgate before the transfer finished." (or the receiver) where the CLOSE goes in time, as in Chromium, and "The connection was lost, so the transfer couldn't continue." where the page is gone first, as in Firefox.
 - **What the pages keep:** nothing in the browser's storage, and nothing of a link, a code, a name or a size in any request: every request is to the page's own server (and the STUN server, over UDP), and the code reaches it only as its locator, inside a rendezvous message.
 
+### 4.17 No Compatibility with Dropgate 3
+
+Dropgate 4's direct transfers work with nothing of Dropgate 3's, and each part of Dropgate 3 is told so where it can be:
+
+- **A Dropgate 3 app on a Dropgate 4 server:** its direct transfers signalled through PeerJS at `/peerjs`. Anything there, over HTTP or as a WebSocket, is answered 410 with `{ "code": "VERSION_UNSUPPORTED", "error": "This server runs Dropgate 4. Update the app to use it." }`, as Dropgate 3's upload paths are ([DGUP](./DGUP.md)), whether direct transfer is on or off; PeerJS's script isn't served any more.
+- **A Dropgate 3 link** (`/p2p/<code>`, its code in the path): the server answers it with its older-version page, 410 ([§4.16](#416-in-the-web-ui)). Core's `links.resolve()` gives its path, which opens that page; `client.direct.receive({ link })` refuses it with `INVALID_ARGUMENT` before anything is sent.
+- **A Dropgate 3 code:** it looks like a Dropgate 4 one, but no Dropgate 4 room has it, so a receive by it ends `NOT_FOUND`, "No transfer has that code or link. It may have ended, or the code was used."
+- **A Dropgate 3 server, for a Dropgate 4 app:** its `/api/info` gives no protocol versions, so every call is refused with `VERSION_UNSUPPORTED`, saying the server needs updating, and nothing more is asked of it.
+- **Dropgate 3's calls to core:** a `client.direct.send()` or `receive()` that passes PeerJS's `Peer` is refused with `INVALID_ARGUMENT`, "Dropgate 4's direct transfers take no Peer option: use the handle that send() or receive() gives.", before anything is made or sent.
+
 ### 4.14 Constants
 
 | Constant | Value | Purpose |
@@ -510,11 +521,11 @@ The Web UI runs its direct transfers on core's handles ([§4.15](#415-in-cores-a
 
 ## 5. Signalling Layer
 
-This section and those up to [§18](#18-error-model) are how today's direct transfers work: version 3's messages on PeerJS, with DTLS alone. Dropgate 4's rendezvous and engine replace them, running every transfer over the secure channel ([§1.1](#11-whats-built-now)).
+This section and those up to [§18](#18-error-model) are how Dropgate 3's direct transfers worked: version 3's messages on PeerJS, with DTLS alone. Dropgate 4 removed them: its rendezvous and engine run every transfer over the secure channel ([§1.1](#11-whats-built-now)), and these sections are to be rewritten as the engine's. A Dropgate 4 server answers PeerJS's path, `/peerjs`, with "update" ([§4.17](#417-no-compatibility-with-dropgate-3)).
 
 ### 5.1 Architecture
 
-Today's direct transfers use PeerJS as their signalling layer. The Dropgate Server mounts an ExpressPeerServer at the fixed path `/peerjs`. The signalling server handles:
+Dropgate 3's direct transfers used PeerJS as their signalling layer. Its server mounted an ExpressPeerServer at the fixed path `/peerjs`, which handled:
 
 - Peer registration and discovery.
 - ICE candidate relay.
@@ -542,7 +553,7 @@ The server advertises ICE server configuration via the `/api/info` endpoint:
 
 - **Default STUN server:** `stun:stun.cloudflare.com:3478`.
 - **Custom STUN servers:** configurable via the `P2P_STUN_SERVERS` environment variable (comma- or space-separated list of `stun:` or `stuns:` addresses). Set to `none`, the server offers no ICE servers at all (`"iceServers": []`).
-- **PeerJS's path** isn't given any more: today's direct transfers find PeerJS at its fixed path, `/peerjs`.
+- **PeerJS's path** isn't given any more: Dropgate 4 has no PeerJS.
 
 ### 5.3 Signalling Data Visible to the Server
 
@@ -559,7 +570,7 @@ An honest server has **no visibility** into data channel content once the WebRTC
 
 ### 5.4 Secure Context Requirement
 
-The Dropgate Web UI only allows direct transfers in a secure context (HTTPS or `localhost`). This is Dropgate's own check, using the core library's `hosts.isSecureForDirect()` helper, not a browser restriction on WebRTC; the core library does not enforce it itself. The signalling server MUST be accessed over HTTPS in production. The `proxied: true` flag is set on the PeerJS server to indicate it operates behind a TLS-terminating reverse proxy.
+The Dropgate Web UI only allows direct transfers in a secure context (HTTPS or `localhost`). This is Dropgate's own check, using the core library's `hosts.isSecureForDirect()` helper, not a browser restriction on WebRTC; the core library does not enforce it itself. The server MUST be accessed over HTTPS in production.
 
 ---
 
@@ -1095,21 +1106,21 @@ Core reports each error as a `DropgateError`, with one of these codes (the full 
 
 ## 19. Security Considerations
 
-These are today's direct transfers' ([§5](#5-signalling-layer) to [§18](#18-error-model)). What the secure channel protects, and what it doesn't, is in [§4.1](#41-what-it-protects-and-what-it-doesnt).
+These are Dropgate 3's direct transfers' ([§5](#5-signalling-layer) to [§18](#18-error-model)), until they're rewritten as the engine's. What the secure channel, which every Dropgate 4 transfer runs over, protects, and what it doesn't, is in [§4.1](#41-what-it-protects-and-what-it-doesnt).
 
 ### 19.1 Transport Encryption
 
 WebRTC data channels are encrypted via **DTLS** (Datagram Transport Layer Security). This is handled transparently by the browser's WebRTC implementation. All data in transit between peers — including DGDTP messages and file content — is encrypted.
 
-Today's direct transfers add no encryption of their own to DTLS, and that has a consequence for what DTLS protects against. Each peer proves its identity during the DTLS handshake with a certificate whose fingerprint is sent to the other peer in the SDP. In DGDTP the SDP travels through the signalling server, and nothing else authenticates it: the P2P code is only used to find the sender.
+Dropgate 3's direct transfers added no encryption of their own to DTLS, and that has a consequence for what DTLS protects against. Each peer proves its identity during the DTLS handshake with a certificate whose fingerprint is sent to the other peer in the SDP. In DGDTP the SDP travels through the signalling server, and nothing else authenticates it: the P2P code is only used to find the sender.
 
 - **Network observers** (including anyone relaying WebRTC packets) see only encrypted data.
 - **An honest signalling server** relays the fingerprints unchanged and cannot read the transfer.
 - **A malicious or compromised signalling server** can replace both fingerprints with its own, place itself between the peers and read or alter everything, including file names and contents. Neither peer can detect this.
 
-In practice, today's direct transfers are only as confidential as the signalling server is trustworthy. For sensitive transfers, use a server you run or trust.
+In practice, Dropgate 3's direct transfers were only as confidential as the signalling server was trustworthy.
 
-The secure channel closes this gap: its set-up messages are sealed, and both certificates' fingerprints are in its encrypted handshake, so a server that swaps them makes the handshake fail ([§4.6](#46-the-dtls-prologue)). Direct transfers run over it once core's API and the apps use Dropgate 4's rendezvous and engine, which core has now.
+The secure channel closes this gap: its set-up messages are sealed, and both certificates' fingerprints are in its encrypted handshake, so a server that swaps them makes the handshake fail ([§4.6](#46-the-dtls-prologue)). Every Dropgate 4 direct transfer runs over it.
 
 ### 19.2 Session ID Tracking
 
@@ -1168,41 +1179,19 @@ Over the secure channel, only a code's locator reaches the server, each code tak
 
 ### 20.2 Client Configuration Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `chunkSize` | 65,536 (64 KiB) | Size of each data chunk. |
-| `maxAttempts` | 4 | Code registration retries. |
-| `endAckTimeoutMs` | 15,000 | Base timeout for end acknowledgement. |
-| `bufferHighWaterMark` | 8,388,608 (8 MiB) | Pause sending above this buffer level. |
-| `bufferLowWaterMark` | 2,097,152 (2 MiB) | Resume sending below this buffer level. |
-| `heartbeatIntervalMs` | 5,000 | Ping interval (0 = disabled). |
-| `chunkAcknowledgments` | `true` | Enable chunk-level acks. |
-| `maxUnackedChunks` | 64 | Back-pressure threshold. |
-| `watchdogTimeoutMs` | 30,000 | Receiver stall detection timeout. |
-| `autoReady` | `true` | Auto-accept transfers on metadata receipt. |
+A direct transfer takes three settings, from core's `direct` option on the client, each overridable per transfer: the pause limit, the reconnect window and "no STUN" ([§4.15](#415-in-cores-api); their ranges are in [§4.14](#414-constants)). Dropgate 3's options (its chunk size, acknowledgements, buffer marks, heartbeat and watchdog) went with its code.
 
 ---
 
 ## 21. Protocol Constants
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `P2P_PROTOCOL_VERSION` | 4 | The DGDTP major, as `@dropgate/core` gives it in `DropgateClient.protocols.dgdtp`. |
-| `P2P_CHUNK_SIZE` | 65,536 | Default chunk size (bytes). |
-| `P2P_MAX_UNACKED_CHUNKS` | 64 | Flow control threshold. |
-| `P2P_END_ACK_TIMEOUT_MS` | 15,000 | End-ack base timeout. |
-| `P2P_END_ACK_RETRIES` | 3 | End message retry count. |
-| `P2P_END_ACK_RETRY_DELAY_MS` | 100 | Delay between redundant end-acks. |
-| `P2P_CLOSE_GRACE_PERIOD_MS` | 2,000 | Delay before closing after completion. |
-| `P2P_UNACKED_CHUNK_TIMEOUT_MS` | 60,000 | Stale ack detection. |
-| `MAX_FILE_COUNT` | 10,000 | Maximum files in a multi-file transfer. |
-| `MAX_CONNECTION_ATTEMPTS` | 10 | Connection rate limit. |
-| `CONNECTION_RATE_WINDOW_MS` | 10,000 | Rate limit sliding window. |
-| `MAX_WRITE_QUEUE_DEPTH` | 100 | Receiver memory protection. |
+The secure channel's and the engine's constants are in [§4.14](#414-constants). Dropgate 3's, from its chunk size to its end-acknowledgement retries, went with its code.
 
 ---
 
 ## 22. Message Type Reference
+
+Dropgate 3's messages ([§5](#5-signalling-layer)), until this is rewritten as the engine's records.
 
 | Type | Direction | State(s) | Purpose |
 |------|-----------|----------|---------|
@@ -1229,10 +1218,10 @@ Over the secure channel, only a code's locator reaches the server, each code tak
 
 ### 23.1 Server Deployment
 
-- **Deploy the Dropgate Server/signalling server behind HTTPS.** The Web UI only enables direct transfers in a secure context (§5.4). The PeerJS server MUST be accessed via HTTPS (or `localhost` for development).
-- **Treat the signalling server as trusted infrastructure.** Because it relays the DTLS fingerprints that secure each transfer (§19.1), whoever controls it could intercept transfers. For sensitive use, run your own.
+- **Deploy the Dropgate Server behind HTTPS.** The Web UI only enables direct transfers in a secure context (§5.4), and its rendezvous MUST be reached over HTTPS and WSS (or `localhost` for development). A reverse proxy has to pass WebSocket upgrades on `/api/v4/rendezvous`.
+- **A server can stop a transfer, not read it.** Everything the rendezvous relays is sealed, and both devices' certificates are checked inside the encrypted handshake, so a server that changes anything ends the connection ([§4.1](#41-what-it-protects-and-what-it-doesnt)). Dropgate 3's signalling server had to be trusted not to intercept transfers (§19.1).
 - **Configure appropriate STUN servers.** The default Cloudflare STUN server is suitable for most deployments. For privacy-sensitive applications, consider self-hosting a STUN server or using a VPN to mask IP addresses.
-- **Mind the reverse proxy's access log.** A transfer that still runs on PeerJS (a call to core passing its `Peer`; nothing of Dropgate's own) puts its code in the URL of the PeerJS WebSocket connection (`/peerjs/peerjs?key=peerjs&id=<code>&token=…`). The Web UI's transfers don't: nothing of a link or code is in any URL. See [DATA-PROCESSING §9.2](./DATA-PROCESSING.md#92-reverse-proxies).
+- **Mind the reverse proxy's access log.** Nothing of a link or code is in any URL a direct transfer uses: the rendezvous's address is `/api/v4/rendezvous` alone. A Dropgate 3 app's PeerJS connection puts its code in the URL it asks for (`/peerjs/peerjs?key=peerjs&id=<code>&token=…`), which the server answers with "update", but which an access log may keep. See [DATA-PROCESSING §9.2](./DATA-PROCESSING.md#92-reverse-proxies).
 - **Monitor connection patterns.** Unusual rates of peer registrations or connection attempts may indicate scanning or abuse.
 
 ### 23.2 Client Behaviour
@@ -1251,6 +1240,8 @@ Over the secure channel, only a code's locator reaches the server, each code tak
 ---
 
 ## 24. Single-File Transfer Flow Summary
+
+Dropgate 3's, on PeerJS ([§5](#5-signalling-layer)), until it's rewritten as the engine's.
 
 ```
 Sender                                      Receiver

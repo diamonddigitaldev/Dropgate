@@ -20,20 +20,6 @@ export default defineConfig([
     clean: true,
     target: 'es2020',
     splitting: false,
-    external: ['peerjs'],
-    platform: 'browser',
-    define,
-    banner,
-  },
-  // P2P submodule - ESM and CJS
-  {
-    entry: { 'p2p/index': 'src/p2p/index.ts' },
-    format: ['esm', 'cjs'],
-    dts: { compilerOptions: { ignoreDeprecations: '6.0' } },
-    sourcemap: true,
-    target: 'es2020',
-    splitting: false,
-    external: ['peerjs'],
     platform: 'browser',
     define,
     banner,
@@ -50,7 +36,6 @@ export default defineConfig([
     banner,
     sourcemap: true,
     target: 'es2020',
-    external: ['peerjs'],
     esbuildOptions(options) {
       options.footer = {
         js: 'if(typeof window!=="undefined"){window.DropgateCore=DropgateCore;}',
