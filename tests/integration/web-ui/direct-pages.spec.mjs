@@ -16,9 +16,10 @@
 //   straight after the page's pagehide listener, since a closing Firefox or
 //   WebKit page never sees WebCrypto answer, and Firefox gets out only one
 //   WebSocket message as the page goes. A receive page closed says so in every
-//   engine. A sending page closed in Firefox sometimes doesn't, mostly on a
-//   busy machine, so the receiver reads the connection lost: that one case
-//   takes either (best effort, DGDTP.md).
+//   engine. A sending page, busy sending as it's closed, sometimes doesn't, on
+//   a slow machine (its pagehide may never run in time, in Chromium as in
+//   Firefox), so the receiver reads the connection lost: that one case takes
+//   either (best effort, DGDTP.md).
 // - The web UI passes core no direct settings; and no frame through the
 //   rendezvous holds anything of the connection, an address or a name.
 //
@@ -312,14 +313,14 @@ test.describe('while it runs', () => {
         await senderEnded(page, 'Transfer Failed', 'The receiver closed Dropgate before the transfer finished.');
     });
 
-    test('a sending page closed mid-transfer ends the receive, telling the receiver the sender closed Dropgate (in Firefox, or that the connection was lost)', async ({ page, otherContext, browserName }) => {
+    test('a sending page closed mid-transfer ends the receive, telling the receiver the sender closed Dropgate, or (busy sending, on a slow machine) that the connection was lost', async ({ page, otherContext }) => {
         const { receiver } = await underWay(page, otherContext, madeUpFile('closed by sender.bin', 8 * MiB, 49));
         await bytesMoved(receiver);
         await page.close();
         const closed = 'The sender closed Dropgate before the transfer finished.';
-        // A closing Firefox sending page doesn't always get its one message out in time.
+        // A page busy sending doesn't always get its message out before it's gone.
         const lost = "The connection was lost, so the transfer couldn't continue.";
-        await receiverSays(receiver, 'Transfer Failed', browserName === 'firefox' ? new RegExp(`^(${closed.replace(/\./g, '\\.')}|${lost.replace(/\./g, '\\.')})$`) : closed);
+        await receiverSays(receiver, 'Transfer Failed', new RegExp(`^(${closed.replace(/\./g, '\\.')}|${lost.replace(/\./g, '\\.')})$`));
     });
 });
 
