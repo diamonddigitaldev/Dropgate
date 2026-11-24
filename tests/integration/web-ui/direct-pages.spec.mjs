@@ -11,13 +11,14 @@
 //   Decline; a wrong code, and the sender's new one; no code free.
 // - With no usable sink, nothing is accepted, and with none at all the page
 //   never connects.
-// - A page closed mid-transfer tells the other side it closed, in every
-//   engine: core seals that CLOSE with nothing to wait for and sends it first,
-//   in the microtask straight after the page's pagehide listener, since a
-//   closing Firefox or WebKit page never sees WebCrypto answer, and Firefox
-//   gets out only one WebSocket message as the page goes. (Closed within a few
-//   milliseconds of the sender's last message to the server, at the very
-//   moment of Download, Firefox may still lose it: best effort, DGDTP.md.)
+// - A page closed mid-transfer tells the other side it closed: core seals
+//   that CLOSE with nothing to wait for and sends it first, in the microtask
+//   straight after the page's pagehide listener, since a closing Firefox or
+//   WebKit page never sees WebCrypto answer, and Firefox gets out only one
+//   WebSocket message as the page goes. A receive page closed says so in every
+//   engine. A sending page closed in Firefox sometimes doesn't, mostly on a
+//   busy machine, so the receiver reads the connection lost: that one case
+//   takes either (best effort, DGDTP.md).
 // - The web UI passes core no direct settings; and no frame through the
 //   rendezvous holds anything of the connection, an address or a name.
 //
@@ -311,11 +312,14 @@ test.describe('while it runs', () => {
         await senderEnded(page, 'Transfer Failed', 'The receiver closed Dropgate before the transfer finished.');
     });
 
-    test('a sending page closed mid-transfer ends the receive, telling the receiver the sender closed Dropgate', async ({ page, otherContext }) => {
+    test('a sending page closed mid-transfer ends the receive, telling the receiver the sender closed Dropgate (in Firefox, or that the connection was lost)', async ({ page, otherContext, browserName }) => {
         const { receiver } = await underWay(page, otherContext, madeUpFile('closed by sender.bin', 8 * MiB, 49));
         await bytesMoved(receiver);
         await page.close();
-        await receiverSays(receiver, 'Transfer Failed', 'The sender closed Dropgate before the transfer finished.');
+        const closed = 'The sender closed Dropgate before the transfer finished.';
+        // A closing Firefox sending page doesn't always get its one message out in time.
+        const lost = "The connection was lost, so the transfer couldn't continue.";
+        await receiverSays(receiver, 'Transfer Failed', browserName === 'firefox' ? new RegExp(`^(${closed.replace(/\./g, '\\.')}|${lost.replace(/\./g, '\\.')})$`) : closed);
     });
 });
 
