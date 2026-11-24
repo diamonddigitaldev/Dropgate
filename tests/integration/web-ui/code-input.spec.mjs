@@ -212,7 +212,11 @@ test.describe('on the home page', () => {
         `);
         await expect(page.locator('#codeCard').getByRole('textbox')).toHaveCount(1);
         // The input lies over the cells, so every click and tap on them reaches it.
-        const [input, cells] = [await page.locator('#codeInput').boundingBox(), await page.locator('.code-cells').boundingBox()];
+        // Both measured in one go: two separate measurements can straddle the page moving as it settles (a font arriving).
+        const [input, cells] = await page.evaluate(() => ['#codeInput', '.code-cells'].map((selector) => {
+            const { x, y, width, height } = document.querySelector(selector).getBoundingClientRect();
+            return { x, y, width, height };
+        }));
         for (const side of ['x', 'y', 'width', 'height']) expect(Math.abs(input[side] - cells[side]), side).toBeLessThan(1);
         await expect(page.locator('#codeInput')).toHaveAccessibleDescription(HINT);
         await expect(page.locator('#codeInput')).toHaveAttribute('autocomplete', 'one-time-code');
