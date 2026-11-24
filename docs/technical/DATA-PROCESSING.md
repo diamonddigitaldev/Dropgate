@@ -58,12 +58,13 @@ Dropgate 4 reads nothing a Dropgate 3 server stored, and no Dropgate 3 link work
 | Data | Stored? | Where | Why | When Created | When Deleted |
 |------|---------|-------|-----|--------------|--------------|
 | **Dropgate 3's PeerJS signalling** (peer IDs, which were its codes; ICE candidates; SDP) | **Never** | — | Dropgate 4 has no PeerJS. A Dropgate 3 app's request to `/peerjs`, or its WebSocket there, is answered 410 "update" and nothing of it is kept (tests: [every request under /peerjs answers 410 VERSION_UNSUPPORTED…](../../server/test/dropgate3.test.mjs); [PeerJS's WebSocket is answered the same, and never opens](../../server/test/dropgate3.test.mjs)). Dropgate 3's receiver link had the code in its path (`/p2p/<code>`); a Dropgate 4 server answers it with the older-version page, and Dropgate 4's links and typed codes go after the `#`, which no request carries (see §9.2). | — | — |
-| **Rendezvous rooms** (at `/api/v4/rendezvous`, which every direct transfer uses) | Transiently | Server memory | Lets a receiver's device find a sender's and pass it the sealed messages that set up their connection ([DGDTP §4.13](./DGDTP.md#413-what-the-rendezvous-and-the-engine-add)). A room holds its ID (made from the link's secret, which never reaches the server), its random nonce, its unused code's locator (2 or 3 letters; the rest of the code never reaches the server), the sender's socket, and each receiver's socket under a one-byte tag. The messages pass through whole, unread and not kept, and the rendezvous holds no address, only the keyed hash below; the rate limiter counts each connection as a request (tests: [a room, a code, an attempt and a socket each hold only known fields…](../../server/test/rendezvous.test.mjs); [nothing once every room has ended, however they ended](../../server/test/rendezvous.test.mjs)). | When a sender's device opens one. | When the sender's socket closes; a receiver's part when its own socket closes, or the sender drops it. A code's locator leaves the room when the code is used, released (10 minutes after the sender last renewed it) or locked, and is then held 5 minutes, tied to nothing, before it's handed out again. |
+| **Rendezvous rooms** (at `/api/v4/rendezvous`, which every direct transfer uses) | Transiently | Server memory | Lets a receiver's device find a sender's and pass it the sealed messages that set up their connection ([DGDTP §5](./DGDTP.md#5-the-rendezvouss-wire), [§17](./DGDTP.md#17-what-the-server-holds)). A room holds its ID (made from the link's secret, which never reaches the server), its random nonce, its unused code's locator (2 or 3 letters; the rest of the code never reaches the server), the sender's socket, and each receiver's socket under a one-byte tag. The messages pass through whole, unread and not kept, and the rendezvous holds no address, only the keyed hash below; the rate limiter counts each connection as a request (tests: [a room, a code, an attempt and a socket each hold only known fields…](../../server/test/rendezvous.test.mjs); [nothing once every room has ended, however they ended](../../server/test/rendezvous.test.mjs)). | When a sender's device opens one. | When the sender's socket closes; a receiver's part when its own socket closes, or the sender drops it. A code's locator leaves the room when the code is used, released (10 minutes after the sender last renewed it) or locked, and is then held 5 minutes, tied to nothing, before it's handed out again. |
 | **Unused codes per address** | Transiently | Server memory | Codes can run out, so one address holds at most `P2P_MAX_CODES_PER_IP` unused codes at once (5 by default). Each address with one is counted under a keyed hash: HMAC-SHA-256 of the address (an IPv6 address's /56 network, as the rate limiter counts it), cut to 16 bytes, under a key of 32 random bytes made as the server starts and never written anywhere. The count holds no address in any form, the address itself is hashed as its connection opens and not kept, and after a restart the same address has a different hash, so nothing links one run's counts to the next (tests: [holds no address: its keys are 16-byte keyed hashes…](../../server/test/rendezvous.test.mjs), which also looks through the server's whole memory for the addresses; [a sixth unused code from one address gives a room with no code…](../../server/test/rendezvous.test.mjs)). | When an address's first unused code is given. | When its last unused code is used, released or locked, or its room ends; and at a restart. |
+| **Sealed frames** (what the devices send each other through the rendezvous) | Transiently | Server memory: the sockets' buffers | Relayed whole and in order, never read or kept: at most 1 MiB waits for any one socket, which is closed past that (tests: [is closed once 1 MiB waits to be sent to it…](../../server/test/rendezvous.test.mjs); [nothing that goes through the rendezvous, either way, holds anything of the connection, an address or a name, and no frame is over its cap](../../tests/integration/web-ui/direct-pages.spec.mjs)). | As each is sent. | As each is passed on. |
 | **File content** | **Never** | — | File data flows directly between peers via the WebRTC data channel. The server is not involved (tests: [a file sent by direct transfer arrives intact when the receiver types the code into the home page, and none of it passes through the server](../../tests/integration/parity/direct-transfer.spec.mjs); [several files sent together by direct transfer arrive intact as one ZIP, and none of them passes through the server](../../tests/integration/parity/direct-transfer.spec.mjs)). | — | — |
 | **File metadata** (name, size, MIME) | **Never** | — | Exchanged between peers over the encrypted data channel. The server cannot observe it. (No request or WebSocket message reaching the server holds a file's name: checked after every test, such as [a file sent by direct transfer arrives intact when the receiver opens the link…](../../tests/integration/parity/direct-transfer.spec.mjs).) | — | — |
 
-These guarantees assume the server relays signalling honestly. The SDP it relays includes the DTLS certificate fingerprints that secure the peer connection, so a malicious or compromised server could put itself between the peers and read the transfer, including file names and contents. See [DGDTP §19.1](./DGDTP.md#191-transport-encryption).
+These hold even if the server isn't honest. What it relays is sealed, and both devices' certificate fingerprints are bound into an encrypted handshake over their connection, so a malicious or compromised server can drop or delay a transfer's set-up, ending it, but can't read the transfer or put itself between the devices unnoticed (test: [a swapped fingerprint ends both sides with SECURITY_POLICY_MISMATCH…](../../packages/dropgate-core/tests/channel.test.ts)). Dropgate 3's direct transfers had no such protection. See [DGDTP §4.1](./DGDTP.md#41-what-it-protects-and-what-it-doesnt) and [§19.1](./DGDTP.md#191-transport-encryption).
 
 ### 2.4 Dropgate Server — HTTP Request Metadata
 
@@ -162,6 +163,14 @@ The server has no access to encryption keys and therefore **cannot**:
 - Decrypt file content.
 - Read an encrypted upload's file names or sizes, or its sealed file list.
 - Recover keys from stored data.
+- Read a direct transfer, or the sealed messages that set up its connection, or find a link's secret from the room ID it's given.
+- Test a guess at a code: a guess can only be tried by connecting, once per code ([DGDTP §4.3](./DGDTP.md#43-cpace-typed-codes)).
+
+### 3.5 Direct Transfers
+
+Every direct transfer runs over its own encrypted channel between the two devices, inside WebRTC's DTLS ([DGDTP §4](./DGDTP.md#4-the-secure-channel)): the files, their names and sizes, and every message about the transfer, how it ended included. The messages that set up the connection (each device's addresses and certificate) go through the server sealed, and padded so the server can't tell one kind of address from another.
+
+What the server, or anyone between the devices, still sees: the timing and volume of traffic; how many sealed messages each device sends, and when; a code's first 2 or 3 letters, which find the sender's room; and the IP addresses the server, the STUN server and the other device see ([§9.1](#91-stun-servers)). A direct transfer's keys are made for that transfer alone, held in memory only, and gone when it ends.
 
 ---
 
@@ -273,30 +282,29 @@ Data at rest: data/uploads/objects/<id> (ciphertext and padding if E2EE)
 ## 7. Data Flow: DGDTP P2P Transfer
 
 ```
-Sender              Signalling Server              Receiver
-  │                        │                          │
-  │  1. Register peer      │                          │
-  │  (P2P code)            │                          │
-  │───────────────────────►│                          │
-  │                        │                          │
-  │                        │  2. Connect to code      │
-  │                        │◄─────────────────────────│
-  │                        │                          │
-  │  3. ICE + SDP relay    │                          │
-  │◄══════════════════════►│◄════════════════════════►│
-  │                        │                          │
-  │  4. Data channel established (DTLS-encrypted)     │
-  │◄═════════════════════════════════════════════════►│
-  │                        │                          │
-  │  5. File data [×N]     │                          │
-  │  (direct, not via      │  Server NOT involved     │
-  │   server)              │  from this point         │
-  │───────────────────────────────────────────────────►│
-  │                        │                          │
+Sender                 Rendezvous (server)                Receiver
+  │  1. Open a room            │                              │
+  │  (room ID, nonce, a code?) │                              │
+  │───────────────────────────►│                              │
+  │◄── its code's locator ─────│                              │
+  │                            │  2. Join by the room ID      │
+  │                            │     or the code's locator    │
+  │                            │◄─────────────────────────────│
+  │  3. Sealed frames: CPace (by code), offer, answer,        │
+  │     ICE candidates — relayed whole, unread, not kept      │
+  │◄══════════════════════════►│◄════════════════════════════►│
+  │                            │                              │
+  │  4. Data channel (DTLS), then the encrypted handshake     │
+  │◄═════════════════════════════════════════════════════════►│
+  │  5. The list of files, the data, the end: encrypted,      │
+  │     device to device; the server not involved            │
+  │◄═════════════════════════════════════════════════════════►│
 
-Data at rest: NONE (server stores nothing)
-Data in transit through server: ICE candidates (IP:port), SDP, peer IDs
-Data in transit peer-to-peer: File content + metadata (DTLS-encrypted)
+Data at rest: none (the server keeps nothing on disk)
+In memory, while the room lives: the room ID, its nonce, its code's locator,
+  the sockets; a keyed hash of each address holding an unused code
+Through the server: sealed frames only
+Device to device: the files, their names and sizes, every message (encrypted)
 ```
 
 ---

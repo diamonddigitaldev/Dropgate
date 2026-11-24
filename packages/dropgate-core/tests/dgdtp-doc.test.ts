@@ -26,9 +26,12 @@ import {
   OFFER_TIMEOUT_MS, PING_INTERVAL_MS, SETUP_TIMEOUT_MS, STALL_FAILED_MS, STALL_SHOWN_MS,
 } from '../src/dgdtp/timers.js';
 import {
-  BIND_BYTES, BLOCK_BYTES, DATA_HEADER_BYTES, HELLO_BYTES, MANIFEST_HEADER_BYTES, MANIFEST_VERSION, MAX_MANIFEST_BYTES, MAX_MANIFEST_FILES,
-  MAX_MEDIA_TYPE_BYTES,
+  ASSURANCES, BIND_BYTES, BLOCK_BYTES, CLOSE_DETAILS, CLOSE_REASONS, DATA_HEADER_BYTES, HELLO_BYTES, MANIFEST_HEADER_BYTES, MANIFEST_VERSION,
+  MAX_MANIFEST_BYTES, MAX_MANIFEST_FILES, MAX_MEDIA_TYPE_BYTES, MESSAGE_TYPE, decodeMessage, encodeMessage,
 } from '../src/dgdtp/messages.js';
+import { STATUS_STATE } from '../src/dgdtp/engine.js';
+import { RENDEZVOUS_ERROR, RENDEZVOUS_TYPE } from '../src/dgdtp/rendezvous.js';
+import messageVectors from './fixtures/dgdtp-message-vectors.json';
 import {
   MAX_PAUSE_LIMIT_MS, MAX_RECONNECT_WINDOW_MS, MIN_PAUSE_LIMIT_MS, MIN_RECONNECT_WINDOW_MS,
 } from '../src/client/direct.js';
@@ -107,5 +110,129 @@ describe.skipIf(!inRepository())("DGDTP.md's constants (in the repository only)"
     expect(valueOf('`Noise_NNpsk0_25519_AESGCM_SHA256`')).toBe('Noise_NNpsk0_25519_AESGCM_SHA256');
     expect(() => valueOf('8230 bytes')).toThrow();
     expect(() => valueOf('8,23')).toThrow();
+  });
+});
+
+// DGDTP.md's tables of the wire: the rendezvous's messages and ERROR's codes,
+// the engine's records with their lengths, and the values their fields take.
+// Each table is held to core's own, both ways: every row is one of core's,
+// with its number, and every one of core's has a row. The records' lengths
+// are held to the second implementation's vectors, which core's bytes match.
+
+/** A table's rows after `marker` (a heading, or a bold line): each row's cells, trimmed, the header and its rule left out. */
+function tableAfter(markdown: string, marker: RegExp): string[][] {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  const at = lines.findIndex((line) => marker.test(line));
+  expect(at, `${DOC} has no line like ${marker}`).toBeGreaterThan(-1);
+  const rows: string[][] = [];
+  let inTable = false;
+  for (const line of lines.slice(at + 1)) {
+    if (line.startsWith('|')) {
+      inTable = true;
+      rows.push(line.split('|').slice(1, -1).map((cell) => cell.trim()));
+    } else if (inTable || /^#{1,3} /.test(line)) {
+      break;
+    }
+  }
+  // The header and the rule under it.
+  return rows.slice(2);
+}
+
+/** A row's number, written as 7 or 0x83. */
+const numberOf = (cell: string): number => {
+  const plain = cell.replace(/^`|`$/g, '');
+  if (/^0x[0-9A-F]{2}$/.test(plain)) return parseInt(plain.slice(2), 16);
+  if (/^\d+$/.test(plain)) return Number(plain);
+  throw new Error(`a number the test can't read: ${cell}`);
+};
+const nameOf = (cell: string) => cell.replace(/^`|`$/g, '');
+
+/** `{ name: number }` from a table's rows, its number in column `n` and its name in column `m`. */
+const pairs = (rows: string[][], n = 0, m = 1) => Object.fromEntries(rows.map((row) => [nameOf(row[m]), numberOf(row[n])]));
+
+/** Each record type's lengths in the second implementation's vectors. */
+function vectorLengths(): Map<number, Set<number>> {
+  const lengths = new Map<number, Set<number>>();
+  for (const { record } of messageVectors.records as Array<{ record: string }>) {
+    const type = parseInt(record.slice(0, 2), 16);
+    if (!lengths.has(type)) lengths.set(type, new Set());
+    (lengths.get(type) as Set<number>).add(record.length / 2);
+  }
+  return lengths;
+}
+
+/** The lengths a "Bytes" cell gives, as 51, "18 or 79" or "10, 21 or 82"; none for a record whose length is its content's. */
+function lengthsOf(cell: string): number[] | undefined {
+  if (!/^\d/.test(cell)) return undefined;
+  return cell.split(/,\s*|\s+or\s+/).map((part) => {
+    if (!/^\d+$/.test(part)) throw new Error(`a length the test can't read: ${cell}`);
+    return Number(part);
+  });
+}
+
+describe.skipIf(!inRepository())("DGDTP.md's tables of the wire (in the repository only)", () => {
+  const markdown = () => readFileSync(new URL(DOC, ROOT), 'utf8');
+
+  it("gives the rendezvous's messages core's type bytes, each from the side that sends it", () => {
+    const rows = tableAfter(markdown(), /^### 5\.2 Messages$/);
+    expect(pairs(rows)).toEqual({ ...RENDEZVOUS_TYPE });
+    for (const [type, name, from] of rows) {
+      const value = numberOf(type);
+      const side = value >= 0x80 ? 'The server' : value >= 0x10 ? 'A receiver' : 'The sender';
+      expect(`${name}: ${from}`).toBe(`${name}: ${side}`);
+    }
+  });
+
+  it("gives ERROR's codes core's numbers", () => {
+    expect(pairs(tableAfter(markdown(), /^\*\*`ERROR`'s codes:\*\*$/))).toEqual({ ...RENDEZVOUS_ERROR });
+  });
+
+  it("gives every record core's type and the second implementation's lengths", () => {
+    const rows = tableAfter(markdown(), /^### 8\.1 The Records$/);
+    expect(pairs(rows)).toEqual({ ...MESSAGE_TYPE });
+    const lengths = vectorLengths();
+    for (const row of rows) {
+      const want = lengthsOf(row[row.length - 1]);
+      const type = numberOf(row[0]);
+      if (want === undefined) {
+        // MANIFEST and DATA are as long as what they carry; RESUME and RESUME_OK are kept, with no length yet.
+        expect([MESSAGE_TYPE.MANIFEST, MESSAGE_TYPE.DATA, MESSAGE_TYPE.RESUME, MESSAGE_TYPE.RESUME_OK], row[1]).toContain(type);
+        continue;
+      }
+      expect([...(lengths.get(type) ?? [])].sort((a, b) => a - b), row[1]).toEqual(want);
+    }
+  });
+
+  it("gives CLOSE's reasons and details core's numbers", () => {
+    const reasons = pairs(tableAfter(markdown(), /^\*\*`CLOSE`'s reason\*\*/));
+    expect(reasons).toEqual(Object.fromEntries(CLOSE_REASONS.map((reason, i) => [reason, i + 1])));
+    const details = pairs(tableAfter(markdown(), /^\*\*`CLOSE`'s detail,\*\*/));
+    expect(details).toEqual(Object.fromEntries(CLOSE_DETAILS.map((detail, i) => [detail, i + 1])));
+  });
+
+  it("gives ACCEPT's sink and RESULT's assurance, HOLD's reasons and STATUS's states core's values", () => {
+    expect(pairs(tableAfter(markdown(), /^\*\*`ACCEPT`'s sink, and `RESULT`'s assurance:\*\*$/)))
+      .toEqual(Object.fromEntries(ASSURANCES.map((assurance, i) => [assurance, i + 1])));
+
+    // HOLD's reasons as core writes them, and any other value read as the person.
+    const holds = pairs(tableAfter(markdown(), /^\*\*`HOLD`'s reason\*\*/));
+    for (const [reason, value] of Object.entries(holds)) {
+      expect(encodeMessage({ type: 'hold', held: true, reason: reason as 'person' | 'app' })[2], reason).toBe(value);
+    }
+    expect(Object.keys(holds).sort()).toEqual(['app', 'person']);
+    expect(decodeMessage(Uint8Array.of(MESSAGE_TYPE.HOLD, 1, 9))).toMatchObject({ reason: 'person' });
+
+    const states = tableAfter(markdown(), /^\*\*`STATUS`'s state:\*\*$/).filter((row) => row[1] !== '—');
+    expect(pairs(states)).toEqual({ ...STATUS_STATE });
+  });
+
+  it('reads the numbers the tables write, and refuses one it can\'t read', () => {
+    expect(numberOf('`0x83`')).toBe(0x83);
+    expect(numberOf('12')).toBe(12);
+    expect(() => numberOf('0x8')).toThrow();
+    expect(lengthsOf('18 or 79')).toEqual([18, 79]);
+    expect(lengthsOf('10, 21 or 82')).toEqual([10, 21, 82]);
+    expect(lengthsOf('at most the record size − 16')).toBeUndefined();
+    expect(() => lengthsOf('51 bytes')).toThrow();
   });
 });

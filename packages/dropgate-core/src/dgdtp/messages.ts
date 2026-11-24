@@ -91,15 +91,15 @@ export type CloseDetail =
   | 'OUTPUT_WRITE_FAILED' | 'OUTPUT_STALLED' | 'SOURCE_UNAVAILABLE' | 'INTEGRITY_FAILED' | 'INVALID_MANIFEST' | 'INVALID_MESSAGE'
   | 'TIMED_OUT' | 'CAPABILITY_UNSUPPORTED';
 
-const CLOSE_REASONS: readonly CloseReason[] = ['USER_CANCELLED', 'USER_DECLINED', 'APP_CLOSED', 'PAUSE_LIMIT', 'RECOVERY_EXHAUSTED', 'FAILED', 'TAKEN'];
-const CLOSE_DETAILS: readonly CloseDetail[] = [
+export const CLOSE_REASONS: readonly CloseReason[] = ['USER_CANCELLED', 'USER_DECLINED', 'APP_CLOSED', 'PAUSE_LIMIT', 'RECOVERY_EXHAUSTED', 'FAILED', 'TAKEN'];
+export const CLOSE_DETAILS: readonly CloseDetail[] = [
   'OUTPUT_WRITE_FAILED', 'OUTPUT_STALLED', 'SOURCE_UNAVAILABLE', 'INTEGRITY_FAILED', 'INVALID_MANIFEST', 'INVALID_MESSAGE',
   'TIMED_OUT', 'CAPABILITY_UNSUPPORTED',
 ];
 
 /** Where received files went: saved by the receiver's app, or handed to a browser to save. */
 export type Assurance = 'saved' | 'handed-off';
-const ASSURANCES: readonly Assurance[] = ['saved', 'handed-off'];
+export const ASSURANCES: readonly Assurance[] = ['saved', 'handed-off'];
 
 /** Who held the transfer: the person, or the app itself. An unknown reason is read as the person. */
 export type HoldReason = 'person' | 'app';
