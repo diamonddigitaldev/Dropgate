@@ -11,10 +11,13 @@
 //   Decline; a wrong code, and the sender's new one; no code free.
 // - With no usable sink, nothing is accepted, and with none at all the page
 //   never connects.
-// - A page closed mid-transfer tells the other side, best effort: Chromium
-//   sends its CLOSE as the page goes; Firefox (and maybe WebKit) tears the
-//   page down before WebCrypto has sealed it, so the other side reads the
-//   connection lost, and the transfer ends there all the same.
+// - A page closed mid-transfer tells the other side it closed, in every
+//   engine: core seals that CLOSE with nothing to wait for and sends it first,
+//   in the microtask straight after the page's pagehide listener, since a
+//   closing Firefox or WebKit page never sees WebCrypto answer, and Firefox
+//   gets out only one WebSocket message as the page goes. (Closed within a few
+//   milliseconds of the sender's last message to the server, at the very
+//   moment of Download, Firefox may still lose it: best effort, DGDTP.md.)
 // - The web UI passes core no direct settings; and no frame through the
 //   rendezvous holds anything of the connection, an address or a name.
 //
@@ -298,21 +301,21 @@ test.describe('while it runs', () => {
         await senderEnded(page, 'Transfer Cancelled', 'The receiver cancelled the transfer.');
     });
 
-    /** What the other side reads once a page closes: that it closed, or (where the CLOSE can't go in time) the connection lost. */
-    const closedWords = (browserName, who) => (browserName === 'chromium'
-        ? `The ${who} closed Dropgate before the transfer finished.`
-        : new RegExp(`^(The ${who} closed Dropgate before the transfer finished\\.|The connection was lost, so the transfer couldn't continue\\.)$`));
+    /** Mid-transfer: the receive page's bar has moved, so a block has been saved. */
+    const bytesMoved = (receiver) => expect.poll(() => receiver.locator('#bar').evaluate((bar) => bar.style.width), { timeout: 30_000 }).not.toBe('0%');
 
-    test('a receive page closed mid-transfer ends the send, telling the sender it closed where the page lives long enough', async ({ page, otherContext, browserName }) => {
+    test('a receive page closed mid-transfer ends the send, telling the sender the receiver closed Dropgate', async ({ page, otherContext }) => {
         const { receiver } = await underWay(page, otherContext, madeUpFile('closed by receiver.bin', 8 * MiB, 48));
+        await bytesMoved(receiver);
         await receiver.close();
-        await senderEnded(page, 'Transfer Failed', closedWords(browserName, 'receiver'));
+        await senderEnded(page, 'Transfer Failed', 'The receiver closed Dropgate before the transfer finished.');
     });
 
-    test('a sending page closed mid-transfer ends the receive, telling the receiver it closed where the page lives long enough', async ({ page, otherContext, browserName }) => {
+    test('a sending page closed mid-transfer ends the receive, telling the receiver the sender closed Dropgate', async ({ page, otherContext }) => {
         const { receiver } = await underWay(page, otherContext, madeUpFile('closed by sender.bin', 8 * MiB, 49));
+        await bytesMoved(receiver);
         await page.close();
-        await receiverSays(receiver, 'Transfer Failed', closedWords(browserName, 'sender'));
+        await receiverSays(receiver, 'Transfer Failed', 'The sender closed Dropgate before the transfer finished.');
     });
 });
 

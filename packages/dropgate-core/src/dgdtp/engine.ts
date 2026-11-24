@@ -158,6 +158,9 @@ export class Link {
   #handling = false;
   /** Why the channel ended, told once the inbox is empty. */
   #lostWith: DropgateError | undefined;
+  /** The other side's CLOSE through the rendezvous, heard while the data channel is still up: it waits (#heldClose()). */
+  #heldClose: CloseMessage | undefined;
+  #heldTimer: unknown;
 
   // Liveness.
   #lastSent: number;
@@ -198,8 +201,36 @@ export class Link {
       } catch {
         return;
       }
-      if (message.type === 'close') this.#handlers.close(message, this.generation);
+      if (message.type === 'close') this.#outOfBand(message);
     }, () => undefined);
+  }
+
+  /**
+   * The other side's CLOSE through the rendezvous. That copy is sealed and
+   * sent at once, so it can come ahead of the records the other side sent
+   * before it (an ACCEPT, say). While the data channel is up it waits for the
+   * in-band CLOSE, which follows them, for the channel's end, or for 2 s,
+   * whichever is first; once the channel has gone it's heard at once.
+   */
+  #outOfBand(message: CloseMessage): void {
+    if (this.#closed) {
+      this.#handlers.close(message, this.generation);
+      return;
+    }
+    if (this.#heldClose) return;
+    this.#heldClose = message;
+    this.#heldTimer = this.#timers.setTimeout(() => {
+      const held = this.#takeHeldClose();
+      if (held && !this.#released) this.#handlers.close(held, this.generation);
+    }, CLOSE_ACK_WAIT_MS);
+  }
+
+  /** The held out-of-band CLOSE, if there is one, no longer held. */
+  #takeHeldClose(): CloseMessage | undefined {
+    const held = this.#heldClose;
+    this.#heldClose = undefined;
+    if (held) this.#timers.clearTimeout(this.#heldTimer);
+    return held;
   }
 
   /** The smoothed round trip, once a PONG has come. */
@@ -244,37 +275,38 @@ export class Link {
   }
 
   /**
-   * Sends this side's one CLOSE: in-band (after whatever is already
-   * encrypted) and sealed through the rendezvous, then waits up to 2 s for the
+   * Sends this side's one CLOSE: first sealed through the rendezvous, before
+   * this returns its promise (so a page that's going still gets it out), then
+   * in-band, after whatever is already encrypted; then waits up to 2 s for the
    * CLOSE_ACK, which it gives. With the data channel already gone it goes
    * through the rendezvous alone, and nothing is waited for.
    */
-  async closeWith(message: CloseMessage): Promise<CloseAck | undefined> {
+  closeWith(message: CloseMessage): Promise<CloseAck | undefined> {
     const record = encodeMessage(message);
+    if (!this.#released) {
+      try {
+        this.#channel.sendClose(record);
+      } catch {
+        // The channel has ended, or this side's close went already: the in-band one is all there is.
+      }
+    }
+    if (this.#closed) return Promise.resolve(undefined);
     const key = idKey(message.operationId);
     let resolve!: (ack: CloseAck | undefined) => void;
     const acked = new Promise<CloseAck | undefined>((res) => { resolve = res; });
-    const inBand = !this.#closed;
-    if (inBand) {
-      this.#acks.set(key, resolve);
-      this.sendRecord(record);
-    }
-    // Sealed first, so it has gone before the side closes the rendezvous's pipe.
-    const outOfBand = this.#released ? Promise.resolve() : this.#channel.sendClose(record).catch(() => undefined);
-    if (!inBand) {
-      await outOfBand;
-      return undefined;
-    }
+    this.#acks.set(key, resolve);
+    this.sendRecord(record);
     const timer = this.#timers.setTimeout(() => resolve(undefined), CLOSE_ACK_WAIT_MS);
-    const ack = await acked;
-    this.#timers.clearTimeout(timer);
-    this.#acks.delete(key);
-    await outOfBand;
-    return ack;
+    return acked.then((ack) => {
+      this.#timers.clearTimeout(timer);
+      this.#acks.delete(key);
+      return ack;
+    });
   }
 
   /** Closes the link and its channel: nothing more is sent or read, and no late CLOSE is listened for. */
   close(): void {
+    this.#takeHeldClose();
     this.#stop();
     if (this.#released) return;
     this.#released = true;
@@ -350,6 +382,8 @@ export class Link {
         else this.#handlers.statusHeard?.(message, this.generation);
         break;
       case 'close':
+        // The in-band CLOSE is the one: a copy held from the rendezvous is let go.
+        this.#takeHeldClose();
         this.#handlers.close(message, this.generation);
         break;
       case 'close-ack':
@@ -445,7 +479,10 @@ export class Link {
   /** The channel ended under the link, or the other side went quiet: the side is told, and closes the link when it's ready. */
   #end(err: unknown): void {
     if (this.#closed) return;
+    const held = this.#takeHeldClose();
     this.#stop();
+    // A CLOSE held from the rendezvous is what ended it: heard first, so the side ends as it says.
+    if (held) this.#handlers.close(held, this.generation);
     this.#handlers.ended(toDropgateError(err));
   }
 }

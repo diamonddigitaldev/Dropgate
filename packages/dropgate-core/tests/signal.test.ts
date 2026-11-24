@@ -285,7 +285,7 @@ describe.each(PROVIDERS)('padding and caps, on %s', (_name, provider) => {
     for (const [channel, message] of small) expect((await channel.seal(message)).byteLength).toBe(FRAME_HEADER_BYTES + SMALL_BUCKET_BYTES + 16);
     const close = await closeKeys(provider);
     for (const body of [new Uint8Array(0), new Uint8Array(509)]) {
-      for (const role of ['receiver', 'sender'] as const) expect((await closeChannel(provider, { keys: close, role }).seal(body)).byteLength).toBe(550);
+      for (const role of ['receiver', 'sender'] as const) expect(closeChannel({ keys: close, role }).seal(body).byteLength).toBe(550);
     }
   });
 
@@ -393,45 +393,50 @@ describe.each(PROVIDERS)('the attempt\'s start, on %s', (_name, provider) => {
 describe.each(PROVIDERS)('the out-of-band close, on %s', (_name, provider) => {
   it('one each way: a second is refused to seal and ignored when opened; anything that doesn\'t open is ignored', async () => {
     const keys = await closeKeys(provider);
-    const receiver = closeChannel(provider, { keys, role: 'receiver' });
-    const sender = closeChannel(provider, { keys, role: 'sender' });
-    const frame = await sender.seal(Uint8Array.of(1, 2, 3));
-    expect((await failure(() => sender.seal(Uint8Array.of(4)))).code).toBe('INVALID_ARGUMENT');
+    const receiver = closeChannel({ keys, role: 'receiver' });
+    const sender = closeChannel({ keys, role: 'sender' });
+    const frame = sender.seal(Uint8Array.of(1, 2, 3));
+    expect((await failure(async () => sender.seal(Uint8Array.of(4)))).code).toBe('INVALID_ARGUMENT');
     const flipped = new Uint8Array(frame);
     flipped[300] ^= 1;
     const ignored = [
       flipped,
-      await closeChannel(provider, { keys, role: 'receiver' }).seal(Uint8Array.of(9)), // reflected: the receiver's own
+      closeChannel({ keys, role: 'receiver' }).seal(Uint8Array.of(9)), // reflected: the receiver's own
       fromHex(vectors.frames.sender[1].frame), // signalling, not a close
       crafted({ key: codeKeys.closeS2R, direction: 2, counter: 1, kind: 0x11, message: { type: 'close', body: '01' } }), // counter 1
       crafted({ key: codeKeys.closeS2R, direction: 2, counter: 0, kind: 0x11, message: { type: 'restart' } }), // not a close inside
       crafted({ key: codeKeys.closeS2R, direction: 2, counter: 0, kind: 0x11, inside: insideChanged({ type: 'close', body: '01' }, (b) => { b[400] = 1; return b; }) }),
       new Uint8Array(0),
     ];
-    for (const bad of ignored) expect(await receiver.open(bad)).toBeUndefined();
-    expect(hex((await receiver.open(frame)) as Uint8Array)).toBe('010203');
-    expect(await receiver.open(frame)).toBeUndefined();
-    expect((await failure(() => receiver.seal(new Uint8Array(510)))).code).toBe('INVALID_ARGUMENT');
+    for (const bad of ignored) expect(receiver.open(bad)).toBeUndefined();
+    expect(hex(receiver.open(frame) as Uint8Array)).toBe('010203');
+    expect(receiver.open(frame)).toBeUndefined();
+    expect((await failure(async () => receiver.seal(new Uint8Array(510)))).code).toBe('INVALID_ARGUMENT');
     // That changed nothing: the receiver's one close can still be sealed, and opens.
-    const own = await receiver.seal(new Uint8Array(509).fill(7));
-    expect(await closeChannel(provider, { keys, role: 'sender' }).open(own)).toEqual(new Uint8Array(509).fill(7));
-    // Two opened at once: only one is taken.
-    const again = closeChannel(provider, { keys, role: 'receiver' });
-    const both = await Promise.all([again.open(frame), again.open(frame)]);
-    expect(both.filter((body) => body !== undefined)).toHaveLength(1);
-    // Once one is taken, nothing more is even opened.
-    const wrapped = plain(provider);
-    const spy = vi.spyOn(wrapped, 'decryptWithNonce');
-    const taken = closeChannel(wrapped, { keys, role: 'receiver' });
-    expect(await taken.open(frame)).toBeDefined();
-    spy.mockClear();
-    expect(await taken.open(frame)).toBeUndefined();
-    expect(spy).not.toHaveBeenCalled();
+    const own = receiver.seal(new Uint8Array(509).fill(7));
+    expect(closeChannel({ keys, role: 'sender' }).open(own)).toEqual(new Uint8Array(509).fill(7));
+    // Once one is taken its key is gone: the same frame doesn't open a second time.
+    const again = closeChannel({ keys, role: 'receiver' });
+    expect([again.open(frame), again.open(frame)].filter((body) => body !== undefined)).toHaveLength(1);
+    // forget() lets both keys go: nothing is sealed or opened after it.
+    const gone = closeChannel({ keys, role: 'receiver' });
+    gone.forget();
+    expect(gone.open(frame)).toBeUndefined();
+    expect((await failure(async () => gone.seal(Uint8Array.of(1)))).code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('a close is sealed and opened at once: each answers with bytes, never a promise', async () => {
+    const keys = await closeKeys(provider);
+    const frame = closeChannel({ keys, role: 'sender' }).seal(Uint8Array.of(3, 0, 0));
+    expect(frame).toBeInstanceOf(Uint8Array);
+    const body = closeChannel({ keys, role: 'receiver' }).open(frame);
+    expect(body).toBeInstanceOf(Uint8Array);
+    expect(hex(body as Uint8Array)).toBe('030000');
   });
 
   it('the close keys are bound to the attempt: another attempt\'s close is ignored', async () => {
     const other = await deriveCloseKeys(provider, { closeSecret: fromHex(v.closeSecret), roomNonce: fromHex(v.roomNonce), attemptId: fromHex('cd'.repeat(16)) });
-    expect(await closeChannel(provider, { keys: other, role: 'receiver' }).open(fromHex(vectors.close.sender.frame))).toBeUndefined();
+    expect(closeChannel({ keys: other, role: 'receiver' }).open(fromHex(vectors.close.sender.frame))).toBeUndefined();
   });
 });
 
@@ -487,10 +492,14 @@ describe('the key schedule\'s secrets and checks', () => {
     for (const secret of [codeKeys.psk, codeKeys.sealR2S, codeKeys.sealS2R, codeKeys.closeR2S, codeKeys.closeS2R, v.isk, v.closeSecret]) {
       for (const text of shown) expect(text).not.toContain(secret);
     }
-    // The keys themselves can't be read out.
+    // The sealing keys can't be read out. The close keys are bytes, shown as [CloseKeys], gone once let go.
     await expect(webCrypto.exportKey(keys.sealR2S)).rejects.toBeTruthy();
     await expect(noble.exportKey((await attemptKeys(noble)).sealS2R)).rejects.toBeTruthy();
-    await expect(noble.exportKey((await closeKeys(noble)).closeR2S)).rejects.toBeTruthy();
+    expect(inspect(close)).toBe('[CloseKeys]');
+    expect(String(close)).toBe('[CloseKeys]');
+    close.forget();
+    expect(() => close.closeR2S).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    expect(() => close.closeS2R).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
     // No error says anything about a frame or a key.
     const channel = signalChannel(webCrypto, { keys, role: 'receiver' });
     const err = await failure(() => channel.open(fromHex(vectors.frames.receiver[0].frame)));
@@ -519,7 +528,8 @@ describe('the key schedule\'s secrets and checks', () => {
     const keys = await attemptKeys(webCrypto);
     expect(() => signalChannel(webCrypto, { keys, role: 'peer' as never })).toThrow();
     expect(() => signalChannel(webCrypto, { keys: {} as AttemptKeys, role: 'receiver' })).toThrow();
-    expect(() => closeChannel(webCrypto, { keys: keys as never, role: 'receiver' })).toThrow();
+    expect(() => closeChannel({ keys: keys as never, role: 'receiver' })).toThrow();
+    expect(() => closeChannel({ keys: { closeR2S: new Uint8Array(32), closeS2R: new Uint8Array(32) } as never, role: 'receiver' })).toThrow();
     const receiver = signalChannel(webCrypto, { keys, role: 'receiver' });
     const badMessages = [
       null, {}, { type: 'hello' }, { type: 'offer' }, { type: 'offer', sdp: 1 },
@@ -532,8 +542,8 @@ describe('the key schedule\'s secrets and checks', () => {
     ];
     for (const message of badMessages) expect([message, (await failure(() => receiver.seal(message as SignalMessage))).code]).toEqual([message, 'INVALID_ARGUMENT']);
     expect(receiver.sent).toBe(0);
-    const close = closeChannel(webCrypto, { keys: await closeKeys(webCrypto), role: 'sender' });
-    expect((await failure(() => close.seal('x' as never))).code).toBe('INVALID_ARGUMENT');
+    const close = closeChannel({ keys: await closeKeys(webCrypto), role: 'sender' });
+    expect((await failure(async () => close.seal('x' as never))).code).toBe('INVALID_ARGUMENT');
   });
 
   it('a candidate\'s null fields go as empty and come back as null; its line index as FFFF', async () => {

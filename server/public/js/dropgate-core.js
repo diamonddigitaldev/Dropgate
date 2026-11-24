@@ -4909,6 +4909,27 @@ function base64urlToBytes(value, length, adapter) {
   return new Uint8Array(bytes);
 }
 
+// src/crypto/sync-aes-gcm.ts
+var checkKey = (key) => {
+  if (!(key instanceof Uint8Array) || key.byteLength !== CONTENT_KEY_BYTES) throw notBytes("An AES-256-GCM key", CONTENT_KEY_BYTES);
+};
+function sealAesGcmNow(key, nonce, plaintext, associatedData3) {
+  checkKey(key);
+  checkNonce(nonce);
+  return gcm(key, nonce, associatedData3).encrypt(plaintext);
+}
+function openAesGcmNow(key, nonce, sealed, associatedData3) {
+  checkKey(key);
+  checkNonce(nonce);
+  return gcm(key, nonce, associatedData3).decrypt(sealed);
+}
+function warmAesGcm(bytes) {
+  const key = new Uint8Array(CONTENT_KEY_BYTES);
+  const nonce = new Uint8Array(12);
+  const ad = new Uint8Array(16);
+  openAesGcmNow(key, nonce, sealAesGcmNow(key, nonce, new Uint8Array(bytes), ad), ad);
+}
+
 // src/credentials.ts
 var TOKEN68 = /^[A-Za-z0-9\-._~+/]+=*$/;
 var MAX_TOKEN_LENGTH = 8192;
@@ -5682,19 +5703,75 @@ async function deriveAttemptKeys(provider, options) {
     sealS2R: sealS2R.value
   });
 }
+var CLOSE_KEY_BYTES = 32;
+var _roomNonce2, _attemptId2, _closeR2S, _closeS2R, _CloseKeys_instances, need_fn2;
+var CloseKeys = class {
+  /** @internal deriveCloseKeys() makes these. */
+  constructor(roomNonce, attemptId, closeR2S, closeS2R) {
+    __privateAdd(this, _CloseKeys_instances);
+    __privateAdd(this, _roomNonce2);
+    __privateAdd(this, _attemptId2);
+    __privateAdd(this, _closeR2S);
+    __privateAdd(this, _closeS2R);
+    __privateSet(this, _roomNonce2, roomNonce);
+    __privateSet(this, _attemptId2, attemptId);
+    __privateSet(this, _closeR2S, closeR2S);
+    __privateSet(this, _closeS2R, closeS2R);
+    Object.freeze(this);
+  }
+  /** The attempt's public values, copies, as a close frame's header and associated data carry them. */
+  get roomNonce() {
+    return new Uint8Array(__privateGet(this, _roomNonce2));
+  }
+  get attemptId() {
+    return new Uint8Array(__privateGet(this, _attemptId2));
+  }
+  /** A copy of the key the receiver's close frame is under. */
+  get closeR2S() {
+    return new Uint8Array(__privateMethod(this, _CloseKeys_instances, need_fn2).call(this, __privateGet(this, _closeR2S)));
+  }
+  /** A copy of the key the sender's is under. */
+  get closeS2R() {
+    return new Uint8Array(__privateMethod(this, _CloseKeys_instances, need_fn2).call(this, __privateGet(this, _closeS2R)));
+  }
+  /** Overwrites both keys: the close channel has taken its copies, or the attempt is over. */
+  forget() {
+    __privateGet(this, _closeR2S)?.fill(0);
+    __privateGet(this, _closeS2R)?.fill(0);
+    __privateSet(this, _closeR2S, void 0);
+    __privateSet(this, _closeS2R, void 0);
+  }
+  toJSON() {
+    return "[CloseKeys]";
+  }
+  toString() {
+    return "[CloseKeys]";
+  }
+  [/* @__PURE__ */ Symbol.for("nodejs.util.inspect.custom")]() {
+    return "[CloseKeys]";
+  }
+};
+_roomNonce2 = new WeakMap();
+_attemptId2 = new WeakMap();
+_closeR2S = new WeakMap();
+_closeS2R = new WeakMap();
+_CloseKeys_instances = new WeakSet();
+need_fn2 = function(key) {
+  if (!key) throw invalid4("These close keys were let go.");
+  return key;
+};
 async function deriveCloseKeys(provider, options) {
   if (!isBytes5(options?.closeSecret, CLOSE_SECRET_BYTES)) throw invalid4(`A close secret is ${CLOSE_SECRET_BYTES} bytes.`);
   const ctx = contextOf(options.roomNonce, options.attemptId);
-  const [closeR2S, closeS2R] = await Promise.all([
-    provider.deriveContentKey(options.closeSecret, ctx, info(INFO.closeR2S)),
-    provider.deriveContentKey(options.closeSecret, ctx, info(INFO.closeS2R))
+  const [closeR2S, closeS2R] = await Promise.allSettled([
+    provider.hkdf(options.closeSecret, ctx, info(INFO.closeR2S), CLOSE_KEY_BYTES),
+    provider.hkdf(options.closeSecret, ctx, info(INFO.closeS2R), CLOSE_KEY_BYTES)
   ]);
-  return Object.freeze({
-    closeR2S,
-    closeS2R,
-    roomNonce: ctx.slice(0, CPACE_ROOM_NONCE_BYTES),
-    attemptId: ctx.slice(CPACE_ROOM_NONCE_BYTES)
-  });
+  if (closeR2S.status === "rejected" || closeS2R.status === "rejected") {
+    for (const made of [closeR2S, closeS2R]) if (made.status === "fulfilled") made.value.fill(0);
+    throw [closeR2S, closeS2R].find((result) => result.status === "rejected")?.reason;
+  }
+  return new CloseKeys(ctx.slice(0, CPACE_ROOM_NONCE_BYTES), ctx.slice(CPACE_ROOM_NONCE_BYTES), closeR2S.value, closeS2R.value);
 }
 
 // src/dgdtp/noise.ts
@@ -6230,7 +6307,7 @@ var Writer = class {
 };
 _view = new WeakMap();
 _at = new WeakMap();
-var _bytes2, _view2, _fail, _at2, _Reader_instances, need_fn2;
+var _bytes2, _view2, _fail, _at2, _Reader_instances, need_fn3;
 var Reader = class {
   constructor(bytes, at, fail) {
     __privateAdd(this, _Reader_instances);
@@ -6247,16 +6324,16 @@ var Reader = class {
     return __privateGet(this, _bytes2).byteLength - __privateGet(this, _at2);
   }
   u8() {
-    return __privateGet(this, _view2).getUint8(__privateMethod(this, _Reader_instances, need_fn2).call(this, 1));
+    return __privateGet(this, _view2).getUint8(__privateMethod(this, _Reader_instances, need_fn3).call(this, 1));
   }
   u16() {
-    return __privateGet(this, _view2).getUint16(__privateMethod(this, _Reader_instances, need_fn2).call(this, 2));
+    return __privateGet(this, _view2).getUint16(__privateMethod(this, _Reader_instances, need_fn3).call(this, 2));
   }
   u32() {
-    return __privateGet(this, _view2).getUint32(__privateMethod(this, _Reader_instances, need_fn2).call(this, 4));
+    return __privateGet(this, _view2).getUint32(__privateMethod(this, _Reader_instances, need_fn3).call(this, 4));
   }
   u64() {
-    return __privateGet(this, _view2).getBigUint64(__privateMethod(this, _Reader_instances, need_fn2).call(this, 8));
+    return __privateGet(this, _view2).getBigUint64(__privateMethod(this, _Reader_instances, need_fn3).call(this, 8));
   }
   /** A 64-bit size or count, which must be at most 2^53 − 1. */
   size() {
@@ -6265,7 +6342,7 @@ var Reader = class {
     return Number(value);
   }
   raw(n) {
-    const at = __privateMethod(this, _Reader_instances, need_fn2).call(this, n);
+    const at = __privateMethod(this, _Reader_instances, need_fn3).call(this, n);
     return __privateGet(this, _bytes2).slice(at, at + n);
   }
   rest() {
@@ -6277,7 +6354,7 @@ _view2 = new WeakMap();
 _fail = new WeakMap();
 _at2 = new WeakMap();
 _Reader_instances = new WeakSet();
-need_fn2 = function(n) {
+need_fn3 = function(n) {
   if (__privateGet(this, _at2) + n > __privateGet(this, _bytes2).byteLength) throw __privateGet(this, _fail).call(this);
   const at = __privateGet(this, _at2);
   __privateSet(this, _at2, __privateGet(this, _at2) + n);
@@ -6835,8 +6912,6 @@ var MAX_FRAMES_EACH_WAY = 4096;
 var INSIDE_HEADER_BYTES = 3;
 var MAX_CLOSE_BODY_BYTES = SMALL_BUCKET_BYTES - INSIDE_HEADER_BYTES;
 var AD_LABEL = new TextEncoder().encode("dropgate/4 dgdtp signal");
-var ROOM_NONCE_BYTES = 16;
-var ATTEMPT_ID_BYTES = 16;
 var DIRECTION = { receiver: 1, sender: 2 };
 var TYPE = { offer: 1, answer: 2, candidate: 3, "end-of-candidates": 4, restart: 5, close: 6 };
 var NO_LINE_INDEX = 65535;
@@ -7112,44 +7187,60 @@ function signalChannel(provider, options) {
     close: end
   });
 }
-function closeChannel(provider, options) {
+function closeChannel(options) {
   const { keys, role } = options ?? {};
   checkRole(role);
-  if (!keys || typeof keys !== "object" || !("closeR2S" in keys)) throw invalid7("A close is sealed under the close keys.");
-  const sendKey = role === "receiver" ? keys.closeR2S : keys.closeS2R;
-  const receiveKey = role === "receiver" ? keys.closeS2R : keys.closeR2S;
-  const ctx = { roomNonce: new Uint8Array(keys.roomNonce), attemptId: new Uint8Array(keys.attemptId), kind: CLOSE_KIND };
-  if (ctx.roomNonce.byteLength !== ROOM_NONCE_BYTES || ctx.attemptId.byteLength !== ATTEMPT_ID_BYTES) throw invalid7("A close is for one attempt.");
+  if (!(keys instanceof CloseKeys)) throw invalid7("A close is sealed under the close keys.");
+  let sendKey = role === "receiver" ? keys.closeR2S : keys.closeS2R;
+  let receiveKey = role === "receiver" ? keys.closeS2R : keys.closeR2S;
+  const ctx = { roomNonce: keys.roomNonce, attemptId: keys.attemptId, kind: CLOSE_KIND };
   const out = { ...ctx, direction: DIRECTION[role] };
   const into = { ...ctx, direction: DIRECTION[otherSide(role)] };
-  let sealed = false;
-  let opened = false;
+  warmAesGcm(SMALL_BUCKET_BYTES);
+  const letGo = (key) => key?.fill(0);
   return Object.freeze({
-    async seal(body) {
+    seal(body) {
       if (!(body instanceof Uint8Array)) throw invalid7("A close's body is bytes.");
       if (body.byteLength > MAX_CLOSE_BODY_BYTES) throw invalid7(`A close's body is at most ${MAX_CLOSE_BODY_BYTES} bytes.`);
-      if (sealed) throw invalid7("A connection has one close each way.");
-      sealed = true;
-      return sealFrame(provider, sendKey, out, 0, inside(TYPE.close, body));
+      const key = sendKey;
+      if (!key) throw invalid7("A connection has one close each way.");
+      sendKey = void 0;
+      const padded = inside(TYPE.close, body);
+      try {
+        return concat4(header(out, 0), sealAesGcmNow(key, nonceOf2(0), padded, associatedData2(out, 0)));
+      } finally {
+        padded.fill(0);
+        letGo(key);
+      }
     },
-    async open(frame) {
-      if (opened || !(frame instanceof Uint8Array)) return void 0;
+    open(frame) {
+      const key = receiveKey;
+      if (!key || !(frame instanceof Uint8Array) || !frameSize(frame)) return void 0;
+      const expected = header(into, 0);
+      for (let i = 0; i < FRAME_HEADER_BYTES; i++) if (frame[i] !== expected[i]) return void 0;
       let padded;
       try {
-        padded = await openFrame(provider, receiveKey, into, 0, new Uint8Array(frame));
+        padded = openAesGcmNow(key, nonceOf2(0), frame.subarray(FRAME_HEADER_BYTES), associatedData2(into, 0));
       } catch {
         return void 0;
       }
       try {
         const { type, body } = readInside(padded);
-        if (type !== TYPE.close || opened) return void 0;
-        opened = true;
+        if (type !== TYPE.close) return void 0;
+        receiveKey = void 0;
+        letGo(key);
         return body;
       } catch {
         return void 0;
       } finally {
         padded.fill(0);
       }
+    },
+    forget() {
+      letGo(sendKey);
+      letGo(receiveKey);
+      sendKey = void 0;
+      receiveKey = void 0;
     }
   });
 }
@@ -7373,7 +7464,10 @@ var Attempt = class {
     __privateSet(this, _keys, void 0);
     __privateGet(this, _signal)?.close();
     __privateSet(this, _signal, void 0);
-    if (!__privateGet(this, _lingering)) __privateSet(this, _close, void 0);
+    if (!__privateGet(this, _lingering)) {
+      __privateGet(this, _close)?.forget();
+      __privateSet(this, _close, void 0);
+    }
     __privateGet(this, _transport)?.close();
     __privateSet(this, _transport, void 0);
     const closes = __privateGet(this, _lingering) ? [() => __privateGet(this, _data)?.close(), () => __privateGet(this, _peer).close()] : [() => __privateGet(this, _data)?.close(), () => __privateGet(this, _pipe).close(), () => __privateGet(this, _peer).close()];
@@ -7482,7 +7576,7 @@ readPipe_fn = async function(first) {
 };
 take_fn = async function(frame) {
   if (frame instanceof Uint8Array && frame.byteLength > 0 && frame[0] === CLOSE_KIND) {
-    const body = __privateGet(this, _close) ? await __privateGet(this, _close).open(frame) : void 0;
+    const body = __privateGet(this, _close)?.open(frame);
     if (body) __privateGet(this, _closeBody).call(this, body);
     return;
   }
@@ -7548,7 +7642,11 @@ openData_fn = async function() {
 closeKeys_fn = async function(closeSecret) {
   const keys = __privateGet(this, _keys);
   const closeKeys = await __privateMethod(this, _Attempt_instances, race_fn).call(this, deriveCloseKeys(__privateGet(this, _provider5), { closeSecret, roomNonce: keys.roomNonce, attemptId: keys.attemptId }));
-  __privateSet(this, _close, closeChannel(__privateGet(this, _provider5), { keys: closeKeys, role: __privateGet(this, _role) }));
+  try {
+    __privateSet(this, _close, closeChannel({ keys: closeKeys, role: __privateGet(this, _role) }));
+  } finally {
+    closeKeys.forget();
+  }
 };
 /** The channel, up: the set-up's timer stopped, the channel handed over to its owner, who closes it. */
 opened_fn = function(hello, own2) {
@@ -7612,10 +7710,10 @@ opened_fn = function(hello, own2) {
         throw attempt.end(lost());
       }
     },
-    async sendClose(body) {
+    sendClose(body) {
       const close = __privateGet(attempt, _close);
       if (!close) throw ended();
-      __privateGet(attempt, _pipe).send(await close.seal(body));
+      __privateGet(attempt, _pipe).send(close.seal(body));
     },
     closeReceived: this.closeReceived,
     close: () => {
@@ -7632,6 +7730,7 @@ opened_fn = function(hello, own2) {
 release_fn = function() {
   if (!__privateGet(this, _lingering)) return;
   __privateSet(this, _lingering, false);
+  __privateGet(this, _close)?.forget();
   __privateSet(this, _close, void 0);
   try {
     __privateGet(this, _pipe).close();
@@ -7802,14 +7901,14 @@ pass_fn = function(deliver) {
   if (__privateGet(this, _target)) deliver(__privateGet(this, _target));
   else __privateGet(this, _early).push(deliver);
 };
-var _provider6, _secret, _roomNonce2, _rendezvous, _letters, _codeWanted, _code, _bound, _incoming, _waiting2, _listeners, _ended2, _SenderRoom_instances, notify_fn, attempt_fn, newCode_fn, forgetCode_fn, end_fn;
+var _provider6, _secret, _roomNonce3, _rendezvous, _letters, _codeWanted, _code, _bound, _incoming, _waiting2, _listeners, _ended2, _SenderRoom_instances, notify_fn, attempt_fn, newCode_fn, forgetCode_fn, end_fn;
 var SenderRoom = class {
   /** @internal openRoom() makes these. */
   constructor(provider, secret, roomNonce, options = {}) {
     __privateAdd(this, _SenderRoom_instances);
     __privateAdd(this, _provider6);
     __privateAdd(this, _secret);
-    __privateAdd(this, _roomNonce2);
+    __privateAdd(this, _roomNonce3);
     __privateAdd(this, _rendezvous);
     __privateAdd(this, _letters);
     __privateAdd(this, _codeWanted);
@@ -7822,7 +7921,7 @@ var SenderRoom = class {
     __privateAdd(this, _ended2);
     __privateSet(this, _provider6, provider);
     __privateSet(this, _secret, secret);
-    __privateSet(this, _roomNonce2, roomNonce);
+    __privateSet(this, _roomNonce3, roomNonce);
     __privateSet(this, _code, options.code);
     __privateSet(this, _codeWanted, options.codeWanted ?? options.code !== void 0);
     __privateSet(this, _rendezvous, options.rendezvous);
@@ -7840,7 +7939,7 @@ var SenderRoom = class {
   }
   /** The room's nonce, a copy: public. */
   get roomNonce() {
-    return new Uint8Array(__privateGet(this, _roomNonce2));
+    return new Uint8Array(__privateGet(this, _roomNonce3));
   }
   /** The code for the sender's screen, until an attempt uses it and a new one comes. */
   get code() {
@@ -7901,7 +8000,7 @@ var SenderRoom = class {
     const timers = timersOf(options);
     const provider = __privateGet(this, _provider6);
     const { pipe } = attempt;
-    const roomNonce = __privateGet(this, _roomNonce2);
+    const roomNonce = __privateGet(this, _roomNonce3);
     const open = () => [pipe, peer];
     if (attempt.by === "code") {
       let code;
@@ -7981,7 +8080,7 @@ var SenderRoom = class {
 };
 _provider6 = new WeakMap();
 _secret = new WeakMap();
-_roomNonce2 = new WeakMap();
+_roomNonce3 = new WeakMap();
 _rendezvous = new WeakMap();
 _letters = new WeakMap();
 _codeWanted = new WeakMap();
@@ -8357,7 +8456,7 @@ var MAX_UNFINISHED_FILE_ENDS = 8;
 var RESULT_ACK_WAIT_MS = 2e3;
 var MAX_PINGS_WAITING = 16;
 var STATUS_STATE = Object.freeze({ OFFERED: 1, TRANSFERRING: 2, FINALISING: 3, FINISHED: 4 });
-var _channel3, _handlers, _timers3, _control, _stream, _inFlight, _since, _wake, _busy, _idle, _closed3, _released, _inbox, _handling, _lostWith, _lastSent, _lastHeard, _srtt, _pings, _nextId, _pingTimer, _answerTimer, _acks, _Link_instances, stop_fn2, read_fn, answered_fn, takeId_fn, ping_fn, pong_fn, handle_fn, pump_fn, fromStream_fn, settleIdle_fn, end_fn2;
+var _channel3, _handlers, _timers3, _control, _stream, _inFlight, _since, _wake, _busy, _idle, _closed3, _released, _inbox, _handling, _lostWith, _heldClose, _heldTimer, _lastSent, _lastHeard, _srtt, _pings, _nextId, _pingTimer, _answerTimer, _acks, _Link_instances, outOfBand_fn, takeHeldClose_fn, stop_fn2, read_fn, answered_fn, takeId_fn, ping_fn, pong_fn, handle_fn, pump_fn, fromStream_fn, settleIdle_fn, end_fn2;
 var Link = class {
   constructor(channel, handlers, timers = GLOBAL_TIMERS) {
     __privateAdd(this, _Link_instances);
@@ -8384,6 +8483,9 @@ var Link = class {
     __privateAdd(this, _handling, false);
     /** Why the channel ended, told once the inbox is empty. */
     __privateAdd(this, _lostWith);
+    /** The other side's CLOSE through the rendezvous, heard while the data channel is still up: it waits (#heldClose()). */
+    __privateAdd(this, _heldClose);
+    __privateAdd(this, _heldTimer);
     // Liveness.
     __privateAdd(this, _lastSent);
     __privateAdd(this, _lastHeard);
@@ -8419,7 +8521,7 @@ var Link = class {
       } catch {
         return;
       }
-      if (message.type === "close") __privateGet(this, _handlers).close(message, this.generation);
+      if (message.type === "close") __privateMethod(this, _Link_instances, outOfBand_fn).call(this, message);
     }, () => void 0);
   }
   /** The smoothed round trip, once a PONG has come. */
@@ -8459,37 +8561,38 @@ var Link = class {
     await Promise.allSettled([...__privateGet(this, _inFlight)]);
   }
   /**
-   * Sends this side's one CLOSE: in-band (after whatever is already
-   * encrypted) and sealed through the rendezvous, then waits up to 2 s for the
+   * Sends this side's one CLOSE: first sealed through the rendezvous, before
+   * this returns its promise (so a page that's going still gets it out), then
+   * in-band, after whatever is already encrypted; then waits up to 2 s for the
    * CLOSE_ACK, which it gives. With the data channel already gone it goes
    * through the rendezvous alone, and nothing is waited for.
    */
-  async closeWith(message) {
+  closeWith(message) {
     const record = encodeMessage(message);
+    if (!__privateGet(this, _released)) {
+      try {
+        __privateGet(this, _channel3).sendClose(record);
+      } catch {
+      }
+    }
+    if (__privateGet(this, _closed3)) return Promise.resolve(void 0);
     const key = idKey(message.operationId);
     let resolve;
     const acked = new Promise((res) => {
       resolve = res;
     });
-    const inBand = !__privateGet(this, _closed3);
-    if (inBand) {
-      __privateGet(this, _acks).set(key, resolve);
-      this.sendRecord(record);
-    }
-    const outOfBand = __privateGet(this, _released) ? Promise.resolve() : __privateGet(this, _channel3).sendClose(record).catch(() => void 0);
-    if (!inBand) {
-      await outOfBand;
-      return void 0;
-    }
+    __privateGet(this, _acks).set(key, resolve);
+    this.sendRecord(record);
     const timer = __privateGet(this, _timers3).setTimeout(() => resolve(void 0), CLOSE_ACK_WAIT_MS);
-    const ack = await acked;
-    __privateGet(this, _timers3).clearTimeout(timer);
-    __privateGet(this, _acks).delete(key);
-    await outOfBand;
-    return ack;
+    return acked.then((ack) => {
+      __privateGet(this, _timers3).clearTimeout(timer);
+      __privateGet(this, _acks).delete(key);
+      return ack;
+    });
   }
   /** Closes the link and its channel: nothing more is sent or read, and no late CLOSE is listened for. */
   close() {
+    __privateMethod(this, _Link_instances, takeHeldClose_fn).call(this);
     __privateMethod(this, _Link_instances, stop_fn2).call(this);
     if (__privateGet(this, _released)) return;
     __privateSet(this, _released, true);
@@ -8524,6 +8627,8 @@ _released = new WeakMap();
 _inbox = new WeakMap();
 _handling = new WeakMap();
 _lostWith = new WeakMap();
+_heldClose = new WeakMap();
+_heldTimer = new WeakMap();
 _lastSent = new WeakMap();
 _lastHeard = new WeakMap();
 _srtt = new WeakMap();
@@ -8533,6 +8638,32 @@ _pingTimer = new WeakMap();
 _answerTimer = new WeakMap();
 _acks = new WeakMap();
 _Link_instances = new WeakSet();
+/**
+ * The other side's CLOSE through the rendezvous. That copy is sealed and
+ * sent at once, so it can come ahead of the records the other side sent
+ * before it (an ACCEPT, say). While the data channel is up it waits for the
+ * in-band CLOSE, which follows them, for the channel's end, or for 2 s,
+ * whichever is first; once the channel has gone it's heard at once.
+ */
+outOfBand_fn = function(message) {
+  if (__privateGet(this, _closed3)) {
+    __privateGet(this, _handlers).close(message, this.generation);
+    return;
+  }
+  if (__privateGet(this, _heldClose)) return;
+  __privateSet(this, _heldClose, message);
+  __privateSet(this, _heldTimer, __privateGet(this, _timers3).setTimeout(() => {
+    const held = __privateMethod(this, _Link_instances, takeHeldClose_fn).call(this);
+    if (held && !__privateGet(this, _released)) __privateGet(this, _handlers).close(held, this.generation);
+  }, CLOSE_ACK_WAIT_MS));
+};
+/** The held out-of-band CLOSE, if there is one, no longer held. */
+takeHeldClose_fn = function() {
+  const held = __privateGet(this, _heldClose);
+  __privateSet(this, _heldClose, void 0);
+  if (held) __privateGet(this, _timers3).clearTimeout(__privateGet(this, _heldTimer));
+  return held;
+};
 stop_fn2 = function() {
   if (__privateGet(this, _closed3)) return;
   __privateSet(this, _closed3, true);
@@ -8588,6 +8719,7 @@ answered_fn = function(record) {
       else __privateGet(this, _handlers).statusHeard?.(message, this.generation);
       break;
     case "close":
+      __privateMethod(this, _Link_instances, takeHeldClose_fn).call(this);
       __privateGet(this, _handlers).close(message, this.generation);
       break;
     case "close-ack":
@@ -8668,7 +8800,9 @@ settleIdle_fn = function() {
 /** The channel ended under the link, or the other side went quiet: the side is told, and closes the link when it's ready. */
 end_fn2 = function(err) {
   if (__privateGet(this, _closed3)) return;
+  const held = __privateMethod(this, _Link_instances, takeHeldClose_fn).call(this);
   __privateMethod(this, _Link_instances, stop_fn2).call(this);
+  if (held) __privateGet(this, _handlers).close(held, this.generation);
   __privateGet(this, _handlers).ended(toDropgateError(err));
 };
 var idKey = (id) => Array.from(id, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -9591,6 +9725,7 @@ quiet_fn = function() {
 end_fn3 = async function(outcome, close) {
   if (__privateGet(this, _phase) === "ended") return;
   __privateSet(this, _phase, "ended");
+  const telling = close && !__privateGet(this, _peerClosed) ? __privateGet(this, _link).closeWith({ type: "close", operationId: __privateGet(this, _provider7).randomBytes(16), ...close }) : void 0;
   __privateSet(this, _outcome, outcome);
   __privateMethod(this, _DirectReceiver_instances, quiet_fn).call(this);
   if (__privateGet(this, _lostTimer) !== void 0) __privateGet(this, _timers6).clearTimeout(__privateGet(this, _lostTimer));
@@ -9614,8 +9749,8 @@ end_fn3 = async function(outcome, close) {
     __privateGet(this, _link).send({ type: "close-ack", operationId: __privateGet(this, _pendingClose).operationId, finished: false });
     __privateSet(this, _pendingClose, void 0);
   }
-  if (close && !__privateGet(this, _peerClosed)) {
-    await __privateGet(this, _link).closeWith({ type: "close", operationId: __privateGet(this, _provider7).randomBytes(16), ...close });
+  if (telling) {
+    await telling;
   } else {
     await within(__privateGet(this, _link).flush(), CLOSE_ACK_WAIT_MS, __privateGet(this, _timers6));
   }
@@ -10693,6 +10828,7 @@ end_fn5 = async function(outcome, close) {
   }
 };
 ending_fn2 = async function(outcome, close) {
+  const telling = close && !__privateGet(this, _peerClosed2) ? __privateGet(this, _link2).closeWith({ type: "close", operationId: __privateGet(this, _host).provider.randomBytes(16), ...close }) : void 0;
   __privateMethod(this, _SenderSession_instances, quiet_fn2).call(this);
   if (__privateGet(this, _lostTimer2) !== void 0) __privateGet(this, _host).timers.clearTimeout(__privateGet(this, _lostTimer2));
   __privateGet(this, _resumeSecret2)?.fill(0);
@@ -10701,8 +10837,8 @@ ending_fn2 = async function(outcome, close) {
   __privateMethod(this, _SenderSession_instances, wakeProducer_fn).call(this);
   __privateGet(this, _link2).stream(void 0);
   __privateGet(this, _host).ended(this, outcome);
-  if (close && !__privateGet(this, _peerClosed2)) {
-    await __privateGet(this, _link2).closeWith({ type: "close", operationId: __privateGet(this, _host).provider.randomBytes(16), ...close });
+  if (telling) {
+    await telling;
   } else {
     await within(__privateGet(this, _link2).flush(), outcome.state === "completed" ? RESULT_ACK_WAIT_MS : CLOSE_ACK_WAIT_MS, __privateGet(this, _host).timers);
   }
@@ -11027,7 +11163,17 @@ function linkSecret(link, baseUrl, base64) {
   return secret;
 }
 function appClosing(host) {
-  for (const close of [...host.appClosers]) close();
+  const upTo = closersAdded;
+  queueMicrotask(() => {
+    for (const close of [...host.appClosers]) if ((addedAt.get(close) ?? 0) <= upTo) close();
+  });
+}
+var closersAdded = 0;
+var addedAt = /* @__PURE__ */ new WeakMap();
+function addAppCloser(host, close) {
+  closersAdded += 1;
+  addedAt.set(close, closersAdded);
+  host.appClosers.add(close);
 }
 function directServer(host, compat) {
   host.requireDirect(compat);
@@ -11152,7 +11298,7 @@ async function startDirectSend(host, opts) {
   const scope = new CancelScope("direct.send", { parent: host.registry.scope, signal: opts.signal });
   let sender;
   const closeForApp = () => sender ? sender.appClosed() : scope.cancel();
-  host.appClosers.add(closeForApp);
+  addAppCloser(host, closeForApp);
   try {
     scope.throwIfCancelled();
     const server = directServer(host, await host.connect({ signal: scope.signal }));
@@ -11437,7 +11583,7 @@ async function startDirectReceive(host, opts) {
     if (receiver) receiver.appClosed();
     else handle.cancel();
   }
-  if (!ended) host.appClosers.add(closeForApp);
+  if (!ended) addAppCloser(host, closeForApp);
   void handle.result.then((outcome) => {
     engine.reject(outcome.status === "failed" ? outcome.error : new DropgateError({ code: "OPERATION_CANCELLED", details: { cancellation: outcome.status === "cancelled" ? outcome.cancellation : void 0 } }));
   });

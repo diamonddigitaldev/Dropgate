@@ -148,13 +148,36 @@ export interface DirectHost {
 }
 
 /**
- * The app is closing: every direct transfer `host` runs ends at once, each
- * telling its other side so (CLOSE, APP_CLOSED, best effort), and ends
- * cancelled by this side. One still opening its room, or still connecting,
- * has nobody to tell, and is cancelled.
+ * The app is closing: every direct transfer `host` runs ends, each telling
+ * its other side so (CLOSE, APP_CLOSED, best effort), and ends cancelled by
+ * this side. One still opening its room, or still connecting, has nobody to
+ * tell, and is cancelled.
+ *
+ * The work goes in a microtask, run as soon as the caller's code returns,
+ * never later: Firefox drops a WebSocket message a page sends from inside the
+ * first `pagehide` listener as it closes, but sends one from the microtask
+ * straight after it. Each transfer's close is then sealed and sent before
+ * anything else it does (the engine's closeWith()). The transfers are the
+ * ones running at the call: one started after it carries on. The call itself
+ * only notes how many have started; the list is read in the microtask (read in
+ * the listener, Firefox's sending page lost its close every time, measured).
  */
 export function appClosing(host: DirectHost): void {
-  for (const close of [...host.appClosers]) close();
+  const upTo = closersAdded;
+  queueMicrotask(() => {
+    for (const close of [...host.appClosers]) if ((addedAt.get(close) ?? 0) <= upTo) close();
+  });
+}
+
+/** How many app closers have been added, and when each was: appClosing() ends those added before its call. */
+let closersAdded = 0;
+const addedAt = new WeakMap<() => void, number>();
+
+/** Adds a running transfer's closer for `client.direct.appClosing()`. */
+function addAppCloser(host: DirectHost, close: () => void): void {
+  closersAdded += 1;
+  addedAt.set(close, closersAdded);
+  host.appClosers.add(close);
 }
 
 /** What the server says about its direct transfers, checked. */
@@ -318,7 +341,7 @@ export async function startDirectSend(host: DirectHost, opts: DirectSendOptions)
   let sender: DirectSender | undefined;
   // Still opening its room, there's nobody to tell: the send is cancelled, and the room closed once open.
   const closeForApp = () => (sender ? sender.appClosed() : scope.cancel());
-  host.appClosers.add(closeForApp);
+  addAppCloser(host, closeForApp);
   try {
     scope.throwIfCancelled();
     const server = directServer(host, await host.connect({ signal: scope.signal }));
@@ -623,7 +646,7 @@ export async function startDirectReceive(host: DirectHost, opts: DirectReceiveOp
     if (receiver) receiver.appClosed();
     else handle.cancel();
   }
-  if (!ended) host.appClosers.add(closeForApp);
+  if (!ended) addAppCloser(host, closeForApp);
   // Ended before the channel was up: an offer, an accept or a decline waiting for it hears how.
   void handle.result.then((outcome) => {
     engine.reject(outcome.status === 'failed' ? outcome.error : new DropgateError({ code: 'OPERATION_CANCELLED', details: { cancellation: outcome.status === 'cancelled' ? outcome.cancellation : undefined } }));

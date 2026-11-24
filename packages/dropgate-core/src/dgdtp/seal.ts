@@ -1,7 +1,7 @@
-import type { ContentKey, CryptoProvider } from '../crypto/index.js';
+import { openAesGcmNow, sealAesGcmNow, warmAesGcm, type ContentKey, type CryptoProvider } from '../crypto/index.js';
 import { DropgateError } from '../errors.js';
 import { checkCpaceAbort } from './cpace.js';
-import type { AttemptKeys, CloseKeys } from './keys.js';
+import { CloseKeys, type AttemptKeys } from './keys.js';
 
 // Sealed signalling: every message that sets up a direct transfer's connection
 // (the receiver's offer, the sender's answer, each ICE candidate as it's found,
@@ -40,8 +40,11 @@ import type { AttemptKeys, CloseKeys } from './keys.js';
 // sender's CPace abort: CODE_MISMATCH (cpace.ts' checkCpaceAbort).
 //
 // An out-of-band close is one frame each way, counter 0, under the close keys,
-// which travels through the rendezvous when the data channel is already gone;
-// one that doesn't open, or a second, is ignored.
+// which travels through the rendezvous with every in-band CLOSE, and alone
+// when the data channel is already gone; one that doesn't open, or a second,
+// is ignored. It's sealed at once, on @noble's AES-GCM in every runtime
+// (crypto/sync-aes-gcm.ts), with the same bytes as WebCrypto's: a page that's
+// closing may never see a WebCrypto promise settle, and its close must still go.
 //
 // No error carries anything from a frame or a key, and nothing here logs.
 
@@ -74,9 +77,6 @@ const INSIDE_HEADER_BYTES = 3;
 export const MAX_CLOSE_BODY_BYTES = SMALL_BUCKET_BYTES - INSIDE_HEADER_BYTES;
 
 const AD_LABEL = new TextEncoder().encode('dropgate/4 dgdtp signal');
-
-const ROOM_NONCE_BYTES = 16;
-const ATTEMPT_ID_BYTES = 16;
 
 /** Which side of a direct transfer this is. */
 export type SignalRole = 'receiver' | 'sender';
@@ -447,61 +447,90 @@ export function signalChannel(provider: CryptoProvider, options: { keys: Attempt
   });
 }
 
-/** One connection's out-of-band close, both ways, for one side. */
+/**
+ * One connection's out-of-band close, both ways, for one side. Everything
+ * here answers at once: a close is sealed with no promise to wait for, so a
+ * page that's going can still send it (crypto/sync-aes-gcm.ts).
+ */
 export interface CloseChannel {
   /**
    * The one close frame this side sends, holding `body` (CLOSE's own bytes),
-   * at most 509 bytes. INVALID_ARGUMENT if it's too long, or one was sealed
-   * already.
+   * at most 509 bytes, sealed before this returns. INVALID_ARGUMENT if it's
+   * too long, one was sealed already, or the channel was let go. The key is
+   * overwritten once it's used.
    */
-  seal(body: Uint8Array): Promise<Uint8Array<ArrayBuffer>>;
+  seal(body: Uint8Array): Uint8Array<ArrayBuffer>;
   /**
    * The body of the other side's close frame, or undefined if this isn't it:
    * one that doesn't open, isn't exactly a close, or comes after the first is
    * ignored.
    */
-  open(frame: Uint8Array): Promise<Uint8Array<ArrayBuffer> | undefined>;
+  open(frame: Uint8Array): Uint8Array<ArrayBuffer> | undefined;
+  /** Overwrites both keys: nothing more is sealed or opened. */
+  forget(): void;
 }
 
-/** A connection's out-of-band close for `role`, under `keys` (keys.ts' deriveCloseKeys). */
-export function closeChannel(provider: CryptoProvider, options: { keys: CloseKeys; role: SignalRole }): CloseChannel {
+/**
+ * A connection's out-of-band close for `role`, under `keys` (keys.ts'
+ * deriveCloseKeys), whose two keys it copies: the caller lets `keys` go.
+ * @noble's AES-GCM is warmed here, so the close itself runs on warm code.
+ */
+export function closeChannel(options: { keys: CloseKeys; role: SignalRole }): CloseChannel {
   const { keys, role } = options ?? {};
   checkRole(role);
-  if (!keys || typeof keys !== 'object' || !('closeR2S' in keys)) throw invalid('A close is sealed under the close keys.');
-  const sendKey = role === 'receiver' ? keys.closeR2S : keys.closeS2R;
-  const receiveKey = role === 'receiver' ? keys.closeS2R : keys.closeR2S;
-  const ctx = { roomNonce: new Uint8Array(keys.roomNonce), attemptId: new Uint8Array(keys.attemptId), kind: CLOSE_KIND };
-  if (ctx.roomNonce.byteLength !== ROOM_NONCE_BYTES || ctx.attemptId.byteLength !== ATTEMPT_ID_BYTES) throw invalid('A close is for one attempt.');
+  if (!(keys instanceof CloseKeys)) throw invalid('A close is sealed under the close keys.');
+  let sendKey: Uint8Array<ArrayBuffer> | undefined = role === 'receiver' ? keys.closeR2S : keys.closeS2R;
+  let receiveKey: Uint8Array<ArrayBuffer> | undefined = role === 'receiver' ? keys.closeS2R : keys.closeR2S;
+  const ctx = { roomNonce: keys.roomNonce, attemptId: keys.attemptId, kind: CLOSE_KIND };
   const out: Way = { ...ctx, direction: DIRECTION[role] };
   const into: Way = { ...ctx, direction: DIRECTION[otherSide(role)] };
-  let sealed = false;
-  let opened = false;
+  warmAesGcm(SMALL_BUCKET_BYTES);
+  const letGo = (key: Uint8Array | undefined) => key?.fill(0);
   return Object.freeze({
-    async seal(body: Uint8Array) {
+    seal(body: Uint8Array) {
       if (!(body instanceof Uint8Array)) throw invalid("A close's body is bytes.");
       if (body.byteLength > MAX_CLOSE_BODY_BYTES) throw invalid(`A close's body is at most ${MAX_CLOSE_BODY_BYTES} bytes.`);
-      if (sealed) throw invalid('A connection has one close each way.');
-      sealed = true;
-      return sealFrame(provider, sendKey, out, 0, inside(TYPE.close, body));
+      const key = sendKey;
+      if (!key) throw invalid('A connection has one close each way.');
+      // Taken first: whatever happens next, this key never seals a second frame (counter 0's nonce, once).
+      sendKey = undefined;
+      const padded = inside(TYPE.close, body);
+      try {
+        return concat(header(out, 0), sealAesGcmNow(key, nonceOf(0), padded, associatedData(out, 0)));
+      } finally {
+        padded.fill(0);
+        letGo(key);
+      }
     },
-    async open(frame: Uint8Array) {
-      if (opened || !(frame instanceof Uint8Array)) return undefined;
+    open(frame: Uint8Array) {
+      const key = receiveKey;
+      if (!key || !(frame instanceof Uint8Array) || !frameSize(frame)) return undefined;
+      const expected = header(into, 0);
+      for (let i = 0; i < FRAME_HEADER_BYTES; i++) if (frame[i] !== expected[i]) return undefined;
       let padded: Uint8Array<ArrayBuffer>;
       try {
-        padded = await openFrame(provider, receiveKey, into, 0, new Uint8Array(frame));
+        padded = openAesGcmNow(key, nonceOf(0), frame.subarray(FRAME_HEADER_BYTES), associatedData(into, 0));
       } catch {
         return undefined;
       }
       try {
         const { type, body } = readInside(padded);
-        if (type !== TYPE.close || opened) return undefined;
-        opened = true;
+        if (type !== TYPE.close) return undefined;
+        // The first that opens is the one: the key goes with it, and any later frame is ignored.
+        receiveKey = undefined;
+        letGo(key);
         return body;
       } catch {
         return undefined;
       } finally {
         padded.fill(0);
       }
+    },
+    forget() {
+      letGo(sendKey);
+      letGo(receiveKey);
+      sendKey = undefined;
+      receiveKey = undefined;
     },
   });
 }

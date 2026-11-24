@@ -422,18 +422,21 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
     const junk = new Uint8Array(550);
     junk[0] = 0x11;
     pipe.sender.send(junk);
-    await receiver.sendClose(ascii('the receiver closed'));
+    // Sealed and on the pipe before sendClose() returns: nothing to wait for.
+    const before = pipe.sent.receiver.length;
+    expect(receiver.sendClose(ascii('the receiver closed'))).toBeUndefined();
+    expect(pipe.sent.receiver.length).toBe(before + 1);
     const own = pipe.sent.receiver[pipe.sent.receiver.length - 1];
     pipe.sender.send(own);
-    await sender.sendClose(ascii('the sender closed'));
+    sender.sendClose(ascii('the sender closed'));
     // Each close in its own direction, under its own key: the receiver's direction 1, the sender's 2, both counter 0.
     const theirs = pipe.sent.sender[pipe.sent.sender.length - 1];
     expect([own[0], own[1], ...own.subarray(18, 22), own.byteLength]).toEqual([0x11, 1, 0, 0, 0, 0, 550]);
     expect([theirs[0], theirs[1], ...theirs.subarray(18, 22), theirs.byteLength]).toEqual([0x11, 2, 0, 0, 0, 0, 550]);
     expect(new TextDecoder().decode(await receiver.closeReceived)).toBe('the sender closed');
     expect(new TextDecoder().decode(await sender.closeReceived)).toBe('the receiver closed');
-    await expect(receiver.sendClose(ascii('again'))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-    await expect(sender.sendClose(new Uint8Array(510))).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    expect(() => receiver.sendClose(ascii('again'))).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    expect(() => sender.sendClose(new Uint8Array(510))).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
     // The channel carries on.
     await receiver.send(ascii('still here'));
     expect(new TextDecoder().decode(await sender.receive())).toBe('still here');
@@ -475,13 +478,32 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
     expect(codes({ receiver: rr, sender: ss })).toBe('CONNECTION_LOST / CONNECTION_LOST');
   });
 
+  it("the out-of-band close is sealed and on the rendezvous before sendClose() returns, and opened as it comes, even once the provider's own work never settles (a closing page's WebCrypto)", async () => {
+    let stalled = false;
+    const now = new Set(['randomBytes', 'randomUUID', 'equal', 'elligator2']);
+    const stalling = Object.fromEntries(Object.entries(provider).map(([name, value]) => [
+      name,
+      typeof value === 'function' && !now.has(name)
+        ? (...args: unknown[]) => (stalled ? new Promise(() => undefined) : (value as (...a: unknown[]) => unknown).apply(provider, args))
+        : value,
+    ])) as unknown as CryptoProvider;
+    const t = await transfer(stalling);
+    const { receiver, sender } = channels(t);
+    const pipe = t.rendezvous.pipes[0];
+    stalled = true;
+    const before = pipe.sent.receiver.length;
+    receiver.sendClose(ascii('the page is going'));
+    expect(pipe.sent.receiver.length).toBe(before + 1);
+    expect(new TextDecoder().decode(await sender.closeReceived)).toBe('the page is going');
+  });
+
   it('close() lets everything go: its own calls refused, the other side told by its data channel closing', async () => {
     const t = await transfer(provider);
     const { receiver, sender } = channels(t);
     receiver.close();
     await expect(receiver.send(ascii('x'))).rejects.toMatchObject({ code: 'OPERATION_CANCELLED' });
     await expect(receiver.receive()).rejects.toMatchObject({ code: 'OPERATION_CANCELLED' });
-    await expect(receiver.sendClose(ascii('x'))).rejects.toMatchObject({ code: 'OPERATION_CANCELLED' });
+    expect(() => receiver.sendClose(ascii('x'))).toThrow(expect.objectContaining({ code: 'OPERATION_CANCELLED' }));
     await expect(sender.receive()).rejects.toMatchObject({ code: 'CONNECTION_LOST' });
     expect(t.peers.receiver.closed).toBe(true);
     expect(t.peers.sender.closed).toBe(true);

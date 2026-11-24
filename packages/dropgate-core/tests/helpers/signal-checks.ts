@@ -65,8 +65,8 @@ export async function signalVectorChecks(provider: CryptoProvider): Promise<Vect
     });
   }
   await check('closeR2S and closeS2R', `${vectors.schedules.code.closeR2S} ${vectors.schedules.code.closeS2R}`, async () => {
-    const keys = await closeKeys(exporting(provider));
-    return `${hex(await provider.exportKey(keys.closeR2S))} ${hex(await provider.exportKey(keys.closeS2R))}`;
+    const keys = await closeKeys(provider);
+    return `${hex(keys.closeR2S)} ${hex(keys.closeS2R)}`;
   });
 
   // Each side's frames, sealed as the vectors have them, and opened by the other side.
@@ -89,9 +89,10 @@ export async function signalVectorChecks(provider: CryptoProvider): Promise<Vect
   const close = await closeKeys(provider);
   for (const [role, peer] of [['receiver', 'sender'], ['sender', 'receiver']] as const) {
     const want = vectors.close[role];
-    await check(`the ${role}'s close, sealed`, want.frame, async () => hex(await closeChannel(provider, { keys: close, role }).seal(fromHex(want.body))));
+    // Sealed and opened at once, on @noble's AES-GCM whichever provider made the keys: the same bytes.
+    await check(`the ${role}'s close, sealed`, want.frame, async () => hex(closeChannel({ keys: close, role }).seal(fromHex(want.body))));
     await check(`the ${role}'s close, opened by the ${peer}`, want.body, async () => {
-      const body = await closeChannel(provider, { keys: close, role: peer }).open(fromHex(want.frame));
+      const body = closeChannel({ keys: close, role: peer }).open(fromHex(want.frame));
       return body ? hex(body) : 'ignored';
     });
   }

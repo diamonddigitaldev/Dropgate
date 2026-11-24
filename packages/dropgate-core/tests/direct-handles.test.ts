@@ -257,7 +257,15 @@ describe('client.direct on handles, through the real server over werift', () => 
       await receive.accept({ sink });
       await until(() => sink.writes >= 1, 'a write');
       const closing = who === 'sender' ? sending : receiving;
+      const sends = vi.spyOn(WebSocket.prototype, 'send');
       expect(closing.direct.appClosing()).toBeUndefined();
+      // It returns before anything is done; the transfer ends in the microtask straight after the caller's code, and its
+      // sealed CLOSE is on that side's rendezvous socket by then (a frame of 550 bytes, after the sender's 2-byte SEND
+      // header or the receiver's 1-byte one), with no timer or other task in between: a closing page has no more.
+      expect(sends).not.toHaveBeenCalled();
+      await null;
+      expect(sends.mock.calls.map(([data]) => (data as Uint8Array).byteLength)).toEqual([who === 'sender' ? 552 : 551]);
+      sends.mockRestore();
       const [r, s] = await Promise.all([receive.result, send.result]);
       if (who === 'sender') {
         expect(`${said(r)} / ${said(s)}`).toBe('failed PEER_CLOSED / cancelled by self');

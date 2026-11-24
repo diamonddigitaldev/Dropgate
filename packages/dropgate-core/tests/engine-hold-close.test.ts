@@ -620,6 +620,67 @@ describe('CLOSE: one way to end', () => {
     expect((await Promise.all([receiver.done, run.sender.done])).map(said)).toEqual(['failed CONNECTION_LOST', 'failed CONNECTION_LOST']);
   });
 
+  it('an app closing seals its CLOSE and hands it to the rendezvous before appClosed() returns, each side, ahead of anything else', async () => {
+    for (const side of ['receiver', 'sender'] as const) {
+      const run = await direct([memoryFile('a.bin', patterned(6 * MiB, 64))]);
+      const { receiver } = await run.receive();
+      // What had gone through the rendezvous when this side did anything else: aborted its sink, told its listeners.
+      const atAbort: number[] = [];
+      const sink = new MemorySink();
+      const abort = sink.abort.bind(sink);
+      sink.abort = (reason?: unknown) => { atAbort.push(closesSent(run.rendezvous).receiver); return abort(reason); };
+      const atTold: number[] = [];
+      run.sender.onChange(() => { if (run.sender.state === 'cancelled') atTold.push(closesSent(run.rendezvous).sender); });
+      await receiver.accept({ sink });
+      await until(() => run.sender.canPause && receiver.canPause, 'transferring');
+      const before = closesSent(run.rendezvous);
+      (side === 'sender' ? run.sender : receiver).appClosed();
+      // No await in between: the sealed copy went within the call, and before anything else.
+      expect(closesSent(run.rendezvous)).toEqual({ ...before, [side]: before[side] + 1 });
+      expect(before[side]).toBe(0);
+      if (side === 'receiver') expect(atAbort).toEqual([1]);
+      else expect(atTold[0]).toBe(1);
+      const [r, s] = await Promise.all([receiver.done, run.sender.done]);
+      expect(side === 'sender' ? r : s).toMatchObject({ state: 'failed', error: { code: 'PEER_CLOSED' } });
+    }
+  });
+
+  it("an out-of-band CLOSE that overtakes the records sent before it waits for them: a cancel straight after Download ends the send cancelled, not waiting", async () => {
+    const run = await direct([memoryFile('a.bin', patterned(6 * MiB, 65))]);
+    const { receiver } = await run.receive();
+    await receiver.accept({ sink: new MemorySink() });
+    // The ACCEPT is on the data channel; the CLOSE's sealed copy goes through the rendezvous at once and gets there first.
+    receiver.cancel();
+    expect((await Promise.all([receiver.done, run.sender.done])).map(said)).toEqual(['cancelled by self', 'cancelled by peer']);
+  });
+
+  it('an out-of-band CLOSE heard while the data channel is up and nothing follows in-band is acted on after 2 s, or as soon as the data channel goes', async () => {
+    for (const end of ['2 s', 'the data channel going'] as const) {
+      const clock = new FakeClock();
+      const run = await direct([memoryFile('a.bin', patterned(6 * MiB, 66))], { clock });
+      const { receiver, pair, channel } = await run.receive();
+      await receiver.accept({ sink: new MemorySink() });
+      await until(() => run.sender.canPause, 'transferring');
+      // Held, so the transfer can't finish in the meantime.
+      receiver.pause();
+      await until(() => run.sender.pausedBy === 'peer', 'the sender held');
+      // Only the rendezvous's copy, as from a page whose in-band CLOSE never got out.
+      channel.sendClose(encodeMessage({ type: 'close', operationId: new Uint8Array(16).fill(4), reason: 'APP_CLOSED' }));
+      await sleep(50);
+      if (end === '2 s') {
+        await clock.advance(1900);
+        expect(await soon(run.sender.done)).toBe('pending');
+        await clock.advance(100);
+      } else {
+        expect(await soon(run.sender.done)).toBe('pending');
+        pair.data?.receiver.close();
+      }
+      expect(await run.sender.done).toMatchObject({ state: 'failed', error: { code: 'PEER_CLOSED' } });
+      receiver.cancel();
+      await receiver.done;
+    }
+  });
+
   it("a CLOSE once RESULT has gone gets CLOSE_ACK{finished} with the RESULT, and the receive stays completed", async () => {
     const t = await transfer(provider);
     const pair = channels(t);

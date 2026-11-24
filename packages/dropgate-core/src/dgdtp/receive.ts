@@ -695,13 +695,18 @@ export class DirectReceiver {
   /**
    * Ends the transfer, once: everything after is fenced off at once. The sink
    * aborted unless completed, the resume secret overwritten. With `close`,
-   * the sender is told (in-band and through the rendezvous, its CLOSE_ACK
-   * waited for 2 s at most); otherwise whatever is queued (a CLOSE_ACK, say)
+   * the sender is told first (through the rendezvous at once, then in-band,
+   * its CLOSE_ACK waited for 2 s at most); otherwise whatever is queued (a CLOSE_ACK, say)
    * goes first. Then the channel is closed.
    */
   async #end(outcome: DirectOutcome, close?: CloseWhy): Promise<void> {
     if (this.#phase === 'ended') return;
     this.#phase = 'ended';
+    // The sender is told first, before anything else is done: a page that's going has about a millisecond (DGDTP.md).
+    // It has ended already if its CLOSE was heard: nothing more to tell it.
+    const telling = close && !this.#peerClosed
+      ? this.#link.closeWith({ type: 'close', operationId: this.#provider.randomBytes(16), ...close })
+      : undefined;
     this.#outcome = outcome;
     this.#quiet();
     if (this.#lostTimer !== undefined) this.#timers.clearTimeout(this.#lostTimer);
@@ -726,9 +731,8 @@ export class DirectReceiver {
       this.#link.send({ type: 'close-ack', operationId: this.#pendingClose.operationId, finished: false });
       this.#pendingClose = undefined;
     }
-    // The sender has ended already if its CLOSE was heard: nothing more to tell it.
-    if (close && !this.#peerClosed) {
-      await this.#link.closeWith({ type: 'close', operationId: this.#provider.randomBytes(16), ...close });
+    if (telling) {
+      await telling;
     } else {
       await within(this.#link.flush(), CLOSE_ACK_WAIT_MS, this.#timers);
     }

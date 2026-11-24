@@ -18,8 +18,12 @@ import { CPACE_ATTEMPT_ID_BYTES, CPACE_ROOM_NONCE_BYTES } from './cpace.js';
 //   closeR2S 32   HKDF(IKM closeSecret, salt ctx, "dropgate/4 dgdtp close r>s")  an out-of-band close,
 //   closeS2R 32   HKDF(IKM closeSecret, salt ctx, "dropgate/4 dgdtp close s>r")  each way
 //
-// The sealing and close keys are the provider's AES-256-GCM handles, which
-// can't be exported. The two outputs that aren't keys are bytes: the room ID
+// The sealing keys are the provider's AES-256-GCM handles, which can't be
+// exported. The close keys are bytes, made by the provider's HKDF and held
+// privately (CloseKeys) until the close channel takes them: an out-of-band
+// close is sealed at once, with no promise to wait for, on @noble's AES-GCM in
+// every runtime (crypto/sync-aes-gcm.ts), as a closing page may never see a
+// WebCrypto promise settle. The other two outputs that are bytes: the room ID
 // goes to the rendezvous, and the PSK into Noise, which copies it; the PSK is
 // held privately until it's used once, then overwritten, and the room ID is
 // the caller's to overwrite once sent. The base secret is only read: every
@@ -198,15 +202,55 @@ export async function deriveAttemptKeys(provider: CryptoProvider, options: Attem
   });
 }
 
-/** The two keys an out-of-band close is sealed under, one each way, and the attempt they're for. */
-export interface CloseKeys {
-  /** The receiver's close frame. */
-  readonly closeR2S: ContentKey;
-  /** The sender's. */
-  readonly closeS2R: ContentKey;
-  /** The attempt's public values, as a close frame's header and associated data carry them. */
-  readonly roomNonce: Uint8Array<ArrayBuffer>;
-  readonly attemptId: Uint8Array<ArrayBuffer>;
+/** A close key: 32 bytes for AES-256-GCM. */
+export const CLOSE_KEY_BYTES = 32;
+
+/**
+ * The two keys an out-of-band close is sealed under, one each way, as bytes,
+ * and the attempt they're for. Printed, logged or serialised, it shows as
+ * `[CloseKeys]`.
+ */
+export class CloseKeys {
+  readonly #roomNonce: Uint8Array<ArrayBuffer>;
+  readonly #attemptId: Uint8Array<ArrayBuffer>;
+  #closeR2S: Uint8Array<ArrayBuffer> | undefined;
+  #closeS2R: Uint8Array<ArrayBuffer> | undefined;
+
+  /** @internal deriveCloseKeys() makes these. */
+  constructor(roomNonce: Uint8Array<ArrayBuffer>, attemptId: Uint8Array<ArrayBuffer>, closeR2S: Uint8Array<ArrayBuffer>, closeS2R: Uint8Array<ArrayBuffer>) {
+    this.#roomNonce = roomNonce;
+    this.#attemptId = attemptId;
+    this.#closeR2S = closeR2S;
+    this.#closeS2R = closeS2R;
+    Object.freeze(this);
+  }
+
+  /** The attempt's public values, copies, as a close frame's header and associated data carry them. */
+  get roomNonce(): Uint8Array<ArrayBuffer> { return new Uint8Array(this.#roomNonce); }
+  get attemptId(): Uint8Array<ArrayBuffer> { return new Uint8Array(this.#attemptId); }
+
+  /** A copy of the key the receiver's close frame is under. */
+  get closeR2S(): Uint8Array<ArrayBuffer> { return new Uint8Array(this.#need(this.#closeR2S)); }
+
+  /** A copy of the key the sender's is under. */
+  get closeS2R(): Uint8Array<ArrayBuffer> { return new Uint8Array(this.#need(this.#closeS2R)); }
+
+  /** Overwrites both keys: the close channel has taken its copies, or the attempt is over. */
+  forget(): void {
+    this.#closeR2S?.fill(0);
+    this.#closeS2R?.fill(0);
+    this.#closeR2S = undefined;
+    this.#closeS2R = undefined;
+  }
+
+  #need(key: Uint8Array<ArrayBuffer> | undefined): Uint8Array<ArrayBuffer> {
+    if (!key) throw invalid('These close keys were let go.');
+    return key;
+  }
+
+  toJSON(): string { return '[CloseKeys]'; }
+  toString(): string { return '[CloseKeys]'; }
+  [Symbol.for('nodejs.util.inspect.custom')](): string { return '[CloseKeys]'; }
 }
 
 export interface CloseKeyOptions {
@@ -216,15 +260,18 @@ export interface CloseKeyOptions {
   attemptId: Uint8Array;
 }
 
-/** The out-of-band close keys, from BIND's closeSecret and the attempt's context. */
+/** The out-of-band close keys, as bytes, from BIND's closeSecret and the attempt's context. */
 export async function deriveCloseKeys(provider: CryptoProvider, options: CloseKeyOptions): Promise<CloseKeys> {
   if (!isBytes(options?.closeSecret, CLOSE_SECRET_BYTES)) throw invalid(`A close secret is ${CLOSE_SECRET_BYTES} bytes.`);
   const ctx = contextOf(options.roomNonce, options.attemptId);
-  const [closeR2S, closeS2R] = await Promise.all([
-    provider.deriveContentKey(options.closeSecret, ctx, info(INFO.closeR2S)),
-    provider.deriveContentKey(options.closeSecret, ctx, info(INFO.closeS2R)),
+  const [closeR2S, closeS2R] = await Promise.allSettled([
+    provider.hkdf(options.closeSecret, ctx, info(INFO.closeR2S), CLOSE_KEY_BYTES),
+    provider.hkdf(options.closeSecret, ctx, info(INFO.closeS2R), CLOSE_KEY_BYTES),
   ]);
-  return Object.freeze({
-    closeR2S, closeS2R, roomNonce: ctx.slice(0, CPACE_ROOM_NONCE_BYTES), attemptId: ctx.slice(CPACE_ROOM_NONCE_BYTES),
-  });
+  if (closeR2S.status === 'rejected' || closeS2R.status === 'rejected') {
+    // Neither key is left behind if the other couldn't be made.
+    for (const made of [closeR2S, closeS2R]) if (made.status === 'fulfilled') made.value.fill(0);
+    throw [closeR2S, closeS2R].find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
+  }
+  return new CloseKeys(ctx.slice(0, CPACE_ROOM_NONCE_BYTES), ctx.slice(CPACE_ROOM_NONCE_BYTES), closeR2S.value, closeS2R.value);
 }

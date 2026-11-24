@@ -484,8 +484,9 @@ export class SenderSession {
 
   /**
    * Ends the session, once: fenced at once, the producer woken to stop, the
-   * resume secret overwritten. With `close`, the receiver is told (in-band and
-   * through the rendezvous, its CLOSE_ACK waited for 2 s at most); otherwise
+   * resume secret overwritten. With `close`, the receiver is told first
+   * (through the rendezvous at once, then in-band, its CLOSE_ACK waited for
+   * 2 s at most); otherwise
    * whatever is queued (a CLOSE_ACK, say) goes first. Completed, the channel
    * is left for the receiver to close (its RESULT_ACK on its way), and closed
    * after 2 s whatever happens.
@@ -501,6 +502,11 @@ export class SenderSession {
   }
 
   async #ending(outcome: DirectOutcome, close?: CloseWhy): Promise<void> {
+    // The receiver is told first, before anything else is done: a page that's going has about a millisecond (DGDTP.md).
+    // It has ended already if its CLOSE was heard: nothing more to tell it.
+    const telling = close && !this.#peerClosed
+      ? this.#link.closeWith({ type: 'close', operationId: this.#host.provider.randomBytes(16), ...close })
+      : undefined;
     this.#quiet();
     if (this.#lostTimer !== undefined) this.#host.timers.clearTimeout(this.#lostTimer);
     this.#resumeSecret?.fill(0);
@@ -509,9 +515,8 @@ export class SenderSession {
     this.#wakeProducer();
     this.#link.stream(undefined);
     this.#host.ended(this, outcome);
-    // The receiver has ended already if its CLOSE was heard: nothing more to tell it.
-    if (close && !this.#peerClosed) {
-      await this.#link.closeWith({ type: 'close', operationId: this.#host.provider.randomBytes(16), ...close });
+    if (telling) {
+      await telling;
     } else {
       await within(this.#link.flush(), outcome.state === 'completed' ? RESULT_ACK_WAIT_MS : CLOSE_ACK_WAIT_MS, this.#host.timers);
     }

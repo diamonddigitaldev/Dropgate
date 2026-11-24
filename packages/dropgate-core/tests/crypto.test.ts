@@ -669,11 +669,11 @@ describe('One provider', () => {
     expect(reaching).toEqual(['crypto/provider.ts']);
   });
 
-  it('@noble comes in through provider.ts, noble.ts and elligator.ts alone, so a rename touches only them', () => {
+  it('@noble comes in through provider.ts, noble.ts, elligator.ts and sync-aes-gcm.ts alone, so a rename touches only them', () => {
     const noble = files
       .filter((path) => code(path).some((line) => /\bfrom\s+['"]@noble\/|\bimport\s*\(\s*['"]@noble\//.test(line)))
       .map(name)
       .sort();
-    expect(noble).toEqual(['crypto/elligator.ts', 'crypto/noble.ts', 'crypto/provider.ts']);
+    expect(noble).toEqual(['crypto/elligator.ts', 'crypto/noble.ts', 'crypto/provider.ts', 'crypto/sync-aes-gcm.ts']);
   });
 });

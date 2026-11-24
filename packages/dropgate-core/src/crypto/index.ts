@@ -5,3 +5,4 @@
 export { ContentKey, MacKey, X25519Key, cryptoProvider, webCryptoProvider } from './provider.js';
 export type { CryptoProvider, CryptoProviderName, HmacHash, NamedCryptoProvider, RuntimeCryptoProvider } from './provider.js';
 export { nobleProvider } from './noble.js';
+export { openAesGcmNow, sealAesGcmNow, warmAesGcm } from './sync-aes-gcm.js';

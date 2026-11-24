@@ -228,9 +228,12 @@ export interface DirectApi {
    * other device so, which reads that this side closed Dropgate before the
    * transfer finished. Each ends `cancelled`, `by: 'self'`. One still opening
    * its room or still connecting has nobody to tell, and is cancelled. It
-   * returns at once: telling the other device is best effort, since a page
-   * being closed may not live long enough for the message to go. The client
-   * stays usable.
+   * returns at once, and the transfers end in a microtask straight after the
+   * caller's code (a `pagehide` listener) returns, each sealing its message
+   * with nothing to wait for, as a page being closed may not live long
+   * enough for anything slower: Firefox lets a closing page send almost
+   * nothing. Telling the other device is still best effort. The client stays
+   * usable.
    */
   appClosing(): void;
 }

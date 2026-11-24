@@ -194,11 +194,12 @@ export interface SecureChannel {
   /** Resolves once the data channel's buffer has room again (`MessagePipe.writable()`); rejects once the channel has ended. */
   writable(): Promise<void>;
   /**
-   * This side's one out-of-band close, sealed, through the rendezvous: `body`
-   * at most 509 bytes. It still goes once the data channel has gone, until
-   * `close()`.
+   * This side's one out-of-band close, sealed and handed to the rendezvous
+   * before this returns: `body` at most 509 bytes. It still goes once the
+   * data channel has gone, until `close()`. INVALID_ARGUMENT for a second
+   * or one too long; the attempt's error once the channel has ended.
    */
-  sendClose(body: Uint8Array): Promise<void>;
+  sendClose(body: Uint8Array): void;
   /**
    * The other side's out-of-band close, when one comes: its body. One can
    * still come once the data channel has gone (CONNECTION_LOST), until
@@ -458,7 +459,7 @@ class Attempt {
   async #take(frame: Uint8Array): Promise<void> {
     if (frame instanceof Uint8Array && frame.byteLength > 0 && frame[0] === CLOSE_KIND) {
       // Anything that doesn't open as the other side's close is ignored: nothing the server injects ends anything.
-      const body = this.#close ? await this.#close.open(frame) : undefined;
+      const body = this.#close?.open(frame);
       if (body) this.#closeBody(body);
       return;
     }
@@ -597,7 +598,11 @@ class Attempt {
   async #closeKeys(closeSecret: Uint8Array): Promise<void> {
     const keys = this.#keys as AttemptKeys;
     const closeKeys = await this.#race(deriveCloseKeys(this.#provider, { closeSecret, roomNonce: keys.roomNonce, attemptId: keys.attemptId }));
-    this.#close = closeChannel(this.#provider, { keys: closeKeys, role: this.#role });
+    try {
+      this.#close = closeChannel({ keys: closeKeys, role: this.#role });
+    } finally {
+      closeKeys.forget();
+    }
   }
 
   /** The channel, up: the set-up's timer stopped, the channel handed over to its owner, who closes it. */
@@ -657,11 +662,12 @@ class Attempt {
           throw attempt.end(lost());
         }
       },
-      async sendClose(body: Uint8Array) {
+      sendClose(body: Uint8Array) {
         const close = attempt.#close;
         // Gone once the attempt has ended.
         if (!close) throw ended();
-        attempt.#pipe.send(await close.seal(body));
+        // Sealed at once, and sent before this returns: nothing waits on a promise, so a page that's going still sends it.
+        attempt.#pipe.send(close.seal(body));
       },
       closeReceived: this.closeReceived,
       close: () => {
@@ -700,7 +706,10 @@ class Attempt {
     this.#keys = undefined;
     this.#signal?.close();
     this.#signal = undefined;
-    if (!this.#lingering) this.#close = undefined;
+    if (!this.#lingering) {
+      this.#close?.forget();
+      this.#close = undefined;
+    }
     this.#transport?.close();
     this.#transport = undefined;
     const closes = this.#lingering ? [() => this.#data?.close(), () => this.#peer.close()] : [() => this.#data?.close(), () => this.#pipe.close(), () => this.#peer.close()];
@@ -719,6 +728,7 @@ class Attempt {
   #release(): void {
     if (!this.#lingering) return;
     this.#lingering = false;
+    this.#close?.forget();
     this.#close = undefined;
     try {
       this.#pipe.close();
