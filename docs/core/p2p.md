@@ -46,7 +46,7 @@ Either device can pause from the receiver's acceptance until all the data has be
 
 ## Connecting, and STUN
 
-The two devices connect directly. On one network that just works. Across two networks, each asks a STUN server for its public address: the server offers its own (`capabilities.p2p.iceServers`; Cloudflare's by default, or none, as its operator sets it). A STUN server sees the device's IP address, as any server it talks to does, and nothing of the transfer. With `direct: { stun: false }`, core gives the connection no ICE servers at all, so nothing is sent to a STUN server, and only devices that can reach each other directly connect. There's no relay (TURN): two devices that can't reach each other don't connect, with `TIMED_OUT`, "Couldn't connect to the other device."
+The two devices connect directly. On one network that just works. Across two networks, each asks a STUN server for its public address: the server offers its own (`capabilities.p2p.iceServers`; Cloudflare's by default, or none, as its operator sets it). A STUN server sees the device's IP address, as any server it talks to does, and nothing of the transfer. With `direct: { stun: false }`, core gives the connection no ICE servers at all, so nothing is sent to a STUN server, and only devices that can reach each other directly connect. Core takes only `stun:` and `stuns:` addresses from that list, with no username or credential: a TURN relay the server lists is left out. There's no relay (TURN): two devices that can't reach each other don't connect, with `TIMED_OUT`, "Couldn't connect to the other device."
 
 A connection that drops ends the transfer with `CONNECTION_LOST`, never as a cancel: in this version it isn't recovered. Start it again.
 

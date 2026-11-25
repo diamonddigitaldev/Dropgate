@@ -608,6 +608,39 @@ describe('STUN: the server\'s servers by default, none with "no STUN"', () => {
     expect(await run(off, off, { send: true, receive: true })).toEqual([offered, offered]);
     expect(await run(on, off, {})).toEqual([[], offered]);
   }, 60_000);
+
+  it("only STUN servers are taken from what the server lists, with no username or credential: a TURN relay, and anything that isn't an address, is left out", async () => {
+    /** The real server, but with its `/api/info` listing `iceServers` instead of its own. */
+    const listing = (iceServers: unknown) => async (input: RequestInfo | URL, init?: RequestInit) => {
+      const res = await fetch(input, init);
+      if (new URL(String(input)).pathname !== '/api/info') return res;
+      const info = await res.json();
+      info.capabilities.p2p.iceServers = iceServers;
+      return new Response(JSON.stringify(info), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+    const transferListing = async (iceServers: unknown) => {
+      configs.length = 0;
+      const client = new DropgateClient({ server: server.baseUrl, RTCPeerConnection: Recording as unknown as DirectPeerConnectionClass, fetchFn: listing(iceServers) });
+      const send = await client.direct.send({ files: memoryFile('a.bin', patterned(10, 1)) });
+      const receive = await client.direct.receive({ link: send.share().link as string });
+      await receive.accept({ sink: new MemorySink() });
+      expect(`${said(await receive.result)} / ${said(await send.result)}`).toBe('completed, saved / completed, saved');
+      return configs.map((c) => c.iceServers);
+    };
+    const relay = { username: 'someone', credential: 'their password' };
+    const kept = [{ urls: ['stun:127.0.0.1:3478'] }, { urls: ['STUNS:127.0.0.1:5349'] }];
+    expect(await transferListing([
+      { urls: ['turn:relay.example:443?transport=tcp', 'stun:127.0.0.1:3478'], ...relay },
+      { urls: 'turns:relay.example:5349', ...relay },
+      { urls: 'STUNS:127.0.0.1:5349', ...relay },
+      { urls: [42, null, 'http://127.0.0.1/', ' stun:127.0.0.1'] },
+      'stun:127.0.0.1:3478',
+      null,
+    ])).toEqual([kept, kept]);
+    // A list of relays alone leaves no STUN server at all, as does one that isn't a list.
+    expect(await transferListing([{ urls: ['turn:relay.example:3478'], ...relay }])).toEqual([[], []]);
+    expect(await transferListing({ urls: 'stun:127.0.0.1:3478' })).toEqual([[], []]);
+  }, 60_000);
 });
 
 describe("a direct send's credential", () => {

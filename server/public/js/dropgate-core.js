@@ -11183,8 +11183,17 @@ function directServer(host, compat) {
   if (letters !== 0 && letters !== 2 && letters !== 3) {
     throw new DropgateError({ code: "INVALID_RESPONSE", message: "The server's direct transfer settings weren't understood." });
   }
-  const iceServers = Array.isArray(p2p.iceServers) ? p2p.iceServers : [];
-  return { codeLetters: letters, iceServers, credentialRequired: p2p.credentialRequired === true };
+  return { codeLetters: letters, iceServers: stunServersOf(p2p.iceServers), credentialRequired: p2p.credentialRequired === true };
+}
+function stunServersOf(listed) {
+  if (!Array.isArray(listed)) return [];
+  const out = [];
+  for (const server of listed) {
+    const urls = server?.urls;
+    const kept = (Array.isArray(urls) ? urls : [urls]).filter((url) => typeof url === "string" && /^stuns?:/i.test(url));
+    if (kept.length > 0) out.push({ urls: kept });
+  }
+  return out;
 }
 function peerConnectionClass(given) {
   const found = given ?? globalThis.RTCPeerConnection;

@@ -196,8 +196,24 @@ function directServer(host: DirectHost, compat: { serverInfo: ServerInfo; dgdtp:
   if (letters !== 0 && letters !== 2 && letters !== 3) {
     throw new DropgateError({ code: 'INVALID_RESPONSE', message: "The server's direct transfer settings weren't understood." });
   }
-  const iceServers = Array.isArray(p2p.iceServers) ? (p2p.iceServers as RtcIceServer[]) : [];
-  return { codeLetters: letters, iceServers, credentialRequired: p2p.credentialRequired === true };
+  return { codeLetters: letters, iceServers: stunServersOf(p2p.iceServers), credentialRequired: p2p.credentialRequired === true };
+}
+
+/**
+ * The STUN servers in what the server lists, and nothing else: only `stun:` and `stuns:` addresses, with no username or
+ * credential. Dropgate's direct transfers go directly between the devices, never through a relay, so a TURN server the
+ * server names (with its credentials) is left out, as is anything that isn't an address; an entry left with none goes,
+ * and a list left with none means no STUN.
+ */
+function stunServersOf(listed: unknown): RtcIceServer[] {
+  if (!Array.isArray(listed)) return [];
+  const out: RtcIceServer[] = [];
+  for (const server of listed) {
+    const urls = (server as { urls?: unknown } | null)?.urls;
+    const kept = (Array.isArray(urls) ? urls : [urls]).filter((url): url is string => typeof url === 'string' && /^stuns?:/i.test(url));
+    if (kept.length > 0) out.push({ urls: kept });
+  }
+  return out;
 }
 
 /** The `RTCPeerConnection` a direct transfer uses: the client's option, or the global one. */

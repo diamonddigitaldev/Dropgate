@@ -261,7 +261,7 @@ await client.direct.send({ files, direct: { pauseLimitMs: null, stun: false } })
 | --- | --- | --- |
 | `pauseLimitMs` | `null` | How long the transfer may stay paused, by either device, before this device ends it: `null` for no limit, or a whole number of seconds from one minute to one week, in milliseconds (60,000 to 604,800,000) |
 | `reconnectWindowMs` | 120,000 | How long a dropped connection may be recovered for: a whole number of seconds from 10 seconds to an hour, in milliseconds (10,000 to 3,600,000). In this version a dropped connection ends the transfer; the window is told to the other device for recovery to use |
-| `stun` | `true` | Use the server's STUN servers (`capabilities.p2p.iceServers`) to find a route between two networks. `false` gives the connection no ICE servers at all, so nothing is sent to a STUN server, and only devices that can reach each other directly, as on one network, connect |
+| `stun` | `true` | Use the server's STUN servers (`capabilities.p2p.iceServers`: only its `stun:` and `stuns:` addresses, with no username or credential, so a TURN relay the server lists is left out) to find a route between two networks. `false` gives the connection no ICE servers at all, so nothing is sent to a STUN server, and only devices that can reach each other directly, as on one network, connect |
 
 Each setting given to a send or receive wins over the client's, one by one. Each device applies its own and tells the other as they connect, in whole seconds. Anything else, an unknown setting included, is `INVALID_ARGUMENT`: from the constructor for the client's, and from `send()` or `receive()` for a transfer's.
 
@@ -302,7 +302,7 @@ The server's info (`ServerInfo`) is what it gives in `/api/info`:
 | `name`, `version` | The server's name, and its own version, for display |
 | `protocols` | `{ dgup, dgdtp }`, each `{ major, minor }` ([Versions](#versions)) |
 | `capabilities.upload` | `enabled`, `maxSizeMB` (0 for no limit), `maxLifetimeHours` (0 for unlimited), `maxFileDownloads` (the most an upload's `maxDownloads` may be, and what it is when left out; 0 for no limit), `e2ee`, `chunkSize` in bytes, `maxPauseMinutes` (how long a paused upload or download is held; 0 when pausing is off, [Pausing](#pausing)), and `credentialRequired` ([Credentials](#credentials)) |
-| `capabilities.p2p` | `enabled`, `iceServers` (its STUN servers, `[]` with STUN off), `codeLetters` (how many of a code's letters are the server's: 2 or 3, or 0 with codes off) and `credentialRequired` ([Credentials](#credentials)), for direct transfers |
+| `capabilities.p2p` | `enabled`, `iceServers` (its STUN servers, `[]` with STUN off; core uses only the `stun:` and `stuns:` addresses in it, with no username or credential), `codeLetters` (how many of a code's letters are the server's: 2 or 3, or 0 with codes off) and `credentialRequired` ([Credentials](#credentials)), for direct transfers |
 | `capabilities.webUI` | `enabled` |
 
 ### client.operations
