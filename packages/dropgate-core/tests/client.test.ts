@@ -1253,6 +1253,26 @@ describe('client.hosted.metadata()', () => {
     expect(server.paths().filter((path) => path.endsWith('/leases')), 'leases taken').toEqual([]);
   });
 
+  it("a link with a secret is for an encrypted upload: a server answering it with an unencrypted one is INTEGRITY_FAILED in metadata(), open() and download(), before any lease is taken or anything read or written", async () => {
+    // The server has its own unencrypted file, notes.txt, where the link's encrypted upload should be.
+    const server = fakeServer();
+    const client = createClient(server.fetchFn);
+    const refused = {
+      code: 'INTEGRITY_FAILED',
+      message: 'This link is for an encrypted upload, but the server has an unencrypted one in its place. Nothing was downloaded.',
+      details: { encrypted: false },
+    };
+    await expect(client.hosted.metadata({ id: FILE_ID, secret: LINK_SECRET })).rejects.toMatchObject(refused);
+    await expect(client.hosted.open({ id: FILE_ID, secret: LINK_SECRET })).rejects.toMatchObject(refused);
+    const written: Uint8Array[] = [];
+    const outcome = await client.hosted.download({ id: FILE_ID, secret: LINK_SECRET, sink: { write: (chunk) => { written.push(chunk.slice()); }, close: () => {} } }).result;
+    expect(outcome.status === 'failed' && outcome.error).toMatchObject(refused);
+    expect(written).toEqual([]);
+    expect(server.paths().filter((path) => !path.startsWith('GET /api/info'))).toEqual([META, META, META]);
+    // The same upload by a link with no secret opens as the unencrypted upload it is.
+    expect((await client.hosted.metadata({ id: FILE_ID })).files).toEqual([{ name: 'notes.txt', size: CHUNK_SIZE }]);
+  });
+
   it("reads an encrypted upload of several files from its sealed list, which only the secret opens: the server is never told how many", async () => {
     const sealed = await sealedFiles([{ name: 'tax return.xlsx', bytes: varied(9, 1) }, { name: 'a.txt', bytes: varied(3, 2) }]);
     const server = fakeServer();

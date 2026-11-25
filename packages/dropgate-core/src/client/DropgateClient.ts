@@ -286,6 +286,9 @@ function serverChunkSize(serverInfo: ServerInfo, fallback: number): number {
 /** An upload's ID, as a Dropgate server makes them. It's put in a URL's path, so nothing else is. */
 const UPLOAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** INTEGRITY_FAILED's words when a link with a secret finds an unencrypted upload: the web UI's download page shows them too. */
+const ENCRYPTED_LINK_PLAIN_UPLOAD = 'This link is for an encrypted upload, but the server has an unencrypted one in its place. Nothing was downloaded.';
+
 /**
  * The upload an operation names: by `id`, with its link's `secret`.
  * @throws {DropgateError} INVALID_ARGUMENT without an id.
@@ -791,6 +794,9 @@ export class DropgateClient {
       opened = await openObject(this._crypto, { secret: secretBytes, header, meta, size });
       files = opened.files.map(({ name, size: fileSize }) => ({ name, size: fileSize }));
     } else {
+      // A link with a secret is only ever made for an end-to-end encrypted upload: a server answering it with an
+      // unencrypted one (its own list of files and bytes) is refused before anything is read or written.
+      if (secret) throw new DropgateError({ code: 'INTEGRITY_FAILED', message: ENCRYPTED_LINK_PLAIN_UPLOAD, details: { encrypted: false } });
       files = plainFiles(raw.files, size);
     }
 

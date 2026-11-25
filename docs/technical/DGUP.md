@@ -360,6 +360,8 @@ Unencrypted:
 
 `size` is the stored object's bytes. An encrypted upload's `header` is its object's first 60 bytes ([§4.2](#42-the-header)), so a client can check it and learn the chunk size before asking for anything else, and `meta` is its sealed file list. It never gives when the upload expires, how many times it has been downloaded, or its limit. **Asking takes no lease and counts nothing,** so a link preview or a download page can look before anyone downloads.
 
+**A link with a secret is for an encrypted upload.** A link only carries a secret after its `#` when its upload was end-to-end encrypted, so a client that has one takes metadata saying `"encrypted": false` as the server's, not the sender's: core refuses it with `INTEGRITY_FAILED` ("This link is for an encrypted upload, but the server has an unencrypted one in its place. Nothing was downloaded.") before it takes a lease or asks for a byte, in `metadata()`, `open()` and `download()`. A server, or anyone who changed its records, can't put an unencrypted upload of its own under an encrypted upload's link.
+
 ### 6.2 Leases
 
 | Route | Does |
@@ -521,7 +523,7 @@ GET /{id}
 
   None of them ever shows a file as saved that isn't the whole file. To finish one, download it again from its link, while the upload's download limit allows.
 - **Saving a file.** In a secure context the page streams each file to disk through StreamSaver, whose service worker answers the download's address inside the browser. The address is random, and holds no file name: the name reaches the browser only in the download's `Content-Disposition` header. A browser can still send that address to the server, as Firefox's own Resume does, so any other request under `/vendor/streamsaver/` is answered by dropping the connection, and the browser marks that download failed: a page in its place would be saved as the file, marked complete.
-- **Loading the page takes no lease and counts nothing.** The page holds no file name or size: a link preview, which fetches the page without the `#` part, sees only the server's name and Dropgate's description. The page reads the upload's metadata ([§6.1](#61-metadata)) and opens its file list with the secret, in the browser.
+- **Loading the page takes no lease and counts nothing.** The page holds no file name or size: a link preview, which fetches the page without the `#` part, sees only the server's name and Dropgate's description. The page reads the upload's metadata ([§6.1](#61-metadata)) and opens its file list with the secret, in the browser. A link with a secret whose upload the server says is unencrypted is refused there: the page says so ("Not the Encrypted Upload", in core's words) and shows no file.
 - **Downloading one file** is core's: one lease ([§6.2](#62-leases)), released as soon as the download ends, so at its limit the upload is gone once the file is saved. A download that finds every allowed place held waits as `Retry-After` says, and starts when one frees.
 - **Several files** are opened with core's `client.hosted.open()`: the page's downloads, each file on its own and **Download All as ZIP**, share one lease, taken at the first, renewed every 2 minutes (`POST /api/v4/lease/renew`) and released as the page goes (`pagehide`), so they count as one download. Each file asks only for its own part of the upload ([§4.7](#47-where-the-bytes-are)).
 - **A dropped connection** is continued under the same lease, from where it got to ([§8.4](#84-reconnecting-downloads)).

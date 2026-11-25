@@ -261,6 +261,9 @@ async function loadMetadata() {
     resetTitleProgress();
     if (DropgateError.is(error, 'DECRYPT_FAILED')) {
       showError('Wrong Link', "This link's key doesn't open the upload. Check that the whole link was copied.");
+    } else if (DropgateError.is(error, 'INTEGRITY_FAILED') && error.details?.encrypted === false) {
+      // A link with a key is for an encrypted upload: the server answering it with an unencrypted one is refused, in core's words.
+      showError('Not the Encrypted Upload', error.message);
     } else if (DropgateError.is(error, 'NOT_FOUND')) {
       showError('File Not Found', 'This file may have expired, been downloaded, or been deleted.');
     } else {

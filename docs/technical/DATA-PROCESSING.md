@@ -128,7 +128,7 @@ When E2EE is active:
 - **File content** — encrypted with AES-256-GCM before leaving the client, in chunks, with the files padded inside them.
 - **File names and sizes** — in a list sealed with AES-256-GCM, padded to 4 KiB or more.
 
-Each has its own key, made from the link's secret ([DGUP §4](./DGUP.md#4-the-object)). Each chunk's position, and whether it's the last, are authenticated too, so a changed, reordered, shortened or mixed-up upload fails to download ([DGUP §4.4](./DGUP.md#44-the-chunks)).
+Each has its own key, made from the link's secret ([DGUP §4](./DGUP.md#4-the-object)). Each chunk's position, and whether it's the last, are authenticated too, so a changed, reordered, shortened or mixed-up upload fails to download ([DGUP §4.4](./DGUP.md#44-the-chunks)). A link with a secret is only made for an encrypted upload, so a server that answers one with an unencrypted upload in its place (its own files and names) is refused before anything is downloaded ([DGUP §6.1](./DGUP.md#61-metadata); tests: [a link with a secret is for an encrypted upload: a server answering it with an unencrypted one is INTEGRITY_FAILED…](../../packages/dropgate-core/tests/client.test.ts); [is refused for…](../../tests/integration/web-ui/download-page.spec.mjs)).
 
 ### 3.2 What Is NOT Encrypted
 

@@ -46,6 +46,35 @@ for (const several of [false, true]) for (const encrypted of [true, false]) {
     });
 }
 
+test.describe('a link with a key, to an upload the server holds unencrypted', () => {
+    test.use({ serverEnv: { UPLOAD_ENABLE_E2EE: 'false' } });
+
+    for (const several of [false, true]) {
+        test(`is refused for ${several ? 'several files' : 'a file'}: the page says the link is for an encrypted upload, shows no file, and takes no lease`, async ({ page, server }) => {
+            const file = madeUpFile(several ? 'One of several.txt' : 'Not what was sent.bin', 4_000, several ? 61 : 60);
+            const files = several ? [file, madeUpFile('Another.txt', 2_000, 62)] : [file];
+            const link = await uploadFromHomePage(page, files, { encrypted: false });
+            // The link an encrypted upload has: its ID, then 32 bytes after the #.
+            const keyed = `${link}#${Buffer.alloc(32, 7).toString('base64url')}`;
+
+            const before = server.requests().length;
+            let downloads = 0;
+            page.on('download', () => { downloads += 1; });
+            await page.goto(keyed);
+            await expect(page.locator('#status-title')).toHaveText('Not the Encrypted Upload');
+            await expect(page.locator('#status-message')).toHaveText(
+                'This link is for an encrypted upload, but the server has an unencrypted one in its place. Nothing was downloaded.');
+            await expect(page.locator('#download-button')).toBeHidden();
+            await expect(page.locator('#file-details')).toBeHidden();
+            for (const each of files) await expect(page.locator('body')).not.toContainText(each.name);
+
+            const asked = server.requests().slice(before).map((r) => `${r.method} ${r.url}`).filter((r) => r.includes('/api/v4/'));
+            expect(asked, 'only the metadata').toEqual([`GET /api/v4/objects${new URL(link).pathname}`]);
+            expect(downloads, 'nothing downloaded').toBe(0);
+        });
+    }
+});
+
 test.describe('a page with no secure context', () => {
     test.use({ serverEnv: { UPLOAD_ENABLE_E2EE: 'false' } });
 

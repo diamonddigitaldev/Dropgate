@@ -12087,6 +12087,7 @@ function serverChunkSize(serverInfo, fallback) {
   return Number.isFinite(size) && size > 0 ? size : fallback;
 }
 var UPLOAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+var ENCRYPTED_LINK_PLAIN_UPLOAD = "This link is for an encrypted upload, but the server has an unencrypted one in its place. Nothing was downloaded.";
 function hostedTarget(opts) {
   const { id } = opts ?? {};
   if (typeof id === "string" && id) return { id, secret: opts?.secret };
@@ -12452,6 +12453,7 @@ var DropgateClient = class {
       opened = await openObject(this._crypto, { secret: secretBytes, header: header2, meta, size });
       files = opened.files.map(({ name, size: fileSize }) => ({ name, size: fileSize }));
     } else {
+      if (secret) throw new DropgateError({ code: "INTEGRITY_FAILED", message: ENCRYPTED_LINK_PLAIN_UPLOAD, details: { encrypted: false } });
       files = plainFiles(raw.files, size);
     }
     return {
