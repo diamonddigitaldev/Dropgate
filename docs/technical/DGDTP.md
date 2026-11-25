@@ -319,7 +319,7 @@ Each error is core's `DropgateError` with one of these codes ([Errors](../core/e
 | `CAPABILITY_UNSUPPORTED` | `server` | A typed code, on a server whose `codeLetters` is 0. Nothing is sent | "This server doesn't use codes. Ask the sender for the link." |
 | `INVALID_CODE` | `local` | A typed code isn't one. Nothing is sent | "That isn't a valid sharing code." |
 | `INVALID_RESPONSE` | `server` | The rendezvous gave a room nonce or a locator that isn't one, sent something that isn't one of its messages, or refused one of core's as malformed or as one frame too many | "The server's answer wasn't understood." |
-| `INVALID_MESSAGE` | `peer` | A record from the other device isn't one of this version's at its exact length, or isn't one the engine takes then: from the wrong device, out of order, a DATA record of any size but the one it must be, or past the credit given ([§4.13](#413-what-the-rendezvous-and-the-engine-add)) | "The other device sent something this version of Dropgate doesn't understand." |
+| `INVALID_MESSAGE` | `peer` | A record from the other device isn't one of this version's at its exact length, or isn't one the engine takes then: from the wrong device, out of order, a DATA record of any size but the one it must be, or past the credit given ([§4.13](#413-what-the-rendezvous-and-the-engine-add)); or more records waiting to be handled than a device holds ([§19.3](#193-memory-is-bounded)) | "The other device sent something this version of Dropgate doesn't understand." |
 | `OPERATION_CANCELLED` | `local` | This device closed the attempt or the channel | "The operation was cancelled." |
 
 In a transfer, the engine adds these ([§4.13](#413-what-the-rendezvous-and-the-engine-add)):
@@ -470,6 +470,7 @@ Dropgate 4's direct transfers work with nothing of Dropgate 3's, and each part o
 | `SOURCE_BLOCKS_AHEAD` | 2 | The sender reads a file at most this many blocks ahead of what it has sent. |
 | `ENCRYPT_AHEAD` | 8 | Records encrypted at once, ahead of the data channel. |
 | `MAX_UNFINISHED_FILE_ENDS` | 8 | File ends the sender sends ahead of the files the receiver has finished. |
+| `MAX_INBOX_RECORDS`, `MAX_INBOX_BYTES` | 4,096, 8,388,608 | Records a device has read from the other and not yet handled, at most, and their bytes: past either, the transfer ends `INVALID_MESSAGE`. |
 | `RESULT_ACK_WAIT_MS` | 2,000 | How long the receiver waits for RESULT_ACK before completing anyway. |
 | `ICE_TIMEOUT_MS` | 30,000 | An attempt's data channel must open within this of its start. |
 | `HANDSHAKE_TIMEOUT_MS` | 15,000 | An attempt's handshake must finish within this of its data channel opening. |
@@ -723,7 +724,7 @@ Every timer runs on a monotonic clock (`performance.now()`). The values are [§4
 | A data channel gone, before RESULT | 2 seconds | Listening for a CLOSE through the rendezvous, then `CONNECTION_LOST` |
 | An out-of-band CLOSE heard while the data channel is up | 2 seconds | Heard, if the in-band one hasn't come ([§13.2](#132-in-band-and-through-the-rendezvous)) |
 
-**Liveness.** A device that has sent nothing for 5 seconds sends a PING; each is answered with a PONG as it arrives, whatever the device is busy with, and the round trips make a smoothed round-trip time, each new one counting for an eighth. PING, PONG, STATUS, CLOSE and CLOSE_ACK are all handled as they arrive, never behind a slow sink. Liveness keeps running while the transfer is held, so a 6-hour pause stays connected; finishing the files after FINISH counts as a write.
+**Liveness.** A device that has sent nothing for 5 seconds sends a PING; each is answered with a PONG as it arrives, whatever the device is busy with (while its own buffer is full, only the newest PING's PONG waits, [§19.3](#193-memory-is-bounded)), and the round trips make a smoothed round-trip time, each new one counting for an eighth. PING, PONG, STATUS, CLOSE and CLOSE_ACK are all handled as they arrive, never behind a slow sink. Liveness keeps running while the transfer is held, so a 6-hour pause stays connected; finishing the files after FINISH counts as a write.
 
 **STATUS.** An answer gives the device's state ([§8.2](#82-the-fields-values)), whether it holds the transfer, the bytes written as it knows them, and, once it has sent RESULT, the RESULT. An answer is kept for the device's screens and changes nothing else.
 
@@ -831,7 +832,7 @@ Every record is one type at one exact length, read field by field ([§8](#8-reco
 
 ### 19.3 Memory Is Bounded
 
-Credit caps what the sender may have sent and not yet written at 4 MiB, and DATA is counted against it as it arrives, so a sender that ignores credit is refused rather than held in memory. The list of files is at most 1 MiB and 10,000 files; the sender reads at most 2 blocks ahead; the rendezvous holds at most 1 MiB for a slow socket and closes it past that.
+Credit caps what the sender may have sent and not yet written at 4 MiB, and DATA is counted against it as it arrives, so a sender that ignores credit is refused rather than held in memory. The list of files is at most 1 MiB and 10,000 files; the sender reads at most 2 blocks ahead; the rendezvous holds at most 1 MiB for a slow socket and closes it past that. Each PING and each STATUS ask is answered, but at most one PONG and one STATUS answer wait to be sent: a newer one takes the place of the one waiting, so asks that come while a device's buffer is full, however many, hold one answer of each. A device holds at most 4,096 records read from the other and not yet handled, and 8 MiB of them (`MAX_INBOX_RECORDS`, `MAX_INBOX_BYTES`): far more than credit and the file ends ahead let an honest device leave waiting. Past either, it reads no more and ends the transfer `INVALID_MESSAGE`, the other device told.
 
 ### 19.4 Liveness Can't Be Faked Into Progress
 

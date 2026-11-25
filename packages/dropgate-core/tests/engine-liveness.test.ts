@@ -3,9 +3,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { webCryptoProvider } from '../src/crypto/index.js';
 import type { SecureChannel } from '../src/dgdtp/channel.js';
 import { Link } from '../src/dgdtp/engine.js';
-import { encodeMessage, type Message } from '../src/dgdtp/messages.js';
+import { decodeMessage, encodeMessage, type Message } from '../src/dgdtp/messages.js';
 import { channels, transfer } from './helpers/channel-checks.js';
-import { FakeClock, tracked, anythingWithin, recordOf } from './helpers/direct.js';
+import { FakeClock, tracked, anythingWithin, countingReads, recordOf } from './helpers/direct.js';
 
 // The engine's liveness (src/dgdtp/engine.ts' Link): one Link over the real
 // secure channel in memory, the test playing the other device record by
@@ -29,6 +29,7 @@ async function linkAndOther(clock: FakeClock) {
     ended: (err) => { ended.push(err.code); },
     close: () => undefined,
     status: () => ({ state: 0, held: false, consumed: 0 }),
+    overrun: () => undefined,
   }, clock);
   link.start();
   return { link, other: pair.receiver as SecureChannel, ended };
@@ -102,4 +103,102 @@ describe("the engine's liveness (fake clock)", () => {
     await clock.advance(1);
     expect(await recordOf(other, 'ping')).toMatchObject({ type: 'ping' });
   }, 20_000);
+});
+
+/**
+ * A Link whose data channel's buffer is full: about 1 MiB has gone (the
+ * filler records) and the buffer stays over the low-water mark until the test
+ * lets it drain, so the pump waits. What the other side sends is counted as
+ * it's read.
+ */
+async function linkWithFullBuffer(status: () => { state: number; held: boolean; consumed: number }) {
+  const t = await transfer(provider);
+  const pair = channels(t);
+  const data = t.peers.data as NonNullable<typeof t.peers.data>;
+  const counted = countingReads(pair.sender);
+  const link = new Link(counted.channel, {
+    record: async () => undefined,
+    ended: () => undefined,
+    close: () => undefined,
+    status,
+    overrun: () => undefined,
+  }, new FakeClock());
+  link.start();
+  data.sender.bufferedAmount = 2 * MiB;
+  for (let i = 0; i < FILLER_RECORDS; i++) link.sendRecord(new Uint8Array(FILLER_BYTES));
+  await link.flush();
+  /** Every record the other side gets once the buffer drains, the filler left out. */
+  const drained = async () => {
+    data.sender.bufferedAmount = 0;
+    const out: Message[] = [];
+    for (;;) {
+      const item = await rawWithin(pair.receiver, 300);
+      if (item === undefined) return out;
+      if (item.byteLength !== FILLER_BYTES) out.push(decodeMessage(item));
+    }
+  };
+  return { link, other: pair.receiver as SecureChannel, counted, drained };
+}
+
+const MiB = 1048576;
+// 14 records of 60,000 bytes: past 1 MiB − 256 KiB, so the pump looks at the buffer before its next record.
+const FILLER_RECORDS = 14;
+const FILLER_BYTES = 60_000;
+const ASKS = 5000;
+
+/** The next record's bytes on `channel`, undecoded; undefined if none comes within `ms` or it has ended. */
+async function rawWithin(channel: SecureChannel, ms: number): Promise<Uint8Array | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => { timer = setTimeout(resolve, ms); });
+  const next = rawReaders.get(channel) ?? channel.receive().catch(() => undefined);
+  const record = await Promise.race([next, late]);
+  clearTimeout(timer);
+  if (record === undefined) rawReaders.set(channel, next);
+  else rawReaders.delete(channel);
+  return record;
+}
+const rawReaders = new WeakMap<SecureChannel, Promise<Uint8Array | undefined>>();
+
+describe("the engine's answers while its data channel's buffer is full", () => {
+  it('5,000 PINGs leave one PONG waiting, the newest, not one each; it goes once the buffer drains', async () => {
+    const { other, counted, drained } = await linkWithFullBuffer(() => ({ state: 0, held: false, consumed: 0 }));
+    for (let id = 1; id <= ASKS; id++) await send(other, { type: 'ping', id: BigInt(id) });
+    for (let i = 0; i < 2000 && counted.read < ASKS; i++) await sleep(5);
+    expect(counted.read).toBe(ASKS);
+    const pongs = (await drained()).map((m) => (m.type === 'pong' ? m.id : m.type));
+    // The first PONG may already have been taken when the pump stopped; besides it, the one waiting answers the last PING.
+    expect(pongs.length).toBeGreaterThan(0);
+    expect(pongs.length).toBeLessThanOrEqual(2);
+    expect(pongs.at(-1)).toBe(BigInt(ASKS));
+  }, 30_000);
+
+  it("5,000 STATUS asks leave one answer waiting: the newest ask's, with where this side stands as it came", async () => {
+    let asked = 0;
+    const { other, counted, drained } = await linkWithFullBuffer(() => {
+      asked += 1;
+      return { state: 2, held: false, consumed: asked };
+    });
+    for (let id = 1; id <= ASKS; id++) await send(other, { type: 'status', kind: 'ask', id: BigInt(id) });
+    for (let i = 0; i < 2000 && counted.read < ASKS; i++) await sleep(5);
+    expect(counted.read).toBe(ASKS);
+    const answers = (await drained()).map((m) => (m.type === 'status' && m.kind === 'answer' ? [m.id, m.consumed] : m.type));
+    expect(answers.length).toBeGreaterThan(0);
+    expect(answers.length).toBeLessThanOrEqual(2);
+    expect(answers.at(-1)).toEqual([BigInt(ASKS), ASKS]);
+  }, 30_000);
+
+  it("PINGs and STATUS asks together: one answer of each waits, and this side's own record queued after them goes after them", async () => {
+    const { link, other, counted, drained } = await linkWithFullBuffer(() => ({ state: 0, held: false, consumed: 0 }));
+    for (let id = 1; id <= 500; id++) {
+      await send(other, { type: 'ping', id: BigInt(id) });
+      await send(other, { type: 'status', kind: 'ask', id: BigInt(id) });
+    }
+    for (let i = 0; i < 2000 && counted.read < 1000; i++) await sleep(5);
+    // This side's own record, queued after them, still goes after them.
+    link.send({ type: 'hold', held: true, reason: 'person' });
+    const types = (await drained()).map((m) => m.type);
+    expect(types.filter((type) => type === 'pong').length).toBeLessThanOrEqual(2);
+    expect(types.filter((type) => type === 'status').length).toBeLessThanOrEqual(2);
+    expect(types.at(-1)).toBe('hold');
+  }, 30_000);
 });

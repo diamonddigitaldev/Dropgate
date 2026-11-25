@@ -240,6 +240,20 @@ const readerOf = (channel: SecureChannel) => {
   return reader;
 };
 
+/** `channel`, counting the records read from it, so a test knows once everything it sent has been read. */
+export function countingReads(channel: SecureChannel): { channel: SecureChannel; readonly read: number } {
+  let read = 0;
+  const counted: SecureChannel = {
+    ...channel,
+    async receive() {
+      const record = await channel.receive();
+      read += 1;
+      return record;
+    },
+  };
+  return { channel: counted, get read() { return read; } };
+}
+
 /** The next record on `channel`, read; or what ended it, thrown. */
 export async function nextRecord(channel: SecureChannel): Promise<Message> {
   const item = (await readerOf(channel).next()) as { record: Uint8Array } | { error: unknown };

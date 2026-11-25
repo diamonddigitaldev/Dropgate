@@ -8487,8 +8487,10 @@ var ENCRYPT_AHEAD = 8;
 var MAX_UNFINISHED_FILE_ENDS = 8;
 var RESULT_ACK_WAIT_MS = 2e3;
 var MAX_PINGS_WAITING = 16;
+var MAX_INBOX_RECORDS = 4096;
+var MAX_INBOX_BYTES = 8388608;
 var STATUS_STATE = Object.freeze({ OFFERED: 1, TRANSFERRING: 2, FINALISING: 3, FINISHED: 4 });
-var _channel3, _handlers, _timers3, _control, _stream, _inFlight, _since, _wake, _busy, _idle, _closed3, _released, _inbox, _handling, _lostWith, _heldClose, _heldTimer, _lastSent, _lastHeard, _srtt, _pings, _nextId, _pingTimer, _answerTimer, _acks, _Link_instances, outOfBand_fn, takeHeldClose_fn, stop_fn2, read_fn, answered_fn, takeId_fn, ping_fn, pong_fn, handle_fn, pump_fn, fromStream_fn, settleIdle_fn, end_fn2;
+var _channel3, _handlers, _timers3, _control, _pongWaiting, _statusWaiting, _stream, _inFlight, _since, _wake, _busy, _idle, _closed3, _released, _inbox, _inboxBytes, _handling, _lostWith, _heldClose, _heldTimer, _lastSent, _lastHeard, _srtt, _pings, _nextId, _pingTimer, _answerTimer, _acks, _Link_instances, outOfBand_fn, takeHeldClose_fn, answer_fn, stop_fn2, read_fn, answered_fn, takeId_fn, ping_fn, pong_fn, handle_fn, pump_fn, fromStream_fn, settleIdle_fn, end_fn2;
 var Link = class {
   constructor(channel, handlers, timers = GLOBAL_TIMERS) {
     __privateAdd(this, _Link_instances);
@@ -8499,6 +8501,10 @@ var Link = class {
     __privateAdd(this, _handlers);
     __privateAdd(this, _timers3);
     __privateAdd(this, _control, []);
+    /** The PONG waiting in `#control`, if one is: the next PING's answer takes its place. */
+    __privateAdd(this, _pongWaiting);
+    /** The STATUS answer waiting in `#control`, if one is: the next ask's answer takes its place. */
+    __privateAdd(this, _statusWaiting);
     __privateAdd(this, _stream);
     __privateAdd(this, _inFlight, []);
     /** Bytes handed to the channel since its buffer was last at the low-water mark. */
@@ -8512,6 +8518,8 @@ var Link = class {
     __privateAdd(this, _released, false);
     /** Records read and not yet handled, in order. */
     __privateAdd(this, _inbox, []);
+    /** Their bytes. */
+    __privateAdd(this, _inboxBytes, 0);
     __privateAdd(this, _handling, false);
     /** Why the channel ended, told once the inbox is empty. */
     __privateAdd(this, _lostWith);
@@ -8571,7 +8579,7 @@ var Link = class {
   /** A record already written: the manifest's. */
   sendRecord(record) {
     if (__privateGet(this, _closed3)) return;
-    __privateGet(this, _control).push(record);
+    __privateGet(this, _control).push({ record });
     this.wake();
   }
   /** Sets (or, with undefined, stops) the stream the pump draws from once no control record waits. */
@@ -8648,6 +8656,8 @@ _channel3 = new WeakMap();
 _handlers = new WeakMap();
 _timers3 = new WeakMap();
 _control = new WeakMap();
+_pongWaiting = new WeakMap();
+_statusWaiting = new WeakMap();
 _stream = new WeakMap();
 _inFlight = new WeakMap();
 _since = new WeakMap();
@@ -8657,6 +8667,7 @@ _idle = new WeakMap();
 _closed3 = new WeakMap();
 _released = new WeakMap();
 _inbox = new WeakMap();
+_inboxBytes = new WeakMap();
 _handling = new WeakMap();
 _lostWith = new WeakMap();
 _heldClose = new WeakMap();
@@ -8696,10 +8707,29 @@ takeHeldClose_fn = function() {
   if (held) __privateGet(this, _timers3).clearTimeout(__privateGet(this, _heldTimer));
   return held;
 };
+/**
+ * An answer to the other side (a PONG, or a STATUS answer), in the place of
+ * the one of its kind still waiting, if there is one: what's waiting for the
+ * pump stays one answer of each kind, however many asks come. The one now
+ * waiting.
+ */
+answer_fn = function(message, waiting) {
+  if (__privateGet(this, _closed3)) return void 0;
+  const record = encodeMessage(message);
+  if (waiting) {
+    waiting.record = record;
+    return waiting;
+  }
+  const queued = { record };
+  __privateGet(this, _control).push(queued);
+  this.wake();
+  return queued;
+};
 stop_fn2 = function() {
   if (__privateGet(this, _closed3)) return;
   __privateSet(this, _closed3, true);
   __privateGet(this, _inbox).length = 0;
+  __privateSet(this, _inboxBytes, 0);
   __privateGet(this, _pingTimer).stop();
   __privateGet(this, _answerTimer).stop();
   __privateMethod(this, _Link_instances, settleIdle_fn).call(this);
@@ -8720,6 +8750,13 @@ read_fn = async function() {
     if (__privateMethod(this, _Link_instances, answered_fn).call(this, record)) continue;
     __privateGet(this, _handlers).arrived?.(record);
     __privateGet(this, _inbox).push(record);
+    __privateSet(this, _inboxBytes, __privateGet(this, _inboxBytes) + record.byteLength);
+    if (__privateGet(this, _inbox).length > MAX_INBOX_RECORDS || __privateGet(this, _inboxBytes) > MAX_INBOX_BYTES) {
+      __privateGet(this, _inbox).length = 0;
+      __privateSet(this, _inboxBytes, 0);
+      __privateGet(this, _handlers).overrun(invalidMessage2());
+      return;
+    }
     if (!__privateGet(this, _handling)) void __privateMethod(this, _Link_instances, handle_fn).call(this);
   }
 };
@@ -8741,14 +8778,17 @@ answered_fn = function(record) {
   }
   switch (message.type) {
     case "ping":
-      this.send({ type: "pong", id: message.id });
+      __privateSet(this, _pongWaiting, __privateMethod(this, _Link_instances, answer_fn).call(this, { type: "pong", id: message.id }, __privateGet(this, _pongWaiting)));
       break;
     case "pong":
       __privateMethod(this, _Link_instances, pong_fn).call(this, message.id);
       break;
     case "status":
-      if (message.kind === "ask") this.send({ type: "status", kind: "answer", id: message.id, ...__privateGet(this, _handlers).status() });
-      else __privateGet(this, _handlers).statusHeard?.(message, this.generation);
+      if (message.kind === "ask") {
+        __privateSet(this, _statusWaiting, __privateMethod(this, _Link_instances, answer_fn).call(this, { type: "status", kind: "answer", id: message.id, ...__privateGet(this, _handlers).status() }, __privateGet(this, _statusWaiting)));
+      } else {
+        __privateGet(this, _handlers).statusHeard?.(message, this.generation);
+      }
       break;
     case "close":
       __privateMethod(this, _Link_instances, takeHeldClose_fn).call(this);
@@ -8786,14 +8826,19 @@ pong_fn = function(id) {
 handle_fn = async function() {
   __privateSet(this, _handling, true);
   while (__privateGet(this, _inbox).length > 0 && !__privateGet(this, _closed3)) {
-    await __privateGet(this, _handlers).record({ generation: this.generation, record: __privateGet(this, _inbox).shift() });
+    const record = __privateGet(this, _inbox).shift();
+    __privateSet(this, _inboxBytes, __privateGet(this, _inboxBytes) - record.byteLength);
+    await __privateGet(this, _handlers).record({ generation: this.generation, record });
   }
   __privateSet(this, _handling, false);
   if (__privateGet(this, _lostWith)) __privateMethod(this, _Link_instances, end_fn2).call(this, __privateGet(this, _lostWith));
 };
 pump_fn = async function() {
   while (!__privateGet(this, _closed3)) {
-    const record = __privateGet(this, _control).shift() ?? __privateMethod(this, _Link_instances, fromStream_fn).call(this);
+    const queued = __privateGet(this, _control).shift();
+    if (queued === __privateGet(this, _pongWaiting)) __privateSet(this, _pongWaiting, void 0);
+    if (queued === __privateGet(this, _statusWaiting)) __privateSet(this, _statusWaiting, void 0);
+    const record = queued?.record ?? __privateMethod(this, _Link_instances, fromStream_fn).call(this);
     if (!record) {
       __privateSet(this, _busy, false);
       __privateMethod(this, _Link_instances, settleIdle_fn).call(this);
@@ -9207,7 +9252,8 @@ var DirectReceiver = class {
       ended: (err) => __privateMethod(this, _DirectReceiver_instances, lost_fn2).call(this, err),
       close: (message, generation) => __privateMethod(this, _DirectReceiver_instances, closeHeard_fn).call(this, message, generation),
       status: () => __privateMethod(this, _DirectReceiver_instances, status_fn).call(this),
-      statusHeard: (answer, generation) => __privateMethod(this, _DirectReceiver_instances, statusHeard_fn).call(this, answer, generation)
+      statusHeard: (answer, generation) => __privateMethod(this, _DirectReceiver_instances, statusHeard_fn).call(this, answer, generation),
+      overrun: (err) => __privateMethod(this, _DirectReceiver_instances, fail_fn).call(this, err, g)
     }, __privateGet(this, _timers6)));
     __privateSet(this, _assembler, new ManifestAssembler(__privateGet(this, _link).recordBytes));
     __privateSet(this, _maxData, dataBytes(__privateGet(this, _link).recordBytes));
@@ -10507,7 +10553,8 @@ var SenderSession = class {
       ended: (err) => __privateMethod(this, _SenderSession_instances, lost_fn3).call(this, err),
       close: (message, generation) => __privateMethod(this, _SenderSession_instances, closeHeard_fn2).call(this, message, generation),
       status: () => __privateMethod(this, _SenderSession_instances, status_fn2).call(this),
-      statusHeard: (answer, generation) => __privateMethod(this, _SenderSession_instances, statusHeard_fn2).call(this, answer, generation)
+      statusHeard: (answer, generation) => __privateMethod(this, _SenderSession_instances, statusHeard_fn2).call(this, answer, generation),
+      overrun: (err) => __privateMethod(this, _SenderSession_instances, fail_fn2).call(this, err, g)
     }, timers));
     __privateSet(this, _maxData2, dataBytes(__privateGet(this, _link2).recordBytes));
   }

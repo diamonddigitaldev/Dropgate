@@ -144,6 +144,7 @@ export class SenderSession {
       close: (message, generation) => this.#closeHeard(message, generation),
       status: () => this.#status(),
       statusHeard: (answer, generation) => this.#statusHeard(answer, generation),
+      overrun: (err) => this.#fail(err, g),
     }, timers);
     this.#maxData = dataBytes(this.#link.recordBytes);
   }

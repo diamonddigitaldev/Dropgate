@@ -32,6 +32,13 @@ export { GLOBAL_TIMERS, type EngineTimers };
 // max(15 s, 6 × the smoothed RTT) ends the connection, CONNECTION_LOST. It
 // keeps running while a transfer is held.
 //
+// Memory. At most one PONG and one STATUS answer wait in the pump's queue: a
+// newer one takes the place of the one waiting, so PINGs or STATUS asks that
+// come while this side's buffer is full hold one answer each, not one per
+// ask. Records read and not yet handled are at most MAX_INBOX_RECORDS and
+// MAX_INBOX_BYTES; past either, reading stops and the side ends
+// INVALID_MESSAGE.
+//
 // The fence. Every effect carries the generation of the connection it came
 // from or was started on: a record, a sink's write, a file's read, a timer.
 // One from another generation, or that resolves after the transfer has ended,
@@ -64,6 +71,15 @@ export const MAX_UNFINISHED_FILE_ENDS = 8;
 export const RESULT_ACK_WAIT_MS = 2000;
 /** PINGs a side remembers waiting for their PONG: an older one's answer is passed over. */
 const MAX_PINGS_WAITING = 16;
+/**
+ * Records read from the other side and not yet handled, at most: past this,
+ * or past `MAX_INBOX_BYTES`, the other side has sent far more than credit and
+ * the file ends ahead let it have waiting, and the transfer ends
+ * INVALID_MESSAGE.
+ */
+export const MAX_INBOX_RECORDS = 4096;
+/** The bytes of the records read and not yet handled, at most: twice the credit. */
+export const MAX_INBOX_BYTES = 8388608;
 
 /** Where a direct transfer stands, for one side. */
 export type DirectState = 'connecting' | 'waiting' | 'offered' | 'transferring' | 'finalising' | 'completed' | 'cancelled' | 'failed';
@@ -127,6 +143,17 @@ export interface LinkHandlers {
   status(): Omit<StatusAnswer, 'type' | 'kind' | 'id'>;
   /** The other side's answer to this side's STATUS ask. */
   statusHeard?(answer: StatusAnswer, generation: bigint): void;
+  /**
+   * The other side has more records waiting to be handled than the inbox
+   * holds (`MAX_INBOX_RECORDS`, `MAX_INBOX_BYTES`): nothing more is read, and
+   * the side ends with `err` (INVALID_MESSAGE), telling the other side.
+   */
+  overrun(err: DropgateError): void;
+}
+
+/** A record waiting in the pump's queue. An answer's may be replaced by a newer one until the pump takes it. */
+interface Queued {
+  record: Uint8Array;
 }
 
 /**
@@ -141,7 +168,11 @@ export class Link {
   readonly #channel: SecureChannel;
   readonly #handlers: LinkHandlers;
   readonly #timers: EngineTimers;
-  readonly #control: Uint8Array[] = [];
+  readonly #control: Queued[] = [];
+  /** The PONG waiting in `#control`, if one is: the next PING's answer takes its place. */
+  #pongWaiting: Queued | undefined;
+  /** The STATUS answer waiting in `#control`, if one is: the next ask's answer takes its place. */
+  #statusWaiting: Queued | undefined;
   #stream: StreamSource | undefined;
   readonly #inFlight: Array<Promise<void>> = [];
   /** Bytes handed to the channel since its buffer was last at the low-water mark. */
@@ -155,6 +186,8 @@ export class Link {
   #released = false;
   /** Records read and not yet handled, in order. */
   readonly #inbox: Uint8Array[] = [];
+  /** Their bytes. */
+  #inboxBytes = 0;
   #handling = false;
   /** Why the channel ended, told once the inbox is empty. */
   #lostWith: DropgateError | undefined;
@@ -249,8 +282,27 @@ export class Link {
   /** A record already written: the manifest's. */
   sendRecord(record: Uint8Array): void {
     if (this.#closed) return;
-    this.#control.push(record);
+    this.#control.push({ record });
     this.wake();
+  }
+
+  /**
+   * An answer to the other side (a PONG, or a STATUS answer), in the place of
+   * the one of its kind still waiting, if there is one: what's waiting for the
+   * pump stays one answer of each kind, however many asks come. The one now
+   * waiting.
+   */
+  #answer(message: Message, waiting: Queued | undefined): Queued | undefined {
+    if (this.#closed) return undefined;
+    const record = encodeMessage(message);
+    if (waiting) {
+      waiting.record = record;
+      return waiting;
+    }
+    const queued = { record };
+    this.#control.push(queued);
+    this.wake();
+    return queued;
   }
 
   /** Sets (or, with undefined, stops) the stream the pump draws from once no control record waits. */
@@ -326,6 +378,7 @@ export class Link {
     if (this.#closed) return;
     this.#closed = true;
     this.#inbox.length = 0;
+    this.#inboxBytes = 0;
     this.#pingTimer.stop();
     this.#answerTimer.stop();
     this.#settleIdle();
@@ -349,6 +402,14 @@ export class Link {
       if (this.#answered(record)) continue;
       this.#handlers.arrived?.(record);
       this.#inbox.push(record);
+      this.#inboxBytes += record.byteLength;
+      if (this.#inbox.length > MAX_INBOX_RECORDS || this.#inboxBytes > MAX_INBOX_BYTES) {
+        // More waiting than an honest device can leave: nothing more is read, and what waits is let go.
+        this.#inbox.length = 0;
+        this.#inboxBytes = 0;
+        this.#handlers.overrun(invalidMessage());
+        return;
+      }
       if (!this.#handling) void this.#handle();
     }
   }
@@ -372,14 +433,17 @@ export class Link {
     }
     switch (message.type) {
       case 'ping':
-        this.send({ type: 'pong', id: message.id });
+        this.#pongWaiting = this.#answer({ type: 'pong', id: message.id }, this.#pongWaiting);
         break;
       case 'pong':
         this.#pong(message.id);
         break;
       case 'status':
-        if (message.kind === 'ask') this.send({ type: 'status', kind: 'answer', id: message.id, ...this.#handlers.status() });
-        else this.#handlers.statusHeard?.(message, this.generation);
+        if (message.kind === 'ask') {
+          this.#statusWaiting = this.#answer({ type: 'status', kind: 'answer', id: message.id, ...this.#handlers.status() }, this.#statusWaiting);
+        } else {
+          this.#handlers.statusHeard?.(message, this.generation);
+        }
         break;
       case 'close':
         // The in-band CLOSE is the one: a copy held from the rendezvous is let go.
@@ -430,7 +494,9 @@ export class Link {
   async #handle(): Promise<void> {
     this.#handling = true;
     while (this.#inbox.length > 0 && !this.#closed) {
-      await this.#handlers.record({ generation: this.generation, record: this.#inbox.shift() as Uint8Array });
+      const record = this.#inbox.shift() as Uint8Array;
+      this.#inboxBytes -= record.byteLength;
+      await this.#handlers.record({ generation: this.generation, record });
     }
     this.#handling = false;
     if (this.#lostWith) this.#end(this.#lostWith);
@@ -438,7 +504,11 @@ export class Link {
 
   async #pump(): Promise<void> {
     while (!this.#closed) {
-      const record = this.#control.shift() ?? this.#fromStream();
+      const queued = this.#control.shift();
+      // Taken: the next answer of its kind waits afresh.
+      if (queued === this.#pongWaiting) this.#pongWaiting = undefined;
+      if (queued === this.#statusWaiting) this.#statusWaiting = undefined;
+      const record = queued?.record ?? this.#fromStream();
       if (!record) {
         this.#busy = false;
         this.#settleIdle();

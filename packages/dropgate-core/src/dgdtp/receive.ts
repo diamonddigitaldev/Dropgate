@@ -164,6 +164,7 @@ export class DirectReceiver {
       close: (message, generation) => this.#closeHeard(message, generation),
       status: () => this.#status(),
       statusHeard: (answer, generation) => this.#statusHeard(answer, generation),
+      overrun: (err) => this.#fail(err, g),
     }, this.#timers);
     this.#assembler = new ManifestAssembler(this.#link.recordBytes);
     this.#maxData = dataBytes(this.#link.recordBytes);

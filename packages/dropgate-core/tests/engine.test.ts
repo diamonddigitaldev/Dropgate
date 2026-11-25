@@ -8,14 +8,14 @@ import {
 import { DropgateError } from '../src/errors.js';
 import { deriveRoomId } from '../src/dgdtp/keys.js';
 import {
-  BLOCK_BYTES, ManifestAssembler, dataBytes, decodeManifest, encodeManifest, encodeMessage, manifestHash, type Message,
+  BLOCK_BYTES, MESSAGE_TYPE, ManifestAssembler, dataBytes, decodeManifest, encodeManifest, encodeMessage, manifestHash, type Message,
 } from '../src/dgdtp/messages.js';
 import { receiveDirect, type DirectReceiver } from '../src/dgdtp/receive.js';
 import { SenderSession, sendDirect, type SessionHost } from '../src/dgdtp/send.js';
 import type { FileSource } from '../src/source.js';
 import { channels, transfer } from './helpers/channel-checks.js';
 import {
-  MemorySink, ScriptedSender, anythingWithin, memoryFile, patterned, recordOf, sameAs, sinksByFile,
+  MemorySink, ScriptedSender, anythingWithin, countingReads, memoryFile, patterned, recordOf, sameAs, sinksByFile,
 } from './helpers/direct.js';
 import { MockRendezvous, PeerPair, pipePair, type FakePeer } from './helpers/fake-channel.js';
 import { readZip } from './helpers/zip-reader.js';
@@ -579,6 +579,131 @@ describe("the sender's stream: credit, records and the pump", () => {
     expect(said(await receiver.done)).toBe('completed, saved');
     expect(sameAs(sink.bytes, bytes)).toBe('the same');
   });
+
+  it('a send still completes, every byte in order, with 2,000 PINGs coming while its buffer is full: one PONG waits, the newest', async () => {
+    const t = await transfer(provider);
+    const pair = channels(t);
+    const data = t.peers.data as NonNullable<typeof t.peers.data>;
+    const counted = countingReads(pair.sender);
+    const bytes = patterned(3 * MiB + 5, 31);
+    const { raw, outcomes, accept } = await sessionAndReceiver([memoryFile('a.bin', bytes)], { channels: { sender: counted.channel, receiver: pair.receiver } });
+    data.sender.bufferedAmount = 2 * MiB;
+    await accept();
+    // About 1 MiB of the file goes, then the sender waits on its buffer.
+    await until(() => data.sent.sender.reduce((n, m) => n + m.byteLength, 0) > 768 * 1024, 'the sender filling its buffer');
+    for (let id = 1; id <= 2000; id++) await raw.send(encodeMessage({ type: 'ping', id: BigInt(id) }));
+    await until(() => counted.read === 2001, 'every PING read', 20_000);
+    data.sender.bufferedAmount = 0;
+    const got = new Uint8Array(bytes.byteLength);
+    let at = 0;
+    const pongs: bigint[] = [];
+    let finish: Extract<Message, { type: 'finish' }> | undefined;
+    while (!finish) {
+      const m = await nextRecordWithin(raw);
+      if (m.type === 'data') {
+        expect(m.offset).toBe(at);
+        got.set(m.bytes, at);
+        at += m.bytes.byteLength;
+      } else if (m.type === 'pong') {
+        pongs.push(m.id);
+      } else if (m.type === 'finish') {
+        finish = m;
+      }
+    }
+    expect(sameAs(got, bytes)).toBe('the same');
+    expect(pongs.length).toBeGreaterThan(0);
+    expect(pongs.length).toBeLessThanOrEqual(2);
+    expect(pongs[pongs.length - 1]).toBe(2000n);
+    await raw.send(encodeMessage({ type: 'result', commitId: new Uint8Array(16), assurance: 'saved', fileCount: 1, totalSize: bytes.byteLength, chain: finish.chain }));
+    await until(() => outcomes.length === 1, 'the send completing');
+    expect(said(outcomes[0])).toBe('completed, saved');
+  }, 30_000);
+});
+
+/** The next record on `channel`, or a failure if none comes within 2 s. */
+async function nextRecordWithin(channel: SecureChannel): Promise<Message> {
+  const m = await anythingWithin(channel, 2000);
+  if (m === undefined || m === 'closed') throw new Error(`Expected a record, got ${m ?? 'nothing'}.`);
+  return m;
+}
+
+/**
+ * The receiver's engine with its first write held for good, the test playing
+ * the sender: a 1 MiB file's records sent, so the BLOCK_END waits on the sink
+ * and its FILE_END waits behind it, unhandled. What the test sends is counted
+ * as the receiver reads it.
+ */
+async function receiverStuckOnItsSink() {
+  const t = await transfer(provider);
+  const pair = channels(t);
+  const counted = countingReads(pair.receiver);
+  const engine = receiveDirect(provider, counted.channel);
+  const script = new ScriptedSender(provider, pair.sender, [{ name: 'a.bin', bytes: patterned(MiB, 41) }]);
+  await script.offer();
+  const sink = new MemorySink();
+  sink.holdWrite = () => new Promise<void>(() => undefined);
+  await engine.accept({ sink });
+  await recordOf(script.channel, 'accept');
+  const offerRecords = counted.read;
+  await script.sendFile(0);
+  await until(() => sink.writes === 1, 'the first write');
+  // 17 DATA (16 whole records and the rest of the block), the BLOCK_END and the FILE_END read; the FILE_END alone is waiting.
+  await until(() => counted.read === offerRecords + 19, 'the file read');
+  return { engine, script, sink, counted, waiting: { records: 1, bytes: encodeMessage(fileEndOf(script)).byteLength } };
+}
+
+/** A FILE_END the size of any. */
+const fileEndOf = (script: ScriptedSender): Message => ({ type: 'file-end', fileIndex: 0, size: MiB, blockCount: 1, chain: script.chain });
+
+// As DGDTP.md gives them, not read from the code under test.
+const INBOX_RECORDS = 4096;
+const INBOX_BYTES = 8 * MiB;
+
+describe("the receiver's inbox: what's read and not yet handled", () => {
+  it('4,096 records waiting are held; one more ends it INVALID_MESSAGE, the sender told, reading no more', async () => {
+    const { engine, script, sink, counted, waiting } = await receiverStuckOnItsSink();
+    const before = counted.read;
+    // HOLDs that change nothing: what counts is how many wait, not what they are.
+    for (let i = waiting.records; i < INBOX_RECORDS; i++) await script.send({ type: 'hold', held: false, reason: 'person' });
+    await until(() => counted.read === before + INBOX_RECORDS - waiting.records, 'the HOLDs read');
+    await sleep(50);
+    expect(engine.state).toBe('transferring');
+    await script.send({ type: 'hold', held: false, reason: 'person' });
+    expect(said(await engine.done)).toBe('failed INVALID_MESSAGE');
+    expect(await closeHeard(script.channel)).toBe('FAILED INVALID_MESSAGE');
+    expect(sink.aborted).toBeTruthy();
+    // Nothing more is read once it's past the bound.
+    const read = counted.read;
+    await script.send({ type: 'hold', held: false, reason: 'person' }).catch(() => undefined);
+    await sleep(50);
+    expect(counted.read).toBe(read);
+  }, 30_000);
+
+  it('8 MiB of records waiting are held; a byte more ends it INVALID_MESSAGE', async () => {
+    const { engine, script, sink, counted, waiting } = await receiverStuckOnItsSink();
+    const most = script.recordBytes - 16;
+    // Records of the list of files, which would be refused once handled, but they're never handled: with the FILE_END,
+    // exactly the bound's bytes.
+    const before = counted.read;
+    let left = INBOX_BYTES - waiting.bytes;
+    let sent = 0;
+    while (left > 0) {
+      const size = Math.min(most, left);
+      const record = new Uint8Array(size);
+      record[0] = MESSAGE_TYPE.MANIFEST;
+      await script.channel.send(record);
+      left -= size;
+      sent += 1;
+    }
+    await until(() => counted.read === before + sent, 'every record read');
+    await sleep(50);
+    expect(engine.state).toBe('transferring');
+    // One byte more.
+    await script.channel.send(Uint8Array.of(MESSAGE_TYPE.MANIFEST));
+    expect(said(await engine.done)).toBe('failed INVALID_MESSAGE');
+    expect(await closeHeard(script.channel)).toBe('FAILED INVALID_MESSAGE');
+    expect(sink.aborted).toBeTruthy();
+  }, 30_000);
 });
 
 describe("the receiver's checks", () => {

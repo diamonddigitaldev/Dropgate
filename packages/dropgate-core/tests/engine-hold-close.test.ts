@@ -1071,6 +1071,7 @@ function alive(channel: SecureChannel, clock: FakeClock): Array<Extract<Message,
     ended: () => undefined,
     close: (message) => { heard.push(message); },
     status: () => ({ state: 0, held: false, consumed: 0 }),
+    overrun: () => undefined,
   }, clock).start();
   return heard;
 }
