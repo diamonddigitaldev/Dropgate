@@ -26,7 +26,8 @@ import * as raw from '../../../server/test/helpers/rendezvous.mjs';
 // fresh code and both its link and its new code still connect; every locator
 // held, so a send starts with its link and asks again for a code every 15
 // seconds (on a test clock) until one frees, and stops once a receiver is
-// accepted; what each message carries (never the link's secret, the code or
+// accepted; a receiver by code that sends nothing, which the server ends 10
+// seconds on; what each message carries (never the link's secret, the code or
 // its password: a code's locator alone); and each refusal as core words it.
 
 const provider = webCryptoProvider(globalThis.crypto);
@@ -460,6 +461,40 @@ describe("core's rendezvous client and the real server, over werift", () => {
     expect(await failure(openRoom(provider, { rendezvous: senderRendezvous({ url: closed, codeLetters: 2 }), code: true })))
       .toMatchObject({ code: 'SERVER_UNREACHABLE' });
   }, 30_000);
+});
+
+describe('a receiver by code that sends nothing', () => {
+  it("is ended by the server 10 s after it joins: the sender shows a code again, the same locator with a new password, and the real receiver connects by it", async () => {
+    const server = (await startServer({ env: { RATE_LIMIT_MAX_REQUESTS: '0', P2P_STUN_SERVERS: 'none' }, clock: true })) as Server;
+    try {
+      const client = { url: rendezvousUrl(server.baseUrl), codeLetters: await codeLettersOf(server) };
+      const { room } = await sending(client, { code: true });
+      const first = room.code as string;
+      // It joins by the locator, as anyone probing for one could, and never sends CPace's first message.
+      const silent = await receiving(client).join({ locator: first.slice(0, 2) });
+      const incoming = await room.nextAttempt();
+      expect([incoming.by, room.codeState]).toEqual(['code', 'unavailable']);
+      // The real receiver, meanwhile, is told the code is someone else's.
+      const busy = await failure(connectByCode(provider, { rendezvous: receiving(client), code: first, peer: peer('receiver') }));
+      expect(busy.code).toBe('REQUEST_REJECTED');
+
+      await server.advanceClock(11_000);
+      await until(() => room.codeState === 'ready', 'a code again');
+      expect(codeOf(await silent.pipe.receive().catch((err) => err))).toBe('CONNECTION_LOST');
+      expect(codeOf(await incoming.pipe.receive().catch((err) => err))).toBe('CONNECTION_LOST');
+      // The server kept the unused locator; the password is drawn afresh, as after any attempt by code.
+      expect(room.code?.slice(0, 2)).toBe(first.slice(0, 2));
+      expect(room.code).not.toBe(first);
+      const run = await attempt(room, (p) => connectByCode(provider, { rendezvous: receiving(client), code: room.code as string, peer: p }));
+      expect(`${outcome(run.receiver)} / ${outcome(run.sender)}`).toBe('up / up');
+      await crosses(channelOf(run.receiver), channelOf(run.sender));
+      channelOf(run.receiver).close();
+      channelOf(run.sender).close();
+      room.close();
+    } finally {
+      await server.stop();
+    }
+  }, 60_000);
 });
 
 describe('servers whose codes differ', () => {

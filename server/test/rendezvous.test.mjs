@@ -10,7 +10,7 @@ import { after, before, describe, test } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { startServer, waitFor } from './helpers/harness.mjs';
 import {
-    BY, CODE_LETTERS, CPACE_MESSAGE1_BYTES, ERROR, MAX_FRAMES_EACH_WAY, MAX_FRAME_BYTES, PING_INTERVAL_MS, QUARANTINE_MS, RELEASE_MS, TYPE,
+    BY, CODE_FIRST_FRAME_MS, CODE_LETTERS, CPACE_MESSAGE1_BYTES, ERROR, MAX_FRAMES_EACH_WAY, MAX_FRAME_BYTES, PING_INTERVAL_MS, QUARANTINE_MS, RELEASE_MS, TYPE,
     VERSION, askCode, connect, errorMessage, expectError, joinByCode, joinRoom, msg, openRoom, upgradeRefused,
 } from './helpers/rendezvous.mjs';
 
@@ -30,6 +30,16 @@ const heldOf = async (server, keys) => {
 const heldBecomes = (server, expected) => waitFor(async () => {
     return JSON.stringify(await heldOf(server, Object.keys(expected))) === JSON.stringify(expected);
 }, { what: `the rendezvous to hold ${JSON.stringify(expected)}` });
+
+/** A receiver's socket still open, with nothing sent to it: a ping's round trip, so anything sent before it has come. */
+const receiverStillOpen = async (receiver) => {
+    assert.equal(receiver.ws.readyState, receiver.ws.OPEN, 'the socket closed');
+    const pong = once(receiver.ws, 'pong');
+    receiver.ws.ping();
+    const closed = await Promise.race([pong.then(() => false), receiver.closed.then(() => true)]);
+    assert.equal(closed, false, 'the socket closed');
+    assert.deepEqual(receiver.pending(), []);
+};
 
 /**
  * Sends a socket something and checks it's still open and answering: CODE on
@@ -461,7 +471,7 @@ describe('the rendezvous', () => {
             assert.deepEqual(fieldsOf(roomCode[0].replace(/^[^{]*/, '')), ['locator', 'attempt', 'release']);
             const attempt = code.match(/const attempt = \{[^}]*\};/g);
             assert.equal(attempt?.length, 1, 'one place makes an attempt');
-            assert.deepEqual(fieldsOf(attempt[0].replace(/^[^{]*/, '')), ['room', 'tag', 'by', 'receiver', 'live', 'toSender', 'toReceiver']);
+            assert.deepEqual(fieldsOf(attempt[0].replace(/^[^{]*/, '')), ['room', 'tag', 'by', 'receiver', 'live', 'toSender', 'toReceiver', 'firstFrameDue']);
             const peer = code.match(/const peer = \{[^}]*\};/g);
             assert.equal(peer?.length, 1, 'one place makes a socket\'s state');
             assert.deepEqual(fieldsOf(peer[0].replace(/^[^{]*/, '')), ['ws', 'role', 'room', 'attempt', 'heardAt', 'finished', 'counted']);
@@ -979,6 +989,64 @@ describe('codes on the test clock', () => {
         assert.notEqual(next, room.locator, 'the released locator waits out its quarantine');
         // The room carries on by link.
         await joinRoom(server, room);
+        await closeRooms([room]);
+    });
+
+    test("a receiver by code that sends nothing for 10 seconds is ended, both devices told GONE: the code stays the sender's, unused, and the real receiver joins by it", async (t) => {
+        const server = await startServer({ held: true, clock: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        t.after(server.stop);
+        const room = await openRoom(server, { code: true });
+        // It joins by the locator and sends nothing, its socket answering every ping.
+        const silent = await joinByCode(server, room);
+        const meanwhile = await connect(server);
+        meanwhile.send(msg.joinByCode(room.locator));
+        await refusedWith(meanwhile, ERROR.BUSY, 'the real receiver, while the silent one holds the code');
+
+        // Real time passes between the clock's steps too, so the checks stand clear of the 10 seconds.
+        await server.advanceClock(CODE_FIRST_FRAME_MS - 2000);
+        await receiverStillOpen(silent.receiver);
+        assert.deepEqual(room.sender.pending(), [], 'nothing yet, 8 seconds on');
+        await server.advanceClock(4000);
+        assert.equal(hex(await silent.receiver.next()), hex([TYPE.GONE_TO_RECEIVER]));
+        assert.equal((await silent.receiver.closed).code, 1000);
+        assert.equal(hex(await room.sender.next()), hex([TYPE.GONE_TO_SENDER, silent.tag]));
+
+        assert.deepEqual(await heldOf(server, ['codes', 'attempts', 'quarantined']), { codes: 1, attempts: 0, quarantined: 0 }, 'the code unused');
+        assert.equal(await askCode(room.sender), room.locator, "still the sender's");
+        const genuine = await joinByCode(server, room);
+        const m1 = message1();
+        genuine.receiver.send(msg.receiverSend(m1));
+        assert.equal(hex(await room.sender.next()), hex(Buffer.concat([Buffer.from([TYPE.FRAME_TO_SENDER, genuine.tag]), m1])));
+        await closeRooms([room]);
+    });
+
+    test('a receiver by code whose first frame comes within the 10 seconds runs on past them, as one does after LOCK; one by link is never ended for sending nothing', async (t) => {
+        const server = await startServer({ held: true, clock: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        t.after(server.stop);
+        const room = await openRoom(server, { code: true });
+        const prompt = await joinByCode(server, room);
+        const byLink = await joinRoom(server, room);
+        await server.advanceClock(CODE_FIRST_FRAME_MS - 2000);
+        prompt.receiver.send(msg.receiverSend(message1()));
+        assert.equal((await room.sender.next()).length, 2 + CPACE_MESSAGE1_BYTES);
+
+        // After LOCK the code has left the room; an attempt by it that has sent its first frame still runs on.
+        const next = await askCode(room.sender);
+        prompt.receiver.close();
+        assert.equal(hex(await room.sender.next()), hex([TYPE.GONE_TO_SENDER, prompt.tag]));
+        const late = await joinByCode(server, { ...room, locator: next });
+        room.sender.send(msg.lock());
+        await server.advanceClock(CODE_FIRST_FRAME_MS - 2000);
+        late.receiver.send(msg.receiverSend(message1()));
+        assert.equal((await room.sender.next()).length, 2 + CPACE_MESSAGE1_BYTES);
+
+        await server.advanceClock(CODE_FIRST_FRAME_MS * 3);
+        for (const attempt of [late, byLink]) await receiverStillOpen(attempt.receiver);
+        assert.deepEqual(room.sender.pending(), [], 'no GONE');
+        room.sender.send(msg.send(late.tag, Buffer.from('on')));
+        assert.equal((await late.receiver.next()).subarray(1).toString(), 'on');
+        room.sender.send(msg.send(byLink.tag, Buffer.from('on')));
+        assert.equal((await byLink.receiver.next()).subarray(1).toString(), 'on');
         await closeRooms([room]);
     });
 

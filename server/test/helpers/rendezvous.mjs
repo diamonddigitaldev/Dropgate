@@ -25,6 +25,8 @@ export const PING_INTERVAL_MS = 30_000;
 export const QUARANTINE_MS = 5 * 60_000;
 /** How long an unused code lasts after its sender last asked for it or renewed it. */
 export const RELEASE_MS = 10 * 60_000;
+/** How long after its JOIN an attempt by code has to send its first frame. */
+export const CODE_FIRST_FRAME_MS = 10_000;
 /** The letters a code's locator is made of. */
 export const CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 /** CPace's first message, from the receiver: the first frame of an attempt by code. */

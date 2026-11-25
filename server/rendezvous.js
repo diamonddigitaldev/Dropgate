@@ -17,7 +17,9 @@
 // from a pool of every 2-letter (or 3-letter) string of the code's letters,
 // and a receiver joins by them. The rest is the password, which never leaves
 // the sender's device. A code takes one try: the receiver's first frame by it
-// is CPace's first message, and relaying it uses the code up. Every locator
+// is CPace's first message, and relaying it uses the code up. A receiver by
+// code that hasn't sent it within 10 seconds of joining is ended, and the code
+// stays unused. Every locator
 // that leaves a room (used, released, locked or its room gone) waits 5 minutes
 // before the pool hands it out again, so a late try at an old code can't meet
 // another sender's new one. An unused code is released 10 minutes after the
@@ -56,6 +58,12 @@ const MAX_UNSENT_BYTES = 1024 * 1024;
 const PING_INTERVAL_MS = 30_000;
 /** A socket the server hasn't heard from (a message or a pong) for this long is closed. */
 const SILENT_LIMIT_MS = 60_000;
+/**
+ * An attempt by code whose first frame (CPace's first message) hasn't come
+ * this long after its JOIN is ended, and the code left unused: a receiver that
+ * joins and sends nothing can't keep the code from the one it's for.
+ */
+const CODE_FIRST_FRAME_MS = 10_000;
 
 /** How long a locator that has left a room waits before the pool hands it out again. */
 const QUARANTINE_MS = 5 * 60_000;
@@ -187,6 +195,7 @@ function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress
     const endAttempt = (attempt, { tellSender, receiverError = null }) => {
         if (!attempt.live) return;
         attempt.live = false;
+        clearTimeout(attempt.firstFrameDue);
         attempt.room.attempts.delete(attempt.tag);
         // An attempt by code that ends before its first frame leaves the code unused, for another to try.
         if (attempt.room.code?.attempt === attempt) attempt.room.code.attempt = null;
@@ -372,9 +381,14 @@ function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress
         }
         const tag = nextTag(room);
 
-        const attempt = { room, tag, by, receiver: peer, live: true, toSender: 0, toReceiver: 0 };
+        const attempt = { room, tag, by, receiver: peer, live: true, toSender: 0, toReceiver: 0, firstFrameDue: null };
         room.attempts.set(tag, attempt);
-        if (by === BY.CODE) room.code.attempt = attempt;
+        if (by === BY.CODE) {
+            room.code.attempt = attempt;
+            // Its first frame comes within 10 seconds, or the attempt ends, both devices told GONE, and the code is left unused.
+            attempt.firstFrameDue = setTimeout(() => endAttempt(attempt, { tellSender: true }), CODE_FIRST_FRAME_MS);
+            attempt.firstFrameDue.unref?.();
+        }
         peer.role = 'receiver';
         peer.attempt = attempt;
         log('debug', 'A receiver joined.');
@@ -424,6 +438,9 @@ function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress
         if (data[0] !== TYPE.RECEIVER_SEND || data.length > 1 + MAX_FRAME_BYTES) return fail(peer, ERROR.MALFORMED);
         const { attempt } = peer;
         if (++attempt.toSender > MAX_FRAMES_EACH_WAY) return endAttempt(attempt, { tellSender: true, receiverError: ERROR.LIMIT });
+        // Its first frame has come in time: an attempt by code runs on as any other, whether or not its code is still the room's.
+        clearTimeout(attempt.firstFrameDue);
+        attempt.firstFrameDue = null;
         // An attempt by code's first frame is CPace's first message: relaying it uses the code up, right or wrong.
         if (attempt.room.code?.attempt === attempt) letGoOfCode(attempt.room);
         send(attempt.room.sender,Buffer.concat([message(TYPE.FRAME_TO_SENDER, attempt.tag), data.subarray(1)]));
