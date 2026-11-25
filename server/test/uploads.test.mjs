@@ -3,8 +3,10 @@
 // cancel. Every error is JSON with a code.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { startServer } from './helpers/harness.mjs';
 import {
     QUIET_MS, SMALL_CHUNKS, answer, contentDigest, encryptedObject, fileBytes, plainObject, sendChunks, startBody,
@@ -233,6 +235,147 @@ describe('chunks', () => {
         assert.deepEqual(await answer(await uploads.chunk(server, uploadId, 2, long)), wrong, 'one byte over');
         assert.deepEqual(await answer(await uploads.chunk(server, uploadId, 0, object.chunks[2])), wrong, 'the last chunk\'s length');
         assert.deepEqual(await answer(await uploads.status(server, uploadId)).then((a) => a.body.received), []);
+    });
+});
+
+describe('chunks as they come: streamed to their place, a few at once', () => {
+    let server;
+    // The server's own chunk size, 5 MiB: a chunk held whole in memory would show.
+    const CHUNK = 5 * MIB;
+    // As the docs give it.
+    const AT_ONCE = 4;
+    before(async () => {
+        server = await startServer({ held: true, env: { ENABLE_UPLOAD: 'true', RATE_LIMIT_MAX_REQUESTS: '0' } });
+    });
+    after(() => server?.stop());
+
+    /** What the server holds in Buffers and goes on holding: the least of three readings a moment apart. */
+    const steadyBufferBytes = async () => {
+        const readings = [];
+        for (let i = 0; i < 3; i++) {
+            readings.push(await server.bufferBytes());
+            await sleep(100);
+        }
+        return Math.min(...readings);
+    };
+
+    const eightChunks = () => plainObject({ files: [{ name: 'big.bin', bytes: fileBytes(8 * CHUNK, 3) }], chunkSize: CHUNK });
+
+    /**
+     * A chunk request whose body is sent `first` bytes now, the rest when the
+     * test says (or never): its answer, once it comes.
+     */
+    const slowChunk = async (uploadId, index, bytes, first) => {
+        const req = http.request(new URL(`${server.baseUrl}/api/v4/upload/chunks/${index}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': bytes.length, 'Content-Digest': contentDigest(bytes), 'Dropgate-Upload': uploadId },
+        });
+        const answered = new Promise((resolve) => {
+            req.on('response', (res) => {
+                let text = '';
+                res.setEncoding('utf8');
+                res.on('data', (part) => { text += part; });
+                res.on('end', () => resolve({ status: res.statusCode, retryAfter: res.headers['retry-after'], body: text ? JSON.parse(text) : null }));
+            });
+            req.on('error', () => resolve({ status: 'cut off' }));
+        });
+        // Handed to the connection, then a moment for the server to read it.
+        await new Promise((resolve) => req.write(bytes.subarray(0, first), resolve));
+        await sleep(150);
+        return { answered, rest: () => req.end(bytes.subarray(first)), cut: () => req.destroy() };
+    };
+
+    test(`8 slow chunk requests at once on one upload: ${AT_ONCE} are taken, written to disk as they come, and hold no chunk in memory; the rest are 429 with a Retry-After of 1 second, and go once sent again`, async () => {
+        const object = eightChunks();
+        const uploadId = await startUpload(server, object);
+        const before = await steadyBufferBytes();
+        // Each sends all but its last byte and stays open, as a client that never finishes would.
+        const slow = [];
+        for (let i = 0; i < 8; i++) slow.push(await slowChunk(uploadId, i, object.chunks[i], CHUNK - 1));
+        const held = (await steadyBufferBytes()) - before;
+        assert.ok(held < CHUNK, `the server holds ${(held / MIB).toFixed(1)} MiB more in Buffers: less than one chunk`);
+
+        const refused = await Promise.all(slow.slice(AT_ONCE).map((s) => s.answered));
+        assert.deepEqual(refused.map((r) => [r.status, r.retryAfter, r.body?.code]), Array(8 - AT_ONCE).fill([429, '1', 'RATE_LIMITED']));
+        // What the taken ones sent is on disk already, each at its place.
+        const temp = fs.readFileSync(path.join(server.tmpDir, uploadId));
+        for (let i = 0; i < AT_ONCE; i++) {
+            assert.ok(temp.subarray(i * CHUNK, (i + 1) * CHUNK - 1).equals(object.chunks[i].subarray(0, CHUNK - 1)), `chunk ${i} on disk as it came`);
+        }
+        for (const s of slow.slice(0, AT_ONCE)) s.rest();
+        assert.deepEqual((await Promise.all(slow.slice(0, AT_ONCE).map((s) => s.answered))).map((r) => r.status), Array(AT_ONCE).fill(200));
+        await sendChunks(server, uploadId, object, AT_ONCE);
+        assert.deepEqual(fs.readFileSync(path.join(server.tmpDir, uploadId)), object.bytes);
+        assert.equal((await uploads.complete(server, uploadId)).status, 201);
+    });
+
+    test('a chunk cut off part-way leaves nothing held: the status lists none, the finish is 409, and the whole chunk sent again is taken', async () => {
+        const object = eightChunks();
+        const uploadId = await startUpload(server, object);
+        await sendChunks(server, uploadId, object, 1);
+        const cut = await slowChunk(uploadId, 0, object.chunks[0], CHUNK / 2);
+        cut.cut();
+        assert.equal((await cut.answered).status, 'cut off');
+        await sleep(150);
+        assert.deepEqual((await answer(await uploads.status(server, uploadId))).body.received, [[1, 7]]);
+        assert.equal((await answer(await uploads.complete(server, uploadId))).body.code, 'UPLOAD_INCOMPLETE');
+        await sendChunks(server, uploadId, object, 0, 1);
+        assert.deepEqual(fs.readFileSync(path.join(server.tmpDir, uploadId)), object.bytes);
+        assert.equal((await uploads.complete(server, uploadId)).status, 201);
+    });
+
+    test("a chunk that doesn't match its digest is still 400 DIGEST_MISMATCH and isn't held, though its bytes went to its place; the right bytes then are", async () => {
+        const object = eightChunks();
+        const uploadId = await startUpload(server, object);
+        const wrong = Buffer.from(object.chunks[0]);
+        wrong[CHUNK - 1] ^= 1;
+        assert.deepEqual(await answer(await uploads.chunk(server, uploadId, 0, wrong, { digest: contentDigest(object.chunks[0]) })), {
+            status: 400, body: { code: 'DIGEST_MISMATCH', error: 'The chunk\'s Content-Digest is missing, or doesn\'t match its bytes.' },
+        });
+        assert.deepEqual((await answer(await uploads.status(server, uploadId))).body.received, []);
+        await sendChunks(server, uploadId, object);
+        assert.deepEqual(fs.readFileSync(path.join(server.tmpDir, uploadId)), object.bytes);
+        assert.equal((await uploads.complete(server, uploadId)).status, 201);
+    });
+
+    test("a body with no Content-Length (sent in parts) is held to the chunk's length as it comes: one byte short, or any more, is 400 INVALID_CHUNK, nothing is held, and the next chunk's place is untouched", async () => {
+        const object = eightChunks();
+        const uploadId = await startUpload(server, object);
+        await sendChunks(server, uploadId, object, 1, 2);
+        const inParts = (bytes) => new Promise((resolve) => {
+            const req = http.request(new URL(`${server.baseUrl}/api/v4/upload/chunks/0`), {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/octet-stream', 'Content-Digest': contentDigest(bytes), 'Dropgate-Upload': uploadId },
+            });
+            req.on('response', (res) => {
+                let text = '';
+                res.setEncoding('utf8');
+                res.on('data', (part) => { text += part; });
+                res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) }));
+            });
+            req.on('error', () => resolve({ status: 'cut off' }));
+            for (let at = 0; at < bytes.length; at += MIB) req.write(bytes.subarray(at, at + MIB));
+            req.end();
+        });
+        const wrong = { status: 400, body: { code: 'INVALID_CHUNK', error: 'That chunk is the wrong length.' } };
+        assert.deepEqual(await inParts(object.chunks[0].subarray(1)), wrong, 'one byte short');
+        assert.deepEqual(await inParts(Buffer.concat([object.chunks[0], Buffer.from([0xab]), Buffer.alloc(MIB, 0xab)])), wrong, 'over');
+        assert.deepEqual((await answer(await uploads.status(server, uploadId))).body.received, [[1, 1]]);
+        const temp = fs.readFileSync(path.join(server.tmpDir, uploadId));
+        assert.ok(temp.subarray(CHUNK, 2 * CHUNK).equals(object.chunks[1]), "chunk 1's bytes as they were");
+        assert.deepEqual(await inParts(object.chunks[0]).then((r) => r.status), 200, 'the right length, in parts');
+    });
+
+    test('the same chunk twice at once: the second is 429 while the first is on its way, then 200 as the same bytes', async () => {
+        const object = eightChunks();
+        const uploadId = await startUpload(server, object);
+        const first = await slowChunk(uploadId, 0, object.chunks[0], CHUNK / 2);
+        const second = await answer(await uploads.chunk(server, uploadId, 0, object.chunks[0]));
+        assert.deepEqual([second.status, second.body.code], [429, 'RATE_LIMITED']);
+        first.rest();
+        assert.equal((await first.answered).status, 200);
+        assert.equal((await uploads.chunk(server, uploadId, 0, object.chunks[0])).status, 200);
+        assert.deepEqual((await answer(await uploads.status(server, uploadId))).body.received, [[0, 0]]);
     });
 });
 

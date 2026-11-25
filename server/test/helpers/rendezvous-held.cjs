@@ -2,13 +2,21 @@
 // rendezvous holds right now (rendezvous.js' held(): how many sockets, rooms,
 // attempts, unused codes, quarantined and free locators, and per-address
 // counts), so it can check nothing is left once they've ended; and what the
-// per-address counts' keys are (counted()), to show none is an address.
+// per-address counts' keys are (counted()), to show none is an address. And
+// what the process holds in Buffers, after a full garbage collection, to show
+// what a request's body held in memory adds.
 //
 // It catches the rendezvous as server.js makes it, without changing it: when
 // rendezvous.js is loaded, its createRendezvous() is wrapped to keep what it
 // returns. A server with direct transfer off has none, and answers null.
 const Module = require('node:module');
 const path = require('node:path');
+const v8 = require('node:v8');
+const vm = require('node:vm');
+
+// A full collection on request, without starting the server with --expose-gc.
+v8.setFlagsFromString('--expose-gc');
+const collect = vm.runInNewContext('gc');
 
 let rendezvous = null;
 
@@ -26,5 +34,9 @@ process.on('message', (msg) => {
     if (msg && msg.type === 'rendezvous-held') process.send({ type: 'rendezvous-held', held: rendezvous ? rendezvous.held() : null });
     if (msg && msg.type === 'rendezvous-counted') process.send({ type: 'rendezvous-counted', counted: rendezvous ? rendezvous.counted() : null });
     // Everything the server's process holds, written to a file the test names, as a memory dump would show it.
-    if (msg && msg.type === 'heap-snapshot') process.send({ type: 'heap-snapshot', file: require('node:v8').writeHeapSnapshot(msg.file) });
+    if (msg && msg.type === 'heap-snapshot') process.send({ type: 'heap-snapshot', file: v8.writeHeapSnapshot(msg.file) });
+    if (msg && msg.type === 'buffer-bytes') {
+        collect();
+        process.send({ type: 'buffer-bytes', bytes: process.memoryUsage().arrayBuffers });
+    }
 });

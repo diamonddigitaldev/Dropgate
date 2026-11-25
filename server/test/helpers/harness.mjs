@@ -241,6 +241,14 @@ export async function startServer({ env = {}, clock = false, requests = false, h
             return (await ask({ type: 'heap-snapshot', file }, 'heap-snapshot')).file;
         },
         /**
+         * The bytes the server's process holds in Buffers and other ArrayBuffers right now, after a full garbage
+         * collection: what a request's body held in memory would add to (see rendezvous-held.cjs).
+         */
+        bufferBytes: async () => {
+            if (!held) throw new Error('Start the server with { held: true } to use bufferBytes().');
+            return (await ask({ type: 'buffer-bytes' }, 'buffer-bytes')).bytes;
+        },
+        /**
          * Stop the server and start it again in the same folder, as an operator's
          * restart would, on a port that may differ: baseUrl follows it. The output
          * goes on. The test clock, if any, starts again at the real time.

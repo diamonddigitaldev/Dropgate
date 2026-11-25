@@ -357,6 +357,9 @@ const reservedBytes = () => {
 
 // Security: Limits to prevent DoS attacks
 const MAX_CHUNKS = 100000; // Maximum chunks per upload (~500GB at 5MB chunks)
+// An upload's chunk requests on their way at once, at most; one more is 429 with a Retry-After of this many seconds.
+const MAX_CHUNKS_AT_ONCE = 4;
+const CHUNKS_BUSY_RETRY_SECONDS = 1;
 const MAX_BUNDLE_FILES = 1000; // Maximum files per upload
 
 if (enableUpload) {
@@ -411,7 +414,7 @@ if (enableUpload) {
         log('error', 'UPLOAD_CHUNK_SIZE_BYTES must be at least 65536 (64KB). Smaller values cause extreme fragmentation and per-chunk overhead.');
         process.exit(1);
     }
-    // The most an upload's object can say it uses, and each chunk is held in memory as it arrives.
+    // The most an upload's object can say it uses.
     if (uploadChunkSizeBytes > 64 * MIB) {
         log('error', 'UPLOAD_CHUNK_SIZE_BYTES must be at most 67108864 (64 MB).');
         process.exit(1);
@@ -892,7 +895,7 @@ if (enableUpload) {
                 lifetimeMs,
                 maxDownloads: effectiveMaxDownloads,
                 manageTokenHash: body.manageTokenHash,
-                // Chunk index → SHA-256 digest: those written, and those being written.
+                // Chunk index → SHA-256 digest: those written and checked, and those on their way (the digest they say).
                 received: new Map(),
                 writing: new Map(),
                 paused: false,
@@ -933,30 +936,64 @@ if (enableUpload) {
         const digest = sha256FromContentDigest(req.get('Content-Digest'));
         const digestMismatch = () => res.status(400).json({ code: 'DIGEST_MISMATCH', error: 'The chunk\'s Content-Digest is missing, or doesn\'t match its bytes.' });
         if (!digest) return digestMismatch();
+        // At most a few of an upload's chunks arrive at once, and each index one at a time: another waits a second.
+        if (upload.busy >= MAX_CHUNKS_AT_ONCE || upload.writing.has(index)) {
+            res.set('Retry-After', String(CHUNKS_BUSY_RETRY_SECONDS));
+            return res.status(429).json({ code: 'RATE_LIMITED', error: 'This upload has as many chunks on their way as the server takes at once. Try again shortly.' });
+        }
         res.removeHeader('Connection');
 
+        // A chunk the server already holds isn't written again: the same bytes are
+        // fine, different bytes are refused. It compares the digests it kept.
+        const held = upload.received.get(index);
+        // One it doesn't goes straight to its place in the temp file as it comes,
+        // never held whole in memory, and counts only once it has all come and
+        // matches its digest: until then its place may be written again.
+        if (!held) upload.writing.set(index, digest);
         upload.busy++;
         let body;
         try {
-            // Read no more than the chunk's length: one byte past it, and it's refused.
+            // Read no more than the chunk's length, hashing it as it comes: one byte past it, and it's refused.
             body = await new Promise((resolve) => {
                 // A body sent as JSON was read already, and isn't a chunk.
-                if (req.readableEnded) return resolve({ bytes: Buffer.alloc(0) });
-                const parts = [];
+                if (req.readableEnded) return resolve({ received: 0, digest: null });
+                const hash = crypto.createHash('sha256');
+                const into = held ? null : fs.createWriteStream(upload.tempFilePath, { flags: 'r+', start: offset });
                 let received = 0;
+                let fileError = null;
+                let settled = false;
                 const done = (result) => {
+                    if (settled) return;
+                    settled = true;
                     req.off('data', onData);
                     req.off('end', onEnd);
                     req.off('close', onClose);
                     req.off('error', onClose);
-                    resolve(result);
+                    if (!into) return resolve(result);
+                    // The file is closed before anything is answered, whatever happened. Only a whole chunk's
+                    // writes count: one stopped part-way is let go, and its writes failing on the way says nothing.
+                    const whole = result.received !== undefined;
+                    const closed = () => resolve(fileError && whole ? { fileError } : result);
+                    if (whole) into.end();
+                    else into.destroy();
+                    if (into.closed) closed();
+                    else into.once('close', closed);
                 };
+                into?.on('error', (err) => {
+                    fileError = err;
+                    done({ fileError: err });
+                });
                 const onData = (part) => {
                     received += part.length;
                     if (received > length) return done({ tooLong: true });
-                    parts.push(part);
+                    hash.update(part);
+                    // The request is read no faster than the disk takes it.
+                    if (into && !into.write(part)) {
+                        req.pause();
+                        into.once('drain', () => req.resume());
+                    }
                 };
-                const onEnd = () => done({ bytes: Buffer.concat(parts, received) });
+                const onEnd = () => done({ received, digest: hash.digest() });
                 // The connection went before the whole chunk came: nothing is kept.
                 const onClose = () => done({ dropped: true });
                 req.on('data', onData);
@@ -966,41 +1003,24 @@ if (enableUpload) {
             });
         } finally {
             upload.busy--;
+            if (!held) upload.writing.delete(index);
         }
-        if (body.dropped) return renew(upload);
+        const gone = v4Uploads.get(upload.id) !== upload;
+        // It ended while this chunk was being written, so its file is this chunk's to remove.
+        if (gone && !held) fs.rm(upload.tempFilePath, { force: true }, () => { });
+        if (body.dropped) return gone ? undefined : renew(upload);
         if (body.tooLong) {
             res.set('Connection', 'close');
             return wrongLength();
         }
-        if (v4Uploads.get(upload.id) !== upload) return uploadNotFound(res);
+        // A cancelled or ended upload's file is gone, which isn't the server's fault.
+        if (gone) return uploadNotFound(res);
+        if (body.fileError) throw body.fileError;
         renew(upload);
-        if (body.bytes.length !== length) return wrongLength(res);
-        if (!crypto.createHash('sha256').update(body.bytes).digest().equals(digest)) return digestMismatch(res);
+        if (body.received !== length) return wrongLength(res);
+        if (!body.digest.equals(digest)) return digestMismatch(res);
 
-        // A chunk the server already holds isn't written again: the same bytes are
-        // fine, different bytes are refused. It compares the digests it kept.
-        const held = upload.received.get(index) ?? upload.writing.get(index);
         if (!held) {
-            upload.writing.set(index, digest);
-            try {
-                const file = await fs.promises.open(upload.tempFilePath, 'r+');
-                try {
-                    await file.write(body.bytes, 0, length, offset);
-                } finally {
-                    await file.close();
-                }
-            } catch (err) {
-                upload.writing.delete(index);
-                // A cancelled or ended upload's file is gone, which isn't the server's fault.
-                if (v4Uploads.get(upload.id) !== upload) return uploadNotFound(res);
-                throw err;
-            }
-            upload.writing.delete(index);
-            if (v4Uploads.get(upload.id) !== upload) {
-                // It ended while this chunk was being written, so its file is this chunk's to remove.
-                fs.rm(upload.tempFilePath, { force: true }, () => { });
-                return uploadNotFound(res);
-            }
             upload.received.set(index, digest);
             log('debug', `Received chunk ${index + 1}/${upload.chunks}. Size: ${(length / 1024).toFixed(2)} KB`);
         } else if (!held.equals(digest)) {

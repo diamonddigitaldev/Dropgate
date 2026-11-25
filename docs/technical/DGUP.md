@@ -254,7 +254,8 @@ The body is chunk `index`'s bytes, from 0, exactly its length. `Content-Digest` 
 
 - **The same chunk again,** with the same digest, is `200` and isn't written again, so a retry is always safe. With different bytes it's refused: the server compares the digest it kept.
 - **A chunk sent while the upload is paused resumes it.** One already on its way when the pause came doesn't: it's kept if it all arrives, and the upload stays paused.
-- The server reads no more than the chunk's length. A request it refuses before reading its body closes the connection.
+- **The body goes straight to its place** in the upload's temporary file as it comes, hashed on the way, so a chunk is never held whole in memory, and no more than the chunk's length is read. A chunk counts as held only once all of it has come and matches its digest: one cut off part-way, or that doesn't match, isn't held, and its place is written again by the next try. A request it refuses before reading its body closes the connection.
+- **At most 4 of an upload's chunks are on their way at once,** and one of each index: another is `429` `RATE_LIMITED` with `Retry-After: 1`, before its body is read, and core sends it again after that second.
 - The core library sends one chunk at a time, in order.
 
 | Status | Code | When |
@@ -264,6 +265,7 @@ The body is chunk `index`'s bytes, from 0, exactly its length. `Content-Digest` 
 | `400` | `DIGEST_MISMATCH` | No `Content-Digest` with SHA-256, or one that doesn't match the body. |
 | `404` | `NOT_FOUND` | No upload in progress by that ID. |
 | `409` | `CHUNK_CONFLICT` | Different bytes for a chunk the server already holds. |
+| `429` | `RATE_LIMITED` | 4 of the upload's chunks already on their way, or this one, with `Retry-After: 1`. |
 
 ### 5.3 Status
 
@@ -620,7 +622,7 @@ A message never holds an ID, a name, a key, a token, or anything from the reques
 | `413` | `TOO_LARGE` | A JSON request body over its limit (1 MiB, or 2 MiB for an upload's start), or an upload over the maximum upload size. |
 | `416` | `RANGE_NOT_SATISFIABLE` | A `Range` the server can't send, with `Content-Range: bytes */<size>` ([§6.4](#64-the-bytes)). |
 | `423` | `DOWNLOADS_BUSY` | A new download while open leases and counted downloads make the upload's limit, with `Retry-After` ([§6.3](#63-leases-and-counting)). |
-| `429` | `RATE_LIMITED` | Too many requests ([§12.1](#121-rate-limits)). |
+| `429` | `RATE_LIMITED` | Too many requests ([§12.1](#121-rate-limits)), or too many of an upload's chunks at once ([§5.2](#52-chunks)). |
 | `500` | `SERVER_ERROR` | Anything unexpected while answering. The server logs the error's kind and the route's pattern, never its message, which can hold a path or part of the request ([PRIVACY.md](../PRIVACY.md)). |
 | `507` | `SERVER_FULL` | Not enough storage for an upload. |
 
