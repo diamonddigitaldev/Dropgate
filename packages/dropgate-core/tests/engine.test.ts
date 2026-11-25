@@ -6,6 +6,7 @@ import {
   CREDIT_WINDOW_BYTES, GLOBAL_TIMERS, MAX_UNFINISHED_FILE_ENDS, closeFor, outcomeOfClose, type DirectOutcome, type EngineTimers,
 } from '../src/dgdtp/engine.js';
 import { DropgateError } from '../src/errors.js';
+import { deriveRoomId } from '../src/dgdtp/keys.js';
 import {
   BLOCK_BYTES, ManifestAssembler, dataBytes, decodeManifest, encodeManifest, encodeMessage, manifestHash, type Message,
 } from '../src/dgdtp/messages.js';
@@ -822,6 +823,40 @@ describe('what comes in order', () => {
     await until(() => run.sender.state === 'waiting', 'the sender waiting again');
     expect(states).toEqual(['waiting', 'connecting', 'waiting']);
     run.sender.cancel();
+  });
+
+  it("sets up no more receivers' attempts at once than the rendezvous lets a room have, 4 by link and 1 by code: one more is dropped as it comes, with no peer connection made", async () => {
+    const rendezvous = new MockRendezvous();
+    let made = 0;
+    const sender = await sendDirect(provider, {
+      files: [memoryFile('a.bin', patterned(10, 33))], rendezvous: rendezvous.sender, code: true,
+      peer: () => { made += 1; return new PeerPair().sender; },
+    });
+    const told: string[] = [];
+    sender.onAttemptEnded((err) => told.push(err.code));
+    const roomId = await deriveRoomId(provider, sender.room.linkSecret() as Uint8Array);
+    /** Whether the rendezvous's path for a join is closed within `ms`. */
+    const closedWithin = (pipe: { receive(): Promise<unknown> }, ms = 200) => Promise.race([
+      pipe.receive().then(() => 'a message', () => 'closed'),
+      sleep(ms).then(() => 'open'),
+    ]);
+    // Receivers that join and never send a first frame: each attempt stays being set up.
+    const links = [];
+    for (let i = 0; i < 5; i++) links.push(await rendezvous.receiver.join({ roomId }));
+    const codes = [await rendezvous.receiver.join({ locator: 'AB' }), await rendezvous.receiver.join({ locator: 'AB' })];
+    expect(await closedWithin(links[4].pipe)).toBe('closed');
+    expect(await closedWithin(codes[1].pipe)).toBe('closed');
+    expect(await Promise.all([...links.slice(0, 4), codes[0]].map(({ pipe }) => closedWithin(pipe, 20)))).toEqual(Array(5).fill('open'));
+    expect(made).toBe(5);
+    expect(told).toEqual([]);
+    expect(sender.state).toBe('connecting');
+    // Once one by link has ended, the next by link is set up again.
+    links[0].pipe.close();
+    await until(() => told.length === 1, 'the first attempt ending');
+    const another = await rendezvous.receiver.join({ roomId });
+    expect(await closedWithin(another.pipe)).toBe('open');
+    expect(made).toBe(6);
+    sender.cancel();
   });
 
   it('a receiver that reaches the room once another is chosen is never offered', async () => {

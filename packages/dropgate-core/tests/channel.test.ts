@@ -2,9 +2,11 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { inspect } from 'node:util';
 import { nobleProvider, webCryptoProvider, type CryptoProvider, type NamedCryptoProvider } from '../src/crypto/index.js';
 import {
-  connectByCode, connectByLink, openRoom, reconnect, type SecureChannel,
+  connectByCode, connectByLink, openRoom, reconnect, type RoomNews, type SecureChannel,
 } from '../src/dgdtp/channel.js';
+import { CodePassword } from '../src/dgdtp/codes.js';
 import { MAX_GENERATION } from '../src/dgdtp/prologue.js';
+import { FRAME_HEADER_BYTES } from '../src/dgdtp/seal.js';
 import { hex } from './helpers/cpace-vectors.js';
 import {
   WRONG_CODE, channelChecks, channels, codeTransfer, ending, transfer, wrongDigit, type Transfer,
@@ -42,6 +44,11 @@ const codeOf = (err: unknown) => String((err as { code?: string })?.code ?? err)
 const outcomeOf = (result: PromiseSettledResult<unknown>) => (result.status === 'fulfilled' ? 'up' : codeOf(result.reason));
 const codes = (t: Pick<Transfer, 'receiver' | 'sender'>) => `${outcomeOf(t.receiver)} / ${outcomeOf(t.sender)}`;
 const allZero = (bytes: Uint8Array) => bytes.every((b) => b === 0);
+/** How an attempt ended within `ms` (its error's code, or `up`), or `still going`; whatever it does later is let go. */
+const endedWithin = (attempt: Promise<SecureChannel>, ms = 500): Promise<string> => Promise.race([
+  attempt.then((channel) => { channel.close(); return 'up'; }, codeOf),
+  new Promise<string>((resolve) => { setTimeout(() => resolve('still going'), ms); }),
+]);
 /** The data channel's abort: one zero byte. */
 const isAbort = (m: Uint8Array) => m.byteLength === 1 && m[0] === 0;
 const ascii = (text: string) => new TextEncoder().encode(text);
@@ -590,6 +597,120 @@ describe.each(PROVIDERS)('the secure channel end to end, on %s', (_name, provide
     }
     expect(new Set(ids).size).toBe(2);
   });
+
+  it("a receiver's first frame sent again as a new attempt, by link or on resume, is refused before anything is sealed for it or any peer connection used; the channel already up and another receiver are untouched", async () => {
+    const rendezvous = new MockRendezvous();
+    const room = await openRoom(provider, { rendezvous: rendezvous.sender });
+    const secret = room.linkSecret() as Uint8Array;
+    const peers = new PeerPair();
+    const sending = rendezvous.nextAttempt().then((a) => room.accept(a, { peer: peers.sender }));
+    const receiver = await connectByLink(provider, { rendezvous: rendezvous.receiver, secret, peer: peers.receiver });
+    const sender = await sending;
+    // A resume on the same room, too: its first frame carries its attempt ID in the same plain header.
+    const resumeSecret = provider.randomBytes(32);
+    const resumePipe = pipePair();
+    const resumePeers = new PeerPair();
+    const [resumed, resumedSender] = await Promise.all([
+      reconnect(provider, { pipe: resumePipe.receiver, roomNonce: room.roomNonce, resumeSecret, previousGeneration: 0n, peer: resumePeers.receiver }),
+      room.accept({ by: 'resume', pipe: resumePipe.sender, resumeSecret, previousGeneration: 0n }, { peer: resumePeers.sender }),
+    ]);
+    const replays: Array<[string, Uint8Array, (pipe: ReturnType<typeof pipePair>) => Parameters<typeof room.accept>[0]]> = [
+      ['by link', rendezvous.pipes[0].sent.receiver[0], (pipe) => ({ by: 'link', pipe: pipe.sender })],
+      ['on resume', resumePipe.sent.receiver[0], (pipe) => ({ by: 'resume', pipe: pipe.sender, resumeSecret, previousGeneration: 0n })],
+    ];
+    // The rendezvous sends each first frame again, byte for byte, as a new attempt, more than once.
+    for (const [how, firstFrame, attemptOf] of replays) {
+      for (let i = 0; i < 2; i++) {
+        const replay = pipePair();
+        const replayPeers = new PeerPair();
+        replay.receiver.send(firstFrame);
+        const ended = await endedWithin(room.accept(attemptOf(replay), { peer: replayPeers.sender }));
+        // Nothing sealed under the first attempt's keys again: no answer, no candidate.
+        expect(replay.sent.sender.length, how).toBe(0);
+        expect(ended, how).toBe(MISMATCH);
+        expect(replayPeers.sender.local, how).toBeUndefined();
+        expect([replay.sender.closed, replayPeers.sender.closed], how).toEqual([true, true]);
+      }
+    }
+    // The channels already up still carry records, both ways.
+    for (const [from, to] of [[receiver, sender], [sender, receiver], [resumed, resumedSender], [resumedSender, resumed]]) {
+      await from.send(ascii('still up'));
+      expect(new TextDecoder().decode(await to.receive())).toBe('still up');
+    }
+    // And another receiver by the same link still connects.
+    const nextPeers = new PeerPair();
+    const nextSending = rendezvous.nextAttempt().then((a) => room.accept(a, { peer: nextPeers.sender }));
+    const next = await connectByLink(provider, { rendezvous: rendezvous.receiver, secret, peer: nextPeers.receiver });
+    expect(hex((await nextSending).attemptId)).toBe(hex(next.attemptId));
+    for (const channel of [receiver, sender, resumed, resumedSender, next]) channel.close();
+    room.close();
+  });
+
+  it('receivers whose attempt IDs differ in one byte, any byte, each connect: only the same ID is refused', async () => {
+    const rendezvous = new MockRendezvous();
+    const room = await openRoom(provider, { rendezvous: rendezvous.sender });
+    for (const at of [-1, 0, 7, 15]) {
+      const id = new Uint8Array(16).fill(0xab);
+      if (at >= 0) id[at] ^= 1;
+      // The receiver's provider draws this ID for its attempt.
+      const fixed: CryptoProvider = { ...provider, randomBytes: (length) => (length === 16 ? new Uint8Array(id) : provider.randomBytes(length)) };
+      const peers = new PeerPair();
+      const sending = rendezvous.nextAttempt().then((a) => room.accept(a, { peer: peers.sender }));
+      const receiver = await connectByLink(fixed, { rendezvous: rendezvous.receiver, secret: room.linkSecret() as Uint8Array, peer: peers.receiver });
+      expect(hex((await sending).attemptId), `byte ${at}`).toBe(hex(id));
+      receiver.close();
+    }
+    room.close();
+  });
+
+  it("by code, a receiver's message 1 sent again as a new attempt is refused before CPace answers it, even with a new code on the screen", async () => {
+    const rendezvous = new MockRendezvous();
+    let news: RoomNews | undefined;
+    const room = await openRoom(provider, {
+      rendezvous: { ...rendezvous.sender, create: (request, relay) => { news = relay; return rendezvous.sender.create(request, relay); } },
+      code: true,
+    });
+    const peers = new PeerPair();
+    const sending = rendezvous.nextAttempt().then((a) => room.accept(a, { peer: peers.sender }));
+    const receiver = await connectByCode(provider, { rendezvous: rendezvous.receiver, code: room.code as string, peer: peers.receiver });
+    const sender = await sending;
+    const message1 = rendezvous.pipes[0].sent.receiver[0];
+    // The rendezvous gives the room its next code, then sends the first receiver's message 1 again.
+    news?.code('AB');
+    expect(room.codeState).toBe('ready');
+    const replay = pipePair();
+    replay.receiver.send(message1);
+    const ended = await endedWithin(room.accept({ by: 'code', pipe: replay.sender }, { peer: new PeerPair().sender }));
+    // No message 2, and no abort: nothing at all.
+    expect(replay.sent.sender.length).toBe(0);
+    expect(ended).toBe(MISMATCH);
+    expect(replay.sender.closed).toBe(true);
+    // One record for every mode. A first frame by link carrying the ID that attempt by code took is refused too.
+    const linkFrame = (attemptId: Uint8Array) => {
+      const frame = new Uint8Array(FRAME_HEADER_BYTES + 16);
+      frame.set([0x10, 1], 0);
+      frame.set(attemptId, 2);
+      return frame;
+    };
+    const attemptBy = async (by: 'link' | 'code', message: Uint8Array) => {
+      const pipe = pipePair();
+      pipe.receiver.send(message);
+      const ended = await endedWithin(room.accept({ by, pipe: pipe.sender }, { peer: new PeerPair().sender }));
+      return `${ended}, ${pipe.sent.sender.length} sent`;
+    };
+    expect(await attemptBy('link', linkFrame(message1.subarray(0, 16)))).toBe(`${MISMATCH}, 0 sent`);
+    // And a message 1 by code starting with an ID a link attempt took (that attempt's frame didn't open) is refused
+    // before CPace reads it: no abort, nothing sent.
+    const linkId = provider.randomBytes(16);
+    expect(await attemptBy('link', linkFrame(linkId))).toBe(`${MISMATCH}, 0 sent`);
+    news?.code('AB');
+    const forged = new Uint8Array(51);
+    forged.set(linkId, 0);
+    expect(await attemptBy('code', forged)).toBe(`${MISMATCH}, 0 sent`);
+    receiver.close();
+    sender.close();
+    room.close();
+  });
 });
 
 describe('the secure channel across providers', () => {
@@ -747,6 +868,26 @@ describe("the secure channel's secrets and checks", () => {
     const linkOnly = await openRoom(webCrypto, { rendezvous: rendezvous.sender });
     expect(linkOnly.code).toBeUndefined();
     expect(rendezvous.records[2].bytes[32]).toBe(0);
+  });
+
+  it("an attempt the room drops has its path closed, and its code's password let go", async () => {
+    const rendezvous = new MockRendezvous();
+    let news: RoomNews | undefined;
+    const room = await openRoom(webCrypto, {
+      rendezvous: { ...rendezvous.sender, create: (request, relay) => { news = relay; return rendezvous.sender.create(request, relay); } },
+      code: true,
+    });
+    const forget = vi.spyOn(CodePassword.prototype, 'forget');
+    const pipe = pipePair();
+    const attempt = { by: 'code' as const, pipe: pipe.sender };
+    // The rendezvous tells the room of an attempt by code: the code on the screen is now that attempt's.
+    news?.attempt(attempt);
+    expect(room.codeState).toBe('unavailable');
+    const before = forget.mock.calls.length;
+    room.drop(attempt);
+    expect(forget.mock.calls.length).toBe(before + 1);
+    expect(pipe.sender.closed).toBe(true);
+    room.close();
   });
 
   it("a receiver's first message too short to hold a frame's header ends the sender's attempt with SECURITY_POLICY_MISMATCH", async () => {

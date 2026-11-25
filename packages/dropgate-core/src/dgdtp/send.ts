@@ -536,6 +536,14 @@ function closeOnFinish(outcome: DirectOutcome): CloseWhy | undefined {
   return closeFor(outcome.error) ?? { reason: 'FAILED' };
 }
 
+/**
+ * The most receivers' attempts the sender sets up at once, by link (a resume among them) and by its code: the
+ * rendezvous's own limits for a room's live attempts, so one that sends more is held to them.
+ */
+export const MAX_LINK_ATTEMPTS_AT_ONCE = 4;
+export const MAX_CODE_ATTEMPTS_AT_ONCE = 1;
+const MAX_ATTEMPTS_AT_ONCE = { link: MAX_LINK_ATTEMPTS_AT_ONCE, code: MAX_CODE_ATTEMPTS_AT_ONCE } as const;
+
 /** The sender's side of a direct transfer: its room, the receivers that reach it, and the one it sends to. */
 export class DirectSender implements SessionHost {
   readonly provider: CryptoProvider;
@@ -557,8 +565,8 @@ export class DirectSender implements SessionHost {
   #chosen: SenderSession | undefined;
   #state: DirectState = 'waiting';
   #ended = false;
-  /** Receivers' attempts still being set up (signalling, the handshake). */
-  #connecting = 0;
+  /** Receivers' attempts still being set up (signalling, the handshake), by the way they came: a resume comes as a link does. */
+  readonly #connecting = { link: 0, code: 0 };
 
   /** @internal sendDirect() makes these. */
   constructor(
@@ -687,7 +695,7 @@ export class DirectSender implements SessionHost {
   /** With no receiver offered and none chosen: `connecting` while an attempt is being set up, else `waiting`. */
   #settleWaiting(): void {
     if (this.#chosen || this.#sessions.size > 0) return;
-    this.#setState(this.#connecting > 0 ? 'connecting' : 'waiting');
+    this.#setState(this.#connecting.link + this.#connecting.code > 0 ? 'connecting' : 'waiting');
   }
 
   async #takeAttempts(): Promise<void> {
@@ -704,25 +712,32 @@ export class DirectSender implements SessionHost {
         attempt.pipe.close();
         return;
       }
-      void this.#take(attempt);
+      // No more set up at once than the rendezvous itself lets a room have: one past that is dropped as it comes,
+      // with no peer connection made for it.
+      const path = attempt.by === 'code' ? 'code' : 'link';
+      if (this.#connecting[path] >= MAX_ATTEMPTS_AT_ONCE[path]) {
+        this.room.drop(attempt);
+        continue;
+      }
+      void this.#take(attempt, path);
     }
   }
 
-  async #take(attempt: IncomingAttempt): Promise<void> {
+  async #take(attempt: IncomingAttempt, path: 'link' | 'code'): Promise<void> {
     let channel: SecureChannel;
-    this.#connecting += 1;
+    this.#connecting[path] += 1;
     this.#settleWaiting();
     try {
       channel = await this.room.accept(attempt, { peer: this.#options.peer(), hello: this.#options.hello, timers: this.timers });
     } catch (err) {
-      this.#connecting -= 1;
+      this.#connecting[path] -= 1;
       if (!this.#ended) {
         this.#tellAttempt(toDropgateError(err));
         this.#settleWaiting();
       }
       return;
     }
-    this.#connecting -= 1;
+    this.#connecting[path] -= 1;
     if (this.#ended || this.#chosen) {
       channel.close();
       return;

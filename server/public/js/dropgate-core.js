@@ -7901,7 +7901,7 @@ pass_fn = function(deliver) {
   if (__privateGet(this, _target)) deliver(__privateGet(this, _target));
   else __privateGet(this, _early).push(deliver);
 };
-var _provider6, _secret, _roomNonce3, _rendezvous, _letters, _codeWanted, _code, _bound, _incoming, _waiting2, _listeners, _ended2, _SenderRoom_instances, notify_fn, attempt_fn, newCode_fn, forgetCode_fn, end_fn;
+var _provider6, _secret, _roomNonce3, _rendezvous, _letters, _codeWanted, _code, _bound, _incoming, _waiting2, _listeners, _attemptIds, _ended2, _SenderRoom_instances, notify_fn, attempt_fn, newCode_fn, forgetCode_fn, end_fn, takeAttemptId_fn;
 var SenderRoom = class {
   /** @internal openRoom() makes these. */
   constructor(provider, secret, roomNonce, options = {}) {
@@ -7918,6 +7918,8 @@ var SenderRoom = class {
     __privateAdd(this, _incoming, []);
     __privateAdd(this, _waiting2, []);
     __privateAdd(this, _listeners, /* @__PURE__ */ new Set());
+    /** Every attempt ID the room has taken, in any mode: one seen again is refused before any key is made. */
+    __privateAdd(this, _attemptIds, /* @__PURE__ */ new Set());
     __privateAdd(this, _ended2);
     __privateSet(this, _provider6, provider);
     __privateSet(this, _secret, secret);
@@ -7986,11 +7988,22 @@ var SenderRoom = class {
       else attempt.pipe.close();
     }
   }
+  /** Drops an attempt the room won't take: its pipe closed, and its code's password, if it had one, let go. */
+  drop(attempt) {
+    __privateGet(this, _bound).get(attempt)?.password.forget();
+    __privateGet(this, _bound).delete(attempt);
+    try {
+      attempt.pipe.close();
+    } catch {
+    }
+  }
   /**
    * Takes one attempt to its secure channel. By code: CPace as the responder,
    * once per code, right or wrong (the code is gone afterwards; the link still
    * works). By link: the attempt's keys from the attempt ID in the receiver's
-   * first frame. A resume: keys from R, the generation one past the last.
+   * first frame. A resume: keys from R, the generation one past the last. In
+   * every mode, an attempt ID the room has taken already ends the attempt
+   * (SECURITY_POLICY_MISMATCH) before any key is made or anything sealed.
    */
   async accept(attempt, options) {
     const { peer } = options ?? {};
@@ -8021,7 +8034,9 @@ var SenderRoom = class {
         try {
           let keys;
           try {
-            const { message2, attemptId } = await exchange.readMessage1(await firstMessage(pipe));
+            const message1 = await firstMessage(pipe);
+            if (message1.byteLength >= CPACE_ATTEMPT_ID_BYTES) __privateMethod(this, _SenderRoom_instances, takeAttemptId_fn).call(this, message1.subarray(0, CPACE_ATTEMPT_ID_BYTES));
+            const { message2, attemptId } = await exchange.readMessage1(message1);
             pipe.send(message2);
             ({ result: keys } = await exchange.readMessage3(await firstMessage(pipe), (isk) => deriveAttemptKeys(provider, { mode: "code", base: isk, roomNonce, attemptId })));
           } catch (err) {
@@ -8040,7 +8055,9 @@ var SenderRoom = class {
       const generation = nextGeneration(attempt.previousGeneration);
       return guarded("sender", open, async () => {
         const first = await firstMessage(pipe);
-        const keys = await deriveAttemptKeys(provider, { mode: "resume", base: resumeSecret, roomNonce, attemptId: attemptIdIn(first) });
+        const attemptId = attemptIdIn(first);
+        __privateMethod(this, _SenderRoom_instances, takeAttemptId_fn).call(this, attemptId);
+        const keys = await deriveAttemptKeys(provider, { mode: "resume", base: resumeSecret, roomNonce, attemptId });
         return senderAttempt(provider, keys, pipe, peer, generation, hello, timers, first);
       }, timers);
     }
@@ -8049,7 +8066,9 @@ var SenderRoom = class {
       const secret = __privateGet(this, _secret);
       if (!secret) throw invalid8("This room is closed.");
       const first = await firstMessage(pipe);
-      const keys = await deriveAttemptKeys(provider, { mode: "link", base: secret, roomNonce, attemptId: attemptIdIn(first) });
+      const attemptId = attemptIdIn(first);
+      __privateMethod(this, _SenderRoom_instances, takeAttemptId_fn).call(this, attemptId);
+      const keys = await deriveAttemptKeys(provider, { mode: "link", base: secret, roomNonce, attemptId });
       return senderAttempt(provider, keys, pipe, peer, 0n, hello, timers, first);
     }, timers);
   }
@@ -8089,6 +8108,7 @@ _bound = new WeakMap();
 _incoming = new WeakMap();
 _waiting2 = new WeakMap();
 _listeners = new WeakMap();
+_attemptIds = new WeakMap();
 _ended2 = new WeakMap();
 _SenderRoom_instances = new WeakSet();
 notify_fn = function() {
@@ -8137,6 +8157,18 @@ end_fn = function(err) {
   __privateSet(this, _ended2, err);
   for (const waiter of __privateGet(this, _waiting2).splice(0)) waiter.reject(err);
   __privateMethod(this, _SenderRoom_instances, forgetCode_fn).call(this);
+};
+/**
+ * Takes an attempt's ID for this room, once: an ID the room has taken before
+ * is SECURITY_POLICY_MISMATCH. By link and on resume an attempt's keys come
+ * from the ID in the receiver's first frame, so the same first frame again
+ * would make the same keys, and anything sealed for it would reuse a key and
+ * nonce already used; the rendezvous could send it as often as it liked.
+ */
+takeAttemptId_fn = function(attemptId) {
+  const id = String.fromCharCode(...attemptId);
+  if (__privateGet(this, _attemptIds).has(id)) throw insecure4();
+  __privateGet(this, _attemptIds).add(id);
 };
 function attemptIdIn(frame) {
   if (frame.byteLength < FRAME_HEADER_BYTES) throw insecure4();
@@ -10853,6 +10885,9 @@ function closeOnFinish(outcome) {
   if (outcome.state === "cancelled") return { reason: "USER_CANCELLED" };
   return closeFor(outcome.error) ?? { reason: "FAILED" };
 }
+var MAX_LINK_ATTEMPTS_AT_ONCE = 4;
+var MAX_CODE_ATTEMPTS_AT_ONCE = 1;
+var MAX_ATTEMPTS_AT_ONCE = { link: MAX_LINK_ATTEMPTS_AT_ONCE, code: MAX_CODE_ATTEMPTS_AT_ONCE };
 var _options2, _sessions, _listeners4, _attemptListeners, _done2, _ending, _chosen, _state3, _ended7, _connecting, _DirectSender_instances, settleWaiting_fn, takeAttempts_fn, take_fn5, tellAttempt_fn, setState_fn2, finish_fn2;
 var DirectSender = class {
   /** @internal sendDirect() makes these. */
@@ -10877,8 +10912,8 @@ var DirectSender = class {
     __privateAdd(this, _chosen);
     __privateAdd(this, _state3, "waiting");
     __privateAdd(this, _ended7, false);
-    /** Receivers' attempts still being set up (signalling, the handshake). */
-    __privateAdd(this, _connecting, 0);
+    /** Receivers' attempts still being set up (signalling, the handshake), by the way they came: a resume comes as a link does. */
+    __privateAdd(this, _connecting, { link: 0, code: 0 });
     this.provider = provider;
     __privateSet(this, _options2, options);
     this.files = Object.freeze([...options.files]);
@@ -11012,7 +11047,7 @@ _DirectSender_instances = new WeakSet();
 /** With no receiver offered and none chosen: `connecting` while an attempt is being set up, else `waiting`. */
 settleWaiting_fn = function() {
   if (__privateGet(this, _chosen) || __privateGet(this, _sessions).size > 0) return;
-  __privateMethod(this, _DirectSender_instances, setState_fn2).call(this, __privateGet(this, _connecting) > 0 ? "connecting" : "waiting");
+  __privateMethod(this, _DirectSender_instances, setState_fn2).call(this, __privateGet(this, _connecting).link + __privateGet(this, _connecting).code > 0 ? "connecting" : "waiting");
 };
 takeAttempts_fn = async function() {
   for (; ; ) {
@@ -11027,24 +11062,29 @@ takeAttempts_fn = async function() {
       attempt.pipe.close();
       return;
     }
-    void __privateMethod(this, _DirectSender_instances, take_fn5).call(this, attempt);
+    const path = attempt.by === "code" ? "code" : "link";
+    if (__privateGet(this, _connecting)[path] >= MAX_ATTEMPTS_AT_ONCE[path]) {
+      this.room.drop(attempt);
+      continue;
+    }
+    void __privateMethod(this, _DirectSender_instances, take_fn5).call(this, attempt, path);
   }
 };
-take_fn5 = async function(attempt) {
+take_fn5 = async function(attempt, path) {
   let channel;
-  __privateSet(this, _connecting, __privateGet(this, _connecting) + 1);
+  __privateGet(this, _connecting)[path] += 1;
   __privateMethod(this, _DirectSender_instances, settleWaiting_fn).call(this);
   try {
     channel = await this.room.accept(attempt, { peer: __privateGet(this, _options2).peer(), hello: __privateGet(this, _options2).hello, timers: this.timers });
   } catch (err) {
-    __privateSet(this, _connecting, __privateGet(this, _connecting) - 1);
+    __privateGet(this, _connecting)[path] -= 1;
     if (!__privateGet(this, _ended7)) {
       __privateMethod(this, _DirectSender_instances, tellAttempt_fn).call(this, toDropgateError(err));
       __privateMethod(this, _DirectSender_instances, settleWaiting_fn).call(this);
     }
     return;
   }
-  __privateSet(this, _connecting, __privateGet(this, _connecting) - 1);
+  __privateGet(this, _connecting)[path] -= 1;
   if (__privateGet(this, _ended7) || __privateGet(this, _chosen)) {
     channel.close();
     return;

@@ -117,7 +117,7 @@ In what follows, `‖` joins bytes, and every number written into bytes is big-e
 - **The transfer:** file contents, names and sizes, the list of files, every message about the transfer and why it ended, from the network, from the rendezvous (the Dropgate Server) and from anything relaying packets between the devices.
 - **What sets up the connection:** each device's addresses, its ICE credentials and its certificate's fingerprint, from the rendezvous.
 - **A code, from guessing:** a guess can only be tried by connecting, once per code, and the sender sees it fail. Nothing anyone records, the server included, lets them test a guess afterwards.
-- **Against a server in the middle:** a swapped certificate, or a set-up message changed, injected, replayed or reordered, ends the attempt with `SECURITY_POLICY_MISMATCH`, never with a connection that quietly works.
+- **Against a server in the middle:** a swapped certificate, a set-up message changed, injected, replayed or reordered, or a receiver's first message sent again as a new attempt, ends the attempt with `SECURITY_POLICY_MISMATCH`, never with a connection that quietly works, and the sender seals nothing for the attempt sent again ([§4.5](#45-sealed-signalling)).
 - **The sender's network, from a wrong code:** a wrong code is caught before either device opens anything the other sent to set up the connection, so someone guessing never learns the sender's addresses.
 
 **It doesn't protect:**
@@ -237,6 +237,8 @@ inside     type (1) ‖ length (2) ‖ body, then zero bytes to its padded size
 - Anything else ends the attempt with `SECURITY_POLICY_MISMATCH`, both ways at once: a flipped bit, a frame from another attempt, one sent back to the device that sealed it, a replay, a gap, a reorder, the wrong size. Nothing is tried again, sealed or not.
 - At most 4,096 frames go each way. A device's 4,097th ends the attempt (`SECURITY_POLICY_MISMATCH`, origin `local`), and so does a 4,097th received.
 - The receiver's first frame must be its offer, and the sender's its answer, one each. Candidates follow as ICE finds them, then the end of them: a candidate found before the device's own offer or answer has gone (some WebRTC stacks, libdatachannel's among them, start finding them while the description is being made) waits, and goes just after it. The receiver seals its offer before it applies it, and the sender its answer, so each takes counter 0.
+- **An attempt ID is taken once in a room.** By link and on resume, the sender reads the attempt's ID from the plain header of the receiver's first frame, so the same first frame sent again would give the same keys, and anything the sender sealed for it would use a key and nonce it had already used. So the sender's room keeps every attempt ID it has taken, in every mode (by code, the one in CPace's message 1), and an attempt whose ID it has seen ends with `SECURITY_POLICY_MISMATCH` before any key is derived or anything sealed, its path through the rendezvous and its peer connection closed.
+- **The sender sets up no more attempts at once than the rendezvous lets a room have:** 4 by link (a resume counts as one) and 1 by its code ([§5.3](#53-rooms-and-attempts)). One more is dropped as it comes, its path closed, with no peer connection made for it.
 - By code, the sender opens no frame before `Ta` checks ([§4.3](#43-cpace-typed-codes)), and until the sender's first frame opens, the receiver takes an empty message as the sender's abort.
 - A candidate the connection can't use is skipped, and ICE carries on with the others. A restart is ignored until the engine handles ICE restarts.
 
@@ -453,6 +455,7 @@ Dropgate 4's direct transfers work with nothing of Dropgate 3's, and each part o
 | `RENDEZVOUS_PATH` | `/api/v4/rendezvous` | The rendezvous's one path on a server. |
 | `RENEW_INTERVAL_MS` | 240,000 | How often a sender renews its unused code; the server releases one after 10 minutes. |
 | `CODE_RETRY_MS` | 15,000 | How often a sender asks again for a code while none is free. |
+| `MAX_LINK_ATTEMPTS_AT_ONCE`, `MAX_CODE_ATTEMPTS_AT_ONCE` | 4, 1 | The most receivers' attempts a sender sets up at once by link and by its code, as the rendezvous allows a room ([§4.5](#45-sealed-signalling)). |
 | `HELLO_BYTES` | 18 | A hello: the sender's in Noise's second message, the receiver's in BIND. |
 | `BIND_BYTES` | 51 | BIND: its type, the close secret and the receiver's hello. |
 | `MANIFEST_HEADER_BYTES`, `DATA_HEADER_BYTES` | 9, 14 | A MANIFEST record and a DATA record before their bytes. |
@@ -839,10 +842,10 @@ PING and PONG keep a connection alive, never a transfer going: a stalled sink or
 The two devices tell each other their addresses to connect: local addresses, and the public ones a STUN server sees. They're sealed through the rendezvous, so the server can't read them, but the other device learns them, and so does the STUN server, of the device that asks it. Where that matters:
 
 - **Turn STUN off** (`P2P_STUN_SERVERS=none` on the server, or core's `direct: { stun: false }`): nothing goes to a STUN server, and only devices that can reach each other directly connect.
+- **Only STUN servers are used.** Core takes from the server's `capabilities.p2p.iceServers` only `stun:` and `stuns:` addresses, with no username or credential: a TURN relay the server lists, with its credentials, is left out, as is anything that isn't an address, so a server can't route a transfer through a relay of its own. A list left with none means no STUN.
 - **Use a VPN** that allows peer-to-peer traffic, so the addresses shown are the VPN's. Research providers carefully: their logging, jurisdiction and record.
 - A wrong code is caught before either device opens anything the other sent to set up the connection, so someone guessing never learns the sender's addresses ([§4.1](#41-what-it-protects-and-what-it-doesnt)).
 
-- **Only STUN servers are used.** Core takes from the server's `capabilities.p2p.iceServers` only `stun:` and `stuns:` addresses, with no username or credential: a TURN relay the server lists, with its credentials, is left out, as is anything that isn't an address, so a server can't route a transfer through a relay of its own. A list left with none means no STUN.
 ### 19.6 Codes and Links
 
 - **A code takes one try,** right or wrong ([§6](#6-codes-and-the-pool)): a guess can only be tried by connecting, the sender sees it fail and gets a new code, and nothing anyone records, the server included, lets them test a guess afterwards ([§4.3](#43-cpace-typed-codes)). Only a code's locator reaches the server, and a used locator waits 5 minutes before it's given out again. Each address holds at most 5 unused codes by default, and the rendezvous's sockets pass the server's rate limiter.

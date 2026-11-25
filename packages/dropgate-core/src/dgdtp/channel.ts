@@ -1013,6 +1013,8 @@ export class SenderRoom {
   readonly #incoming: IncomingAttempt[] = [];
   readonly #waiting: Array<{ resolve: (attempt: IncomingAttempt) => void; reject: (err: unknown) => void }> = [];
   readonly #listeners = new Set<() => void>();
+  /** Every attempt ID the room has taken, in any mode: one seen again is refused before any key is made. */
+  readonly #attemptIds = new Set<string>();
   #ended: DropgateError | undefined;
 
   /** @internal openRoom() makes these. */
@@ -1090,6 +1092,17 @@ export class SenderRoom {
     }
   }
 
+  /** Drops an attempt the room won't take: its pipe closed, and its code's password, if it had one, let go. */
+  drop(attempt: IncomingAttempt): void {
+    this.#bound.get(attempt)?.password.forget();
+    this.#bound.delete(attempt);
+    try {
+      attempt.pipe.close();
+    } catch {
+      // Already gone.
+    }
+  }
+
   #notify(): void {
     for (const listener of [...this.#listeners]) {
       try {
@@ -1147,10 +1160,26 @@ export class SenderRoom {
   }
 
   /**
+   * Takes an attempt's ID for this room, once: an ID the room has taken before
+   * is SECURITY_POLICY_MISMATCH. By link and on resume an attempt's keys come
+   * from the ID in the receiver's first frame, so the same first frame again
+   * would make the same keys, and anything sealed for it would reuse a key and
+   * nonce already used; the rendezvous could send it as often as it liked.
+   */
+  #takeAttemptId(attemptId: Uint8Array): void {
+    // One character per byte: two IDs are the same key only if they're the same bytes.
+    const id = String.fromCharCode(...attemptId);
+    if (this.#attemptIds.has(id)) throw insecure();
+    this.#attemptIds.add(id);
+  }
+
+  /**
    * Takes one attempt to its secure channel. By code: CPace as the responder,
    * once per code, right or wrong (the code is gone afterwards; the link still
    * works). By link: the attempt's keys from the attempt ID in the receiver's
-   * first frame. A resume: keys from R, the generation one past the last.
+   * first frame. A resume: keys from R, the generation one past the last. In
+   * every mode, an attempt ID the room has taken already ends the attempt
+   * (SECURITY_POLICY_MISMATCH) before any key is made or anything sealed.
    */
   async accept(attempt: IncomingAttempt, options: AttemptOptions & { peer: PeerConnection }): Promise<SecureChannel> {
     const { peer } = options ?? ({} as never);
@@ -1184,7 +1213,9 @@ export class SenderRoom {
           let keys: AttemptKeys;
           try {
             // The attempt ID comes in message 1: CPace binds it, and the key schedule uses it.
-            const { message2, attemptId } = await exchange.readMessage1(await firstMessage(pipe));
+            const message1 = await firstMessage(pipe);
+            if (message1.byteLength >= CPACE_ATTEMPT_ID_BYTES) this.#takeAttemptId(message1.subarray(0, CPACE_ATTEMPT_ID_BYTES));
+            const { message2, attemptId } = await exchange.readMessage1(message1);
             pipe.send(message2);
             ({ result: keys } = await exchange.readMessage3(await firstMessage(pipe), (isk) =>
               deriveAttemptKeys(provider, { mode: 'code', base: isk, roomNonce, attemptId })));
@@ -1205,7 +1236,9 @@ export class SenderRoom {
       const generation = nextGeneration(attempt.previousGeneration);
       return guarded('sender', open, async () => {
         const first = await firstMessage(pipe);
-        const keys = await deriveAttemptKeys(provider, { mode: 'resume', base: resumeSecret, roomNonce, attemptId: attemptIdIn(first) });
+        const attemptId = attemptIdIn(first);
+        this.#takeAttemptId(attemptId);
+        const keys = await deriveAttemptKeys(provider, { mode: 'resume', base: resumeSecret, roomNonce, attemptId });
         return senderAttempt(provider, keys, pipe, peer, generation, hello, timers, first);
       }, timers);
     }
@@ -1214,7 +1247,9 @@ export class SenderRoom {
       const secret = this.#secret;
       if (!secret) throw invalid('This room is closed.');
       const first = await firstMessage(pipe);
-      const keys = await deriveAttemptKeys(provider, { mode: 'link', base: secret, roomNonce, attemptId: attemptIdIn(first) });
+      const attemptId = attemptIdIn(first);
+      this.#takeAttemptId(attemptId);
+      const keys = await deriveAttemptKeys(provider, { mode: 'link', base: secret, roomNonce, attemptId });
       return senderAttempt(provider, keys, pipe, peer, 0n, hello, timers, first);
     }, timers);
   }
