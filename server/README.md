@@ -151,6 +151,7 @@ Images are built for `linux/amd64` and `linux/arm64`. Each release's image is ta
 | `LOG_LEVEL` | `INFO` | `NONE`, `ERROR`, `WARN`, `INFO`, `DEBUG`. At `NONE` the server writes nothing at all, errors included. |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window in milliseconds (`0` disables rate limiting). |
 | `RATE_LIMIT_MAX_REQUESTS` | `25` | Requests allowed per window (`0` disables rate limiting). |
+| `TRUST_PROXY` | none | How many reverse proxies are in front of the server, so the client's address is the one the first of them adds to `X-Forwarded-For`: `1` (or `true`) behind one, a whole number for more. Unset, empty, `0` or `false`, no proxy is trusted, and a client's address is its connection's. The rate limiter and the limits by address count by it. **Behind a reverse proxy, set it** (`TRUST_PROXY=1` for one), or every client shares the proxy's address; reached directly, leave it unset, or a client can name any address it likes. Anything else stops the server at startup; the value is logged at `INFO` as it starts. **Changed in 4.0:** Dropgate 3 always trusted one proxy (see [HTTPS / Reverse Proxy Setup](#https--reverse-proxy-setup)). |
 
 ### Hosted Uploads (classic mode)
 
@@ -248,6 +249,8 @@ Run the server behind a reverse proxy that terminates TLS:
 * [Caddy](https://caddyserver.com/)
 * [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)
 * [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/)
+
+**Set `TRUST_PROXY` to how many there are in front of the server: `TRUST_PROXY=1` behind one.** The server then takes each client's address from the `X-Forwarded-For` header the proxy adds, for the rate limiter and the limits by address. Unset, it trusts no proxy and counts every request by the address it came from: behind a proxy that's the proxy's own, so all clients share one count, and the server warns once, at the first request carrying `X-Forwarded-For`. Leave it unset for a server reached directly, such as one on a local network, where a client could otherwise name its own address in the header. **Changed in 4.0:** Dropgate 3 always trusted one proxy, so a Dropgate 3 server behind one needs `TRUST_PROXY=1` added when it moves to 4. A tunnel such as Cloudflare Tunnel or Tailscale Funnel connects to the server as a proxy does, and needs it set too.
 
 On plain HTTP, even on `localhost` or `127.0.0.1`, the Web UI encrypts uploads, since browsers count localhost as secure. An upload's download page, `https://<host>/<id>`, one file or several, is served over HTTP and HTTPS alike: the page itself checks whether the browser can decrypt there, so on localhost an encrypted upload downloads, and over plain HTTP from another machine the page says it needs HTTPS. (In 3.x, an encrypted bundle's page needed HTTPS even on localhost; that's fixed in 4.0.) A Dropgate 3 bundle's link, `https://<host>/b/<id>`, answers 410 with a page saying it was made with an older version. A Dropgate 3 single file's link, `https://<host>/<id>#<key>`, names an upload the server doesn't have, so it answers 404, and the page, reading the key's older shape in the browser, says the same.
 

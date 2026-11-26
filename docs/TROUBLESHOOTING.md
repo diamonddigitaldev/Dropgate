@@ -137,6 +137,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 ## 6) Rate limiting
 
 If clients see “Too many requests”:
+- Behind a reverse proxy or a tunnel, check `TRUST_PROXY` is set (`TRUST_PROXY=1` for one proxy). Unset, the server counts every client as the proxy's one address, so a few clients together reach the limit; it warns once in its log, at the first request through the proxy. This changed in 4.0: Dropgate 3 always trusted one proxy.
 - Increase `RATE_LIMIT_MAX_REQUESTS` or `RATE_LIMIT_WINDOW_MS`.
 - Or disable rate limiting by setting both to `0`.
 

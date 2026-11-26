@@ -32,7 +32,7 @@ If you’re running a public instance, this is one of the key ways the project t
 **Everything the server writes goes through `LOG_LEVEL`,** errors included (test: [nothing reaches stdout or stderr outside LOG_LEVEL](../server/test/privacy-logs.test.mjs)):
 
 - **Unexpected errors** are logged at `ERROR` by the kind of error and the route's pattern only, such as `GET /api/v4/objects/:id (Error, EISDIR)`: never the error's message or stack trace, which could hold the internal path of a stored upload (and so its ID) or part of a request body. The answer to the request says only that something went wrong (tests: [an error while answering gives 500 SERVER_ERROR, and the log names the route's pattern, never its ID](../server/test/api.test.mjs); [a request body that can't be read answers 400 INVALID_REQUEST…](../server/test/api.test.mjs)).
-- **A misconfigured reverse proxy,** one that passes a client address the rate limiter can't read (for example `IP:port`), is logged at `ERROR` by the rate limiter's error code, never the address (test: [a client address the rate limiter can't read is logged by its code alone, and not at all at NONE](../server/test/api.test.mjs)).
+- **A misconfigured reverse proxy,** one that passes a client address the rate limiter can't read (for example `IP:port`), is logged at `ERROR` by the rate limiter's error code, never the address (test: [a client address the rate limiter can't read is logged by its code alone, and not at all at NONE](../server/test/api.test.mjs)). One with `TRUST_PROXY` unset, whose `X-Forwarded-For` the server doesn't believe, is warned of once at `WARN`, never naming the address (test: [with no proxy trusted, a request with X-Forwarded-For is warned of once…](../server/test/client-address.test.mjs)).
 
 ---
 

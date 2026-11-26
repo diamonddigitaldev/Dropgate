@@ -9,6 +9,11 @@ services:
       - ENABLE_UPLOAD=true
       - UPLOAD_ENABLE_E2EE=true
       - UPLOAD_MAX_FILE_SIZE_MB=100
+      # Behind a reverse proxy (or a tunnel such as Cloudflare Tunnel), say how
+      # many: each client's address is then the one the proxy passes on, for the
+      # rate limiter and the limits by address. Unset, the server trusts no proxy,
+      # and every client behind one shares the proxy's address.
+      # - TRUST_PROXY=1
       # Keep uploads across restarts (they're in the data volume below)
       # - UPLOAD_PRESERVE_UPLOADS=true
     volumes:

@@ -481,7 +481,23 @@ if (enableUpload) {
 createDirIfNotExists(dataDir);
 log('info', 'Configuring server endpoints and middleware...');
 
-app.set('trust proxy', 1); // Trust the first hop from a reverse proxy
+// How many reverse proxies in front of the server add the client's address to
+// X-Forwarded-For, so their last that many hops are believed: none unless the
+// operator says so, and then the client's address is the socket's. A server
+// reached directly that believed the header would let each client name its
+// own address, for the rate limiter and every count by address.
+const parseTrustProxy = (raw) => {
+    const text = raw === undefined ? '' : raw.trim().toLowerCase();
+    if (text === '' || text === 'false' || text === '0') return 0;
+    if (text === 'true') return 1;
+    if (/^\d{1,3}$/.test(text)) return Number(text);
+    return refuseSetting('Invalid TRUST_PROXY environment variable. It must be how many reverse proxies are in front of the server: 1 behind one, a whole number for more, true for 1, or 0, false or nothing for none (the client\'s address is then the connection\'s).');
+};
+const trustProxyHops = parseTrustProxy(process.env.TRUST_PROXY);
+log('info', `TRUST_PROXY: ${trustProxyHops === 0
+    ? '0 (no reverse proxy: each client\'s address is its connection\'s)'
+    : `${trustProxyHops} (the client's address is the one ${trustProxyHops === 1 ? 'the reverse proxy' : `the first of ${trustProxyHops} reverse proxies`} adds to X-Forwarded-For)`}`);
+app.set('trust proxy', trustProxyHops === 0 ? false : trustProxyHops);
 app.disable('x-powered-by');
 
 // Templating
@@ -625,7 +641,11 @@ if (Number(rateLimitMaxRequests) > 0 && Number(rateLimitWindowMs) > 0) {
         // messages can quote the address.
         logger: {
             warn: (err) => log('warn', `The rate limiter reported a problem with the server's setup${describeError(err)}.`),
-            error: (err) => log('error', `The rate limiter reported a problem with the server's setup${describeError(err)}.`),
+            // The first request came with X-Forwarded-For, which TRUST_PROXY=0 doesn't believe: most likely a
+            // reverse proxy the operator hasn't set it for.
+            error: (err) => (err?.code === 'ERR_ERL_UNEXPECTED_X_FORWARDED_FOR'
+                ? log('warn', 'A request came with X-Forwarded-For, which isn\'t believed while TRUST_PROXY is 0. Behind a reverse proxy, set TRUST_PROXY=1, or every client shares the proxy\'s address for the rate limiter and the limits by address.')
+                : log('error', `The rate limiter reported a problem with the server's setup${describeError(err)}.`)),
         },
         handler: (_req, res) => {
             log('warn', 'Rate limit triggered. Request blocked.');
@@ -1536,7 +1556,7 @@ const rendezvous = enableP2P ? createRendezvous({
 
 /**
  * Runs the rate limiter on a WebSocket upgrade, as on any request: its address
- * is read with the server's own rule (`trust proxy`), which the raw request
+ * is read with the server's own rule (TRUST_PROXY), which the raw request
  * Node hands an upgrade doesn't have. Calls `next` with Express's request and
  * response if it may go on, the response still able to answer it over the
  * socket (detach the socket from it to hand it on); otherwise it has been

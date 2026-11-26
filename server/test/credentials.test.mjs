@@ -10,7 +10,7 @@ import { CREDENTIAL_TOKEN, runFixture } from './helpers/fixture.mjs';
 import { SMALL_CHUNKS, answer, contentDigest, fileBytes, plainObject, startBody } from './helpers/dgup4.mjs';
 
 test('the server asks no credential, and a client with an auth provider sends none', async (t) => {
-    const server = await startServer({ env: { ENABLE_UPLOAD: 'true' } });
+    const server = await startServer({ env: { ENABLE_UPLOAD: 'true', TRUST_PROXY: '1' } });
     t.after(server.stop);
 
     const info = await (await fetch(`${server.baseUrl}/api/info`)).json();

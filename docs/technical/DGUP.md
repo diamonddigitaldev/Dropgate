@@ -659,7 +659,7 @@ The server enforces a request rate limit to protect against abuse. The defaults 
 | Window | 60,000 ms |
 | Maximum requests per window | 25 |
 
-Rate limits are applied per IP address, in memory. When triggered, the server responds with HTTP 429, `RATE_LIMITED`, and `Retry-After` gives the seconds until the window resets. Uploads and downloads skip the limit for an upload in progress, a stored upload that's there, and an open download lease ([§5.8](#58-rate-limits-and-credentials), [§6.6](#66-rate-limits)).
+Rate limits are applied per IP address, in memory: the connection's, or, with `TRUST_PROXY` set to how many reverse proxies are in front, the one the first of them adds to `X-Forwarded-For` (an IPv6 address counts with the rest of its /56). When triggered, the server responds with HTTP 429, `RATE_LIMITED`, and `Retry-After` gives the seconds until the window resets. Uploads and downloads skip the limit for an upload in progress, a stored upload that's there, and an open download lease ([§5.8](#58-rate-limits-and-credentials), [§6.6](#66-rate-limits)).
 
 ### 12.2 Cross-Origin Requests
 

@@ -8,7 +8,8 @@ import { QUIET_MS, SMALL_CHUNKS, plainObject, fileBytes, runDownloads, runUpload
 import { runRendezvous } from './helpers/rendezvous.mjs';
 
 // Each run's uploads and downloads are within the rate limit, which stays on.
-const UPLOADS = { ENABLE_UPLOAD: 'true', UPLOAD_CHUNK_SIZE_BYTES: SMALL_CHUNKS, RATE_LIMIT_MAX_REQUESTS: '100' };
+// Behind one reverse proxy, as the fixtures' X-Forwarded-For says: the client's address reaches the rate limiter and the counts.
+const UPLOADS = { ENABLE_UPLOAD: 'true', UPLOAD_CHUNK_SIZE_BYTES: SMALL_CHUNKS, RATE_LIMIT_MAX_REQUESTS: '100', TRUST_PROXY: '1' };
 
 // Dropgate's own log lines: "[<ISO time>] [LEVEL] message".
 const OWN_LINE = /^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\] \[(ERROR|WARN|INFO|DEBUG)\] (.*)$/;

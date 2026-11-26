@@ -87,7 +87,7 @@ test('a client address the rate limiter can\'t read is logged by its code alone,
     // A reverse proxy that passes the client's port along with its address.
     const address = '203.0.113.9:4567';
     for (const level of ['NONE', 'ERROR']) {
-        const server = await startServer({ env: { LOG_LEVEL: level } });
+        const server = await startServer({ env: { LOG_LEVEL: level, TRUST_PROXY: '1' } });
         try {
             const res = await fetch(`${server.baseUrl}/api/info`, { headers: { 'X-Forwarded-For': address } });
             assert.equal(res.status, 200);

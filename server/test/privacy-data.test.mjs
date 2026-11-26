@@ -19,7 +19,7 @@ describe('what the server stores', () => {
     let stored = [];
 
     before(async () => {
-        server = await startServer({ env: { ENABLE_UPLOAD: 'true', UPLOAD_PRESERVE_UPLOADS: 'true' } });
+        server = await startServer({ env: { ENABLE_UPLOAD: 'true', UPLOAD_PRESERVE_UPLOADS: 'true', TRUST_PROXY: '1' } });
         const { upload } = await createClient(server, createRecorder());
         await upload(fixtureFiles.encrypted(), true);
         await upload(fixtureFiles.plain(), false);
@@ -173,7 +173,7 @@ describe('responses, and what is left after the download limit', () => {
     let fixture;
 
     before(async () => {
-        server = await startServer({ env: { ENABLE_UPLOAD: 'true' } });
+        server = await startServer({ env: { ENABLE_UPLOAD: 'true', TRUST_PROXY: '1' } });
         fixture = await runFixture(server);
         for (const route of ['/js/theme.js', '/vendor/bootstrap/bootstrap.min.css', '/vendor/streamsaver/mitm.html', '/peerjs/peerjs/id', '/upload/init', '/no-such-page']) {
             await (await fixture.fetch(server.baseUrl + route)).arrayBuffer();

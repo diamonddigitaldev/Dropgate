@@ -23,7 +23,7 @@ export const serverVersion = JSON.parse(
 // Settings the server reads from the environment. Anything inherited from the
 // shell is dropped so every test starts from the server's own defaults.
 // NODE_ENV matters too: Express stops printing error stacks when it is 'test'.
-const SERVER_ENV = /^(SERVER_|ENABLE_|UPLOAD_|RATE_LIMIT_|P2P_|PEERJS_|LOG_LEVEL$|NODE_ENV$)/;
+const SERVER_ENV = /^(SERVER_|ENABLE_|UPLOAD_|RATE_LIMIT_|P2P_|PEERJS_|TRUST_PROXY$|LOG_LEVEL$|NODE_ENV$)/;
 
 const freePort = () => new Promise((resolve, reject) => {
     const srv = net.createServer();

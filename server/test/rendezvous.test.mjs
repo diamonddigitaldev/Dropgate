@@ -616,8 +616,8 @@ function listFiles(dir) {
 }
 
 describe('the rendezvous upgrade', () => {
-    test('goes through the rate limiter, counted by the address the one-hop proxy rule gives, and is answered 429 past it', async (t) => {
-        const server = await startServer({ held: true, env: { RATE_LIMIT_MAX_REQUESTS: '2' } });
+    test('goes through the rate limiter, counted by the address TRUST_PROXY gives (one proxy here), and is answered 429 past it', async (t) => {
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '2' } });
         t.after(server.stop);
         const from = (address) => ({ headers: { 'X-Forwarded-For': `198.51.100.1, ${address}` } });
         assert.equal(await upgradeRefused(server, from('203.0.113.1')), null);
@@ -625,7 +625,7 @@ describe('the rendezvous upgrade', () => {
         assert.deepEqual(await upgradeRefused(server, from('203.0.113.1')), {
             status: 429, body: JSON.stringify({ code: 'RATE_LIMITED', error: 'Too many requests, please try again later.' }),
         });
-        // The last address in X-Forwarded-For is the client's, by the server's own rule: another has its own count.
+        // The last address in X-Forwarded-For is the client's, behind one proxy: another has its own count.
         assert.equal(await upgradeRefused(server, from('203.0.113.2')), null);
         await heldBecomes(server, NOTHING_HELD);
     });
@@ -747,7 +747,7 @@ const everyLocator = (letters) => {
     for (let i = 0; i < letters; i++) all = all.flatMap((start) => [...CODE_LETTERS].map((letter) => start + letter));
     return all;
 };
-/** A proxy saying the connection came from this address (the server trusts one hop). */
+/** A proxy saying the connection came from this address (a test that uses it sets TRUST_PROXY=1). */
 const from = (address) => ({ headers: { 'X-Forwarded-For': address } });
 
 /** Expects a socket to be refused with this ERROR, and closed. */
@@ -785,7 +785,7 @@ describe('codes', () => {
     const own = () => from(`198.51.100.${++addresses}`);
 
     before(async () => {
-        server = await startServer({ held: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
     });
 
     after(() => server?.stop());
@@ -1151,7 +1151,7 @@ const formsOf = (address) => {
 
 describe('the per-address count of unused codes', () => {
     test('a sixth unused code from one address gives a room with no code, which works by link, while another address still gets codes; a code used up lets it have another', async (t) => {
-        const server = await startServer({ held: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
         t.after(server.stop);
         const a = from('203.0.113.10');
         const five = [];
@@ -1174,7 +1174,7 @@ describe('the per-address count of unused codes', () => {
     });
 
     test("an address is counted as the rate limiter counts it: an IPv4 address in either of its forms, an IPv6 address by its /56 network", async (t) => {
-        const server = await startServer({ held: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
         t.after(server.stop);
         const capOf = async (addresses) => {
             const rooms = [];
@@ -1193,7 +1193,7 @@ describe('the per-address count of unused codes', () => {
     });
 
     test('holds no address: its keys are 16-byte keyed hashes, an entry goes at 0, and after a restart the same addresses have other keys and the same cap; nothing on disk, in memory or in the log', async (t) => {
-        const server = await startServer({ held: true, env: { RATE_LIMIT_MAX_REQUESTS: '0', LOG_LEVEL: 'DEBUG' } });
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0', LOG_LEVEL: 'DEBUG' } });
         t.after(server.stop);
         const addresses = ['203.0.113.50', '2001:db8:5:100::1', '::ffff:192.0.2.33'];
         const forms = addresses.map(formsOf);

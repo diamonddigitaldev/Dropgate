@@ -496,7 +496,7 @@ The rendezvous is the Dropgate Server's part in a direct transfer ([`server/rend
 ### 5.1 The Connection
 
 - **One WebSocket per device** at `/api/v4/rendezvous`, over `wss:` (or `ws:` to a server on plain HTTP, which a client reaches only with `allowInsecure`). The sender's one socket holds its room; each receiver's attempt has a socket of its own, kept for the whole transfer. Nothing about a room, a code or a link is in the address, so a reverse proxy's log sees that path alone.
-- **The upgrade goes through the server's rate limiter** like any request, the address read with the server's one-hop rule (the last address a trusted proxy added, else the socket's). There's no `Origin` check: nothing rides on the socket by itself (no cookie), and a credential, when one is needed, is in a message.
+- **The upgrade goes through the server's rate limiter** like any request, the address read by the server's own rule: the socket's, unless `TRUST_PROXY` says how many reverse proxies are in front, and then the one the first of them added to `X-Forwarded-For` (the last address with one proxy). The code count ([§6](#6-codes-and-the-pool)) counts by the same address. There's no `Origin` check: nothing rides on the socket by itself (no cookie), and a credential, when one is needed, is in a message.
 - **Binary messages only,** at most 8,232 bytes: a text message, or a bigger one, closes the socket. Each message is a type byte, then fixed fields, big-endian.
 - **Pings:** the server pings every socket every 30 seconds and closes one it hasn't heard from in 60, and closes one with more than 1 MiB waiting to be sent to it, so a slow reader can't make it hold data.
 
@@ -871,6 +871,7 @@ A page that closes mid-transfer tells the other device it closed, best effort ([
 | `P2P_LOCATOR_LETTERS` | `2` | How many of a code's letters are the rendezvous's locator: `2` (576 codes at once) or `3` (13,824). |
 | `P2P_MAX_CODES_PER_IP` | `5` | The most unused codes one address holds at once; `0` turns codes off. |
 | `PEERJS_DEBUG` | — | Removed in Dropgate 4: set to anything, the server warns once at startup that it's ignored. |
+| `TRUST_PROXY` | none | How many reverse proxies are in front of the server: `1` (or `true`) behind one; unset, `0` or `false`, none, and a device's address is its connection's. The rendezvous's upgrade passes the rate limiter, and its code count counts, by the address it gives ([§5.1](#51-the-connection)). Anything else stops the server at startup. |
 
 ### 20.2 Client Configuration Options
 
@@ -898,6 +899,7 @@ The secure channel's, the rendezvous client's and the engine's constants are in 
 ### 23.1 Server Deployment
 
 - **Deploy the Dropgate Server behind HTTPS.** Browsers allow direct transfers only in a secure context, and the rendezvous MUST be reached over HTTPS and WSS (or `localhost` for development). A reverse proxy has to pass WebSocket upgrades on `/api/v4/rendezvous`.
+- **Say how many proxies are in front** with `TRUST_PROXY` (`TRUST_PROXY=1` behind one), so the code count counts each device's own address, not the proxy's for all of them; and leave it unset for a server reached directly, so no device can name an address of its choosing ([§5.1](#51-the-connection)).
 - **A server can stop a transfer, not read it.** Everything the rendezvous relays is sealed, and both devices' certificates are checked inside the encrypted handshake, so a server that changes anything ends the connection ([§4.1](#41-what-it-protects-and-what-it-doesnt)).
 - **Choose the STUN server.** Cloudflare's is the default and suits most servers. For privacy, offer one you run, or none (`P2P_STUN_SERVERS=none`), for devices that reach each other directly.
 - **Size the pool.** 2 letters give 576 codes at once; on a busy server, 3 give 13,824. Links work whatever the pool holds.
