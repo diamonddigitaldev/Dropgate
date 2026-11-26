@@ -158,6 +158,8 @@ The upload's **manage token**, which deletes it ([DGUP §7](./DGUP.md#7-the-uplo
 
 Several files are one upload: one secret, one manage token and one link for all of them.
 
+**The browser's history keeps the link, key and all.** An upload's download page reads the secret from after the `#` and leaves it in its address, as Dropgate 3's did, so a reload still opens the upload. So the browser holds the whole link, the key with it, wherever it keeps addresses: the address bar, the tab's history, the browser's history, and any history it syncs to an account or another device, until it's cleared there. Anyone who can read that history can open the upload while it lasts. Where that matters, open the link in a private window, or clear it from the history once the files are saved. (A direct transfer's receive page is different: it takes a link's secret out of its address at Connect, and a typed code at once, putting `/p2p` in its place in the tab's history: [DGDTP §4.16](./DGDTP.md#416-in-the-web-ui).)
+
 ### 3.4 Server's Cryptographic Capabilities
 
 The server has no access to encryption keys and therefore **cannot**:
@@ -425,6 +427,8 @@ Each check sends requests to GitHub (`github.com`, and GitHub's release-asset ho
 - The user agent `electron-builder` and the system's preferred languages (`Accept-Language`). The check doesn't send the installed Dropgate version or any user details.
 
 When a check finds an update, the client downloads it from GitHub straight away, unless **Download updates automatically** is off in **Settings**, under **Update**, and installs it when you close the app. Those downloads send the same headers.
+
+**What an update is checked against.** A downloaded update is checked only against the SHA-512 in the release's update file (`latest.yml`, or its channel's, such as `beta.yml`), which comes from the same GitHub release, and the installers aren't code-signed. So the check catches a download that went wrong on the way, but whoever can publish a release on Dropgate's GitHub repository (or takes over the account that can) could publish an update that every install would be offered, and that one with automatic downloads on would download and install as it closes. This will be revisited when the builds are code-signed. An update never goes to an older version.
 
 With a network adapter chosen in **Settings**, under **Network**, every check and download goes through that adapter, from a launch's first check on, so GitHub sees the address it connects from; with the adapter gone, a check fails and reaches nothing, and none goes out another way (tests: [with an adapter chosen, every request of a check and a download comes from its address; with it gone, none reaches the server; with Any, as ever](../../tests/integration/desktop/updates.spec.mjs); [a saved adapter that is not there: the check at launch reaches nothing, and says it could not check](../../tests/integration/desktop/updates.spec.mjs)).
 
