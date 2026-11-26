@@ -4,15 +4,16 @@
 <head>
   <%- include('../partials/head-meta') %>
   <link rel="stylesheet" href="/css/download-common.css" />
+  <link rel="stylesheet" href="/css/code-input.css" />
 
   <script src="/vendor/streamsaver/streamsaver.js"></script>
-  <script nonce="<%= nonce %>">streamSaver.mitm = '/vendor/streamsaver/mitm.html';</script>
+  <script nonce="<%= nonce %>">if (window.streamSaver) streamSaver.mitm = '/vendor/streamsaver/mitm.html';</script>
   <script src="/js/theme.js" defer></script>
-  <script type="module" src="/js/page-common.js"></script>
+  <%# The page asks the server nothing until someone connects: download-p2p.js says when. %>
   <script type="module" src="/js/download-p2p.js"></script>
 </head>
 
-<body data-code="<%= code %>">
+<body>
   <main>
     <div class="container-main text-center">
       <%- include('../partials/header') %>
@@ -21,57 +22,74 @@
       <div id="status-card" class="card shadow-sm border border-primary">
         <div class="card-body p-4">
           <div id="icon-container" class="mb-3 text-primary"><span class="material-icons-round">sync_alt</span></div>
-          <h5 class="card-title mb-2" id="title">Connecting...</h5>
-          <p class="card-text text-body-secondary" id="message">Preparing a secure peer-to-peer connection.</p>
+          <h5 class="card-title mb-2" id="title">Direct Transfer</h5>
+          <p class="card-text text-body-secondary" id="message">Opening the transfer…</p>
 
-          <div id="file-details" class="mt-4" style="display: none;">
+          <button id="connect-button" class="btn btn-primary" type="button" hidden>Connect</button>
+
+          <div id="file-details" class="mt-4" hidden>
             <div class="row g-3 justify-content-center">
               <div class="col-md-6">
                 <div id="file-name-label" class="file-label">File name</div>
-                <div class="file-value" id="file-name">Loading...</div>
+                <div class="file-value text-break" id="file-name"></div>
               </div>
               <div class="col-md-6">
-                <div class="file-label">File size</div>
-                <div class="file-value" id="file-size">Loading...</div>
+                <div id="file-size-label" class="file-label">File size</div>
+                <div class="file-value" id="file-size"></div>
               </div>
             </div>
 
-            <div id="p2p-file-list-container" class="mt-3" style="display: none;">
-              <button id="p2p-toggle-file-list" class="btn btn-sm btn-outline-secondary mb-2">
-                <span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;">expand_more</span>
-                Show files
+            <div id="p2p-file-list-container" class="mt-3" hidden>
+              <button id="p2p-toggle-file-list" class="btn btn-sm btn-outline-secondary mb-2" type="button" aria-expanded="false" aria-controls="p2p-file-list">
+                <span class="material-icons-round" style="font-size: 1rem; vertical-align: middle;" aria-hidden="true">expand_more</span>
+                <span id="p2p-toggle-file-list-text">Show Files</span>
               </button>
-              <div id="p2p-file-list" class="text-start" style="display: none;">
+              <div id="p2p-file-list" class="text-start" hidden>
                 <ul id="p2p-file-list-items" class="list-group list-group-flush"></ul>
               </div>
             </div>
           </div>
 
-          <button id="download-button" class="btn btn-primary" style="display: none;">Start Transfer</button>
+          <%# Hidden on a wrapper: Bootstrap's d-flex outranks the hidden attribute. %>
+          <div id="offer-actions" hidden>
+            <div class="d-flex flex-wrap justify-content-center align-items-center gap-2 mt-3">
+              <button id="download-button" class="btn btn-primary" type="button" style="margin-top: 0;">Download</button>
+              <button id="decline-button" class="btn btn-secondary" type="button">Decline</button>
+            </div>
+          </div>
 
-          <div id="meta" class="text-body-secondary small" style="min-height: 1.25rem;"></div>
-
-          <div id="progress-container" style="display: none;">
-            <div class="progress mt-3" role="progressbar" style="height: 6px;">
+          <div id="progress-container" hidden>
+            <div class="progress mt-3" role="progressbar" aria-label="Transfer progress" style="height: 6px;">
               <div id="bar" class="progress-bar" style="width: 0%"></div>
             </div>
             <div class="progress-info text-body-secondary">
-              <span id="bytes">Establishing connection...</span>
+              <span id="bytes">0 B / 0 B</span>
             </div>
           </div>
 
-          <button id="cancel-button" class="btn btn-secondary mt-3" style="display: none;">Cancel Transfer</button>
+          <div id="meta" class="text-body-secondary small" style="min-height: 1.25rem;"></div>
 
-          <div id="actions" class="mt-3" hidden>
-            <button class="btn btn-secondary" id="retryBtn" type="button">Retry</button>
+          <div class="d-flex flex-wrap justify-content-center gap-2 mt-3">
+            <button id="pause-button" class="btn btn-outline-primary" type="button" hidden>Pause</button>
+            <button id="resume-button" class="btn btn-primary" type="button" hidden>Resume</button>
+            <button id="cancel-button" class="btn btn-secondary" type="button" hidden>Cancel</button>
+            <button id="retry-button" class="btn btn-secondary" type="button" hidden>Retry</button>
           </div>
+        </div>
+      </div>
+
+      <%# A bare /p2p, or a code that didn't connect: the code entry. %>
+      <div class="card shadow-sm mt-4" id="code-card" hidden>
+        <div class="card-body p-4">
+          <h2 class="h5 fw-semibold mb-3">Enter Sharing Code</h2>
+          <%- include('../partials/code-entry') %>
         </div>
       </div>
 
       <div id="how-it-works" class="text-body-secondary mt-4">
         <strong>How does this work?</strong><br>
-        <p class="mb-0">Your browser connects directly to the sender. The server only helps the two peers find each
-          other.</p>
+        <p class="mb-0">Your browser connects directly to the sender. The server only helps the two devices find each
+          other, and never sees the files, their names or the keys.</p>
       </div>
     </div>
   </main>

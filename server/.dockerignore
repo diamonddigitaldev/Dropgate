@@ -7,5 +7,6 @@ jsconfig.json
 .git
 .gitignore
 uploads
-LICENSE
+data
+test
 README.md

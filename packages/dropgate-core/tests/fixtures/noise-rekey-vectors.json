@@ -1,0 +1,242 @@
+{
+  "about": "Rekey vectors for Noise_NNpsk0_25519_AESGCM_SHA256 as DGDTP 4 uses it: Rekey() after every rekeyEvery records in each direction (65,536 in Dropgate; lower only in a test build), the nonce never reset. Made by tests/helpers/reference-noise.mjs, a second implementation on node:crypto written from the Noise Protocol Framework (revision 34) and Dropgate's rules for it, not from core. Handshake payloads are empty; record i in direction d (1 initiator to responder, 2 back) is the byte d then i as 8 bytes big-endian. keys[].k is the key a direction holds after afterRecords records (0: the key Split() gives).",
+  "protocol": "Noise_NNpsk0_25519_AESGCM_SHA256",
+  "inputs": {
+    "prologue": "64726f70676174652f34206e6f6973652072656b657920766563746f72a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+    "psk": "9e27febb0364c71430c73c16e65e7d0e9c533c2ed30adadc65c0bb60588c5623",
+    "initEphemeral": "db2312bcfaed87de2a3bf23280c41b98a975dbd62ed3f718546b3bb532efb174",
+    "respEphemeral": "574094cf9dd893c76e4b2908a4a70140b668cea35db7a0ad03131f5729e8fe2d"
+  },
+  "runs": [
+    {
+      "name": "Dropgate's own: past 65,536 records each way",
+      "rekeyEvery": 65536,
+      "records": 65540,
+      "handshakeHash": "d6360431dab1c84ef6ecdb1e68fecd1a19bb15625f741b426c0c921d70012ca6",
+      "message1": "9e44ffc862bff29f8fd24447e66400163e9f4591b31b21aa840babdef8454a3bf651934087426ba8f7199705d4933bd0",
+      "message2": "ecbac7f780a61751c36d447e4febfc400e4e071a175f3363d80c4bf0fcefdd6e786501ac4cb4340e167b4172ab1fce2f",
+      "initiatorToResponder": {
+        "keys": [
+          {
+            "afterRecords": 0,
+            "k": "82757fea74de0b94662a47b27bcf68dfc601a54469d21e603f1041330e0d569d"
+          },
+          {
+            "afterRecords": 65536,
+            "k": "6267435a2aec154550fbe2fc348e59b29e198c8b3e21df1e3b2070f99a4ca98e"
+          }
+        ],
+        "sha256OfRecords": "e74db133a026fa66303ef464f7c09c535486b002c9f9f6aabd4cf7529ab89cf4",
+        "records": {
+          "0": "f23b13a8a4433b068888da78aec3f2945cf14a5023df7ec0ba",
+          "1": "4e386de599f495a27da135cf459245bab39d9870c4a01b7c8a",
+          "65534": "42001c88014b023d6ea113014b4bef19686ae01cc6a1de4831",
+          "65535": "ac0dc493ed2ef53495cf1cf93c5366001e2f9a038ae78665d7",
+          "65536": "1ba6f8f0997e1af383fd6c2000374f08d21556180f24307e07",
+          "65537": "6b1e602dd40b817c0f1487964be53f2ddfe18e6f7f5b79ea27",
+          "65539": "af6f735f78667743d95fb67f493e2f8bc26f7da589d5e9de48"
+        }
+      },
+      "responderToInitiator": {
+        "keys": [
+          {
+            "afterRecords": 0,
+            "k": "d0e17e87485b6d550165e2474ec711c95101ef497487c5f91ae3edf26b3658ba"
+          },
+          {
+            "afterRecords": 65536,
+            "k": "3c45d758a750c5af57324a1aebc03f70930b7fcebeb7080e530d28abbfe0d901"
+          }
+        ],
+        "sha256OfRecords": "ab18fc950bb5f0e4d6a7556fa44ea745e81dd7a6c513ea649ca0a3ff2e4b9fbb",
+        "records": {
+          "0": "efb878c89d20200efc61809475d740737fcc252d98274f146b",
+          "1": "cbca8772d3de8917711d5fd931e98076eb7329db5de225753d",
+          "65534": "a77c36a205c835aa1fff0a046f183014800256ed5f8ca841bc",
+          "65535": "b66ba40a0681ec13a9340138b188d2bcd521af9f968827f4a1",
+          "65536": "b809a373ccad2e4e6503e3742160b61a67041a1559c65497b5",
+          "65537": "18ab7d92e727a55b98e5eec89ed373eac5f05bbc4f5a28cb2b",
+          "65539": "71d876c9f96df307fe480ec29a7a722652ab52ac211f195a21"
+        }
+      }
+    },
+    {
+      "name": "lowered: every 4 records",
+      "rekeyEvery": 4,
+      "records": 18,
+      "handshakeHash": "d6360431dab1c84ef6ecdb1e68fecd1a19bb15625f741b426c0c921d70012ca6",
+      "message1": "9e44ffc862bff29f8fd24447e66400163e9f4591b31b21aa840babdef8454a3bf651934087426ba8f7199705d4933bd0",
+      "message2": "ecbac7f780a61751c36d447e4febfc400e4e071a175f3363d80c4bf0fcefdd6e786501ac4cb4340e167b4172ab1fce2f",
+      "initiatorToResponder": {
+        "keys": [
+          {
+            "afterRecords": 0,
+            "k": "82757fea74de0b94662a47b27bcf68dfc601a54469d21e603f1041330e0d569d"
+          },
+          {
+            "afterRecords": 4,
+            "k": "6267435a2aec154550fbe2fc348e59b29e198c8b3e21df1e3b2070f99a4ca98e"
+          },
+          {
+            "afterRecords": 8,
+            "k": "014bed9293d45c787fa21515a056c89413f7bfba45721c82763e7a8027d9502c"
+          },
+          {
+            "afterRecords": 12,
+            "k": "6b78195ff590bb020da644bb89e91db423f14b5586f8e0efac3ded6cfa4535b2"
+          },
+          {
+            "afterRecords": 16,
+            "k": "90a78f9b620163aff5244195dabf2a9b1a8de06437a83f8285004550842a599a"
+          }
+        ],
+        "sha256OfRecords": "daffb45cc3a1a8cf0e54c72be7588668f66a293a3c4d713bb745b9418be4cb93",
+        "records": {
+          "0": "f23b13a8a4433b068888da78aec3f2945cf14a5023df7ec0ba",
+          "1": "4e386de599f495a27da135cf459245bab39d9870c4a01b7c8a",
+          "2": "33046b05b81032a86026f787055c5ab04d6c0aecdb3822993a",
+          "3": "5a130c931d17e3de4923e8625c037b82d88d64f96ae707c4db",
+          "4": "045e6e509d7405e14b612fee8f61061b7974f94037f764407a",
+          "5": "6ec0711dbe0654e3fc062a97377cd818856e754b3e391c7b34",
+          "6": "add019f653d2574172e329042d8e7bdd558c335590df0e2d9c",
+          "7": "44f50b2f9e8cf070829885778801a6d679f1046601b4a8f92f",
+          "8": "a82e42bf191cac317658ca0c5a911d305c5dada5cf71fefbc8",
+          "9": "8290c4dbeb35bf7f663faa6cdbc3017e194559e5834b2dd126",
+          "10": "1a7f86f433511c8edeb301143d2a6156aa17b5b5cef79a9045",
+          "11": "aff1f093d61494d653f478bdc88962f634ab32a2d8fa743d73",
+          "12": "7368f5a530338725afbfc98bedfe691f434a60193c8d5d022e",
+          "13": "8f753e5ec93c542f6dbd0036c4a6bfb9f8a389ed80bd8f8f21",
+          "14": "f812d5db03eb9475c759099619d77f7bbceb834d71d23e7434",
+          "15": "3c5923977d651b2d8064555dadd0f67649a7297ea0d2e82abe",
+          "16": "49c73b037d97c53c1a2696df3c9f5887407db5b9b467c86824",
+          "17": "11f305c83444ada1feede093f3ff9178c541eaf5cb6e08a5c9"
+        }
+      },
+      "responderToInitiator": {
+        "keys": [
+          {
+            "afterRecords": 0,
+            "k": "d0e17e87485b6d550165e2474ec711c95101ef497487c5f91ae3edf26b3658ba"
+          },
+          {
+            "afterRecords": 4,
+            "k": "3c45d758a750c5af57324a1aebc03f70930b7fcebeb7080e530d28abbfe0d901"
+          },
+          {
+            "afterRecords": 8,
+            "k": "1f99a87f7d3dff1146ac2e1c6529153bfaac1a605c14722029ea60d25d1fed3d"
+          },
+          {
+            "afterRecords": 12,
+            "k": "87cbd736e04555b508aae72d9ccaa3ebf190f5e48e5403f9e9d2b071301699e4"
+          },
+          {
+            "afterRecords": 16,
+            "k": "185a948fb46a4468ee4bc53aef3069c7cbef5ece7edcf1551e515c554c2b7af4"
+          }
+        ],
+        "sha256OfRecords": "a4177f7da85c05f49c44a2d9acb9bb22f27cac2a6e97702ca80542a268a78328",
+        "records": {
+          "0": "efb878c89d20200efc61809475d740737fcc252d98274f146b",
+          "1": "cbca8772d3de8917711d5fd931e98076eb7329db5de225753d",
+          "2": "f62b5be9e3053e651d35063a3cc67fc6148161b21c52fdfdb7",
+          "3": "c0f325834dae200fa3fbe054f036e5a696d306b31ecbad40b6",
+          "4": "36751b42ef91fe456dda4ce8460e5bf18996dd9767a21b5d23",
+          "5": "06242298ea953bda5a64ab2aba2ead319c6a68f0f814ef0096",
+          "6": "114652a6286366f0e20a46681c4fa48ad0991a268ad8135b54",
+          "7": "e6742aa536c4e22a9d15d669fb062f991b35de365773d96e60",
+          "8": "14f57d29c751d13af01e30cba9e90f3dfdc3380fd949d9f34e",
+          "9": "fa3b36595a13104b8217338512143ddaf879f8f5b1c346a11c",
+          "10": "4f3aa969c5bdd5e5d8783c5f397622a6e376a64e4903323997",
+          "11": "7de3a0da2d2fd9a37c96b6f13e67504498ad48923d713984bc",
+          "12": "9a1d44dcc3d28f2c9e625abc7338346d680686d73e25870dd4",
+          "13": "3dbf0349dedf55e2e2b52e6aec05fac9c6ceb161001b04cbc1",
+          "14": "1bfeb921edbb7fe5ffe5616daf5b563fec6f4c16fedcc0ccd8",
+          "15": "4f9bc6f57062fbafdcdcdb1a4ce1e43a14f5a604a52fe9245c",
+          "16": "9e56d1ce47409782d64e5bb1eb05ddc30888a2bdda5d64a01f",
+          "17": "91bc300174c5beaeab64798643359ad96587e78802cd3586fd"
+        }
+      }
+    },
+    {
+      "name": "lowered: after every record",
+      "rekeyEvery": 1,
+      "records": 5,
+      "handshakeHash": "d6360431dab1c84ef6ecdb1e68fecd1a19bb15625f741b426c0c921d70012ca6",
+      "message1": "9e44ffc862bff29f8fd24447e66400163e9f4591b31b21aa840babdef8454a3bf651934087426ba8f7199705d4933bd0",
+      "message2": "ecbac7f780a61751c36d447e4febfc400e4e071a175f3363d80c4bf0fcefdd6e786501ac4cb4340e167b4172ab1fce2f",
+      "initiatorToResponder": {
+        "keys": [
+          {
+            "afterRecords": 0,
+            "k": "82757fea74de0b94662a47b27bcf68dfc601a54469d21e603f1041330e0d569d"
+          },
+          {
+            "afterRecords": 1,
+            "k": "6267435a2aec154550fbe2fc348e59b29e198c8b3e21df1e3b2070f99a4ca98e"
+          },
+          {
+            "afterRecords": 2,
+            "k": "014bed9293d45c787fa21515a056c89413f7bfba45721c82763e7a8027d9502c"
+          },
+          {
+            "afterRecords": 3,
+            "k": "6b78195ff590bb020da644bb89e91db423f14b5586f8e0efac3ded6cfa4535b2"
+          },
+          {
+            "afterRecords": 4,
+            "k": "90a78f9b620163aff5244195dabf2a9b1a8de06437a83f8285004550842a599a"
+          },
+          {
+            "afterRecords": 5,
+            "k": "0c8f108d7e0598dcda2e1fb7988ea048c62a7b28eb85d8343bd296d3468d2d2d"
+          }
+        ],
+        "sha256OfRecords": "06ce400f8827b5974b33611d958abc570c8bbfdf310b0eaf2740e09cbe6805c0",
+        "records": {
+          "0": "f23b13a8a4433b068888da78aec3f2945cf14a5023df7ec0ba",
+          "1": "583d493ac68f6a07931c48538d9c56479f9cbe8b814fee3b97",
+          "2": "3c69a52bd8e6b8536061758daf26f94a35363ce8f19ca7e2d7",
+          "3": "74870ccd35ab92e085b229d592b905c798b4fb96016386fe80",
+          "4": "584ffbb145b3d718e27378b442ae1f838a8d65c1e359f0f1e0"
+        }
+      },
+      "responderToInitiator": {
+        "keys": [
+          {
+            "afterRecords": 0,
+            "k": "d0e17e87485b6d550165e2474ec711c95101ef497487c5f91ae3edf26b3658ba"
+          },
+          {
+            "afterRecords": 1,
+            "k": "3c45d758a750c5af57324a1aebc03f70930b7fcebeb7080e530d28abbfe0d901"
+          },
+          {
+            "afterRecords": 2,
+            "k": "1f99a87f7d3dff1146ac2e1c6529153bfaac1a605c14722029ea60d25d1fed3d"
+          },
+          {
+            "afterRecords": 3,
+            "k": "87cbd736e04555b508aae72d9ccaa3ebf190f5e48e5403f9e9d2b071301699e4"
+          },
+          {
+            "afterRecords": 4,
+            "k": "185a948fb46a4468ee4bc53aef3069c7cbef5ece7edcf1551e515c554c2b7af4"
+          },
+          {
+            "afterRecords": 5,
+            "k": "3a2f8060ea9487286da4463940bd319232b4d81f7c09e677cc91d8f2d6566e26"
+          }
+        ],
+        "sha256OfRecords": "e06de4ff3fe7eb1812f148e3267f644e68b614cdd0b4ecf48d4f36a94f8ad9b3",
+        "records": {
+          "0": "efb878c89d20200efc61809475d740737fcc252d98274f146b",
+          "1": "e4fbbb9202f8e3724ceed6572740517c0486fd27f3d33315f7",
+          "2": "043f3a34fecc8a290721118856819be7f59276c2cef0a57198",
+          "3": "12697210ff60976434ecf3a173c753deabf6337cfe7fde7d0e",
+          "4": "b983f15a0122637a7bcf66f717fcf20b80f4eb5f34cd372c1c"
+        }
+      }
+    }
+  ]
+}

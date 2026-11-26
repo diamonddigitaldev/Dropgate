@@ -1,7 +1,7 @@
 {
   "name": "@dropgate/core",
   "version": "3.0.13",
-  "description": "Headless Dropgate client library for file uploads and P2P transfers.",
+  "description": "Headless Dropgate client library for file uploads and direct transfers.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -16,54 +16,41 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
-    },
-    "./p2p": {
-      "import": {
-        "types": "./dist/p2p/index.d.ts",
-        "default": "./dist/p2p/index.js"
-      },
-      "require": {
-        "types": "./dist/p2p/index.d.cts",
-        "default": "./dist/p2p/index.cjs"
-      }
     }
   },
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node scripts/copy-build.mjs",
     "dev": "tsup --watch",
     "test": "vitest",
     "test:coverage": "vitest --coverage",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
+    "notices": "node scripts/write-notices.mjs",
     "prepublishOnly": "npm run build"
   },
-  "peerDependencies": {
-    "peerjs": "^1.5.0"
-  },
-  "peerDependenciesMeta": {
-    "peerjs": {
-      "optional": true
-    }
-  },
   "devDependencies": {
-    "@types/node": "^25.2.0",
-    "@typescript-eslint/eslint-plugin": "^8.54.0",
-    "@typescript-eslint/parser": "^8.54.0",
-    "@vitest/coverage-v8": "^4.0.18",
-    "eslint": "^10.0.2",
-    "happy-dom": "^20.4.0",
-    "msw": "^2.12.7",
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@types/node": "^26.6.2",
+    "@typescript-eslint/eslint-plugin": "^8.70.1",
+    "@typescript-eslint/parser": "^8.70.1",
+    "@vitest/coverage-v8": "^5.0.1",
+    "eslint": "^10.11.0",
+    "node-datachannel": "0.33.6",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.1",
+    "werift": "0.26.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=24.0.0"
   },
   "sideEffects": false,
   "author": "Diamond Digital Development <https://diamonddigital.dev>",
@@ -74,7 +61,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/diamonddigitaldev/Dropgate.git",
+    "url": "git+https://github.com/diamonddigitaldev/Dropgate.git",
     "directory": "packages/dropgate-core"
   },
   "keywords": [
@@ -85,7 +72,7 @@
     "encryption",
     "e2ee"
   ],
-  "dependencies": {
-    "fflate": "^0.8.2"
+  "allowScripts": {
+    "esbuild@0.27.7": true
   }
 }

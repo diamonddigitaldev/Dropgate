@@ -1,0 +1,73 @@
+import { isCodeLike, normalizeCode } from '../dgdtp/codes.js';
+
+/**
+ * What someone typed or pasted to open a share, read without the network.
+ */
+export interface ShareInput {
+  /**
+   * What it opens: a hosted upload (`/<id>`), a bundle's older link
+   * (`/b/<id>`), a direct transfer's code (typed, or in an older `/p2p/<code>`
+   * link), or a direct transfer's link (`/p2p#<secret>`).
+   */
+  kind: 'hosted' | 'bundle' | 'direct' | 'direct-link';
+  /** The upload's ID, or the code, upper case; empty for a direct link. Never a whole link, and never anything after a #. */
+  locator: string;
+  /** Everything after the #, if there was one: an encrypted upload's secret, or a direct link's. Never sent anywhere. */
+  secret?: string;
+  /** The host the link was for (host and port), when the input was a link. */
+  linkHost?: string;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CODE_RE = /^[A-Z]{4}-\d{4}$/;
+/** A direct link's secret: 32 bytes as URL-safe base64, no `=`. */
+const DIRECT_SECRET_RE = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Read a sharing code or link on the device, with no request. A link is
+ * reduced to the ID or code in its path, and anything after a # is kept apart
+ * as its secret. Returns null for anything that isn't an upload's ID, a
+ * direct transfer's code, or a link to either.
+ */
+export function parseShareInput(value: string): ShareInput | null {
+  const raw = String(value ?? '').trim();
+  const hashAt = raw.indexOf('#');
+  const before = hashAt === -1 ? raw : raw.slice(0, hashAt);
+  const after = hashAt === -1 ? '' : raw.slice(hashAt + 1);
+  const secret = after ? after : undefined;
+
+  if (!/^https?:\/\//i.test(before)) {
+    const typed = before.replace(/\s+/g, '');
+    if (UUID_RE.test(typed)) return { kind: 'hosted', locator: typed.toLowerCase(), ...(secret ? { secret } : {}) };
+    // A code as anyone might type it: either case, the dash left out.
+    return isCodeLike(typed) ? { kind: 'direct', locator: normalizeCode(typed) } : null;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(before);
+  } catch {
+    return null;
+  }
+
+  let path: string;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    return null;
+  }
+
+  if (path === '/p2p') {
+    // A direct link: the secret after the #, nothing else in the address.
+    if (url.search !== '' || !secret || !DIRECT_SECRET_RE.test(secret)) return null;
+    return { kind: 'direct-link', locator: '', linkHost: url.host, secret };
+  }
+  if (path.startsWith('/p2p/')) {
+    const code = path.slice('/p2p/'.length).replace(/\s+/g, '').toUpperCase();
+    return CODE_RE.test(code) ? { kind: 'direct', locator: code, linkHost: url.host } : null;
+  }
+  const bundle = path.startsWith('/b/');
+  const id = path.slice(bundle ? '/b/'.length : 1);
+  if (!UUID_RE.test(id)) return null;
+  return { kind: bundle ? 'bundle' : 'hosted', locator: id.toLowerCase(), linkHost: url.host, ...(secret ? { secret } : {}) };
+}

@@ -9,8 +9,17 @@ services:
       - ENABLE_UPLOAD=true
       - UPLOAD_ENABLE_E2EE=true
       - UPLOAD_MAX_FILE_SIZE_MB=100
-      # Persist uploads across restarts — requires the volume below to be mapped
+      # Behind a reverse proxy (or a tunnel such as Cloudflare Tunnel), say how
+      # many: each client's address is then the one the proxy passes on, for the
+      # rate limiter and the limits by address. Unset, the server trusts no proxy,
+      # and every client behind one shares the proxy's address.
+      # - TRUST_PROXY=1
+      # Keep uploads across restarts (they're in the data volume below)
       # - UPLOAD_PRESERVE_UPLOADS=true
-    # Uncomment to persist uploads across container restarts
-    # volumes:
-    #   - /path/to/uploads:/usr/src/app/uploads
+    volumes:
+      # Everything the server keeps. Uploads are cleared at each start unless
+      # UPLOAD_PRESERVE_UPLOADS=true; the server's own data always stays.
+      - dropgate-data:/app/data
+
+volumes:
+  dropgate-data:
