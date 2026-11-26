@@ -87,7 +87,7 @@ export class PauseControl {
     this.#allowed = hooks !== null;
   }
 
-  /** What every snapshot's `canPause` is: whether `pause()` can be called now. Paused, pausing again renews the deadline. */
+  /** What every snapshot's `canPause` is: whether `pause()` can be called now. Paused, pausing again asks the server again. */
   get canPause(): boolean {
     return this.#state === 'paused' || (this.#state === 'running' && this.#allowed);
   }
@@ -131,9 +131,10 @@ export class PauseControl {
 
   /**
    * Pauses: stops the step under way, waits for the work to stop, and asks the
-   * server to hold it. Paused already, it asks again, which renews the
-   * server's deadline from now. If the server refuses, nothing changes; if it
-   * no longer has the operation, the operation fails.
+   * server to hold it. Paused already, it asks again: a download's lease is
+   * held again from now, and an upload only if a chunk has reached the server
+   * since its last pause (else its deadline stays). If the server refuses,
+   * nothing changes; if it no longer has the operation, the operation fails.
    */
   async pause(): Promise<void> {
     if (this.#state === 'paused') return this.#pauseAgain();

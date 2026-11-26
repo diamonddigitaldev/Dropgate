@@ -4036,7 +4036,7 @@ var PauseControl = class {
     if (hooks) __privateSet(this, _hooks, hooks);
     __privateSet(this, _allowed, hooks !== null);
   }
-  /** What every snapshot's `canPause` is: whether `pause()` can be called now. Paused, pausing again renews the deadline. */
+  /** What every snapshot's `canPause` is: whether `pause()` can be called now. Paused, pausing again asks the server again. */
   get canPause() {
     return __privateGet(this, _state) === "paused" || __privateGet(this, _state) === "running" && __privateGet(this, _allowed);
   }
@@ -4084,9 +4084,10 @@ var PauseControl = class {
   }
   /**
    * Pauses: stops the step under way, waits for the work to stop, and asks the
-   * server to hold it. Paused already, it asks again, which renews the
-   * server's deadline from now. If the server refuses, nothing changes; if it
-   * no longer has the operation, the operation fails.
+   * server to hold it. Paused already, it asks again: a download's lease is
+   * held again from now, and an upload only if a chunk has reached the server
+   * since its last pause (else its deadline stays). If the server refuses,
+   * nothing changes; if it no longer has the operation, the operation fails.
    */
   async pause() {
     if (__privateGet(this, _state) === "paused") return __privateMethod(this, _PauseControl_instances, pauseAgain_fn).call(this);
@@ -12844,10 +12845,16 @@ var DropgateClient = class {
       }),
       expired: unreachableTooLong
     });
+    let lastSaid = { deadline, here: window.end };
+    const heardDeadline = (said, here) => {
+      if (typeof said === "number" && said === lastSaid.deadline) return lastSaid.here;
+      lastSaid = { deadline: said, here };
+      return here;
+    };
     const hooks = {
       pause: async () => {
         const said = await pauseRequest("pause", droppedUpload);
-        const until = pausedUntil(said.deadline, pauseMs);
+        const until = heardDeadline(said.deadline, pausedUntil(said.deadline, pauseMs));
         window.heard(until);
         return until;
       },
@@ -12863,6 +12870,7 @@ var DropgateClient = class {
           }
         }
         window.heard(said.deadline);
+        heardDeadline(said.deadline, window.end);
       },
       expired: () => droppedPausedUpload()
     };
@@ -12913,7 +12921,7 @@ var DropgateClient = class {
       }
       const { body, digest } = sending;
       try {
-        await this._attemptChunkUpload(
+        const said = await this._attemptChunkUpload(
           `${baseUrl}/api/v4/upload/chunks/${i}`,
           {
             method: "PUT",
@@ -12926,6 +12934,7 @@ var DropgateClient = class {
           },
           { policy: p.policy, window, timeoutMs: timeouts.chunkMs ?? 6e4, signal: p.pausing.signal, progress, chunkIndex: i, credentials: p.credentials }
         );
+        heardDeadline(said, window.end);
       } catch (err) {
         if (p.pausing.interrupted) continue;
         throw err;
@@ -13591,11 +13600,12 @@ var DropgateClient = class {
    * Sends one chunk, the same bytes on every try. A try that can recover is
    * made again, after its backoff or the server's Retry-After, until the server
    * stops waiting for the upload; anything else the server says fails at once.
+   * Gives the deadline the server's answer gave.
    */
   async _attemptChunkUpload(url, fetchOptions, opts) {
     const { policy, window, timeoutMs, signal, progress, chunkIndex, credentials } = opts;
     const counted = (attempt) => policy.retries !== void 0 ? `(${attempt}/${policy.retries})` : `(retry ${attempt})`;
-    await retrying(async () => {
+    return retrying(async () => {
       for (; ; ) {
         if (signal.aborted) throw signal.reason;
         const { signal: s, cleanup } = makeAbortSignal(signal, timeoutMs);
@@ -13614,8 +13624,9 @@ var DropgateClient = class {
           } catch {
           }
           if (res.ok) {
-            window.heard(said?.deadline);
-            return;
+            const deadline = said?.deadline;
+            window.heard(deadline);
+            return deadline;
           }
           const err = errorFromStatus(res.status, said, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
           if (DropgateError.is(err, "AUTH_EXPIRED") && await credentials.renew(signal)) continue;

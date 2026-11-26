@@ -194,7 +194,7 @@ The Web UI only encrypts and decrypts in a secure context (HTTPS, or `localhost`
 One upload is one object, a single file or several alike: started, sent in chunks that can be sent again, then finished.
 
 - **The upload's ID** is given by the start, and every request after it names the upload in the `Dropgate-Upload` header, never in its URL.
-- **Every answer to an upload in progress carries its `deadline`**: when the server ends it unless something renews it, in milliseconds since 1970 ([§5.7](#57-how-long-an-upload-lasts)).
+- **Every answer to an upload in progress carries its `deadline`**: when the server ends it unless a new chunk, or a pause after one, renews it, in milliseconds since 1970 ([§5.7](#57-how-long-an-upload-lasts)).
 - **Every error is JSON** with a `code` ([§11](#11-errors)). One that names a field gives it in `details.field`.
 
 ### 5.1 Start
@@ -226,6 +226,7 @@ The body may be up to 2 MiB. The server checks, and the first failure answers:
 | `413` | `TOO_LARGE` | A `size` over the server's maximum upload size, which is for the whole object, padding included. |
 | `400` | `LIFETIME_NOT_ALLOWED` | A lifetime over the server's maximum, or none where the server has one. |
 | `400` | `DOWNLOADS_NOT_ALLOWED` | A download limit over the server's, or none where the server has one. |
+| `429` | `RATE_LIMITED` | The address the start came from already has as many uploads in progress as the server allows, paused ones included: `UPLOAD_MAX_IN_PROGRESS_PER_IP`, 5 by default. One that finishes, is cancelled or ends makes room. |
 | `507` | `SERVER_FULL` | Not enough storage: what's stored, and what every upload in progress has reserved, counts. |
 
 Then the server reserves `size` bytes of storage, keeps the upload in memory, writes an encrypted object's header to its temporary file, and responds `201`:
@@ -239,7 +240,9 @@ Then the server reserves `size` bytes of storage, keeps the upload in memory, wr
 }
 ```
 
-**What the server keeps of an upload in progress,** in memory only: whether it's encrypted, its size, chunk size and number of chunks, the meta or the plain file list, its lifetime and download limit, the manage token's hash, each chunk it holds with that chunk's SHA-256, the storage reserved, whether it's paused, and its deadline. Nothing about who sent it: no address and no account. Its bytes are in `data/uploads/tmp/<uploadId>` until it's finished.
+**What the server keeps of an upload in progress,** in memory only: whether it's encrypted, its size, chunk size and number of chunks, the meta or the plain file list, its lifetime and download limit, the manage token's hash, each chunk it holds with that chunk's SHA-256, the storage reserved, whether it's paused, whether a chunk has come since its last pause, its deadline, and its address's count key. No address and no account. Its bytes are in `data/uploads/tmp/<uploadId>` until it's finished.
+
+**Uploads in progress per address.** One address has at most `UPLOAD_MAX_IN_PROGRESS_PER_IP` uploads in progress at once (5 by default; `0` for no limit), paused ones included, so one client can't reserve the server's storage with many. Each address is counted under its **count key**: HMAC-SHA-256 of the address, under a key made at random as the server starts and never written anywhere, cut to 16 bytes, with an IPv6 address counted by its /56 as the rate limiter counts it ([§12.1](#121-rate-limits)). The address itself goes no further than the start's request; an upload keeps its count key while it's in progress, so its end lowers the count, and an address's entry goes when its count reaches 0. Nothing ties one run's keys to the next.
 
 ### 5.2 Chunks
 
@@ -260,7 +263,7 @@ The body is chunk `index`'s bytes, from 0, exactly its length. `Content-Digest` 
 
 | Status | Code | When |
 |--------|------|------|
-| `200` | — | Written, or the same bytes already held. The body is `{ "deadline": … }`. |
+| `200` | — | Written, or the same bytes already held. The body is `{ "deadline": … }`: a chunk the server didn't hold renews the upload's 5 minutes; the same bytes again don't. |
 | `400` | `INVALID_CHUNK` | No chunk has that index, or the body isn't that chunk's length. |
 | `400` | `DIGEST_MISMATCH` | No `Content-Digest` with SHA-256, or one that doesn't match the body. |
 | `404` | `NOT_FOUND` | No upload in progress by that ID. |
@@ -278,7 +281,7 @@ Dropgate-Upload: <uploadId>
 { "chunks": 20, "received": [[0, 11], [13, 13]], "paused": false, "deadline": 1759766700000 }
 ```
 
-`received` gives the chunks the server holds, as inclusive ranges. A client resuming an upload needs it, then sends the rest; the resume's own answer gives it too ([§5.4](#54-pause-and-resume)). Asking doesn't renew a pause.
+`received` gives the chunks the server holds, as inclusive ranges. A client resuming an upload needs it, then sends the rest; the resume's own answer gives it too ([§5.4](#54-pause-and-resume)). Asking renews nothing: not a quiet upload's deadline, nor a pause's.
 
 ### 5.4 Pause and Resume
 
@@ -289,10 +292,10 @@ POST /api/v4/upload/resume
 
 Each names the upload in `Dropgate-Upload`, with no body.
 
-- **Pause** responds `{ "paused": true, "deadline": … }`: the server keeps the upload for `UPLOAD_MAX_PAUSE_MINUTES` (`capabilities.upload.maxPauseMinutes`) from now, and pausing again renews that from then. With pausing off (`0`), it's `409`, `PAUSE_DISABLED`, and the upload goes on unpaused.
-- **Resume** responds `{ "paused": false, "deadline": …, "received": [...] }`, with the chunks held, as the status gives them, and a quiet upload's deadline.
+- **Pause** responds `{ "paused": true, "deadline": … }`. If a chunk the server didn't hold has come since the upload's last pause (or its start), the server keeps it for `UPLOAD_MAX_PAUSE_MINUTES` (`capabilities.upload.maxPauseMinutes`) from now; pausing again after another renews that from then. With none since, the upload is paused but its deadline stays where it was: an upload paused before its first chunk has arrived is kept to 5 minutes from its start, and pausing again, or pausing, resuming and pausing, keeps it no longer than the last pause that followed a chunk. With pausing off (`0`), it's `409`, `PAUSE_DISABLED`, and the upload goes on unpaused.
+- **Resume** responds `{ "paused": false, "deadline": …, "received": [...] }`, with the chunks held, as the status gives them, and the deadline as it was: the next chunk gives it a quiet upload's 5 minutes again.
 
-**The core library's pause** (`pause()` on an upload's handle, [Core API](../core/api-reference.md#pausing)) stops the chunk it's sending, then asks for the pause; its `resume()` asks for the resume, and sends only the chunks the answer's `received` lacks. The chunk the pause stopped goes again exactly as it was sealed ([§4.4](#44-the-chunks)). A file that changed while the upload was paused fails it (`SOURCE_UNAVAILABLE`) rather than be sent part old, part new. The client shows the server's `deadline`, or the pause length from its answer if that's later, so a server clock behind the client's never ends it early; still paused then, the upload has gone, and the client says "The server dropped this paused upload.", as it does when the resume is `404`. Nothing resumes by itself.
+**The core library's pause** (`pause()` on an upload's handle, [Core API](../core/api-reference.md#pausing)) stops the chunk it's sending, then asks for the pause; its `resume()` asks for the resume, and sends only the chunks the answer's `received` lacks. The chunk the pause stopped goes again exactly as it was sealed ([§4.4](#44-the-chunks)). A file that changed while the upload was paused fails it (`SOURCE_UNAVAILABLE`) rather than be sent part old, part new. The client shows the server's `deadline`, or the pause length from its answer if that's later, so a server clock behind the client's never ends it early; still paused then, the upload has gone, and the client says "The server dropped this paused upload.", as it does when the resume is `404`. A pause the server didn't hold (one before any chunk had arrived, or again with none since) shows that later time too, and the resume is `404` if its deadline has passed. Nothing resumes by itself.
 
 **What a pause holds:** on the server, what it already holds for the upload in progress, its temporary file, its session in memory and its reservation, for at most `UPLOAD_MAX_PAUSE_MINUTES` ([§5.7](#57-how-long-an-upload-lasts)); on the client, in memory, the upload's own state and the sealed chunk the pause stopped. Nothing of it is written to disk.
 
@@ -322,8 +325,8 @@ Responds `204`, with no body: the temporary file, the reservation and the upload
 
 ### 5.7 How Long an Upload Lasts
 
-- **5 minutes after its last request,** unless it's paused. Any request renews it, the status included; a chunk still arriving isn't quiet.
-- **Paused, until the pause's deadline,** which only pausing again renews. Asking for the status meanwhile doesn't.
+- **5 minutes after its last new chunk,** or after its start until one comes, unless a pause holds it. Only a chunk the server didn't hold renews it: the status, a resume, a finish asked too early, a chunk refused, or one it already held sent again, don't. A chunk still arriving isn't quiet. So an upload that sends nothing can't keep the storage it reserved from others by asking about itself.
+- **Paused, until the pause's deadline,** which only a pause after another new chunk renews ([§5.4](#54-pause-and-resume)). Asking for the status, or pausing again with no chunk since, doesn't. A resume leaves the deadline where it was, and the next chunk renews it.
 - **At its deadline it ends at once:** its temporary file and its reservation go, and from then on it's `404`, `NOT_FOUND`, the same answer as for an upload that never existed.
 - **A restart ends every upload,** paused or not, in persistent mode too: nothing about one is ever written to a database, and `data/uploads/tmp/` is cleared at each start.
 
@@ -482,7 +485,7 @@ A client retries only what can recover, and only while the server is still waiti
 
 ### 8.3 How Long a Client Retries
 
-Until the server stops waiting: an upload is dropped 5 minutes after its last request ([§5.7](#57-how-long-an-upload-lasts)), and a lease ends 5 minutes after its last request or byte ([§6.2](#62-leases)). Every answer carries a `deadline`; the client retries until the later of the last `deadline` and 5 minutes after the server last answered, so a clock that's ahead of the server's never cuts it short. Its last wait ends then, for one try more. Meanwhile the core library gives that time as its snapshots' `deadline`. If that fails too, the upload has gone: the core library fails it as `NOT_FOUND`, "The server dropped this upload", as it does when the server answers `404`. A download fails with its last error.
+Until the server stops waiting: an upload is dropped 5 minutes after its last new chunk ([§5.7](#57-how-long-an-upload-lasts)), and a lease ends 5 minutes after its last request or byte ([§6.2](#62-leases)). Every answer carries a `deadline`; the client retries until the later of the last `deadline` and 5 minutes after the server last answered, so a clock that's ahead of the server's never cuts it short. (A retry of a chunk that keeps failing doesn't renew the upload, so the server may have let it go before then: its answer is then `404`, as below.) Its last wait ends then, for one try more. Meanwhile the core library gives that time as its snapshots' `deadline`. If that fails too, the upload has gone: the core library fails it as `NOT_FOUND`, "The server dropped this upload", as it does when the server answers `404`. A download fails with its last error.
 
 ### 8.4 Reconnecting Downloads
 
@@ -622,7 +625,7 @@ A message never holds an ID, a name, a key, a token, or anything from the reques
 | `413` | `TOO_LARGE` | A JSON request body over its limit (1 MiB, or 2 MiB for an upload's start), or an upload over the maximum upload size. |
 | `416` | `RANGE_NOT_SATISFIABLE` | A `Range` the server can't send, with `Content-Range: bytes */<size>` ([§6.4](#64-the-bytes)). |
 | `423` | `DOWNLOADS_BUSY` | A new download while open leases and counted downloads make the upload's limit, with `Retry-After` ([§6.3](#63-leases-and-counting)). |
-| `429` | `RATE_LIMITED` | Too many requests ([§12.1](#121-rate-limits)), or too many of an upload's chunks at once ([§5.2](#52-chunks)). |
+| `429` | `RATE_LIMITED` | Too many requests ([§12.1](#121-rate-limits)), too many of an upload's chunks at once ([§5.2](#52-chunks)), or a start from an address with as many uploads in progress as the server allows ([§5.1](#51-start)). |
 | `500` | `SERVER_ERROR` | Anything unexpected while answering. The server logs the error's kind and the route's pattern, never its message, which can hold a path or part of the request ([PRIVACY.md](../PRIVACY.md)). |
 | `507` | `SERVER_FULL` | Not enough storage for an upload. |
 
@@ -706,8 +709,9 @@ Dropgate 4 works with no Dropgate 3 client, link or upload. Each gets a clear "u
 | Storage quota | 10 GiB | Server-configurable. |
 | Sealed file list | 4 KiB to 1 MiB | Padded to a power of two. |
 | Upload start body | 2 MiB | Every other JSON body: 1 MiB. |
-| Upload, quiet | 5 minutes | After its last request, unless paused. |
-| Upload, paused | 60 minutes | `UPLOAD_MAX_PAUSE_MINUTES`, 1 to 1,440, or 0 to turn pausing off. |
+| Upload, quiet | 5 minutes | After its last new chunk (its start, until one comes), unless a pause holds it. |
+| Upload, paused | 60 minutes | `UPLOAD_MAX_PAUSE_MINUTES`, 1 to 1,440, or 0 to turn pausing off. Held only by a pause after a new chunk. |
+| Uploads in progress per address | 5 | `UPLOAD_MAX_IN_PROGRESS_PER_IP`, paused ones included; 0 = no limit. |
 | Finish kept | 5 minutes | A repeated finish gets the same answer. |
 | Download lease, quiet | 5 minutes | After its last request, unless paused; paused, `UPLOAD_MAX_PAUSE_MINUTES`. |
 | Download waiting | 5 seconds | `Retry-After` on `423`, `DOWNLOADS_BUSY`. |

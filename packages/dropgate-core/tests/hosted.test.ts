@@ -674,6 +674,59 @@ describe('Pausing and resuming, against the real server', { timeout: 60_000 }, (
     });
   });
 
+  it("an upload paused before its first chunk reached the server isn't held, and its snapshot keeps the server's deadline; after chunks a pause holds it, and pausing again with none since moves nothing", async () => {
+    await withServer({}, async (server) => {
+      // The first try at chunk 0, and at chunk 2, each send 1,000 bytes and no more: the pause stops them.
+      const arrivals = new Map<number, () => void>();
+      const arrived = (index: number) => new Promise<void>((resolve) => arrivals.set(index, resolve));
+      const toArrive = [arrived(0), arrived(2)];
+      const fetchFn: typeof fetch = async (input, init = {}) => {
+        const index = init.method === 'PUT' ? Number(/\/chunks\/(\d+)$/.exec(String(input))?.[1]) : NaN;
+        const opened = arrivals.get(index);
+        if (!opened) return fetch(input, init);
+        arrivals.delete(index);
+        const all = new Uint8Array(await (init.body as Blob).arrayBuffer());
+        const body = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(all.slice(0, 1000)); } });
+        const sent = fetch(input, { ...init, body, duplex: 'half' } as RequestInit);
+        setTimeout(opened, 300);
+        return sent;
+      };
+      const bytes = fileBytes(CHUNK * 3 + 777, 24);
+      const started = Date.now();
+      const upload = new DropgateClient({ server: server.baseUrl, fetchFn }).hosted.upload({
+        files: new File([bytes], 'early.bin'), lifetimeMs: 60 * 60 * 1000, encrypt: true,
+      });
+      await toArrive[0];
+      await upload.pause();
+      expect(upload.snapshot).toMatchObject({ status: 'paused', pausedBy: 'self' });
+      // The server keeps it to 5 minutes from its start, not the pause's 60, and the snapshot says so.
+      expect(Math.abs(upload.snapshot.deadline! - (started + 5 * 60_000))).toBeLessThan(5000);
+      const uploadId = server.requests().find((r) => r.url === '/api/v4/upload/pause')!.headers['dropgate-upload'] as string;
+      const status = await (await fetch(`${server.baseUrl}/api/v4/upload`, { headers: { 'Dropgate-Upload': uploadId } })).json();
+      expect(status).toMatchObject({ received: [], paused: true });
+      expect(Math.abs(status.deadline - upload.snapshot.deadline!), "the snapshot's deadline is the server's").toBeLessThan(5000);
+      const unheld = upload.snapshot.deadline;
+      await upload.pause();
+      expect(upload.snapshot.deadline, 'pausing again moves nothing').toBe(unheld);
+
+      // Resumed, chunks 0 and 1 reach the server; paused as chunk 2 goes, it's held for the pause's 60 minutes.
+      await upload.resume();
+      await toArrive[1];
+      const asked = Date.now();
+      await upload.pause();
+      expect(Math.abs(upload.snapshot.deadline! - (asked + 60 * 60_000))).toBeLessThan(5000);
+      const held = upload.snapshot.deadline;
+      await upload.pause();
+      expect(upload.snapshot.deadline, 'pausing again with no chunk since moves nothing').toBe(held);
+
+      await upload.resume();
+      const outcome = await upload.result;
+      if (outcome.status !== 'completed') throw outcome.status === 'failed' ? outcome.error : new Error('Cancelled.');
+      const got = await download(new DropgateClient({ server: server.baseUrl }), outcome.value.id, new URL(outcome.value.downloadUrl).hash.slice(1));
+      expect(got.bytes.equals(Buffer.from(bytes))).toBe(true);
+    });
+  });
+
   it('a download paused part-way closes its request; resumed, it asks for the rest by Range from the next whole chunk under the same lease, byte for byte, and counts once', async () => {
     await withServer({ UPLOAD_MAX_FILE_DOWNLOADS: '2' }, async (server) => {
       const uploader = new DropgateClient({ server: server.baseUrl });

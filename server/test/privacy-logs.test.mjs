@@ -24,6 +24,7 @@ const KNOWN_EVENTS = [
     String.raw`Upload started\. Reserved \d+\.\d{2} MB\.`,
     String.raw`Received chunk \d+\/\d+\. Size: \d+\.\d{2} KB`,
     String.raw`Upload cancelled by client\. Released \d+\.\d{2} MB\.`,
+    String.raw`Upload rejected: its address has as many uploads in progress as it may\.`,
     String.raw`Upload rejected due to insufficient storage\. Current usage: \d+\.\d{2} GB, Reserved: \d+\.\d{2} GB, Requested: \d+\.\d{2} GB\.`,
     String.raw`Rate limit triggered\. Request blocked\.`,
     String.raw`Upload (paused|resumed)\.`,

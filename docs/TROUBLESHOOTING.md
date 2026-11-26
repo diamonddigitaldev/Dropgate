@@ -48,6 +48,9 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 **“Server out of capacity” / 507**
 - Increase `UPLOAD_MAX_STORAGE_GB` (or set `0` for unlimited), and/or free disk space.
 
+**"This address has as many uploads in progress as the server allows." / 429 at the start**
+- One address can have `UPLOAD_MAX_IN_PROGRESS_PER_IP` uploads in progress at once (5 by default), paused ones included. Finish, cancel or wait for one, or raise the setting for a server many people use from one address. Behind a reverse proxy, check `TRUST_PROXY` is set, or every client shares the proxy's count.
+
 **"The chunk's Content-Digest is missing, or doesn't match its bytes." / "Received data didn't pass its integrity check."**
 - A chunk reached the server different from what was sent, or a download's bytes weren't what the upload holds. Often proxy buffering, or middleware touching the request or answer body. A proxy must pass the `Content-Digest` header through.
 - Enable `LOG_LEVEL=DEBUG`, retry once, and check where it fails (start vs chunk vs finish).
@@ -57,7 +60,7 @@ Set `LOG_LEVEL=DEBUG` on the server, reproduce the issue once, then set it back.
 - If it keeps happening behind a reverse proxy, check the proxy's timeouts and body size limit, and that it passes `Range` and `If-Range` through to the server.
 
 **"The server dropped this paused upload."**
-- The upload was paused for longer than the server keeps a paused upload: `UPLOAD_MAX_PAUSE_MINUTES` (60 by default) from the pause, the time the Web UI and the Dropgate Client showed ("Kept until …"; the Dropgate Client also notifies 5 minutes before). Nothing resumes by itself, so the server deleted what it had. Upload the files again; to allow longer pauses, raise `UPLOAD_MAX_PAUSE_MINUTES` (at most `1440`, a day).
+- The upload was paused for longer than the server keeps a paused upload: `UPLOAD_MAX_PAUSE_MINUTES` (60 by default) from the pause, the time the Web UI and the Dropgate Client showed ("Kept until …"; the Dropgate Client also notifies 5 minutes before). Nothing resumes by itself, so the server deleted what it had. A pause holds an upload only once some of it has arrived since the last pause: one paused before its first chunk arrived is kept only 5 minutes from its start, and one paused again with none since no longer than the pause before, whatever the app showed. Upload the files again; to allow longer pauses, raise `UPLOAD_MAX_PAUSE_MINUTES` (at most `1440`, a day).
 - A restart drops every upload in progress, paused ones too.
 - **"The server dropped this paused download."** in the Dropgate Client is the same for a download: the server let its lease go once the pause ran out, and it counts as one download, since it got part of the file. Nothing of it is left on your disk. Choose **Retry** to download it again from the start, if the upload is still there.
 - No **Pause** on an upload or a download in the Dropgate Client: the server has pausing off (`UPLOAD_MAX_PAUSE_MINUTES=0`).

@@ -71,7 +71,7 @@ describe('what Dropgate 4\'s uploads store, paused and resumed part-way', () => 
 
     after(() => server?.stop());
 
-    test('an upload in progress holds what its start sent and how far it has got: nothing else from the request, and no time it started', () => {
+    test('an upload in progress holds what its start sent and how far it has got: nothing else from the request but its address\'s keyed hash, and no time it started', () => {
         // The server makes every upload in progress in one place, in its start route.
         const source = fs.readFileSync(path.join(server.dir, 'server.js'), 'utf8').replace(/\r\n/g, '\n');
         const made = source.match(/\n {12}upload = \{\n([\s\S]*?)\n {12}\};\n {12}v4Uploads\.set\(id, upload\);/g);
@@ -80,9 +80,12 @@ describe('what Dropgate 4\'s uploads store, paused and resumed part-way', () => 
         const fields = [...body.matchAll(/^ {16}(\w+)[:,]/gm)].map((m) => m[1]);
         assert.deepEqual(fields, [
             'id', 'tempFilePath', 'encrypted', 'size', 'chunkSize', 'chunks', 'meta', 'files', 'lifetimeMs', 'maxDownloads',
-            'manageTokenHash', 'received', 'writing', 'paused', 'deadline', 'timer', 'busy', 'finishing',
+            'manageTokenHash', 'received', 'writing', 'paused', 'chunkSincePause', 'deadline', 'timer', 'busy', 'finishing', 'counted',
         ]);
         assert.doesNotMatch(body, /\breq\b|Date\.now|clock/, 'nothing taken from the request itself, nor the time');
+        // Its address's count key, made from the address by the keyed hash (upload-addresses.test.mjs), never the address.
+        assert.match(body, /^ {16}counted,$/m);
+        assert.equal(source.match(/const counted = uploadCountKeyOf\(req\.ip\);/g)?.length, 1, 'the count key, from the keyed hash');
         assert.equal(source.match(/v4Uploads\.set\(/g).length, 1, 'and nothing else adds one');
     });
 

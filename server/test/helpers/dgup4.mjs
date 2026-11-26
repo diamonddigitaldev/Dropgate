@@ -156,7 +156,8 @@ const naming = (uploadId) => (uploadId === undefined ? {} : { 'Dropgate-Upload':
 
 /** The upload routes, called as a client would. Each gives the fetch Response. */
 export const uploads = {
-    start: (server, body) => fetch(`${server.baseUrl}/api/v4/uploads`, { method: 'POST', headers: json, body: JSON.stringify(body) }),
+    /** With any other request headers, such as a proxy's X-Forwarded-For. */
+    start: (server, body, headers = {}) => fetch(`${server.baseUrl}/api/v4/uploads`, { method: 'POST', headers: { ...json, ...headers }, body: JSON.stringify(body) }),
     /** Chunk `index`'s bytes, with their digest unless `digest` gives another (null: none). */
     chunk: (server, uploadId, index, bytes, { digest = contentDigest(bytes) } = {}) => fetch(`${server.baseUrl}/api/v4/upload/chunks/${index}`, {
         method: 'PUT',

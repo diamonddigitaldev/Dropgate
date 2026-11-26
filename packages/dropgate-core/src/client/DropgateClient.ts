@@ -1156,10 +1156,20 @@ export class DropgateClient {
       }),
       expired: unreachableTooLong,
     });
+    // The server's own deadline for the upload, as it last gave it, and when that is on this device's clock. A pause
+    // the server holds moves its deadline; one it doesn't (no new chunk has reached it since the upload's start or its
+    // last pause) leaves it where it was, and so does this: the deadlines are compared in the server's time, so a clock
+    // that differs from the server's can't make one look held.
+    let lastSaid: { deadline: unknown; here: number } = { deadline, here: window.end };
+    const heardDeadline = (said: unknown, here: number): number => {
+      if (typeof said === 'number' && said === lastSaid.deadline) return lastSaid.here;
+      lastSaid = { deadline: said, here };
+      return here;
+    };
     const hooks: PauseHooks = {
       pause: async () => {
         const said = await pauseRequest('pause', droppedUpload);
-        const until = pausedUntil(said.deadline, pauseMs);
+        const until = heardDeadline(said.deadline, pausedUntil(said.deadline, pauseMs));
         window.heard(until);
         return until;
       },
@@ -1176,6 +1186,7 @@ export class DropgateClient {
           }
         }
         window.heard(said.deadline);
+        heardDeadline(said.deadline, window.end);
       },
       expired: () => droppedPausedUpload(),
     };
@@ -1236,7 +1247,7 @@ export class DropgateClient {
 
       const { body, digest } = sending;
       try {
-        await this._attemptChunkUpload(
+        const said = await this._attemptChunkUpload(
           `${baseUrl}/api/v4/upload/chunks/${i}`,
           {
             method: 'PUT',
@@ -1249,6 +1260,7 @@ export class DropgateClient {
           },
           { policy: p.policy, window, timeoutMs: timeouts.chunkMs ?? 60000, signal: p.pausing.signal, progress, chunkIndex: i, credentials: p.credentials },
         );
+        heardDeadline(said, window.end);
       } catch (err) {
         // Stopped for a pause: the same bytes go once it's resumed, if the server hasn't got them.
         if (p.pausing.interrupted) continue;
@@ -1990,6 +2002,7 @@ export class DropgateClient {
    * Sends one chunk, the same bytes on every try. A try that can recover is
    * made again, after its backoff or the server's Retry-After, until the server
    * stops waiting for the upload; anything else the server says fails at once.
+   * Gives the deadline the server's answer gave.
    */
   private async _attemptChunkUpload(
     url: string,
@@ -2003,11 +2016,11 @@ export class DropgateClient {
       chunkIndex: number;
       credentials: OperationCredentials;
     }
-  ): Promise<void> {
+  ): Promise<unknown> {
     const { policy, window, timeoutMs, signal, progress, chunkIndex, credentials } = opts;
     const counted = (attempt: number) => (policy.retries !== undefined ? `(${attempt}/${policy.retries})` : `(retry ${attempt})`);
 
-    await retrying(async () => {
+    return retrying(async () => {
       for (;;) {
         // A pause or a cancel that came before the try sends nothing.
         if (signal.aborted) throw signal.reason;
@@ -2025,8 +2038,9 @@ export class DropgateClient {
           let said: unknown = { error: text };
           try { said = JSON.parse(text); } catch { /* A plain-text answer. */ }
           if (res.ok) {
-            window.heard((said as { deadline?: unknown } | null)?.deadline);
-            return;
+            const deadline = (said as { deadline?: unknown } | null)?.deadline;
+            window.heard(deadline);
+            return deadline;
           }
           const err = errorFromStatus(res.status, said, `Chunk ${chunkIndex + 1} failed (HTTP ${res.status}).`);
           // An expired credential is renewed once, and the chunk sent again at

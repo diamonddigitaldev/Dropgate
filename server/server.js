@@ -322,13 +322,27 @@ let MAX_FILE_LIFETIME_MS = Infinity;
 let maxFileDownloads = 1;
 let uploadChunkSizeBytes = 5 * 1024 * 1024;
 let maxPauseMinutes = 60;
+let maxUploadsPerAddress = 5;
 let currentDiskUsage = 0;
 // Dropgate 4's stored uploads' records, by ID.
 let objectDatabase = null;
 // Dropgate 4's uploads in progress, by upload ID, in memory only: what each
-// will be, the chunks the server holds with their digests, and its deadline.
-// Nothing in one says who sent it.
+// will be, the chunks the server holds with their digests, its deadline, and
+// its address's count key (below). Nothing in one says who sent it.
 let v4Uploads = null;
+// How many uploads each address has in progress, by the address's count key:
+// HMAC-SHA-256 of the address (an IPv6 address by its /56, as the rate limiter
+// counts it) under a key made at random as the server starts and never
+// written anywhere, cut to 16 bytes. The address goes no further than its
+// request, and an entry goes when its count reaches 0.
+const UPLOAD_COUNT_KEY = crypto.randomBytes(32);
+const uploadCountKeyOf = (address) => crypto.createHmac('sha256', UPLOAD_COUNT_KEY).update(ipKeyGenerator(String(address ?? ''))).digest().toString('latin1', 0, 16);
+const uploadsByAddress = new Map();
+const countUpload = (key, by) => {
+    const count = (uploadsByAddress.get(key) ?? 0) + by;
+    if (count > 0) uploadsByAddress.set(key, count);
+    else uploadsByAddress.delete(key);
+};
 // A finished upload's answer, by upload ID, kept a few minutes so that
 // finishing again gets the same answer.
 let v4Finished = null;
@@ -432,6 +446,21 @@ if (enableUpload) {
         maxPauseMinutes = Number(text);
     }
     log('info', `UPLOAD_MAX_PAUSE_MINUTES: ${maxPauseMinutes === 0 ? '0 (pausing is off)' : `${maxPauseMinutes} minutes`}`);
+
+    // The most uploads in progress, paused ones included, one address can have at once; 0 for no limit.
+    const maxInProgressRaw = process.env.UPLOAD_MAX_IN_PROGRESS_PER_IP;
+    if (maxInProgressRaw !== undefined) {
+        const text = maxInProgressRaw.trim();
+        if (!/^\d{1,6}$/.test(text)) {
+            log('error', 'Invalid UPLOAD_MAX_IN_PROGRESS_PER_IP environment variable. It must be a whole number: the most uploads in progress one address can have at once, or 0 for no limit.');
+            process.exit(1);
+        }
+        maxUploadsPerAddress = Number(text);
+    }
+    log('info', `UPLOAD_MAX_IN_PROGRESS_PER_IP: ${maxUploadsPerAddress === 0 ? '0 (no limit)' : maxUploadsPerAddress}`);
+    if (maxUploadsPerAddress === 0) {
+        log('warn', 'UPLOAD_MAX_IN_PROGRESS_PER_IP is set to 0! One address can start as many uploads at once as the storage limit allows.');
+    }
 
     if (!preserveUploads) {
         log('info', 'Clearing any existing uploads on startup...');
@@ -688,7 +717,7 @@ const OBJECT_VERSION = 4;
 const OBJECT_SUITE = 1;
 // The sealed file list: a 12-byte nonce and a 16-byte tag around at most 1 MiB.
 const MAX_META_BYTES = MIB + 28;
-// An upload with no request for this long ends, unless it's paused.
+// An upload that receives no new chunk for this long ends, unless a pause holds it.
 const UPLOAD_QUIET_MS = 5 * 60 * 1000;
 // How long a finished upload's answer is kept for a repeated finish.
 const FINISHED_ANSWER_MS = 5 * 60 * 1000;
@@ -780,11 +809,18 @@ if (enableUpload) {
         ...(field ? { details: { field } } : {}),
     });
 
+    /** The upload is no longer in progress: its reservation goes, and its address's count drops. */
+    const letGoOfUpload = (upload) => {
+        if (v4Uploads.get(upload.id) !== upload) return;
+        v4Uploads.delete(upload.id);
+        countUpload(upload.counted, -1);
+    };
+
     /** Ends an upload: its timer, its temp file and its reservation go. */
     const dropUpload = (upload) => {
         if (v4Uploads.get(upload.id) !== upload) return false;
         clearTimeout(upload.timer);
-        v4Uploads.delete(upload.id);
+        letGoOfUpload(upload);
         // A chunk still being written removes it when it's done (see the chunk route).
         try { fs.rmSync(upload.tempFilePath, { force: true }); } catch { }
         return true;
@@ -805,8 +841,14 @@ if (enableUpload) {
         log('debug', `Upload ended at its deadline${upload.paused ? ' while paused' : ''}. Released ${sizeInMB(upload.size)} MB.`);
     };
 
-    /** Any request renews a quiet upload's deadline; only pausing renews a paused one's. */
-    const renew = (upload) => {
+    // Only progress keeps an upload: a chunk it didn't hold renews its quiet
+    // 5 minutes, and lets its next pause hold it. Nothing else moves its
+    // deadline later, so an upload that sends nothing can't keep the storage
+    // it reserved from others by asking about itself or pausing.
+
+    /** A chunk the upload didn't hold has come: it isn't quiet, and its next pause may hold it. */
+    const progressed = (upload) => {
+        upload.chunkSincePause = true;
         if (!upload.paused) setDeadline(upload, UPLOAD_QUIET_MS);
     };
 
@@ -892,9 +934,15 @@ if (enableUpload) {
             effectiveMaxDownloads = maxDownloads;
         }
 
+        // Counted by the address it came from, under its keyed hash; the address goes no further.
+        const counted = uploadCountKeyOf(req.ip);
         const releaseLock = await acquireQuotaLock();
         let upload;
         try {
+            if (maxUploadsPerAddress !== 0 && (uploadsByAddress.get(counted) ?? 0) >= maxUploadsPerAddress) {
+                log('debug', 'Upload rejected: its address has as many uploads in progress as it may.');
+                return res.status(429).json({ code: 'RATE_LIMITED', error: 'This address has as many uploads in progress as the server allows. Finish or cancel one, then try again.' });
+            }
             const reserved = reservedBytes();
             if (currentDiskUsage + reserved + size > MAX_STORAGE_BYTES) {
                 log('debug', `Upload rejected due to insufficient storage. Current usage: ${(currentDiskUsage / GIB).toFixed(2)} GB, Reserved: ${(reserved / GIB).toFixed(2)} GB, Requested: ${(size / GIB).toFixed(2)} GB.`);
@@ -919,12 +967,16 @@ if (enableUpload) {
                 received: new Map(),
                 writing: new Map(),
                 paused: false,
+                // Whether a chunk it didn't hold has come since its last pause (or its start).
+                chunkSincePause: false,
                 deadline: 0,
                 timer: null,
                 busy: 0,
                 finishing: null,
+                counted,
             };
             v4Uploads.set(id, upload);
+            countUpload(counted, 1);
             setDeadline(upload, UPLOAD_QUIET_MS);
         } finally {
             releaseLock();
@@ -940,7 +992,6 @@ if (enableUpload) {
         res.set('Connection', 'close');
         const upload = requestedUpload(req);
         if (!upload) return uploadNotFound(res);
-        renew(upload);
         // Only a chunk sent while paused resumes the upload: one already on its
         // way when the pause came was stopped by it, and leaves it paused.
         const sentWhilePaused = upload.paused;
@@ -1028,7 +1079,7 @@ if (enableUpload) {
         const gone = v4Uploads.get(upload.id) !== upload;
         // It ended while this chunk was being written, so its file is this chunk's to remove.
         if (gone && !held) fs.rm(upload.tempFilePath, { force: true }, () => { });
-        if (body.dropped) return gone ? undefined : renew(upload);
+        if (body.dropped) return undefined;
         if (body.tooLong) {
             res.set('Connection', 'close');
             return wrongLength();
@@ -1036,30 +1087,29 @@ if (enableUpload) {
         // A cancelled or ended upload's file is gone, which isn't the server's fault.
         if (gone) return uploadNotFound(res);
         if (body.fileError) throw body.fileError;
-        renew(upload);
         if (body.received !== length) return wrongLength(res);
         if (!body.digest.equals(digest)) return digestMismatch(res);
 
-        if (!held) {
-            upload.received.set(index, digest);
-            log('debug', `Received chunk ${index + 1}/${upload.chunks}. Size: ${(length / 1024).toFixed(2)} KB`);
-        } else if (!held.equals(digest)) {
+        if (held && !held.equals(digest)) {
             return res.status(409).json({ code: 'CHUNK_CONFLICT', error: 'The server already holds different bytes for that chunk.' });
         }
-
         // A chunk sent while paused resumes the upload.
         if (upload.paused && sentWhilePaused) {
             upload.paused = false;
             log('debug', 'Upload resumed.');
         }
-        renew(upload);
+        // A chunk it already held, sent again, is answered as before, and isn't progress.
+        if (!held) {
+            upload.received.set(index, digest);
+            log('debug', `Received chunk ${index + 1}/${upload.chunks}. Size: ${(length / 1024).toFixed(2)} KB`);
+            progressed(upload);
+        }
         res.status(200).json({ deadline: upload.deadline });
     });
 
     v4Router.get('/upload', v4UploadAuth, uploadCredential, (req, res) => {
         const upload = requestedUpload(req);
         if (!upload) return uploadNotFound(res);
-        renew(upload);
         res.status(200).json({ chunks: upload.chunks, received: receivedRanges(upload), paused: upload.paused, deadline: upload.deadline });
     });
 
@@ -1067,12 +1117,15 @@ if (enableUpload) {
         const upload = requestedUpload(req);
         if (!upload) return uploadNotFound(res);
         if (maxPauseMinutes === 0) {
-            renew(upload);
             return res.status(409).json({ code: 'PAUSE_DISABLED', error: 'Pausing is turned off on this server.' });
         }
-        // Pausing again renews the pause from now.
         upload.paused = true;
-        setDeadline(upload, maxPauseMinutes * 60 * 1000);
+        // A pause holds the upload for the pause's length from now, if a chunk has come since the last pause (or
+        // the start); pausing again after one renews it. Otherwise its deadline stays where it was.
+        if (upload.chunkSincePause) {
+            upload.chunkSincePause = false;
+            setDeadline(upload, maxPauseMinutes * 60 * 1000);
+        }
         log('debug', 'Upload paused.');
         res.status(200).json({ paused: true, deadline: upload.deadline });
     });
@@ -1081,8 +1134,8 @@ if (enableUpload) {
         const upload = requestedUpload(req);
         if (!upload) return uploadNotFound(res);
         if (upload.paused) log('debug', 'Upload resumed.');
+        // Its deadline stays where it was: its next chunk renews it.
         upload.paused = false;
-        renew(upload);
         res.status(200).json({ paused: false, deadline: upload.deadline, received: receivedRanges(upload) });
     });
 
@@ -1097,7 +1150,6 @@ if (enableUpload) {
         const upload = requestedUpload(req);
         if (!upload) return uploadNotFound(res);
         if (upload.received.size !== upload.chunks) {
-            renew(upload);
             return res.status(409).json({
                 code: 'UPLOAD_INCOMPLETE',
                 error: 'The server doesn\'t hold every chunk of this upload yet.',
@@ -1134,7 +1186,7 @@ if (enableUpload) {
             throw err;
         }
         currentDiskUsage += upload.size;
-        v4Uploads.delete(upload.id);
+        letGoOfUpload(upload);
         const forget = setTimeout(() => v4Finished.delete(upload.id), FINISHED_ANSWER_MS);
         v4Finished.set(upload.id, { id, forget });
         log('debug', `Upload finished.${maxStorageGB !== 0 ? ` Server capacity: ${(currentDiskUsage / GIB).toFixed(2)} GB / ${maxStorageGB} GB.` : ''}`);

@@ -141,7 +141,8 @@ export interface UploadSnapshot {
    * Whether `pause()` can be called now. False until the server has taken the upload,
    * while a pause or resume is settling, once it's finishing or has ended, and
    * on a server with pausing turned off (its `maxPauseMinutes` is 0). True
-   * while paused, since pausing again renews the server's deadline.
+   * while paused: pausing again asks the server again, which holds the upload
+   * from then only if a chunk has reached it since its last pause.
    */
   canPause: boolean;
   /** Who paused it, while it's paused: always `'self'` for an upload. `null` while it isn't paused. */

@@ -102,6 +102,28 @@ test('any other UPLOAD_MAX_PAUSE_MINUTES stops the server with a clear error', a
     }
 });
 
+test('UPLOAD_MAX_IN_PROGRESS_PER_IP is 5 unset and takes a whole number, said at INFO; 0 lifts the limit, with a warning', async () => {
+    for (const [value, expected] of [[undefined, '5'], ['1', '1'], [' 20 ', '20'], ['0', '0 \\(no limit\\)']]) {
+        await withServer({ ...UPLOADS, ...(value === undefined ? {} : { UPLOAD_MAX_IN_PROGRESS_PER_IP: value }) }, async (server) => {
+            const lines = linesNaming(server, 'UPLOAD_MAX_IN_PROGRESS_PER_IP');
+            assert.match(lines[0], new RegExp(`\\[INFO\\] UPLOAD_MAX_IN_PROGRESS_PER_IP: ${expected}$`), `with ${JSON.stringify(value)}`);
+            if (value === '0') assert.match(lines[1], /\[WARN\] UPLOAD_MAX_IN_PROGRESS_PER_IP is set to 0! One address can start as many uploads at once as the storage limit allows\./);
+            else assert.equal(lines.length, 1);
+        });
+    }
+});
+
+test('any other UPLOAD_MAX_IN_PROGRESS_PER_IP stops the server with a clear error; with uploads off it isn\'t read', async () => {
+    for (const value of ['-1', '1.5', 'abc', '', '1e3', '0x10', '1234567']) {
+        const { exitCode, output } = await refusedStart({ ...UPLOADS, UPLOAD_MAX_IN_PROGRESS_PER_IP: value });
+        assert.equal(exitCode, 1, `with ${JSON.stringify(value)}`);
+        assert.match(output, /\[ERROR\] Invalid UPLOAD_MAX_IN_PROGRESS_PER_IP environment variable\. It must be a whole number: the most uploads in progress one address can have at once, or 0 for no limit\./);
+    }
+    await withServer({ UPLOAD_MAX_IN_PROGRESS_PER_IP: 'abc' }, async (server) => {
+        assert.deepEqual(linesNaming(server, 'UPLOAD_MAX_IN_PROGRESS_PER_IP'), []);
+    });
+});
+
 test('UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS is gone: the server starts with any value, even one Dropgate 3 refused, and never mentions it', async () => {
     for (const value of ['100', '0', 'abc']) {
         await withServer({ ...UPLOADS, UPLOAD_ZOMBIE_CLEANUP_INTERVAL_MS: value }, async (server) => {
