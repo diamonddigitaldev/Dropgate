@@ -65,7 +65,7 @@ When the server answers with an error, the message is the server's own, if it se
 | `QUOTA_EXCEEDED` | server | No | This would go over the quota the server allows the credential's holder |
 | `NOT_FOUND` | server | No | The upload isn't on the server: it never was, it expired, it was deleted, or it was downloaded as many times as it could be (HTTP 404 or 410). For an upload in progress, the server dropped it ("The server dropped this upload"), or couldn't be reached for longer than it waits for one. For a paused upload or download, it was still paused at the server's deadline, or the server had dropped it by the time it was resumed ("The server dropped this paused upload.") |
 | `REQUEST_REJECTED` | server | No | The server refused the request for another reason (any other 4xx status), and says why: such as a manage token that isn't the upload's (HTTP 403) |
-| `RATE_LIMITED` | server | Yes | The server has had too many requests (HTTP 429) |
+| `RATE_LIMITED` | server | Yes | The server has had too many requests (HTTP 429); or, receiving by code, this network has had too many tries by code lately that didn't work out ("Too many codes have been tried from this network. Wait a few minutes, then try again.") |
 | `SERVER_FULL` | server | Yes | The server is out of space (HTTP 507) |
 | `SERVER_ERROR` | server | Yes | The server ran into an error (HTTP 5xx) |
 | `INVALID_RESPONSE` | server | No | The server's answer wasn't understood, or isn't a Dropgate server's, or it couldn't send the range of bytes asked for, or sent another range than the rest of a download |

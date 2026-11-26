@@ -6,7 +6,7 @@ import type {
 } from '../src/index.js';
 import { DEFAULT_DIRECT_SETTINGS, directSettings, helloOf } from '../src/client/direct.js';
 import { MemorySink, memoryFile, patterned, sameAs, sinksByFile } from './helpers/direct.js';
-import { Loopback, LoopbackPeerConnection, useLoopback } from './helpers/werift-loopback.js';
+import { Loopback, LoopbackPeerConnection, certificates, newCertificate, useLoopback } from './helpers/werift-loopback.js';
 // The server suite's own harness: the real server.js, in a throwaway folder, on a free port.
 import { startServer } from '../../../server/test/helpers/harness.mjs';
 
@@ -710,6 +710,60 @@ describe("a direct send's credential", () => {
       vi.unstubAllGlobals();
     }
   }, 60_000);
+});
+
+describe('tries by code, through the real server: each network has at most 5 that prove wrong in 10 minutes', () => {
+  /** More certificates for this test's peer connections, past the 12 each test is given. */
+  const morePeers = async (count: number) => {
+    certificates.push(...await Promise.all(Array.from({ length: count }, newCertificate)));
+  };
+
+  it('receiving by the right code is never held back, however often one device does it: a right code is no wrong try', async () => {
+    const server = (await startServer({ env: { RATE_LIMIT_MAX_REQUESTS: '0', P2P_STUN_SERVERS: 'none' } })) as Server;
+    try {
+      await morePeers(4);
+      for (let n = 1; n <= 7; n++) {
+        const send = await clientOf(server).direct.send({ files: memoryFile('a.bin', patterned(100, n)) });
+        const receive = await clientOf(server).direct.receive({ code: send.share().code as string });
+        await receive.accept({ sink: new MemorySink() });
+        expect(`${n}: ${said(await receive.result)} / ${said(await send.result)}`).toBe(`${n}: completed, saved / completed, saved`);
+      }
+    } finally {
+      await server.stop();
+    }
+  }, 120_000);
+
+  it("after 5 wrong codes from one network, a sixth receive by code is told to wait, in its words, before it reaches the sender, whose code is left as it was", async () => {
+    const server = (await startServer({ env: { RATE_LIMIT_MAX_REQUESTS: '0', P2P_STUN_SERVERS: 'none' } })) as Server;
+    try {
+      await morePeers(8);
+      const send = await clientOf(server).direct.send({ files: memoryFile('a.bin', patterned(10, 6)) });
+      for (let n = 1; n <= 5; n++) {
+        await until(() => send.snapshot.code === 'ready' && send.share().code !== null, `code ${n}`);
+        const code = send.share().code as string;
+        const wrong = `${code.slice(0, 2)}${code[2] === 'A' ? 'B' : 'A'}${code.slice(3)}`;
+        const failed = await clientOf(server).direct.receive({ code: wrong });
+        expect(`${n}: ${said(await failed.result)}`).toBe(`${n}: failed CODE_MISMATCH`);
+        await until(() => send.snapshot.code === 'ready' && send.share().code !== code, `a new code after try ${n}`);
+      }
+      const right = send.share().code as string;
+      const refused = await clientOf(server).direct.receive({ code: right });
+      // Ended before anything is offered, or, were it let through, offered the files.
+      const outcome = await Promise.race([refused.result, refused.offer().then(() => 'offered', () => refused.result)]);
+      expect(outcome).toMatchObject({
+        status: 'failed',
+        error: { code: 'RATE_LIMITED', origin: 'server', message: 'Too many codes have been tried from this network. Wait a few minutes, then try again.' },
+      });
+      // The sender never heard of it: the same code, still unused, and nothing under way.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(send.share().code).toBe(right);
+      expect(send.snapshot).toMatchObject({ status: 'waiting', code: 'ready' });
+      send.cancel();
+      await send.result;
+    } finally {
+      await server.stop();
+    }
+  }, 120_000);
 });
 
 describe('on a server set for 3 locator letters, and on one with codes off', () => {

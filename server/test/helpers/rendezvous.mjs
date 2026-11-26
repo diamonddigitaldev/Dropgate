@@ -15,7 +15,7 @@ export const TYPE = Object.freeze({
     JOINED: 0x91, FRAME_TO_RECEIVER: 0x92, GONE_TO_RECEIVER: 0x93,
     ERROR: 0xff,
 });
-export const ERROR = Object.freeze({ VERSION_UNSUPPORTED: 1, NOT_FOUND: 2, BUSY: 3, MALFORMED: 4, LIMIT: 5 });
+export const ERROR = Object.freeze({ VERSION_UNSUPPORTED: 1, NOT_FOUND: 2, BUSY: 3, MALFORMED: 4, LIMIT: 5, TOO_MANY_TRIES: 9 });
 export const BY = Object.freeze({ LINK: 1, CODE: 2 });
 
 export const MAX_FRAME_BYTES = 8230;

@@ -233,6 +233,14 @@ export async function startServer({ env = {}, clock = false, requests = false, h
             return (await ask({ type: 'rendezvous-counted' }, 'rendezvous-counted')).counted;
         },
         /**
+         * The rendezvous's per-address tries by code in the last 10 minutes, as [key in hex, count] pairs, or null
+         * with direct transfer off (see rendezvous-held.cjs).
+         */
+        rendezvousTried: async () => {
+            if (!held) throw new Error('Start the server with { held: true } to use rendezvousTried().');
+            return (await ask({ type: 'rendezvous-tried' }, 'rendezvous-tried')).tried;
+        },
+        /**
          * Writes a heap snapshot of the server's process to this file, as a memory dump would show what it holds
          * (see rendezvous-held.cjs).
          */

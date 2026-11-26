@@ -11,14 +11,22 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { startServer, waitFor } from './helpers/harness.mjs';
 import {
     BY, CODE_FIRST_FRAME_MS, CODE_LETTERS, CPACE_MESSAGE1_BYTES, ERROR, MAX_FRAMES_EACH_WAY, MAX_FRAME_BYTES, PING_INTERVAL_MS, QUARANTINE_MS, RELEASE_MS, TYPE,
-    VERSION, askCode, connect, errorMessage, expectError, joinByCode, joinRoom, msg, openRoom, upgradeRefused,
+    VERSION, askCode, connect, errorMessage, expectError, joinByCode as joinByCodeAs, joinRoom, msg, openRoom, upgradeRefused,
 } from './helpers/rendezvous.mjs';
 
 const hex = (b) => Buffer.from(b).toString('hex');
+let receivers = 0;
+/**
+ * A receiver by code from an address of its own (each its own /56), so only the tests of the limit on tries by
+ * code meet it: a try that doesn't prove right counts for 10 minutes. The servers here trust one proxy.
+ */
+const ownReceiver = () => ({ headers: { 'X-Forwarded-For': `2001:db8:${(++receivers).toString(16)}::1` } });
+/** Joins by a room's code, from an address of its own unless `opts` gives one. */
+const joinByCode = (server, room, opts) => joinByCodeAs(server, room, opts ?? ownReceiver());
 /** Nothing open, no unused code and no address counted. Locators may still be waiting out their quarantine. */
 const NOTHING_HELD = { sockets: 0, rooms: 0, attempts: 0, codes: 0, counted: 0 };
 /** Codes off: the rules for rooms, frames and attempts, with nothing from codes in the way. */
-const CODES_OFF = { RATE_LIMIT_MAX_REQUESTS: '0', P2P_MAX_CODES_PER_IP: '0' };
+const CODES_OFF = { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0', P2P_MAX_CODES_PER_IP: '0' };
 
 /** What the rendezvous holds, of these counts only. */
 const heldOf = async (server, keys) => {
@@ -471,7 +479,14 @@ describe('the rendezvous', () => {
             assert.deepEqual(fieldsOf(roomCode[0].replace(/^[^{]*/, '')), ['locator', 'attempt', 'release']);
             const attempt = code.match(/const attempt = \{[^}]*\};/g);
             assert.equal(attempt?.length, 1, 'one place makes an attempt');
-            assert.deepEqual(fieldsOf(attempt[0].replace(/^[^{]*/, '')), ['room', 'tag', 'by', 'receiver', 'live', 'toSender', 'toReceiver', 'firstFrameDue']);
+            assert.deepEqual(fieldsOf(attempt[0].replace(/^[^{]*/, '')), ['room', 'tag', 'by', 'receiver', 'live', 'toSender', 'toReceiver', 'firstFrameDue', 'try']);
+            // A try holds its address's keyed hash and its timer, nothing else.
+            const counted = code.match(/const counted = \{[^}]*\};/g);
+            assert.equal(counted?.length, 1, 'one place makes a try');
+            assert.deepEqual(fieldsOf(counted[0].replace(/^[^{]*/, '')), ['key', 'timer']);
+            assert.equal(code.match(/tryOf\(/g).length, 1, 'made in one place, from the receiver\'s keyed hash');
+            assert.match(code, /attempt\.try = tryOf\(peer\.counted\);/);
+            assert.equal(code.match(/tries\.set\(/g).length, 1, 'and one place sets a try\'s count');
             const peer = code.match(/const peer = \{[^}]*\};/g);
             assert.equal(peer?.length, 1, 'one place makes a socket\'s state');
             assert.deepEqual(fieldsOf(peer[0].replace(/^[^{]*/, '')), ['ws', 'role', 'room', 'attempt', 'heardAt', 'finished', 'counted']);
@@ -631,7 +646,7 @@ describe('the rendezvous upgrade', () => {
     });
 
     test("is at its one path only: any other is refused, and Dropgate 3's PeerJS socket is told to update", async (t) => {
-        const server = await startServer({ held: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
         t.after(server.stop);
         for (const path of ['/api/v4/rendezvous/', '/api/v4/rendezvous/abc', '/api/v4/rendezvousx', '/api/v4', '/', '/p2p', '/peerjsx']) {
             assert.notEqual(await upgradeRefused(server, { path }), null, path);
@@ -644,7 +659,7 @@ describe('the rendezvous upgrade', () => {
     });
 
     test('with direct transfer off, is answered as any other request: there\'s nothing there', async (t) => {
-        const server = await startServer({ held: true, env: { ENABLE_P2P: 'false', ENABLE_UPLOAD: 'true' } });
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', ENABLE_P2P: 'false', ENABLE_UPLOAD: 'true' } });
         t.after(server.stop);
         assert.deepEqual(await upgradeRefused(server), { status: 404, body: JSON.stringify({ code: 'NOT_FOUND', error: 'There is nothing here.' }) });
         assert.equal(await server.rendezvousHeld(), null);
@@ -656,7 +671,7 @@ describe('what the rendezvous logs', () => {
     let server;
 
     before(async () => {
-        server = await startServer({ env: { LOG_LEVEL: 'DEBUG', ...CODES_OFF } });
+        server = await startServer({ env: { TRUST_PROXY: '1', LOG_LEVEL: 'DEBUG', ...CODES_OFF } });
         await waitFor(() => server.output.stdout.includes('is running'), { what: 'the startup log' });
     });
 
@@ -707,7 +722,7 @@ describe('what the rendezvous logs', () => {
 
 describe('a socket that can\'t keep up', () => {
     test("is closed once 1 MiB waits to be sent to it: a slow receiver's attempt ends, a slow sender's room", async (t) => {
-        const server = await startServer({ held: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
         t.after(server.stop);
 
         const room = await openRoom(server);
@@ -758,7 +773,7 @@ const refusedWith = async (client, code, what) => {
 
 /** Joins by a locator, expecting an ERROR. */
 const joinRefused = async (server, locator, code, what) => {
-    const client = await connect(server);
+    const client = await connect(server, ownReceiver());
     client.send(msg.joinByCode(locator));
     await refusedWith(client, code, what);
 };
@@ -793,7 +808,7 @@ describe('codes', () => {
     test("CREATE with a code asked for gives a locator of two of the code's letters; a JOIN by it gives the receiver the room's nonce, the sender an ATTEMPT by code, and frames pass both ways", async () => {
         const room = await openRoom(server, { code: true, ...own() });
         assert.match(room.locator, /^[A-HJ-NP-Z]{2}$/);
-        const receiver = await connect(server);
+        const receiver = await connect(server, ownReceiver());
         receiver.send(msg.joinByCode(room.locator));
         assert.equal(hex(await receiver.next()), hex(Buffer.concat([Buffer.from([TYPE.JOINED]), room.roomNonce])));
         const [type, tag, by] = await room.sender.next();
@@ -809,7 +824,7 @@ describe('codes', () => {
     test("the first frame by a code, CPace's first message, uses it up: only that one reaches the sender; a JOIN by it is BUSY while its attempt has sent nothing, and finds nothing once it has; the attempt carries on", async () => {
         const room = await openRoom(server, { code: true, ...own() });
         const first = await joinByCode(server, room);
-        const meanwhile = await connect(server);
+        const meanwhile = await connect(server, ownReceiver());
         meanwhile.send(msg.joinByCode(room.locator));
         await refusedWith(meanwhile, ERROR.BUSY, 'a second JOIN while the first has sent nothing');
         assert.deepEqual(await heldOf(server, ['codes']), { codes: 1 }, 'the code still unused');
@@ -908,7 +923,7 @@ describe('codes', () => {
         first.receiver.send(msg.receiverSend(message1()));
         await room.sender.next();
         const next = await askCode(room.sender);
-        const busy = await connect(server);
+        const busy = await connect(server, ownReceiver());
         busy.send(msg.joinByCode(next));
         await refusedWith(busy, ERROR.BUSY, 'while the first attempt by code is live');
         first.receiver.close();
@@ -948,7 +963,7 @@ const advanceKeeping = async (server, ms, rooms) => {
 test('a locator is drawn at random from the free ones: the first 100 given start with most of the 24 letters, and two servers give them in different orders', async () => {
     const drawn = [];
     for (let run = 0; run < 2; run++) {
-        const server = await startServer({ env: { RATE_LIMIT_MAX_REQUESTS: '0', P2P_MAX_CODES_PER_IP: '1000' } });
+        const server = await startServer({ env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0', P2P_MAX_CODES_PER_IP: '1000' } });
         try {
             const rooms = [];
             for (let i = 0; i < 100; i++) rooms.push(await openRoom(server, { code: true }));
@@ -969,7 +984,7 @@ test('a locator is drawn at random from the free ones: the first 100 given start
 
 describe('codes on the test clock', () => {
     test("an unused code is released 10 minutes after its sender last asked for it or renewed it: it's told CODE_GONE, and a JOIN by it finds nothing", async (t) => {
-        const server = await startServer({ held: true, clock: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        const server = await startServer({ held: true, clock: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
         t.after(server.stop);
         const room = await openRoom(server, { code: true });
         // Real time passes between the clock's steps too, so each check stands well clear of the 10 minutes.
@@ -993,12 +1008,12 @@ describe('codes on the test clock', () => {
     });
 
     test("a receiver by code that sends nothing for 10 seconds is ended, both devices told GONE: the code stays the sender's, unused, and the real receiver joins by it", async (t) => {
-        const server = await startServer({ held: true, clock: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        const server = await startServer({ held: true, clock: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
         t.after(server.stop);
         const room = await openRoom(server, { code: true });
         // It joins by the locator and sends nothing, its socket answering every ping.
         const silent = await joinByCode(server, room);
-        const meanwhile = await connect(server);
+        const meanwhile = await connect(server, ownReceiver());
         meanwhile.send(msg.joinByCode(room.locator));
         await refusedWith(meanwhile, ERROR.BUSY, 'the real receiver, while the silent one holds the code');
 
@@ -1021,7 +1036,7 @@ describe('codes on the test clock', () => {
     });
 
     test('a receiver by code whose first frame comes within the 10 seconds runs on past them, as one does after LOCK; one by link is never ended for sending nothing', async (t) => {
-        const server = await startServer({ held: true, clock: true, env: { RATE_LIMIT_MAX_REQUESTS: '0' } });
+        const server = await startServer({ held: true, clock: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
         t.after(server.stop);
         const room = await openRoom(server, { code: true });
         const prompt = await joinByCode(server, room);
@@ -1051,7 +1066,7 @@ describe('codes on the test clock', () => {
     });
 
     test('every one of the 576 locators can be held at once, the next sender gets its link and no code, and each locator that leaves (used, locked, its room closed, released) is held back 5 minutes', async (t) => {
-        const server = await startServer({ held: true, clock: true, env: { RATE_LIMIT_MAX_REQUESTS: '0', P2P_MAX_CODES_PER_IP: '1000' } });
+        const server = await startServer({ held: true, clock: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0', P2P_MAX_CODES_PER_IP: '1000' } });
         t.after(server.stop);
         const rooms = await openRooms(server, 576);
         assert.deepEqual(rooms.map((r) => r.locator).sort(), everyLocator(2), 'every locator, each once');
@@ -1105,7 +1120,7 @@ describe('codes on the test clock', () => {
 
 describe('codes at 3 letters', () => {
     test('every one of the 13,824 locators can be held at once, then the next sender gets its link and no code; a JOIN by 3 letters finds its room, by 2 nothing; the messages are the same', async (t) => {
-        const server = await startServer({ held: true, env: { RATE_LIMIT_MAX_REQUESTS: '0', P2P_LOCATOR_LETTERS: '3', P2P_MAX_CODES_PER_IP: '20000' } });
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0', P2P_LOCATOR_LETTERS: '3', P2P_MAX_CODES_PER_IP: '20000' } });
         t.after(server.stop);
         const rooms = await openRooms(server, 13_824);
         assert.deepEqual(rooms.map((r) => r.locator).sort(), everyLocator(3), 'every locator, each once');
@@ -1256,7 +1271,7 @@ describe('the per-address count of unused codes', () => {
     });
 
     test("at DEBUG, a code given, joined by, used, renewed, released or locked logs nothing of its own; a room given none says 'No code was free.'", async (t) => {
-        const server = await startServer({ held: true, clock: true, env: { RATE_LIMIT_MAX_REQUESTS: '0', LOG_LEVEL: 'DEBUG', P2P_MAX_CODES_PER_IP: '1' } });
+        const server = await startServer({ held: true, clock: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0', LOG_LEVEL: 'DEBUG', P2P_MAX_CODES_PER_IP: '1' } });
         t.after(server.stop);
         await waitFor(() => server.output.stdout.includes('is running'), { what: 'the startup log' });
         const loggedBy = async (run) => {
@@ -1297,5 +1312,228 @@ describe('the per-address count of unused codes', () => {
             "[DEBUG] A direct transfer's room closed.", "[DEBUG] A direct transfer's room closed.",
         ]);
         await closeRooms([room]);
+    });
+});
+
+describe("tries by code: each address has at most 5 in 10 minutes that don't prove right", () => {
+    /** CPace's second message and third, as the server sees them: bytes of their lengths, which it never reads. */
+    const message2 = () => randomBytes(99);
+    const message3 = () => randomBytes(64);
+    const A = '203.0.113.200';
+
+    /** Joins a room's code from `address`: the attempt, and the room's sender told of it. */
+    const tryFrom = (server, room, address) => joinByCodeAs(server, room, from(address));
+    /** Sends a frame and waits for it to reach the other end, so the server has acted on it. */
+    const toSender = async (room, receiver, frame) => {
+        receiver.send(msg.receiverSend(frame));
+        await room.sender.next();
+    };
+    const toReceiver = async (room, attempt, frame) => {
+        room.sender.send(msg.send(attempt.tag, frame));
+        await attempt.receiver.next();
+    };
+    /** Ends an attempt from the receiver's side, and waits for the sender to hear it. */
+    const leave = async (room, attempt) => {
+        attempt.receiver.close();
+        await attempt.receiver.closed;
+        await room.sender.next();
+    };
+    /** How many tries the rendezvous counts, over every address. */
+    const triesHeld = async (server) => (await server.rendezvousTried()).reduce((sum, [, count]) => sum + count, 0);
+    /** Joins by a locator from `address`, expecting an ERROR. */
+    const refusedFrom = async (server, locator, address, code, what) => {
+        const client = await connect(server, from(address));
+        client.send(msg.joinByCode(locator));
+        await refusedWith(client, code, what);
+    };
+
+    /** The five ways a try goes wrong, one each, all from `address`: each a room of its own. */
+    const fiveWrong = async (server, address) => {
+        const rooms = [];
+        const fresh = async () => {
+            const room = await openRoom(server, { code: true, ...from(`198.51.100.${rooms.length + 1}`) });
+            rooms.push(room);
+            return room;
+        };
+        // A wrong code: the receiver finds the sender's confirmation wrong, and aborts.
+        let room = await fresh();
+        let attempt = await tryFrom(server, room, address);
+        await toSender(room, attempt.receiver, message1());
+        await toReceiver(room, attempt, message2());
+        await toSender(room, attempt.receiver, Buffer.alloc(0));
+        await leave(room, attempt);
+        // The same, but it closes instead of aborting.
+        room = await fresh();
+        attempt = await tryFrom(server, room, address);
+        await toSender(room, attempt.receiver, message1());
+        await toReceiver(room, attempt, message2());
+        await leave(room, attempt);
+        // The sender finds the receiver's confirmation wrong, and aborts where the receiver waits for its first sealed frame.
+        room = await fresh();
+        attempt = await tryFrom(server, room, address);
+        await toSender(room, attempt.receiver, message1());
+        await toReceiver(room, attempt, message2());
+        await toSender(room, attempt.receiver, message3());
+        await toReceiver(room, attempt, Buffer.alloc(0));
+        await leave(room, attempt);
+        // It leaves before sending anything.
+        room = await fresh();
+        attempt = await tryFrom(server, room, address);
+        await leave(room, attempt);
+        // It sends CPace's first message, and the sender drops it.
+        room = await fresh();
+        attempt = await tryFrom(server, room, address);
+        await toSender(room, attempt.receiver, message1());
+        room.sender.send(msg.drop(attempt.tag));
+        await attempt.receiver.closed;
+        return rooms;
+    };
+
+    test("past 5 tries that didn't prove right, a JOIN by code from that address is refused TOO_MANY_TRIES before any room is found; the code is left as it was, and another address joins by it", async (t) => {
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
+        t.after(server.stop);
+        const rooms = await fiveWrong(server, A);
+        assert.equal(await triesHeld(server), 5, 'each counted');
+
+        const room = await openRoom(server, { code: true, ...from('198.51.100.9') });
+        await refusedFrom(server, room.locator, A, ERROR.TOO_MANY_TRIES, 'the sixth');
+        await refusedFrom(server, room.locator === 'ZZ' ? 'ZY' : 'ZZ', A, ERROR.TOO_MANY_TRIES, 'a locator no room has: refused the same, so it learns nothing');
+        assert.equal(await askCode(room.sender), room.locator, 'its code is still unused');
+
+        const other = await tryFrom(server, room, '203.0.113.201');
+        assert.ok(other.tag, 'another address joins by it');
+        assert.equal(await triesHeld(server), 6);
+        await closeRooms([...rooms, room]);
+    });
+
+    test('JOINs by code at once count each, from the moment they join: a sixth while five are under way is refused', async (t) => {
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
+        t.after(server.stop);
+        const rooms = [];
+        for (let i = 1; i <= 6; i++) rooms.push(await openRoom(server, { code: true, ...from(`198.51.100.${i}`) }));
+        const attempts = await Promise.all(rooms.slice(0, 5).map((room) => tryFrom(server, room, A)));
+        assert.equal(attempts.length, 5);
+        assert.equal(await triesHeld(server), 5);
+        await refusedFrom(server, rooms[5].locator, A, ERROR.TOO_MANY_TRIES, 'the sixth');
+        await closeRooms(rooms);
+    });
+
+    test("a try that proves right isn't counted: once the sender sends it a frame after CPace's second message that isn't an abort, so one address joins by code as often as its codes are right", async (t) => {
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
+        t.after(server.stop);
+        // One wrong try first, which stays counted beside the right ones.
+        const wrongRoom = await openRoom(server, { code: true, ...from('198.51.100.99') });
+        await leave(wrongRoom, await tryFrom(server, wrongRoom, A));
+        const rooms = [wrongRoom];
+        for (let i = 1; i <= 8; i++) {
+            const room = await openRoom(server, { code: true, ...from(`198.51.100.${i}`) });
+            rooms.push(room);
+            const attempt = await tryFrom(server, room, A);
+            await toSender(room, attempt.receiver, message1());
+            await toReceiver(room, attempt, message2());
+            assert.equal(await triesHeld(server), 2, `${i}: counted until it proves right`);
+            await toSender(room, attempt.receiver, message3());
+            assert.equal(await triesHeld(server), 2, `${i}: its third message proves nothing`);
+            // The sealed frames that follow: the sender's first is only sent once the receiver's confirmation matched.
+            await toSender(room, attempt.receiver, randomBytes(200));
+            await toReceiver(room, attempt, randomBytes(200));
+            assert.equal(await triesHeld(server), 1, `${i}: let go once the sender answered past CPace`);
+            await toReceiver(room, attempt, randomBytes(200));
+            await toReceiver(room, attempt, randomBytes(200));
+            assert.equal(await triesHeld(server), 1, `${i}: and only once, the wrong try still counted`);
+        }
+        assert.deepEqual((await server.rendezvousTried()).map(([, count]) => count), [1], 'one entry, the wrong try\'s');
+        await closeRooms(rooms);
+    });
+
+    test('a try is counted for 10 minutes from its JOIN, and then the address may join by code again; a right one is let go for good', async (t) => {
+        const server = await startServer({ held: true, clock: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
+        t.after(server.stop);
+        // A right try first, let go at once, and never taken off the count again when its 10 minutes would have ended.
+        const first = await openRoom(server, { code: true, ...from('198.51.100.20') });
+        const right = await tryFrom(server, first, A);
+        await toSender(first, right.receiver, message1());
+        await toReceiver(first, right, message2());
+        await toSender(first, right.receiver, message3());
+        await toReceiver(first, right, randomBytes(200));
+        assert.equal(await triesHeld(server), 0);
+        await closeRooms([first]);
+        await server.advanceClock(5 * 60_000);
+
+        const rooms = await fiveWrong(server, A);
+        const room = await openRoom(server, { code: true, ...from('198.51.100.9') });
+        await advanceKeeping(server, 5 * 60_000 + 30_000, [room, ...rooms]);
+        await refusedFrom(server, room.locator, A, ERROR.TOO_MANY_TRIES, 'past the right try\'s 10 minutes, the wrong ones still count');
+        assert.equal(await triesHeld(server), 5);
+        await advanceKeeping(server, 4 * 60_000, [room, ...rooms]);
+        await refusedFrom(server, room.locator, A, ERROR.TOO_MANY_TRIES, 'not before 10 minutes');
+        // Its sender keeps its code, as an app open for that long does.
+        room.sender.send(msg.renew());
+        await advanceKeeping(server, 60_000, [room, ...rooms]);
+        assert.deepEqual(await server.rendezvousTried(), [], 'the tries have gone, their entry with them');
+        const attempt = await tryFrom(server, room, A);
+        assert.ok(attempt.tag, 'it joins again');
+        await closeRooms([room, ...rooms]);
+    });
+
+    test('a receiver that joins by a code and sends nothing, again and again, is ended each time after 10 seconds, and its sixth JOIN is refused', async (t) => {
+        const server = await startServer({ held: true, clock: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0' } });
+        t.after(server.stop);
+        const room = await openRoom(server, { code: true, ...from('198.51.100.1') });
+        for (let n = 1; n <= 5; n++) {
+            const silent = await tryFrom(server, room, A);
+            await server.advanceClock(CODE_FIRST_FRAME_MS + 1_000);
+            assert.equal(hex(await silent.receiver.next()), hex([TYPE.GONE_TO_RECEIVER]), `${n}: ended`);
+            assert.deepEqual([...await room.sender.next()], [TYPE.GONE_TO_SENDER, silent.tag], `${n}: the sender told`);
+        }
+        await refusedFrom(server, room.locator, A, ERROR.TOO_MANY_TRIES, 'the sixth silent join');
+        assert.equal(await askCode(room.sender), room.locator, 'the code still unused');
+        const real = await tryFrom(server, room, '203.0.113.201');
+        assert.ok(real.tag, 'and the real receiver joins by it');
+        await closeRooms([room]);
+    });
+
+    test("the tries hold no address: their keys are the code count's 16-byte keyed hashes, an entry goes at 0, and nothing on disk or in the log is an address; at DEBUG a refusal says only that", async (t) => {
+        const server = await startServer({ held: true, env: { TRUST_PROXY: '1', RATE_LIMIT_MAX_REQUESTS: '0', LOG_LEVEL: 'DEBUG' } });
+        t.after(server.stop);
+        const addresses = [A, '2001:db8:9:100::1'];
+        const forms = addresses.map(formsOf);
+        const before = listFiles(server.dir);
+        const rooms = await fiveWrong(server, addresses[0]);
+        // The second address holds an unused code and has a try of its own, so its two keys can be compared.
+        const own = await openRoom(server, { code: true, ...from(addresses[1]) });
+        const target = await openRoom(server, { code: true, ...from('198.51.100.30') });
+        await tryFrom(server, target, addresses[1]);
+
+        const tried = await server.rendezvousTried();
+        assert.deepEqual(tried.map(([, count]) => count).sort(), [1, 5]);
+        for (const [key] of tried) {
+            assert.match(key, /^[0-9a-f]{32}$/, 'a key is 16 bytes');
+            for (const { texts, binary } of forms) {
+                for (const text of texts) {
+                    assert.ok(!key.includes(Buffer.from(text).toString('hex')), `${key} holds ${text}`);
+                    for (const plain of [createHash('sha256').update(text).digest(), createHmac('sha256', Buffer.alloc(32)).update(text).digest()]) {
+                        assert.notEqual(key, plain.subarray(0, 16).toString('hex'), `${key} is an unkeyed hash of ${text}`);
+                    }
+                }
+                for (const bytes of binary) assert.ok(!key.includes(bytes.toString('hex')), `${key} holds ${bytes.toString('hex')}`);
+            }
+        }
+        const counted = new Set((await server.rendezvousCounted()).map(([key]) => key));
+        assert.ok(tried.some(([key, count]) => count === 1 && counted.has(key)), 'the same keyed hash as the code count');
+
+        // A refusal at DEBUG.
+        const mark = server.mark();
+        await refusedFrom(server, target.locator, addresses[0], ERROR.TOO_MANY_TRIES, 'the sixth');
+        await sleep(100);
+        const { stdout, stderr } = server.since(mark);
+        assert.deepEqual((stdout + stderr).split(/\r?\n/).filter(Boolean).map((l) => l.replace(/^\[[^\]]*\] /, '')), [
+            '[DEBUG] A join by code was refused after too many tries.',
+        ]);
+
+        await closeRooms([...rooms, own, target]);
+        assert.deepEqual(listFiles(server.dir), before, 'nothing written');
+        const output = server.output.stdout + server.output.stderr;
+        for (const { texts } of forms) for (const text of texts) assert.ok(!output.includes(text), `the log holds ${text}`);
     });
 });

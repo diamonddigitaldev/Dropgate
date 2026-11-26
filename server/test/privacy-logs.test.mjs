@@ -40,6 +40,7 @@ const KNOWN_EVENTS = [
     String.raw`A direct transfer's room (opened|closed)\.`,
     String.raw`A receiver joined\.`,
     String.raw`No code was free\.`,
+    String.raw`A join by code was refused after too many tries\.`,
 ].map((source) => new RegExp(`^${source}$`));
 const FILE_COUNT = /\(\d+ files|\d+ member files/;
 

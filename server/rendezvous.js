@@ -31,10 +31,20 @@
 // its socket connects and never kept, and nothing ties the counts of one run
 // to the next.
 //
+// A guess at a code can only be tried by joining, so each address has at most
+// 5 tries by code in any 10 minutes, counted under the same keyed hash. A
+// JOIN by code counts as a try at once, and stays counted for 10 minutes
+// unless it proves right: the sender sends it a frame after CPace's second
+// message that isn't an abort, which a sender does only once the receiver
+// has shown it holds the same code. A wrong code, a receiver that closes
+// instead of aborting, one that sends nothing, and many at once all count;
+// past 5, a JOIN by code is refused before it finds any room.
+//
 // What the server holds is in memory only, while the sockets are open: the
 // room's ID, its public nonce, its unused code's locator, each attempt's
-// socket and tag, and the counts by hash. Nothing is written to disk, and
-// nothing about a room is logged but that something happened.
+// socket and tag, and the counts by hash (the tries for 10 minutes). Nothing
+// is written to disk, and nothing about a room is logged but that something
+// happened.
 const { createHmac, randomBytes, randomInt } = require('crypto');
 const { WebSocketServer } = require('ws');
 
@@ -71,6 +81,10 @@ const QUARANTINE_MS = 5 * 60_000;
 const RELEASE_MS = 10 * 60_000;
 /** The per-address count's key, from HMAC-SHA-256, is cut to this many bytes. */
 const COUNT_KEY_BYTES = 16;
+/** The most tries by code one address has in CODE_TRY_MEMORY_MS: a JOIN by code past them is refused. */
+const MAX_CODE_TRIES = 5;
+/** How long a try by code stays counted, unless it proves right. */
+const CODE_TRY_MEMORY_MS = 10 * 60_000;
 
 const ROOM_ID_BYTES = 16;
 const ROOM_NONCE_BYTES = 16;
@@ -110,6 +124,8 @@ const ERROR = Object.freeze({
     BUSY: 3,
     MALFORMED: 4,
     LIMIT: 5,
+    // 6 to 8 are a credential's, which no Dropgate server asks for yet.
+    TOO_MANY_TRIES: 9,
 });
 
 /** How a receiver joins: by a link's room ID, or by a code's locator. */
@@ -166,6 +182,8 @@ function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress
     const countKey = randomBytes(32);
     /** How many unused codes each address holds, by the address's keyed hash; an entry goes when it reaches 0. */
     const counts = new Map();
+    /** How many tries by code each address has had in the last 10 minutes, by the same keyed hash; an entry goes at 0. */
+    const tries = new Map();
 
     const message = (...bytes) => Buffer.from(bytes);
     /** CREATED or CODE_IS: the locator's length, then the locator; 0 and nothing when there's none. */
@@ -249,6 +267,30 @@ function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress
         const count = (counts.get(key) ?? 0) + by;
         if (count > 0) counts.set(key, count);
         else counts.delete(key);
+    };
+
+    const countTry = (key, by) => {
+        const count = (tries.get(key) ?? 0) + by;
+        if (count > 0) tries.set(key, count);
+        else tries.delete(key);
+    };
+
+    /** An attempt by code is a try for its receiver's address, for 10 minutes. Gives the try, to let go of if it proves right. */
+    const tryOf = (key) => {
+        countTry(key, 1);
+        const counted = { key, timer: null };
+        counted.timer = setTimeout(() => countTry(key, -1), CODE_TRY_MEMORY_MS);
+        counted.timer.unref?.();
+        return counted;
+    };
+
+    /** The attempt proved its code right: its try no longer counts. */
+    const rightTry = (attempt) => {
+        const counted = attempt.try;
+        if (!counted) return;
+        attempt.try = null;
+        clearTimeout(counted.timer);
+        countTry(counted.key, -1);
     };
 
     /** Restarts an unused code's 10 minutes. When they run out, the code is released and its sender told. */
@@ -366,6 +408,11 @@ function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress
             if (data.length !== 5 + letters || (letters !== 2 && letters !== 3)) return fail(peer, ERROR.MALFORMED);
             const locator = data.toString('latin1', 5);
             if ([...locator].some((c) => !CODE_LETTERS.includes(c))) return fail(peer, ERROR.MALFORMED);
+            // An address past its tries is refused before anything is looked up, so it learns nothing of any code.
+            if ((tries.get(peer.counted) ?? 0) >= MAX_CODE_TRIES) {
+                log('debug', 'A join by code was refused after too many tries.');
+                return fail(peer, ERROR.TOO_MANY_TRIES);
+            }
             // Only an unused code finds its room: one used, released or never given, or of the other length, finds none.
             room = codes.get(locator);
             if (!room) return fail(peer, ERROR.NOT_FOUND);
@@ -381,10 +428,12 @@ function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress
         }
         const tag = nextTag(room);
 
-        const attempt = { room, tag, by, receiver: peer, live: true, toSender: 0, toReceiver: 0, firstFrameDue: null };
+        const attempt = { room, tag, by, receiver: peer, live: true, toSender: 0, toReceiver: 0, firstFrameDue: null, try: null };
         room.attempts.set(tag, attempt);
         if (by === BY.CODE) {
             room.code.attempt = attempt;
+            // A try for its address from now, whatever comes of it, unless it proves right.
+            attempt.try = tryOf(peer.counted);
             // Its first frame comes within 10 seconds, or the attempt ends, both devices told GONE, and the code is left unused.
             attempt.firstFrameDue = setTimeout(() => endAttempt(attempt, { tellSender: true }), CODE_FIRST_FRAME_MS);
             attempt.firstFrameDue.unref?.();
@@ -406,6 +455,9 @@ function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress
                 // An attempt that has just ended: the sender hears GONE, if it hasn't already.
                 if (!attempt) return;
                 if (++attempt.toReceiver > MAX_FRAMES_EACH_WAY) return endAttempt(attempt, { tellSender: true, receiverError: ERROR.LIMIT });
+                // By code, the sender's first frame is CPace's second message (or an abort), and it sends another,
+                // not empty, only once the receiver's confirmation has matched: the code was right, so no try.
+                if (attempt.try && attempt.toReceiver >= 2 && data.length > 2) rightTry(attempt);
                 return send(attempt.receiver, Buffer.concat([message(TYPE.FRAME_TO_RECEIVER), data.subarray(2)]));
             }
             case TYPE.DROP: {
@@ -504,9 +556,12 @@ function createRendezvous({ version, log, locatorLetters = 2, maxCodesPerAddress
             quarantined: quarantined.size,
             free: free.length,
             counted: counts.size,
+            tried: tries.size,
         }),
         /** The per-address counts, each key in hex: for the tests, to show what they hold. */
         counted: () => [...counts].map(([key, count]) => [Buffer.from(key, 'latin1').toString('hex'), count]),
+        /** The per-address tries by code, each key in hex: for the tests, to show what they hold. */
+        tried: () => [...tries].map(([key, count]) => [Buffer.from(key, 'latin1').toString('hex'), count]),
     };
 }
 

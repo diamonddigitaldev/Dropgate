@@ -33,6 +33,7 @@ Module._load = function load(request, parent, ...rest) {
 process.on('message', (msg) => {
     if (msg && msg.type === 'rendezvous-held') process.send({ type: 'rendezvous-held', held: rendezvous ? rendezvous.held() : null });
     if (msg && msg.type === 'rendezvous-counted') process.send({ type: 'rendezvous-counted', counted: rendezvous ? rendezvous.counted() : null });
+    if (msg && msg.type === 'rendezvous-tried') process.send({ type: 'rendezvous-tried', tried: rendezvous ? rendezvous.tried() : null });
     // Everything the server's process holds, written to a file the test names, as a memory dump would show it.
     if (msg && msg.type === 'heap-snapshot') process.send({ type: 'heap-snapshot', file: v8.writeHeapSnapshot(msg.file) });
     if (msg && msg.type === 'buffer-bytes') {

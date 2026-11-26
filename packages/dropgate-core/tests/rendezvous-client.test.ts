@@ -441,9 +441,17 @@ describe("the server's errors in core's words", () => {
     expect(rendezvousError(1, { major: 3, minor: 0 })).toMatchObject({ code: 'VERSION_UNSUPPORTED', details: { update: 'server' } });
     expect(rendezvousError(1, { major: 4, minor: 7 }).code).toBe('INVALID_RESPONSE');
     expect([2, 3, 4, 5, 6, 7, 8, 9, 0].map((code) => rendezvousError(code).code)).toEqual([
-      'NOT_FOUND', 'REQUEST_REJECTED', 'INVALID_RESPONSE', 'INVALID_RESPONSE', 'AUTH_REQUIRED', 'AUTH_EXPIRED', 'AUTH_DENIED', 'INVALID_RESPONSE',
+      'NOT_FOUND', 'REQUEST_REJECTED', 'INVALID_RESPONSE', 'INVALID_RESPONSE', 'AUTH_REQUIRED', 'AUTH_EXPIRED', 'AUTH_DENIED', 'RATE_LIMITED',
       'INVALID_RESPONSE',
     ]);
+  });
+
+  it('an address that has tried too many codes lately is told to wait, in its own words', () => {
+    expect(rendezvousError(9)).toMatchObject({
+      code: 'RATE_LIMITED', origin: 'server',
+      message: 'Too many codes have been tried from this network. Wait a few minutes, then try again.',
+    });
+    expect(rendezvousError(10).code).toBe('INVALID_RESPONSE');
   });
 });
 

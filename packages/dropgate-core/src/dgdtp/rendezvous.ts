@@ -32,7 +32,8 @@ import { MAX_FRAME_BYTES } from './seal.js';
 //
 // Errors are core's, worded for direct transfers: a server of another major is
 // VERSION_UNSUPPORTED saying which side needs updating; no such room or code
-// NOT_FOUND; a room already taken REQUEST_REJECTED; anything the server sends
+// NOT_FOUND; a room already taken REQUEST_REJECTED; an address that has tried
+// too many codes lately RATE_LIMITED; anything the server sends
 // that isn't one of its messages INVALID_RESPONSE; a socket that never opens
 // SERVER_UNREACHABLE, and one that closes before its answer CONNECTION_LOST.
 // Nothing here logs, and no error holds a room ID, nonce, locator or frame.
@@ -76,6 +77,7 @@ export const RENDEZVOUS_ERROR = Object.freeze({
   AUTH_REQUIRED: 6,
   AUTH_EXPIRED: 7,
   AUTH_DENIED: 8,
+  TOO_MANY_TRIES: 9,
 });
 
 /** The longest credential CREATE carries, in ASCII bytes. */
@@ -329,6 +331,8 @@ export function rendezvousError(code: number, server?: ProtocolVersion, version:
       return new DropgateError({ code: 'AUTH_EXPIRED' });
     case RENDEZVOUS_ERROR.AUTH_DENIED:
       return new DropgateError({ code: 'AUTH_DENIED' });
+    case RENDEZVOUS_ERROR.TOO_MANY_TRIES:
+      return new DropgateError({ code: 'RATE_LIMITED', message: 'Too many codes have been tried from this network. Wait a few minutes, then try again.' });
     default:
       // MALFORMED and LIMIT: the server found this client's messages wrong; or a code this version doesn't know.
       return invalidResponse();

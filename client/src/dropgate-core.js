@@ -9875,7 +9875,8 @@ var RENDEZVOUS_ERROR = Object.freeze({
   LIMIT: 5,
   AUTH_REQUIRED: 6,
   AUTH_EXPIRED: 7,
-  AUTH_DENIED: 8
+  AUTH_DENIED: 8,
+  TOO_MANY_TRIES: 9
 });
 var MAX_CREDENTIAL_BYTES = 8192;
 var TOKEN682 = /^[A-Za-z0-9\-._~+/]+=*$/;
@@ -10053,6 +10054,8 @@ function rendezvousError(code, server, version = PROTOCOLS.dgdtp) {
       return new DropgateError({ code: "AUTH_EXPIRED" });
     case RENDEZVOUS_ERROR.AUTH_DENIED:
       return new DropgateError({ code: "AUTH_DENIED" });
+    case RENDEZVOUS_ERROR.TOO_MANY_TRIES:
+      return new DropgateError({ code: "RATE_LIMITED", message: "Too many codes have been tried from this network. Wait a few minutes, then try again." });
     default:
       return invalidResponse();
   }
